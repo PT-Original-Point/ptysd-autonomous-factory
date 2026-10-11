@@ -1,0 +1,12 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {evaluateWorkerState} from './server.mjs';
+const R=(a,x={})=>evaluateWorkerState({attempt:a,...x});
+const B=(o={})=>({intent:{task:'T',model:'req'},hasArtifact:true,eventsSummary:{},...o});
+test('export',()=>{const r=R(B({eventsSummary:{nativeInitModel:'p/id#v',nativeModelEvidence:'OBSERVED_NATIVE_EXPORT',resultStatus:'SUCCESS'},terminalInfo:{exit_code:0,result:{status:'SUCCESS'}}}));assert.equal(r.status,'COMPLETED');assert.equal(r.modelEvidence,'OBSERVED_NATIVE_EXPORT');});
+test('forged',()=>{const r=R(B({eventsSummary:{nativeInitModel:'p/id#v',nativeModelEvidence:'OBSERVED_NATIVE_EXPORT',nativeExportError:'binding mismatch',resultStatus:'FAILED'},terminalInfo:{exit_code:0,result:{status:'SUCCESS'}}}));assert.equal(r.status,'FAILED');});
+test('artifact',()=>{const r=R(B({terminalInfo:{exit_code:0,result:{status:'SUCCESS'}},hasArtifact:false}));assert.equal(r.status,'UNKNOWN');});
+test('freetier',()=>{const r=R(B({terminalInfo:{exit_code:1,error:{status:403,name:'FreeTierError',message:'FreeTierError free tier'}}}));assert.equal(r.status,'BLOCKED');assert.match(r.blocker,/FreeTierError/);assert.doesNotMatch(r.next,/配額/);assert.match(r.next,/builtinBuild|送審/);});
+test('unknown',()=>{const a=R(B({terminalInfo:{exit_code:1,error:{status:403,message:'forbidden'}}}));assert.match(a.blocker,/AUTH_UNKNOWN/);const b=R(B({eventsSummary:{streamAuth403:true}}));assert.match(b.blocker,/AUTH_UNKNOWN/);assert.doesNotMatch(b.blocker,/FreeTierError/);});
+test('codes',()=>{assert.match(R(B({terminalInfo:{exit_code:1,error:{status:429,message:'quota'}}})).blocker,/Quota|429/i);assert.match(R(B({terminalInfo:{exit_code:1,error:{status:503}}})).blocker,/Upstream|503/i);assert.match(R(B({terminalInfo:{exit_code:1,error:{name:'RegionError'}}})).blocker,/Region/i);});
+test('w1',()=>{const r=R(B({terminalInfo:{exit_code:1,error:{status:403,message:'forbidden'}}}),{policy:{w1:{operational_state:'READY',automatic_dispatch:true}},workerRole:'W1'});assert.notEqual(r.status,'PAUSED');const p=R(B({}),{policy:{w1:{operational_state:'PAUSED_BY_USER_REPEATED_ERROR_RULE'}},workerRole:'W1'});assert.equal(p.status,'PAUSED');});
