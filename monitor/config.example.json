@@ -1,0 +1,18 @@
+{
+  "port": 2667,
+  "workspace": "REPLACE_WITH_LOCAL_WORKSPACE",
+  "phase": "REPLACE_WITH_LOCAL_PHASE_DIRECTORY",
+  "codexDb": "REPLACE_WITH_LOCAL_CODEX_DB_PATH",
+  "humanW1Paused": true,
+  "sourceTtls": {"local": 10, "windows": 60, "vm": 120, "github": 360, "canonical": 600},
+  "controllerThread": null,
+  "threadTitles": {},
+  "powershell": "REPLACE_WITH_INSTALLED_POWERSHELL_PATH",
+  "ssh": "REPLACE_WITH_INSTALLED_SSH_PATH",
+  "vmHost": null,
+  "vmUser": null,
+  "vmKnownHosts": null,
+  "vmKey": null,
+  "repo": "PT-Original-Point/ptysd-vnext42-governance-sandbox",
+  "automationRoot": null
+}
