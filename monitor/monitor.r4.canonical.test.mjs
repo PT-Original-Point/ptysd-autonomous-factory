@@ -31,11 +31,12 @@ function syntheticReadback({ corrupt = false, drift = false } = {}) {
 
 test('provider canonical pointer and checkpoint must match exact byte digest', async () => {
   const source = syntheticReadback();
-  const good = await fetchGitHubCanonical('PT-Original-Point/ptysd-vnext42-governance-sandbox', 'v45/factory-control', source.fetchImpl);
+  const good = await fetchGitHubCanonical('PT-Original-Point/ptysd-autonomous-factory', 'v45/factory-control', source.fetchImpl);
   assert.equal(good.verified, true);
   assert.equal(good.pointer.checkpoint_seq, 201);
   assert.equal(source.calls.length, 3);
   assert.match(source.calls[0], /current\.json/);
+  assert.match(source.calls[0], /\/repos\/PT-Original-Point\/ptysd-autonomous-factory\/contents\//);
   assert.match(source.calls[1], /checkpoints\/000201\.json/);
   assert.match(source.calls[2], /current\.json/);
   const state = buildDashboardState({
@@ -50,7 +51,7 @@ test('provider canonical pointer and checkpoint must match exact byte digest', a
 
 test('canonical pointer changed during a two-file read remains UNKNOWN', async () => {
   const source = syntheticReadback({ drift: true });
-  const result = await fetchGitHubCanonical('PT-Original-Point/ptysd-vnext42-governance-sandbox', 'v45/factory-control', source.fetchImpl);
+  const result = await fetchGitHubCanonical('PT-Original-Point/ptysd-autonomous-factory', 'v45/factory-control', source.fetchImpl);
   assert.equal(result.verified, false);
   assert.match(result.error, /pointer drift/);
   assert.equal(source.calls.length, 3);
@@ -60,7 +61,7 @@ test('canonical pointer changed during a two-file read remains UNKNOWN', async (
 
 test('tampered canonical checkpoint cannot become provider-confirmed', async () => {
   const source = syntheticReadback({ corrupt: true });
-  const result = await fetchGitHubCanonical('PT-Original-Point/ptysd-vnext42-governance-sandbox', 'v45/factory-control', source.fetchImpl);
+  const result = await fetchGitHubCanonical('PT-Original-Point/ptysd-autonomous-factory', 'v45/factory-control', source.fetchImpl);
   assert.equal(result.verified, false);
   assert.match(result.error, /inconsistency/);
   const state = buildDashboardState({ canonicalData: result });
