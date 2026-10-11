@@ -53,3 +53,9 @@ Git SHA, PR and test results reported for this source snapshot only do not imply
 - GitHub canonical pointer is read a third time after the checkpoint and must match the initial pointer by Git blob SHA and exact raw bytes. This prevents an old coherent pointer/checkpoint pair from being described as the latest when the pointer changes during the two-file lookup; later changes remain possible and require a new readback.
 - A generic successful GitHub Actions run at the candidate SHA is classified as `GITHUB_RUN_SUCCESS_UNVERIFIED`. A source success cannot establish the protected verifier/acceptance contract unless that workflow identity and contract have actually been verified.
 - Local offline tests: `node --test ./*.test.mjs` = 98 pass / 0 fail; independent build probes 13 pass / 0 fail; offline UI probes 5 pass / 0 fail. No Windows live deployment, OS reboot or trusted GitHub CI claim.
+
+## Reliable local startup (candidate hardening)
+
+- Missing config defaults to the documented fixed loopback port 2667; invalid explicit ports and malformed JSON fail with bounded error codes instead of silently binding a random port.
+- `monitor/.gitignore` excludes local credentials/config and generated startup receipts.
+- Exact tests: `monitor.port.test.mjs` checks both normal startup configuration and invalid cases. No Win11 deployment or reboot acceptance is implied.

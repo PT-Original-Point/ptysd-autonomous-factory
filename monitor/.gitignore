@@ -1,0 +1,6 @@
+# Win11 local monitor: never publish live configuration or runtime receipts.
+/config.json
+/server.start.json
+/*.log
+/*.db
+/*.db-*

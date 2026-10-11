@@ -182,10 +182,20 @@ export function loadConfig(configPath) {
     try {
       return JSON.parse(fs.readFileSync(targetPath, 'utf8'));
     } catch {
-      return {};
+      throw new Error('INVALID_MONITOR_CONFIG_JSON');
     }
   }
   return {};
+}
+
+// A missing configuration may produce UNKNOWN data, but must never silently
+// move the desktop monitor to a random port, breaking the fixed localhost URL.
+export function configuredListenPort(config) {
+  const port = config?.port === undefined ? 2667 : config.port;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('INVALID_MONITOR_PORT');
+  }
+  return port;
 }
 
 export function normalizePath(p) {
@@ -2506,7 +2516,7 @@ export async function main() {
   };
 
   const server = createHttpServer(ctx);
-  const listenPort = Number.isInteger(config?.port) && config.port >= 1 && config.port <= 65535 ? config.port : 0;
+  const listenPort = configuredListenPort(config);
   server.listen(listenPort, '127.0.0.1', () => {
     const port = server.address().port;
     const startData = {
