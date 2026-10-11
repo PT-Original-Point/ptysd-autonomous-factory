@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { buildDashboardState, deriveHomeOverview, fetchGitHubCanonical } from './server.mjs';
 
 const project = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
@@ -117,4 +118,13 @@ test('no readback and historical CI never imply canonical acceptance', () => {
   assert.equal(s.factoryOverview.canonical.control_readback,'UNKNOWN');
   assert.equal(s.factoryOverview.canonical.accepted,false);
   assert.notEqual(s.factoryOverview.ciQualification.status,'CI_PASSED_NON_CANONICAL');
+});
+
+
+test('monitor example config stays bound to renamed repository without stale V4.2 identity', () => {
+  const example = JSON.parse(readFileSync(new URL('./config.example.json', import.meta.url), 'utf8'));
+  const readme = readFileSync(new URL('./README.md', import.meta.url), 'utf8');
+  assert.equal(example.repo, 'PT-Original-Point/ptysd-autonomous-factory');
+  assert.match(readme, /PT-Original-Point\/ptysd-autonomous-factory/);
+  assert.doesNotMatch(readme, /ptysd-vnext42-governance-sandbox/);
 });
