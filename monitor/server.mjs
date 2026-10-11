@@ -2607,6 +2607,17 @@ export async function main() {
   setInterval(pollCanonical, 600000);
 }
 
+// Startup diagnostics intentionally emit only fixed error codes; never
+// print raw config contents or paths that can expose local credentials.
+export function startupErrorCode(error) {
+  const code = error instanceof Error ? error.message : '';
+  return code === 'INVALID_MONITOR_CONFIG_JSON' || code === 'INVALID_MONITOR_PORT'
+    ? code : 'UNKNOWN_MONITOR_STARTUP_ERROR';
+}
+
 if (isDirectExecution()) {
-  main().catch(() => process.exit(1));
+  main().catch(error => {
+    process.stderr.write(`[PTYSD-MONITOR] ${startupErrorCode(error)}\n`);
+    process.exitCode = 1;
+  });
 }

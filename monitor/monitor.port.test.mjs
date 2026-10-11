@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { configuredListenPort, loadConfig } from './server.mjs';
+import { configuredListenPort, loadConfig, startupErrorCode } from './server.mjs';
 
 test('monitor always uses the documented port when configuration is absent', () => {
   assert.equal(configuredListenPort({}), 2667);
@@ -29,4 +29,10 @@ test('malformed local configuration is an explicit error and no secret is printe
   } finally {
     fs.rmSync(dir,{recursive:true,force:true});
   }
+});
+
+test('startup diagnostics use fixed codes and do not disclose provider secrets', () => {
+  assert.equal(startupErrorCode(new Error('INVALID_MONITOR_CONFIG_JSON')),'INVALID_MONITOR_CONFIG_JSON');
+  assert.equal(startupErrorCode(new Error('INVALID_MONITOR_PORT')),'INVALID_MONITOR_PORT');
+  assert.equal(startupErrorCode(new Error('Bearer secret-token')),'UNKNOWN_MONITOR_STARTUP_ERROR');
 });
