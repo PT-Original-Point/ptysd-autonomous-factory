@@ -6,7 +6,7 @@ Scope: `CHATGPT_GLOBAL_SKILL_GOVERNANCE` local, read-only Win11 monitor.
 
 - This is **CANDIDATE/SOURCE_ONLY_NOT_DEPLOYED**, NOT a canonical control-plane promotion and not a Win11 installed version.
 - Only the already deployed `monitor/` under the operator's local project directory is live; it remains unchanged by this patch.
-- Public repository: `PT-Original-Point/ptysd-vnext42-governance-sandbox`. Canonical prestate on branch `v45/factory-control` was CP200 when the handoff was read. The runtime **must fetch fresh** provider data and cannot treat that snapshot as current or as R4 accepted.
+- Public repository (renamed 2026-10-11, same GitHub repository ID `1352411536`): `PT-Original-Point/ptysd-autonomous-factory`. Canonical prestate on branch `v45/factory-control` was CP200 when the handoff was read. The runtime **must fetch fresh** provider data and cannot treat that snapshot as current or as R4 accepted.
 - Real execution / reboot / automatic Windows Task Scheduler recovery / OS identity and source credentials cannot be validated by Linux source tests. Do not claim PASS for them.
 - Never commit the local `config.json`: it contains workstation and identity paths. Start from `config.example.json`, or preserve the current installed `monitor/config.json` while staging only reviewed candidate source. Do not change the Windows account, services, scheduler, VM key, login credentials or production rights through this PR.
 
