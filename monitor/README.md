@@ -47,3 +47,9 @@ Historical fixture migrations (not weakened assertions):
 6. Only after real OS readback and the accepted project task / trusted provider CI can the corresponding result be promoted beyond SOURCE_ONLY.
 
 Git SHA, PR and test results reported for this source snapshot only do not imply Host-live acceptance.
+
+## 2026-10-11 additional integrity hardening (candidate v2)
+
+- GitHub canonical pointer is read a third time after the checkpoint and must match the initial pointer by Git blob SHA and exact raw bytes. This prevents an old coherent pointer/checkpoint pair from being described as the latest when the pointer changes during the two-file lookup; later changes remain possible and require a new readback.
+- A generic successful GitHub Actions run at the candidate SHA is classified as `GITHUB_RUN_SUCCESS_UNVERIFIED`. A source success cannot establish the protected verifier/acceptance contract unless that workflow identity and contract have actually been verified.
+- Local offline tests: `node --test ./*.test.mjs` = 98 pass / 0 fail; independent build probes 13 pass / 0 fail; offline UI probes 5 pass / 0 fail. No Windows live deployment, OS reboot or trusted GitHub CI claim.

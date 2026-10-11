@@ -177,7 +177,7 @@ describe('R4 Monitor Candidate Suite', () => {
   });
 
   it('16. Homepage HTML contains five required Traditional Chinese headings and engineering details', () => {
-    const html = fs.readFileSync(path.resolve('index.html'), 'utf8');
+    const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
     assert.ok(html.includes('工廠概況'));
     assert.ok(html.includes('真正在做'));
     assert.ok(html.includes('最近收到的交件')); // R4 boss label clarifies pending acceptance

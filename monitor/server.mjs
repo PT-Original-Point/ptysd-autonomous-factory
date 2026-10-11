@@ -1022,7 +1022,7 @@ export async function fetchGitHubCanonical(repo, ref = 'v45/factory-control', fe
     } finally { clearTimeout(timer); }
   };
   try {
-    const { doc: pointer, blob } = await request('governance/csg/current.json');
+    const { doc: pointer, blob, raw: pointerRaw } = await request('governance/csg/current.json');
     if (pointer.project_id !== 'CHATGPT_GLOBAL_SKILL_GOVERNANCE' ||
         !Number.isSafeInteger(pointer.checkpoint_seq) || pointer.checkpoint_seq < 1 ||
         !/^governance\/csg\/checkpoints\/[0-9]{6}\.json$/.test(pointer.checkpoint_path) ||
@@ -1035,6 +1035,13 @@ export async function fetchGitHubCanonical(repo, ref = 'v45/factory-control', fe
         checkpoint.doc.project_id !== pointer.project_id ||
         checkpoint.doc.checkpoint_seq !== pointer.checkpoint_seq) {
       throw new Error('GitHub pointer/checkpoint inconsistency');
+    }
+    // Read the mutable pointer again after the checkpoint. A branch movement
+    // between the first pointer and checkpoint reads must not be shown as live.
+    // This is a bounded readback, not a claim that the branch cannot move later.
+    const current = await request('governance/csg/current.json');
+    if (current.blob !== blob || !current.raw.equals(pointerRaw)) {
+      throw new Error('GitHub canonical pointer drift during readback');
     }
     return { ...result, verified: true, status: 'MONITORING',
       collected_at: new Date().toISOString(), pointer, checkpoint: checkpoint.doc,
@@ -2344,8 +2351,10 @@ export function deriveHomeOverview({
       t.head.toLowerCase() === candSha
     );
     if (matchingRun) {
-      ciStatus = 'CI_PASSED_NON_CANONICAL';
-      ciNote = `已通過 commit ${candSha.slice(0, 7)}，不代表 Canonical Accepted`;
+      // A successful GitHub run is not necessarily an approved trusted verifier.
+      // This monitor has not bound a required workflow identity and test contract.
+      ciStatus = 'GITHUB_RUN_SUCCESS_UNVERIFIED';
+      ciNote = `版本 ${candSha.slice(0, 7)} 有成功的 GitHub 執行紀錄；未核對可信驗收器與測試契約`;
     } else {
       ciStatus = 'NOT_QUALIFIED';
       ciNote = `未發現候選版本 ${candSha.slice(0, 7)} 之成功 CI 記錄`;

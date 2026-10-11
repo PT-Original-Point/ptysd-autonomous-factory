@@ -158,6 +158,7 @@
     function mapCiSummary(ci) {
       if (!ci || !ci.status) return '未知';
       const s = String(ci.status).toUpperCase();
+      if (s === 'GITHUB_RUN_SUCCESS_UNVERIFIED') return '有成功的 GitHub 工作紀錄，可信驗收尚未確認';
       if (s === 'CI_PASSED_NON_CANONICAL') return '指定版本的 CI 通過（未正式驗收）';
       if (s === 'NOT_QUALIFIED') return '尚未確認通過';
       if (s === 'NOT_RUN') return '未執行';

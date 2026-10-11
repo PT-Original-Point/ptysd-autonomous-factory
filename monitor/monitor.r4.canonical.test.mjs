@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { buildDashboardState, deriveHomeOverview, fetchGitHubCanonical } from './server.mjs';
 
 const project = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
-function syntheticReadback({ corrupt = false } = {}) {
+function syntheticReadback({ corrupt = false, drift = false } = {}) {
   const checkpoint = { project_id: project, checkpoint_seq: 201, event: { type: 'TEST' } };
   const bytes = Buffer.from(JSON.stringify(checkpoint));
   const hash = crypto.createHash('sha256').update(bytes).digest('hex');
@@ -15,9 +15,15 @@ function syntheticReadback({ corrupt = false } = {}) {
     checkpoint_digest: 'sha256:' + (corrupt ? '0'.repeat(64) : hash)
   };
   const calls = [];
+  let pointerReads = 0;
   const fetchImpl = async (url) => {
     calls.push(url);
-    const src = url.includes('/current.json?') ? Buffer.from(JSON.stringify(pointer)) : bytes;
+    const isPointer = url.includes('/current.json?');
+    if (isPointer) pointerReads++;
+    const changingPointer = drift && isPointer && pointerReads > 1
+      ? { ...pointer, checkpoint_seq: 202, checkpoint_path: 'governance/csg/checkpoints/000202.json' }
+      : pointer;
+    const src = isPointer ? Buffer.from(JSON.stringify(changingPointer)) : bytes;
     return { ok: true, json: async () => ({ encoding: 'base64', content: src.toString('base64'), size: src.length, sha: 'a'.repeat(40) }) };
   };
   return { fetchImpl, calls };
@@ -28,7 +34,10 @@ test('provider canonical pointer and checkpoint must match exact byte digest', a
   const good = await fetchGitHubCanonical('PT-Original-Point/ptysd-vnext42-governance-sandbox', 'v45/factory-control', source.fetchImpl);
   assert.equal(good.verified, true);
   assert.equal(good.pointer.checkpoint_seq, 201);
-  assert.equal(source.calls.length, 2);
+  assert.equal(source.calls.length, 3);
+  assert.match(source.calls[0], /current\.json/);
+  assert.match(source.calls[1], /checkpoints\/000201\.json/);
+  assert.match(source.calls[2], /current\.json/);
   const state = buildDashboardState({
     now: Date.parse(good.collected_at),
     canonicalData: good,
@@ -37,6 +46,16 @@ test('provider canonical pointer and checkpoint must match exact byte digest', a
   assert.equal(state.sources.canonical.freshness, 'FRESH');
   assert.equal(state.home.factoryOverview.canonical.control_readback, 'PROVIDER_CONFIRMED');
   assert.equal(state.home.factoryOverview.canonical.accepted, false);
+});
+
+test('canonical pointer changed during a two-file read remains UNKNOWN', async () => {
+  const source = syntheticReadback({ drift: true });
+  const result = await fetchGitHubCanonical('PT-Original-Point/ptysd-vnext42-governance-sandbox', 'v45/factory-control', source.fetchImpl);
+  assert.equal(result.verified, false);
+  assert.match(result.error, /pointer drift/);
+  assert.equal(source.calls.length, 3);
+  const dashboard = buildDashboardState({ canonicalData: result });
+  assert.equal(dashboard.home.factoryOverview.canonical.control_readback, 'UNKNOWN');
 });
 
 test('tampered canonical checkpoint cannot become provider-confirmed', async () => {
@@ -77,6 +96,19 @@ test('duplicate cards for same observed PID are not duplicate workers', () => {
   ]});
   assert.equal(state.factoryOverview.activeWorkersCount,2);
   assert.equal(state.genuinelyActive.length,2);
+});
+
+test('arbitrary successful GitHub run cannot certify a trusted CI contract', () => {
+  const sha = 'b'.repeat(40);
+  const result = deriveHomeOverview({
+    config: { candidateSha: sha },
+    sources: { github: { freshness: 'FRESH' } },
+    tasks: [{ worker: 'GitHub Actions', status: 'COMPLETED', tests: 'SUCCESS', head: sha,
+      title: 'untrusted successful workflow' }]
+  });
+  assert.equal(result.factoryOverview.ciQualification.status, 'GITHUB_RUN_SUCCESS_UNVERIFIED');
+  assert.match(result.factoryOverview.ciQualification.note, /未核對可信驗收器/);
+  assert.equal(result.factoryOverview.canonical.accepted, false);
 });
 
 test('no readback and historical CI never imply canonical acceptance', () => {
