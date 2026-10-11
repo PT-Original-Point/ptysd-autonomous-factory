@@ -1,19 +1,11 @@
 {
-  "name": "ptysd-vnext45-governance-factory",
-  "version": "0.1.0",
+  "name": "ptysd-governance-source-validation",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/b0.test.ts",
-    "test:v45": "node --test tests/v45-bounded.test.mjs",
-    "verify": "node scripts/verify.mjs",
-    "verify:v45-bounded": "node scripts/verify-v45-bounded.mjs",
-    "e2e": "node scripts/e2e.mjs",
-    "verify:contracts": "node scripts/verify-b0-contracts.mjs",
-    "verify:appserver": "node scripts/verify-appserver-pin.mjs",
-    "verify:plan": "node scripts/verify-plan-materialization.mjs",
-    "verify:b0-local": "node scripts/verify-b0-local.mjs",
-    "verify:source": "node scripts/verify-source-authority.mjs"
+    "test": "node --test tests/csg/schema.test.mjs tests/csg/current-pointer.r4.test.mjs",
+    "test:python": "python -m unittest discover -s tests/csg -p test_*.py"
   },
   "engines": {
     "node": ">=24"

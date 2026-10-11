@@ -1,0 +1,48 @@
+name: V5.3-R4 retained governance source-only integrity
+on:
+  push:
+    branches:
+      - chatgpt/v53-r4-prune-20261011
+      - v45/factory-control
+  pull_request:
+    paths:
+      - 'scripts/csg-*'
+      - 'tests/csg/**'
+      - 'schemas/csg/**'
+      - 'package.json'
+      - '.github/workflows/v53-r4-governance-source-tests.yml'
+permissions:
+  contents: read
+jobs:
+  source-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Install retained canonicalizer
+        run: npm ci --prefix tools/csg --ignore-scripts --no-audit --no-fund
+      - name: Test accepted CSG integrity helpers
+        run: npm test
+      - name: Test recovered provider-effect and checkpoint semantics
+        run: npm run test:python
+      - name: Ensure removed source entrypoints cannot be resurrected implicitly
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e src/missionctl.ts
+          test ! -e src/core.ts
+          test ! -d tools/csg/factory-mcp
+          test ! -d tools/csg/cell-kernel
+          test ! -e scripts/v46-bounded-driver.mjs
+          test ! -e scripts/v47-task-graph.mjs
+          test ! -e scripts/csg-worklog-projector.mjs
+          test ! -e scripts/csg-nonbypass.mjs
+          test ! -e scripts/csg-migration-shadow.mjs
+          test ! -e scripts/csg-git-cas.mjs
+          test -f governance/csg/current.json
+          test -f governance/csg/checkpoints/000200.json
