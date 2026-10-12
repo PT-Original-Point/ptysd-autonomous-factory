@@ -1,0 +1,111 @@
+# Windows PowerShell 5.1 native, least-privilege, version-neutral OpenCode ingress.
+[CmdletBinding()]
+param(
+    [ValidateSet('Audit','Install','RunOnce','Uninstall')][string]$Mode = 'Audit',
+    [ValidateRange(1,99999999)][int]$IssueNumber = 1,
+    [string]$Workspace = '',
+    [string]$TrustedDispatcher = 't14210184'
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$repo = 'PT-Original-Point/ptysd-autonomous-factory'
+$project = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE'
+$taskName = 'PTYSD-Native-OpenCode'
+$expectedHost = 'DESKTOP-1B6PD2P'
+$homeDir = Join-Path $env:LOCALAPPDATA 'PTYSDNativeBridge'
+$worker = Join-Path $homeDir 'worker.mjs'
+$configPath = Join-Path $homeDir 'config.json'
+
+function Require-Command([string]$Name) {
+    $entry = Get-Command $Name -ErrorAction Stop | Select-Object -First 1
+    if (-not $entry.Source) { throw ('COMMAND_WITHOUT_SOURCE: ' + $Name) }
+    return $entry.Source
+}
+function Get-TaskOptional {
+    # Exact visible task identity. If the provider refuses enumeration, fail-closed;
+    # registration itself also rejects an ACL-hidden name collision.
+    $all = @(Get-ScheduledTask -ErrorAction Stop)
+    $matches = @($all | Where-Object { $_.TaskName -eq $taskName -and $_.TaskPath -eq '\' })
+    if ($matches.Count -gt 1) { throw 'TASK_NAME_NOT_UNIQUE' }
+    if ($matches.Count -eq 0) { return $null }
+    return $matches[0]
+}
+function Inspect-Task {
+    $task = Get-TaskOptional
+    if ($null -eq $task) { Write-Output 'NATIVE_TASK=ABSENT'; return }
+    Write-Output ('NATIVE_TASK=EXISTS state=' + $task.State + ' logon=' + $task.Principal.LogonType + ' runlevel=' + $task.Principal.RunLevel)
+    foreach ($a in @($task.Actions)) { Write-Output ('NATIVE_TASK_ACTION=' + $a.Execute + ' ' + $a.Arguments) }
+}
+if ($env:COMPUTERNAME.ToUpperInvariant() -ne $expectedHost) { throw 'WRONG_HOST_STOP' }
+if ($Mode -eq 'Audit') {
+    Write-Output ('PROJECT_ID=' + $project)
+    Write-Output ('HOST=' + $env:COMPUTERNAME)
+    Write-Output ('ISSUE_NUMBER_ARGUMENT=' + $IssueNumber)
+    foreach ($bin in @('node.exe','gh.exe','opencode.exe')) {
+        try { Write-Output ($bin + '=' + (Require-Command $bin)) }
+        catch { Write-Output ($bin + '=UNAVAILABLE') }
+    }
+    Write-Output ('CONFIG_EXISTS=' + (Test-Path -LiteralPath $configPath))
+    Inspect-Task
+    return
+}
+if ($Mode -eq 'RunOnce') {
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw 'BRIDGE_NOT_INSTALLED' }
+    $node = Require-Command 'node.exe'
+    & $node $worker --config $configPath
+    if ($LASTEXITCODE -ne 0) { throw ('WORKER_EXIT=' + $LASTEXITCODE) }
+    return
+}
+if ($Mode -eq 'Uninstall') {
+    $task = Get-TaskOptional
+    if ($null -eq $task) { Write-Output 'ALREADY_ABSENT'; return }
+    if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Arguments -notlike '*PTYSDNativeBridge*worker.mjs*') {
+        throw 'TASK_IDENTITY_MISMATCH_DO_NOT_DELETE'
+    }
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+    if ($null -ne (Get-TaskOptional)) { throw 'TASK_UNREGISTER_READBACK_FAILED' }
+    Write-Output 'NATIVE_TASK_REMOVED_LOCAL_EVIDENCE_RETAINED'
+    return
+}
+if ($Mode -eq 'Install') {
+    if ($null -ne (Get-TaskOptional)) { throw 'TASK_EXISTS_REVIEW_REQUIRED_NO_OVERWRITE' }
+    if ($IssueNumber -le 1) { throw 'EXACT_DISPATCH_ISSUE_NUMBER_REQUIRED' }
+    if ($TrustedDispatcher -notmatch '^[a-zA-Z0-9-]{1,39}$') { throw 'INVALID_DISPATCH_AUTHOR' }
+    if (-not $Workspace) { throw 'EXACT_WORKSPACE_REQUIRED' }
+    $full = [IO.Path]::GetFullPath($Workspace)
+    $root = [IO.Path]::GetFullPath($env:USERPROFILE + [IO.Path]::DirectorySeparatorChar)
+    if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw 'WORKSPACE_MUST_BE_UNDER_USER_HOME' }
+    if (-not (Test-Path -LiteralPath $full -PathType Container)) { throw 'WORKSPACE_NOT_FOUND' }
+    $node = Require-Command 'node.exe'
+    $null = Require-Command 'gh.exe'
+    $null = Require-Command 'opencode.exe'
+    & gh.exe auth status 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'GH_AUTH_NOT_READY_HUMAN_OAUTH_GATE' }
+    if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'worker.mjs') -PathType Leaf)) { throw 'SOURCE_WORKER_NOT_FOUND' }
+    New-Item -ItemType Directory -Force -Path $homeDir | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'worker.mjs') -Destination $worker -ErrorAction Stop
+    $srcHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'worker.mjs')).Hash
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $worker).Hash -ne $srcHash) { throw 'WORKER_COPY_HASH_MISMATCH' }
+    & $node --check $worker
+    if ($LASTEXITCODE -ne 0) { throw 'NODE_SYNTAX_INVALID' }
+    $c = [ordered]@{
+        project_id = $project; repo = $repo; host = $expectedHost; issue = $IssueNumber
+        workspace = $full; state_dir = $homeDir; dispatchers = @($TrustedDispatcher)
+    }
+    [IO.File]::WriteAllText($configPath, ($c | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
+    $argsLine = ('"' + $worker + '" --config "' + $configPath + '"')
+    $action = New-ScheduledTaskAction -Execute $node -Argument $argsLine -WorkingDirectory $homeDir
+    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
+        -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
+    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -StartWhenAvailable
+    $username = $env:USERDOMAIN + '\' + $env:USERNAME
+    $principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -ErrorAction Stop | Out-Null
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ne $node) { throw 'TASK_INSTALL_READBACK_MISMATCH' }
+    Write-Output 'NATIVE_BRIDGE_INSTALLED_SOURCE_ONLY_NOT_FIRST_POLL'
+    Write-Output ('LOCAL_WORKER_SHA256=' + $srcHash)
+    Write-Output 'LOGON_TYPE=Interactive; RUNLEVEL=Limited; BOOT_BEFORE_LOGON=NOT_GUARANTEED'
+    Write-Output 'NEXT: Run -Mode RunOnce for exact GitHub STARTED/FINISHED receipt readback'
+    return
+}
