@@ -6,7 +6,7 @@ import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
-  RECEIPT_MARKER } from '../native-bridge/worker.mjs';
+  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI } from '../native-bridge/worker.mjs';
 
 const commit = 'a'.repeat(40); const hash = 'b'.repeat(64);
 const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1B6PD2P',
@@ -23,7 +23,16 @@ test('strict exact job contract rejects injection, cross-project, unknown keys a
   assert.equal(parseJob(encoded(mkjob({ kind: 'shell' }))), null);
   assert.equal(parseJob(encoded({ ...mkjob(), command: 'Remove-Item C:\\' })), null);
   assert.equal(parseJob(encoded(mkjob({ kind: 'opencode_plan', spec_path: '../secrets', spec_sha256: hash }))), null);
-  assert.equal(parseJob(encoded(mkjob({ kind: 'opencode_plan', spec_path: 'native-bridge/tasks/review.md', spec_sha256: hash }))).kind, 'opencode_plan');
+  assert.equal(parseJob(encoded(mkjob({ kind: 'opencode_plan', spec_path: 'native-bridge/tasks/review.md', spec_sha256: hash }))),null);
+  const modelJob = { ...mkjob(), schema: 2, kind: 'opencode_plan', spec_path:'native-bridge/tasks/review.md',
+    spec_sha256: hash, model:'opencode/spark', variant:'high' };
+  assert.equal(parseJob(encoded(modelJob)).kind, 'opencode_plan');
+  assert.equal(parseJob(encoded({...modelJob, model:'https://wrong'})),null);
+  assert.equal(parseJob(encoded({...modelJob, variant:'unverified'})),null);
+  assert.equal(parseJob(encoded({...modelJob, shell:'pwsh'})),null);
+  assert.equal(parseJob(encoded(mkjob({kind:'native_preflight'}))).kind,'native_preflight');
+  assert.ok(checkModelAuthorization(modelJob,{ allowed_models:{ 'opencode/spark':['high'] } }));
+  assert.ok(!checkModelAuthorization(modelJob, {allowed_models:{}}));
   assert.equal(parseJob('garbage'), null);
 });
 test('only allowlisted sender and host are eligible, completed/started jobs never rerun', () => {
@@ -35,6 +44,17 @@ test('only allowlisted sender and host are eligible, completed/started jobs neve
   assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(start)));
   state.push(com(3,RECEIPT_MARKER+JSON.stringify(start),'worker'));
   assert.equal(selectNext(state,['t14210184'],'worker','DESKTOP-1B6PD2P'),null);
+});
+test('stale unsigned job does not starve newer exact-main job', () => {
+  const first=mkjob({request_id:'PTYSD_NATIVE_OLD_20261012',source_sha:'a'.repeat(40)});
+  const second=mkjob({request_id:'PTYSD_NATIVE_NEW_20261012',source_sha:'c'.repeat(40)});
+  const s=[com(1,encoded(first)),com(2,encoded(second))];
+  assert.equal(selectNext(s,['t14210184'],'worker','DESKTOP-1B6PD2P','c'.repeat(40)).id,2);
+});
+test('native CLI probe is bounded; no shell wrapper is treated as executable', () => {
+  const empty=findNativeCLI({PATH:'/this/directory/does/not/exist'},false);
+  assert.equal(empty.bin,null);
+  assert.equal(empty.hasWrapper,false);
 });
 test('duplicate changed dispatch same request ID is blocked', () => {
   const a = encoded(mkjob()), b = encoded(mkjob({ source_sha: 'c'.repeat(40) }));
@@ -56,7 +76,7 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
     writeFileSync(join(bin,'opencode'),'#!/bin/sh\necho UNEXPECTED_OPEN_CODE >&2\nexit 88\n');
     chmodSync(join(bin,'opencode'),0o755);
     const config=join(home,'config.json');
-    writeFileSync(config,JSON.stringify({ repo:REPO,project_id:PROJECT,host:hostname().toUpperCase(),issue:101,workspace:work,state_dir:state,dispatchers:['t14210184'] }));
+    writeFileSync(config,JSON.stringify({ repo:REPO,project_id:PROJECT,host:hostname().toUpperCase(),issue:101,workspace:work,state_dir:state,dispatchers:['t14210184'],allowed_models:{'opencode/spark':['high']} }));
     const env={...process.env, PATH:`${bin}:${process.env.PATH}`,MOCK_GH_STATE:mock};
     const path=resolve('native-bridge/worker.mjs');
     const first=spawnSync(process.execPath,[path,'--config',config],{cwd:resolve('.'),env,encoding:'utf8',timeout:15000});
@@ -74,10 +94,10 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
     // Push trusted immutable pinned plan; fake opencode rejects mutation and posts only digest.
     const plan='review README only';
     m.spec=plan;
-    const planJob=mkjob({ host:hostname().toUpperCase(),request_id:'PTYSD_NATIVE_PLAN_20261012',
-      kind:'opencode_plan',spec_path:'native-bridge/tasks/readonly-host-inventory.md',spec_sha256:h(plan)});
+    const planJob={...mkjob({ host:hostname().toUpperCase(),request_id:'PTYSD_NATIVE_PLAN_20261012',
+      kind:'opencode_plan',spec_path:'native-bridge/tasks/readonly-host-inventory.md',spec_sha256:h(plan)}),schema:2,model:'opencode/spark',variant:'high'};
     m.comments.push(com(m.next++,encoded(planJob))); writeFileSync(mock,JSON.stringify(m));
-    writeFileSync(join(bin,'opencode'),`#!/usr/bin/env node\nconst fs=require('fs');if(!process.argv.includes('--pure')||!process.argv.includes('plan')||!process.env.OPENCODE_CONFIG_CONTENT.includes('"bash":"deny"'))process.exit(43);console.log('SAFE_REVIEW_MOCK');\n`);
+    writeFileSync(join(bin,'opencode'),`#!/usr/bin/env node\nconst fs=require('fs');if(!process.argv.includes('--pure')||!process.argv.includes('plan')||!process.argv.includes('--model')||!process.argv.includes('opencode/spark')||!process.argv.includes('--variant')||!process.argv.includes('high')||!process.env.OPENCODE_CONFIG_CONTENT.includes('"bash":"deny"'))process.exit(43);console.log('SAFE_REVIEW_MOCK');\n`);
     chmodSync(join(bin,'opencode'),0o755);
     const run=spawnSync(process.execPath,[path,'--config',config],{cwd:resolve('.'),env,encoding:'utf8',timeout:15000});
     assert.equal(run.status,0,run.stderr);
@@ -88,4 +108,36 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
     assert.match(end.evidence_sha256,/^[a-f0-9]{64}$/);
     assert.ok(!m2.comments.at(-1).body.includes('SAFE_REVIEW_MOCK'));
   } finally { rmSync(home,{recursive:true,force:true}); }
+});
+
+// No real GitHub host, Windows service or model API is invoked in these tests.
+test('no-LLM preflight yields a terminal receipt and local evidence hash', () => {
+  const home=mkdtempSync(join(homedir(), '.ptysd-preflight-test-'));
+  try {
+    const bin=join(home,'bin'), work=join(home,'work'), state=join(home,'state');
+    mkdirSync(bin); mkdirSync(work); mkdirSync(state);
+    const mock=join(home,'mock.json');
+    const job=mkjob({kind:'native_preflight',host:hostname().toUpperCase(),request_id:'PTYSD_NATIVE_PROBE_20261012'});
+    writeFileSync(mock,JSON.stringify({main:commit,user:'win11-worker',issue:101,comments:[com(1,encoded(job))],next:2,spec:''}));
+    const fakeGh=join(bin,'gh');
+    writeFileSync(fakeGh, `#!/usr/bin/env node
+const fs=require('fs');const a=process.argv.slice(2);const p=process.env.MOCK_GH_STATE;const x=JSON.parse(fs.readFileSync(p,'utf8'));if(a[0]==='api'){if(a[1]==='user')console.log(JSON.stringify({login:x.user}));else if(a[1].includes('/git/ref/heads/main'))console.log(JSON.stringify({object:{sha:x.main}}));else if(a[1].includes('/issues/comments/'))console.log(JSON.stringify(x.comments.find(c=>c.id===Number(a[1].split('/').pop()))));else if(a[1].includes('/issues/101/comments'))console.log(JSON.stringify([x.comments]));else if(a[1].endsWith('/issues/101'))console.log(JSON.stringify({title:'[PTYSD-NATIVE] OpenCode dispatch and receipts',state:'open'}));else process.exit(20);}else if(a[0]==='issue'&&a[1]==='comment'){x.comments.push({id:x.next++,body:fs.readFileSync(a[a.indexOf('--body-file')+1],'utf8'),user:{login:x.user}});fs.writeFileSync(p,JSON.stringify(x));}else process.exit(21);
+`);
+    chmodSync(fakeGh,0o755);
+    const config=join(home,'config.json');
+    writeFileSync(config,JSON.stringify({repo:REPO,project_id:PROJECT,host:hostname().toUpperCase(),issue:101,workspace:work,state_dir:state,dispatchers:['t14210184']}));
+    const runner=resolve('native-bridge/worker.mjs');
+    const env={...process.env,PATH:`${bin}:${process.env.PATH}`,MOCK_GH_STATE:mock};
+    const res=spawnSync(process.execPath,[runner,'--config',config],{cwd:resolve('.'),env,encoding:'utf8',timeout:15000});
+    assert.equal(res.status,0,res.stderr);
+    assert.match(res.stdout,/FINISHED_PTYSD_NATIVE_PROBE_20261012/);
+    const c=JSON.parse(readFileSync(mock,'utf8')).comments;
+    assert.equal(c.length,3);
+    const receipt=parseReceipt(c[2].body);
+    assert.equal(receipt.state,'FINISHED');
+    assert.equal(receipt.kind,'native_preflight');
+    assert.match(receipt.evidence_sha256,/^[a-f0-9]{64}$/);
+    assert.equal(c[2].body.includes(home),false);
+    assert.equal(c[2].body.includes('secret'),false);
+  } finally {rmSync(home,{recursive:true,force:true});}
 });
