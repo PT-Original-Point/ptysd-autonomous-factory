@@ -2,10 +2,14 @@
 
 Project ID: `CHATGPT_GLOBAL_SKILL_GOVERNANCE`. GitHub repository ID: `1352411536`.
 
-Human approved V5.3-R4 native execution and delete-first governance. The formal previous control remains `v45/factory-control` at CP200 pending a separate accepted control-plane rebase; `main` is not evidence that canonical was promoted.
+## Authority
+The latest Human-approved Mission/Spec and verified project-native GitHub control pointer determine the active version. This README, a default branch, historical Git revision, draft PR, local PASS, or workflow name cannot promote a candidate or attest a running host. Resolve the authoritative ref and exact SHA from the current provider before writing; never embed a retired version in a new runtime path, service, task, or runner name.
 
-Work is coordinated in project-native GitHub PR/Issue/CI and trusted OS-native Codex/OpenCode/system scheduler. No additional SQLite Supervisor, Factory MCP, JEA/HostGuard gateway, redundant Task DB or retired bounded dispatcher is a V5.3 runtime dependency.
+## Supported runtime
+Use native Codex/OpenCode, Git, GitHub Issue/PR/CI, and the operating system's scheduler and identity boundaries. Do not instantiate a second task database, supervisor, model router, or legacy MCP/HostGuard/JEA/Broker/Tunnel as an execution prerequisite. One writer per shared mutation scope, exact-readback of external effects, OS-enforced secret isolation, and independent trusted acceptance still apply.
 
-OS-enforced secret isolation, external-effect unknown/readback, exact SHA and trusted acceptance remain required. The retained trusted verifier is not an authorization to retain the pre-V5.3 Windows runner indefinitely: migrate that verifier to qualified native GitHub-hosted execution, then decommission the old runner.
+## Retirement
+Old source or execution implementations are removed only by verified scope, not by renaming them. Source cleanup does not mean Windows services, scheduled tasks, registered runners, credentials, or VM workers have been removed. Keep immutable accepted evidence under `governance/**` and `runs/**` readable without reviving obsolete runtime code. Check consumers, stop/disable, revoke credentials, remove exact targets, and reboot-probe before reporting `RETIRED_CONFIRMED`.
 
-This source change does not itself stop installed Win11 services, and it does not delete immutable evidence under governance or runs. Runtime retirement requires targeted OS readback and a real negative probe after removal.
+## Version transitions
+Keep *active* workflow/service/task identifiers version-neutral. Every later version transition must rerun the native Git/OS inventory and independent CI; historical evidence and immutable Git history remain historical, not active dependencies.
