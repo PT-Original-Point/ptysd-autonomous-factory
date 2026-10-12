@@ -8,6 +8,20 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# gh auth status returns 1 on first login and writes to stderr by design.
+# Windows PowerShell 5.1 + ErrorActionPreference=Stop must not convert that
+# expected status into a terminating NativeCommandError.
+function Test-GhAuthenticated([string]$GhExe) {
+    $oldPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $GhExe auth status --hostname github.com *> $null
+        $authExit = $LASTEXITCODE
+        return ($authExit -eq 0)
+    } finally {
+        $ErrorActionPreference = $oldPreference
+    }
+}
 $repo = 'PT-Original-Point/ptysd-autonomous-factory'
 $project = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE'
 $taskName = 'PTYSD-Native-OpenCode'
@@ -41,7 +55,7 @@ if ($Mode -eq 'Audit') {
     Write-Output ('PROJECT_ID=' + $project)
     Write-Output ('HOST=' + $env:COMPUTERNAME)
     Write-Output ('ISSUE_NUMBER_ARGUMENT=' + $IssueNumber)
-    foreach ($bin in @('node.exe','gh.exe','opencode.exe')) {
+    foreach ($bin in @('node.exe','gh.exe','opencode.exe','opencode.cmd')) {
         try { Write-Output ($bin + '=' + (Require-Command $bin)) }
         catch { Write-Output ($bin + '=UNAVAILABLE') }
     }
@@ -78,9 +92,24 @@ if ($Mode -eq 'Install') {
     if (-not (Test-Path -LiteralPath $full -PathType Container)) { throw 'WORKSPACE_NOT_FOUND' }
     $node = Require-Command 'node.exe'
     $null = Require-Command 'gh.exe'
-    $null = Require-Command 'opencode.exe'
-    & gh.exe auth status 1>$null 2>$null
-    if ($LASTEXITCODE -ne 0) { throw 'GH_AUTH_NOT_READY_HUMAN_OAUTH_GATE' }
+    # The first queued job is native ping and does NOT launch OpenCode.
+    # Desktop application is not a proof of a working CLI; npm may expose opencode.cmd.
+    # Leave model work disabled until a separately verified CLI is available.
+    $optionalCli = $null
+    foreach ($candidate in @('opencode.exe', 'opencode.cmd', 'opencode')) {
+        $candidateCommand = Get-Command $candidate -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $candidateCommand -and $candidateCommand.Source) {
+            $optionalCli = $candidateCommand.Source
+            break
+        }
+    }
+    if ($null -eq $optionalCli) {
+        Write-Output 'OPENCODE_CLI_NOT_FOUND_PING_ONLY'
+    } else {
+        Write-Output ('OPENCODE_CLI_FOUND=' + $optionalCli)
+        Write-Output 'OPENCODE_PLAN_NOT_YET_LIVE_VERIFIED'
+    }
+    if (-not (Test-GhAuthenticated 'gh.exe')) { throw 'GH_AUTH_NOT_READY_HUMAN_OAUTH_GATE' }
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'worker.mjs') -PathType Leaf)) { throw 'SOURCE_WORKER_NOT_FOUND' }
     New-Item -ItemType Directory -Force -Path $homeDir | Out-Null
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'worker.mjs') -Destination $worker -ErrorAction Stop
