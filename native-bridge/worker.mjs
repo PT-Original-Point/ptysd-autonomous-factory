@@ -5,7 +5,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir, hostname, platform } from 'node:os';
-import { join, resolve, relative, isAbsolute } from 'node:path';
+import { join, resolve, relative, isAbsolute, delimiter } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
@@ -16,7 +16,10 @@ export const ISSUE_TITLE = '[PTYSD-NATIVE] OpenCode dispatch and receipts';
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const REQUEST = /^[A-Z][A-Z0-9_-]{7,79}$/;
-const EXACT_KEYS = ['schema', 'project_id', 'host', 'request_id', 'kind', 'source_sha', 'spec_path', 'spec_sha256'];
+const V1_KEYS = ['schema', 'project_id', 'host', 'request_id', 'kind', 'source_sha', 'spec_path', 'spec_sha256'];
+const V2_KEYS = [...V1_KEYS, 'model', 'variant'];
+const MODEL_ID = /^[a-z][a-z0-9_-]{1,39}\/[A-Za-z0-9_.:-]{1,100}$/;
+const VARIANTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const RECEIPT_STATES = new Set(['STARTED', 'FINISHED', 'BLOCKED']);
 const terminalStates = new Set(['FINISHED', 'BLOCKED']);
 const commandTimeout = 60000;
@@ -25,16 +28,20 @@ export function parseJob(body) {
   if (typeof body !== 'string' || body.length > 5000 || !body.startsWith(JOB_MARKER)) return null;
   let obj; try { obj = JSON.parse(body.slice(JOB_MARKER.length)); } catch { return null; }
   if (!obj || Array.isArray(obj) || typeof obj !== 'object') return null;
-  if (JSON.stringify(Object.keys(obj).sort()) !== JSON.stringify(EXACT_KEYS.slice().sort())) return null;
-  if (obj.schema !== 1 || obj.project_id !== PROJECT || !REQUEST.test(obj.request_id)) return null;
-  if (typeof obj.host !== 'string' || !/^[A-Z0-9-]{3,64}$/.test(obj.host)) return null;
-  if (!['ping', 'opencode_plan'].includes(obj.kind) || !SHA.test(obj.source_sha)) return null;
-  if (obj.kind === 'ping') {
+  const keys = obj.schema === 1 ? V1_KEYS : obj.schema === 2 ? V2_KEYS : null;
+  if (!keys || JSON.stringify(Object.keys(obj).sort()) !== JSON.stringify(keys.slice().sort())) return null;
+  if (obj.project_id !== PROJECT || !REQUEST.test(obj.request_id)) return null;
+  if (typeof obj.host !== 'string' || !/^[A-Z0-9-]{3,64}$/.test(obj.host) || !SHA.test(obj.source_sha)) return null;
+  if (obj.schema === 1 && (obj.kind === 'ping' || obj.kind === 'native_preflight')) {
     if (obj.spec_path !== null || obj.spec_sha256 !== null) return null;
-  } else {
-    if (typeof obj.spec_path !== 'string' || !/^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(obj.spec_path)) return null;
-    if (typeof obj.spec_sha256 !== 'string' || !HASH.test(obj.spec_sha256)) return null;
+    return obj;
   }
+  // Never allow a model operation without an exact reviewed model + reasoning variant.
+  // V1 opencode_plan without these fields is deliberately retired (no live V1 plan job).
+  if (obj.schema !== 2 || obj.kind !== 'opencode_plan') return null;
+  if (typeof obj.spec_path !== 'string' || !/^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(obj.spec_path)) return null;
+  if (typeof obj.spec_sha256 !== 'string' || !HASH.test(obj.spec_sha256)) return null;
+  if (typeof obj.model !== 'string' || !MODEL_ID.test(obj.model) || !VARIANTS.has(obj.variant)) return null;
   return obj;
 }
 export function parseReceipt(body) {
@@ -47,7 +54,7 @@ export function parseReceipt(body) {
     return o;
   } catch { return null; }
 }
-export function selectNext(comments, dispatchers, workerLogin, host) {
+export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha = null) {
   const jobs = new Map();
   const receipts = new Map();
   for (const c of comments) {
@@ -66,6 +73,8 @@ export function selectNext(comments, dispatchers, workerLogin, host) {
   for (const [, v] of jobs) {
     const r = receipts.get(v.job.request_id) || [];
     if (v.duplicate || r.some(x => terminalStates.has(x.state)) || r.some(x => x.state === 'STARTED')) continue;
+    // A stale unsigned/unclaimed job must not starve a newer exact-main task.
+    if (liveMainSha !== null && v.job.source_sha !== liveMainSha) continue;
     return { job: v.job, id: v.id, originalBody: v.content };
   }
   return null;
@@ -105,22 +114,83 @@ function guardConfig(c) {
     if (rel.startsWith('..') || isAbsolute(rel) || rel === '') throw new Error(`INVALID_${p.toUpperCase()}_NOT_UNDER_HOME`);
   }
   if (!existsSync(c.workspace) || !statSync(c.workspace).isDirectory()) throw new Error('WORKSPACE_NOT_DIRECTORY');
+  if (c.allowed_models !== undefined) {
+    if (!c.allowed_models || typeof c.allowed_models !== 'object' || Array.isArray(c.allowed_models))
+      throw new Error('MODEL_ALLOWLIST_INVALID');
+    for (const [model, variants] of Object.entries(c.allowed_models)) {
+      if (!MODEL_ID.test(model) || !Array.isArray(variants) || !variants.length ||
+          !variants.every(v => VARIANTS.has(v))) throw new Error('MODEL_ALLOWLIST_INVALID');
+    }
+  }
   mkdirSync(c.state_dir, { recursive: true });
   return c;
 }
-async function runPlan(spec, config, requestId) {
+// Never put public paths, environment variables or provider credentials in a receipt.
+// OpenCode's official Windows installation may expose a .cmd shim instead of .exe;
+// resolve only a native binary for child_process shell=false to avoid CMD injection.
+export function findNativeCLI(env = process.env, win = platform() === 'win32') {
+  const parts = String(env.PATH || env.Path || '').split(delimiter).filter(Boolean).slice(0, 120);
+  const nativeName = win ? 'opencode.exe' : 'opencode';
+  let hasWrapper = false;
+  const names = win ? ['opencode.cmd', 'opencode.bat'] : [];
+  for (const dir of parts) {
+    for (const n of names) {
+      try { if (statSync(join(dir, n)).isFile()) hasWrapper = true; } catch { /* not present */ }
+    }
+    try { const bin = join(dir, nativeName); if (statSync(bin).isFile()) return { bin, hasWrapper }; }
+    catch { /* not present */ }
+  }
+  return { bin: null, hasWrapper };
+}
+function localEvidence(config, requestId, value) {
+  const file = join(config.state_dir, `native-evidence-${requestId}-${randomUUID()}.json`);
+  writeFileSync(file, JSON.stringify(value, null, 2), { flag: 'wx', mode: 0o600 });
+  const bytes = readFileSync(file);
+  return { evidence_sha256: digest(bytes), evidence_bytes: bytes.length };
+}
+export function checkModelAuthorization(job, config) {
+  if (job.schema !== 2 || job.kind !== 'opencode_plan') return false;
+  const variants = config.allowed_models?.[job.model];
+  return Array.isArray(variants) && variants.includes(job.variant);
+}
+function nativePreflight(config, job) {
+  const cli = findNativeCLI();
+  const facts = {
+    schema: 1, project_id: PROJECT, host: config.host, request_id: job.request_id,
+    kind: 'native_preflight', source_sha: job.source_sha,
+    node_version: process.version, platform: platform(), architecture: process.arch,
+    opencode_native_executable_in_path: cli.bin !== null,
+    opencode_cmd_wrapper_in_path: cli.hasWrapper,
+    model_allowlist_entries: Object.keys(config.allowed_models || {}).length,
+    cli_version: 'NOT_TESTED', model_auth: 'NOT_TESTED',
+    elevated: 'NOT_CHECKED', old_windows_services: 'NOT_CHECKED',
+  };
+  return { outcome: cli.bin ? 'CLI_NATIVE_CANDIDATE_NOT_AUTH_VERIFIED' :
+    cli.hasWrapper ? 'CLI_WRAPPER_ONLY_NOT_SUPPORTED' : 'CLI_NOT_FOUND',
+    exit_code: 0, ...localEvidence(config, job.request_id, facts) };
+}
+async function runPlan(spec, config, job) {
+  if (!checkModelAuthorization(job, config)) {
+    return { outcome: 'MODEL_NOT_EXPLICITLY_ALLOWED', exit_code: 42,
+      evidence_sha256: null, evidence_bytes: 0 };
+  }
+  const cli = findNativeCLI();
+  if (!cli.bin) return { outcome: cli.hasWrapper ? 'CLI_NATIVE_EXE_REQUIRED_WRAPPER_ONLY' : 'CLI_NOT_FOUND',
+    exit_code: 43, evidence_sha256: null, evidence_bytes: 0 };
   const safePolicy = JSON.stringify({
     share: 'disabled',
     permission: { '*': 'deny', edit: 'deny', bash: 'deny', task: 'deny', external_directory: 'deny', webfetch: 'deny', websearch: 'deny', read: 'allow', glob: 'allow', grep: 'allow', list: 'allow' },
     agent: { plan: { permission: { '*': 'deny', edit: 'deny', bash: 'deny', task: 'deny', external_directory: 'deny', webfetch: 'deny', websearch: 'deny', read: 'allow', glob: 'allow', grep: 'allow', list: 'allow' } } },
   });
-  const args = ['--pure', 'run', '--agent', 'plan', '--format', 'json', '--dir', config.workspace,
-    '--title', requestId, `${spec}\n\nOnly inspect data readable in the current workspace. Do not change files, launch shell, access external directories, or share sessions.`];
-  const outFile = join(config.state_dir, `output-${requestId}-${randomUUID()}.jsonl`);
+  const args = ['--pure', 'run', '--agent', 'plan', '--model', job.model, '--variant', job.variant,
+    '--format', 'json', '--dir', config.workspace,
+    '--title', job.request_id, `${spec}\n\nOnly inspect data readable in the current workspace. Do not change files, launch shell, access external directories, or share sessions.`];
+  const outFile = join(config.state_dir, `output-${job.request_id}-${randomUUID()}.jsonl`);
   return await new Promise((res) => {
     const chunks = []; const errors = []; let size = 0; let killed = false;
-    const cmd = spawn('opencode', args, { cwd: config.workspace, windowsHide: true,
-      shell: false, env: { ...process.env, OPENCODE_CONFIG_CONTENT: safePolicy, OPENCODE_AUTO_SHARE: 'false' } });
+    const cmd = spawn(cli.bin, args, { cwd: config.workspace, windowsHide: true, shell: false,
+      env: { ...process.env, OPENCODE_CONFIG_CONTENT: safePolicy, OPENCODE_AUTO_SHARE: 'false',
+        OPENCODE_DISABLE_AUTOUPDATE: 'true', OPENCODE_DISABLE_DEFAULT_PLUGINS: 'true' } });
     const cap = (arr) => (chunk) => { size += chunk.length; if (size <= 2 * 1024 * 1024) arr.push(Buffer.from(chunk));
       else { killed = true; killTree(cmd); } };
     cmd.stdout.on('data', cap(chunks)); cmd.stderr.on('data', cap(errors));
@@ -155,7 +225,8 @@ export function receipt(requestId, attemptId, state, job, result = null) {
     outcome: result?.outcome ?? (state === 'STARTED' ? 'DISPATCH_ACK_NOT_ACCEPTANCE' : 'UNKNOWN'),
     exit_code: result?.exit_code ?? null,
     evidence_sha256: result?.evidence_sha256 ?? null,
-    evidence_bytes: result?.evidence_bytes ?? null };
+    evidence_bytes: result?.evidence_bytes ?? null,
+    ...(job.schema === 2 ? { model: job.model, variant: job.variant } : {}) };
 }
 async function main() {
   const i = process.argv.indexOf('--config');
@@ -183,10 +254,11 @@ async function main() {
     }
     console.log(`AMBIGUOUS_STARTED_${s.request_id}: NO_REEXECUTION`); return;
   }
-  const next = selectNext(comments, config.dispatchers, me, config.host);
+  const head = api(`repos/${REPO}/git/ref/heads/main`).object?.sha;
+  if (!SHA.test(head || '')) throw new Error('MAIN_HEAD_UNREADABLE');
+  const next = selectNext(comments, config.dispatchers, me, config.host, head);
   if (!next) { console.log('NO_DELTA_NO_LLM'); return; }
   const job = next.job;
-  const head = api(`repos/${REPO}/git/ref/heads/main`).object?.sha;
   if (job.source_sha !== head) { console.log(`STALE_SHA_SKIP_${job.request_id}`); return; }
   // Check full issue comment remains immutable since selection. Edits/races abort the lane.
   const original = api(`repos/${REPO}/issues/comments/${next.id}`);
@@ -199,7 +271,8 @@ async function main() {
   writeReceipt(config, start, me);
   let result;
   if (job.kind === 'ping') result = { outcome: 'BRIDGE_PING_OK_NOT_OS_ACCEPTANCE', exit_code: 0, evidence_sha256: null, evidence_bytes: 0 };
-  else { try { result = await runPlan(spec, config, job.request_id); }
+  else if (job.kind === 'native_preflight') result = nativePreflight(config, job);
+  else { try { result = await runPlan(spec, config, job); }
     catch (err) { result = { outcome: `EXECUTION_ERROR_${String(err.code || 'UNKNOWN').slice(0, 36)}`, exit_code: -1, evidence_sha256: null, evidence_bytes: 0 }; } }
   const terminal = receipt(job.request_id, attemptId, result.exit_code === 0 ? 'FINISHED' : 'BLOCKED', job, result);
   const terminalPath = join(config.state_dir, `result-${job.request_id}-${attemptId}.json`);
