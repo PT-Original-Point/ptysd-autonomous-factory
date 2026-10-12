@@ -1,0 +1,38 @@
+name: V5.3 main source retirement integrity
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'host/v45/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'package.json'
+      - '.github/workflows/v53-r4-main-source-retirement.yml'
+  push:
+    branches:
+      - chatgpt/v53-r4-main-old-source-retirement-20261011
+permissions:
+  contents: read
+jobs:
+  check-native-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Run retained trusted verifier CLI smoke test
+        run: npm test
+      - name: Reject retired source entrypoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e src/core.ts
+          test ! -e src/missionctl.ts
+          test ! -e host/v45/PTYSD.HostGuard/PTYSD.HostGuard.psm1
+          test ! -e config/runtime-manifest.json
+          test ! -e .github/workflows/v45-bounded-self-hosted.yml
+          test -f governance/csg/trust-root/csg-trusted-pr-verifier.mjs
