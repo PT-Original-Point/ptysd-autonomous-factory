@@ -6,7 +6,7 @@ import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
-  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI } from '../native-bridge/worker.mjs';
+  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI, isRecoverableTerminal } from '../native-bridge/worker.mjs';
 
 const commit = 'a'.repeat(40); const hash = 'b'.repeat(64);
 const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1B6PD2P',
@@ -233,4 +233,33 @@ test('receipt identity rejects foreign project and wrong source cannot mask curr
   const other={...start,source_sha:'c'.repeat(40)};
   const state=[com(1,encoded(job)),com(2,RECEIPT_MARKER+JSON.stringify(other),'worker')];
   assert.equal(selectNext(state,['t14210184'],'worker',job.host,job.source_sha)?.id,1);
+});
+
+test('orphan recovery requires exact nested terminal identity and a terminal state', () => {
+  const job={...mkjob({request_id:'PTYSD_NATIVE_PLAN_RECOVERY_20261013',
+    kind:'opencode_plan',spec_path:'native-bridge/tasks/review.md',spec_sha256:hash}),
+    schema:2,model:'opencode/spark',variant:'high'};
+  const attempt='00000000-0000-0000-0000-000000000009';
+  const start=receipt(job.request_id,attempt,'STARTED',job);
+  const end=receipt(job.request_id,attempt,'FINISHED',job,
+    {outcome:'OPENCODE_V2_EXIT_0_UNTRUSTED',exit_code:0});
+  const saved={request_id:job.request_id,attempt_id:attempt,terminal:end};
+  assert.equal(isRecoverableTerminal(start,saved),true);
+  const invalid=[
+    {request_id:'PTYSD_NATIVE_OTHER_RECOVERY_20261013'},
+    {attempt_id:'00000000-0000-0000-0000-000000000008'},
+    {terminal:{...end,request_id:'PTYSD_NATIVE_OTHER_RECOVERY_20261013'}},
+    {terminal:{...end,attempt_id:'00000000-0000-0000-0000-000000000008'}},
+    {terminal:{...end,host:'OTHER-HOST'}},
+    {terminal:{...end,source_sha:'c'.repeat(40)}},
+    {terminal:{...end,kind:'native_preflight'}},
+    {terminal:{...end,model:'opencode/other'}},
+    {terminal:{...end,variant:'xhigh'}},
+    {terminal:{...end,state:'STARTED'}},
+    {terminal:{...end,project_id:'WRONG_PROJECT'}},
+    {terminal:null},
+  ];
+  for (const change of invalid)
+    assert.equal(isRecoverableTerminal(start,{...saved,...change}),false,
+      JSON.stringify(change));
 });

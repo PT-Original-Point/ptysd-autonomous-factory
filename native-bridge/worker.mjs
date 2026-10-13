@@ -58,6 +58,22 @@ export function parseReceipt(body) {
     return o;
   } catch { return null; }
 }
+// A persisted terminal may be replayed only when its *inner* receipt binds
+// the exact previously acknowledged attempt (not merely the outer file name).
+export function isRecoverableTerminal(started, persisted) {
+  if (!started || !persisted ||
+      persisted.request_id !== started.request_id ||
+      persisted.attempt_id !== started.attempt_id) return false;
+  const terminal = parseReceipt(RECEIPT_MARKER + JSON.stringify(persisted.terminal));
+  return terminal !== null && terminalStates.has(terminal.state) &&
+    terminal.request_id === started.request_id &&
+    terminal.attempt_id === started.attempt_id &&
+    terminal.host.toUpperCase() === started.host.toUpperCase() &&
+    terminal.source_sha === started.source_sha &&
+    terminal.kind === started.kind &&
+    terminal.model === started.model &&
+    terminal.variant === started.variant;
+}
 export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha = null, blockedKinds = []) {
   const jobs = new Map();
   const receipts = new Map();
@@ -290,9 +306,7 @@ async function main() {
     const path = join(config.state_dir, `result-${s.request_id}-${s.attempt_id}.json`);
     if (existsSync(path)) {
       const result = JSON.parse(readFileSync(path, 'utf8'));
-      if (result.request_id !== s.request_id || result.attempt_id !== s.attempt_id ||
-          result.terminal?.source_sha !== s.source_sha || result.terminal?.kind !== s.kind ||
-          !parseReceipt(RECEIPT_MARKER + JSON.stringify(result.terminal)))
+      if (!isRecoverableTerminal(s, result))
         throw new Error('LOCAL_RECEIPT_IDENTITY_MISMATCH');
       writeReceipt(config, result.terminal, me);
       console.log(`RECOVERED_TERMINAL_${s.request_id}`);
