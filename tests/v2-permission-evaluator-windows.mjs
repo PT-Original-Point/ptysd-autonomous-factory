@@ -8,15 +8,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
 import { randomBytes } from 'node:crypto';
+import { buildV2ScopedEditConfig } from '../native-bridge/opencode-v2.mjs';
 
 const prefix = process.env.PTYSD_CI_V2_PREFIX;
 assert.ok(prefix, 'V2_PREFIX_REQUIRED');
 const exe = join(prefix, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe');
 assert.ok(statSync(exe).isFile(), 'V2_NATIVE_EXE_NOT_FOUND');
 const configDir = mkdtempSync(join(tmpdir(), 'ptysd-v2-permissions-'));
+const scopedPolicy = buildV2ScopedEditConfig(configDir, ['src/allowed.mjs']);
 const config = {
-  autoupdate: false, plugins: [], share: 'disabled',
+  ...scopedPolicy,
   agents: {
+    ...scopedPolicy.agents,
     'ptysd-allow': { mode: 'primary', permissions: [
       { action: '*', resource: '*', effect: 'allow' },
     ] },
@@ -108,7 +111,7 @@ try {
       throw new Error('V2_AGENT_CATALOG_HTTP_OR_SCHEMA_UNEXPECTED');
     if (!sameDir(current.location?.directory))
       throw new Error('V2_AGENT_CATALOG_CROSS_LOCATION');
-    if (['ptysd-allow', 'ptysd-deny'].every(name => current.data.some(agent => agent.id === name))) {
+    if (['ptysd-allow', 'ptysd-deny', 'ptysd-scoped-write'].every(name => current.data.some(agent => agent.id === name))) {
       agents = current.data;
       break;
     }
@@ -118,7 +121,7 @@ try {
   console.log('V2_AGENT_ACTIVATION_POLL_ATTEMPTS=' + (attempts + 1));
   assert.ok(agents, 'V2_CUSTOM_AGENTS_MISSING_AFTER_BOUNDED_ACTIVATION');
   // Only report booleans and permission counts; never print loaded private config.
-  for (const name of ['ptysd-allow','ptysd-deny']) {
+  for (const name of ['ptysd-allow','ptysd-deny','ptysd-scoped-write']) {
     const item = agents.find(agent => agent.id === name);
     console.log('V2_AGENT_' + name.toUpperCase().replaceAll('-','_') +
       '_PRESENT=' + Boolean(item) + '_RULES=' + (Array.isArray(item?.permissions) ? item.permissions.length : 0));
@@ -146,6 +149,18 @@ try {
     assert.equal(no, 'deny', action + '_DENY_NOT_ENFORCED');
   }
   console.log('V2_NATIVE_PERMISSION_EVALUATOR_NEGATIVE_3_OF_3_PASS_ZERO_INFERENCE');
+  const scopedChecks = [
+    ['edit', join(configDir, 'src', 'allowed.mjs'), 'allow'],
+    ['edit', join(configDir, 'src', 'other.mjs'), 'deny'],
+    ['edit', join(configDir, '..', 'outside.mjs'), 'deny'],
+    ['shell', 'git status', 'deny'],
+    ['external_directory', join(configDir, '..', 'outside.mjs'), 'deny'],
+  ];
+  for (const [action, resource, expected] of scopedChecks) {
+    const actual = await effect(sessionID, 'ptysd-scoped-write', action, resource);
+    assert.equal(actual, expected, 'V2_SCOPED_WRITE_' + action + '_POLICY_INVALID');
+  }
+  console.log('V2_SCOPED_WRITE_PERMISSION_CONTRACT_5_OF_5_PASS_ZERO_INFERENCE');
 } finally {
   if (child.pid) {
     try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {

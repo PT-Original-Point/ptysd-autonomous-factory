@@ -2,7 +2,7 @@
 // No package installation, authentication, model invocation, or OS mutation here.
 import { execFileSync } from 'node:child_process';
 import { statSync } from 'node:fs';
-import { delimiter, join, isAbsolute, normalize } from 'node:path';
+import { delimiter, join, isAbsolute, normalize, resolve, relative } from 'node:path';
 import { homedir, platform } from 'node:os';
 
 const SEMVER_V2 = /^(?:opencode(?:2)?\s+)?v?(2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/i;
@@ -82,4 +82,76 @@ export function buildV2ReadOnlyArgs(job, workspace, spec) {
   return ['run', '--agent', 'ptysd-readonly', '--model', `${job.model}#${job.variant}`,
     '--format', 'json', '--dir', workspace, '--title', job.request_id,
     `${spec}\n\nDo not mutate any resource. Report a blocked result if the model, reasoning variant, or permissions are unavailable.`];
+}
+
+/**
+ * Source-only V2 edit contract for a future OS-isolated coding worker.
+ * This DOES NOT authorize execution under the GitHub publisher's OS identity:
+ * agent permissions are not a filesystem or credential sandbox.
+ */
+export function buildV2ScopedEditConfig(workspace, editableFiles) {
+  if (typeof workspace !== 'string' || !isAbsolute(workspace))
+    throw new Error('SCOPED_EDIT_WORKSPACE_MUST_BE_ABSOLUTE');
+  if (!Array.isArray(editableFiles) || editableFiles.length < 1 || editableFiles.length > 16)
+    throw new Error('SCOPED_EDIT_FILE_ALLOWLIST_INVALID');
+  const root = resolve(workspace);
+  const allowed = new Set();
+  for (const file of editableFiles) {
+    if (typeof file !== 'string' || file.length > 180 ||
+        !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(file))
+      throw new Error('SCOPED_EDIT_FILE_PATH_INVALID');
+    const parts = file.split('/');
+    if (parts.some(p => !p || p === '.' || p === '..'))
+      throw new Error('SCOPED_EDIT_FILE_TRAVERSAL');
+    // The model is not allowed to edit control-plane, Git identity, or auth inputs.
+    if (parts.some(p => /^\.(?:git|github|opencode)$/i.test(p)) ||
+        ['governance', 'runs', 'native-bridge'].includes(parts[0].toLowerCase()) ||
+        parts.some(p => /^\.env(?:\.|$)/i.test(p) ||
+          /^opencode\.jsonc?$/i.test(p) ||
+          /(?:secret|credential|token|password|auth\.json)/i.test(p)))
+      throw new Error('SCOPED_EDIT_CONTROL_OR_SECRET_PATH');
+    const absolute = resolve(root, ...parts);
+    const inside = relative(root, absolute);
+    if (!inside || inside.startsWith('..') || isAbsolute(inside))
+      throw new Error('SCOPED_EDIT_PATH_OUTSIDE_WORKSPACE');
+    allowed.add(absolute.replaceAll('\\', '/'));
+  }
+  if (allowed.size !== editableFiles.length)
+    throw new Error('SCOPED_EDIT_DUPLICATE_PATH');
+  return {
+    autoupdate: false, share: 'disabled', snapshots: false, plugins: [],
+    default_agent: 'ptysd-scoped-write',
+    // A late-loading agent cannot turn the shipped built-in agent into a writer.
+    permissions: [
+      { action: '*', resource: '*', effect: 'deny' },
+      ...['read', 'glob', 'grep'].map(action => ({ action, resource: '*', effect: 'allow' })),
+      { action: 'read', resource: '*.env', effect: 'deny' },
+      { action: 'read', resource: '**/*.env', effect: 'deny' },
+    ],
+    agents: {
+      'ptysd-scoped-write': {
+        mode: 'primary', steps: 12,
+        description: 'Modify only exact operator-approved source files; no shell or network tools',
+        system: 'Edit only exact allowlisted source files for the reviewed task. Do not run commands, access secrets, call subagents or tools outside the project. Explain blocked actions instead of bypassing policy.',
+        permissions: [
+          { action: '*', resource: '*', effect: 'deny' },
+          ...['read', 'glob', 'grep'].map(action => ({ action, resource: '*', effect: 'allow' })),
+          { action: 'read', resource: '*.env', effect: 'deny' },
+          { action: 'read', resource: '**/*.env', effect: 'deny' },
+          ...[...allowed].map(resource => ({ action: 'edit', resource, effect: 'allow' })),
+        ],
+      },
+    },
+  };
+}
+export function buildV2ScopedEditArgs(job, workspace, spec) {
+  if (!validateV2Model(job?.model, job?.variant)) throw new Error('INVALID_V2_MODEL_OR_VARIANT');
+  if (typeof workspace !== 'string' || !isAbsolute(workspace)) throw new Error('WORKSPACE_NOT_ABSOLUTE');
+  if (typeof job?.request_id !== 'string' || !/^[A-Z][A-Z0-9_-]{7,79}$/.test(job.request_id))
+    throw new Error('INVALID_V2_CODING_REQUEST');
+  if (typeof spec !== 'string' || !spec.trim() || spec.length > 20000)
+    throw new Error('INVALID_CODING_TASK_SPEC');
+  return ['run', '--agent', 'ptysd-scoped-write', '--model', `${job.model}#${job.variant}`,
+    '--format', 'json', '--dir', workspace, '--title', job.request_id,
+    `${spec}\n\nOnly the separately enforced exact file allowlist is mutable. Do not execute shell or request wider permissions.`];
 }
