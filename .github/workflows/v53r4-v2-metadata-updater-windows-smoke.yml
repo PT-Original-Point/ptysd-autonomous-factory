@@ -1,0 +1,62 @@
+name: PTYSD V2 metadata updater Windows PowerShell 5.1 acceptance
+on:
+  push:
+    branches:
+      - chatgpt/v53r4-v2-metadata-updater-smoke-20261013
+permissions:
+  contents: read
+jobs:
+  windows-ps51-parse-and-selftest:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Parse exact installer under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Join-Path $PWD 'native-bridge/ops/UPDATE_V2_METADATA_ONCE.ps1'
+          $got = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($got -ne '46c9374d57ffd6715de84d29af3f56d79018172c00dabcb95abc66b508287bdc') {
+            # Windows checkout may convert the Git blob LF to CRLF. Rehydrate raw blob
+            # without autocrlf, then require exact SHA-256 of the user-facing ZIP script.
+            Remove-Item -LiteralPath $path -Force
+            git -c core.autocrlf=false checkout HEAD -- native-bridge/ops/UPDATE_V2_METADATA_ONCE.ps1
+            if ($LASTEXITCODE -ne 0) { throw 'RAW_GIT_BLOB_CHECKOUT_FAILED' }
+            $got = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          if ($got -ne '46c9374d57ffd6715de84d29af3f56d79018172c00dabcb95abc66b508287bdc') { throw 'SCRIPT_SHA256_MISMATCH' }
+          $tokens = $null
+          $errors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+          if ($null -eq $ast -or $errors.Count -ne 0) {
+            $errors | ForEach-Object { Write-Output $_.ToString() }
+            throw 'WINDOWS_POWERSHELL_51_AST_INVALID'
+          }
+          Write-Output ('WINDOWS_POWERSHELL_51_AST_PASS_tokens=' + $tokens.Count)
+      - name: Run isolated NTFS swap and rollback selftest (no GitHub, no task modification)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\native-bridge\ops\UPDATE_V2_METADATA_ONCE.ps1 -Mode SelfTest
+          if ($LASTEXITCODE -ne 0) { throw 'WINDOWS_POWERSHELL_51_SELFTEST_FAIL' }
+          Write-Output 'WINDOWS_POWERSHELL_51_SELFTEST_PASS'
+      - name: Install pinned official V2 on ephemeral Windows host (no model)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prefix = Join-Path $env:RUNNER_TEMP 'ptysd-official-opencode-v2'
+          New-Item -Path $prefix -ItemType Directory -Force | Out-Null
+          & npm.cmd install --prefix $prefix --no-audit --no-fund --save-exact '@opencode/cli@2.0.27'
+          if ($LASTEXITCODE -ne 0) { throw 'OFFICIAL_V2_NPM_INSTALL_FAILED' }
+          $manifest = Join-Path $prefix 'node_modules\@opencode\cli\package.json'
+          if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw 'OFFICIAL_V2_PACKAGE_MANIFEST_MISSING' }
+          $metadata = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+          if ($metadata.name -ne '@opencode/cli' -or $metadata.version -ne '2.0.27') { throw 'OFFICIAL_V2_VERSION_WRONG' }
+          $exe = Join-Path $prefix 'node_modules\@opencode\cli\bin\opencode.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'OFFICIAL_V2_POSTINSTALL_BIN_NOT_FOUND' }
+          $version = & $exe --version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^(?:opencode\s+)?v?2\.0\.27$') { throw 'OFFICIAL_V2_EXE_VERSION_FAILED' }
+          Write-Output ('OFFICIAL_V2_NPM_NATIVE_PATH_PASS_version=' + $version)
