@@ -9,6 +9,7 @@ on:
       - 'tests/v2-cli-contract-smoke.mjs'
       - 'tests/v2-config-source-smoke.mjs'
       - 'tests/v2-provider-policy-deny-smoke.mjs'
+      - 'tests/v2-permission-evaluator-windows.mjs'
       - 'package.json'
       - '.github/workflows/v53r4-v2-cli-qualification.yml'
 permissions:
@@ -44,3 +45,6 @@ jobs:
       - name: Test V2 provider deny-all actually filters model catalog (zero inference)
         shell: pwsh
         run: node tests/v2-provider-policy-deny-smoke.mjs
+      - name: Verify native OpenCode V2 permission evaluator denies shell edit and external access without model
+        shell: pwsh
+        run: node tests/v2-permission-evaluator-windows.mjs
