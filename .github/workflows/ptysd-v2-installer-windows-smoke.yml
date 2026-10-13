@@ -1,0 +1,37 @@
+name: One-time PTYSD OpenCode V2 installer PowerShell 5.1 smoke
+on:
+  push:
+    branches:
+      - chatgpt/v2-installer-windows-smoke-20261013
+permissions:
+  contents: read
+jobs:
+  windows-ps51-parse-and-selftest:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Parse exact installer under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Join-Path $PWD 'native-bridge/ops/ACTIVATE_V2_ONCE.ps1'
+          $got = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($got -ne 'ff4348052827cec41b957c429fdbae17ead7ac89a970ee686dfe72d74ae1c340') { throw 'SCRIPT_SHA256_MISMATCH' }
+          $tokens = $null
+          $errors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+          if ($null -eq $ast -or $errors.Count -ne 0) {
+            $errors | ForEach-Object { Write-Output $_.ToString() }
+            throw 'WINDOWS_POWERSHELL_51_AST_INVALID'
+          }
+          Write-Output ('WINDOWS_POWERSHELL_51_AST_PASS_tokens=' + $tokens.Count)
+      - name: Run isolated NTFS swap and rollback selftest (no GitHub, no task modification)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\native-bridge\ops\ACTIVATE_V2_ONCE.ps1 -Mode SelfTest
+          if ($LASTEXITCODE -ne 0) { throw 'WINDOWS_POWERSHELL_51_SELFTEST_FAIL' }
+          Write-Output 'WINDOWS_POWERSHELL_51_SELFTEST_PASS'
