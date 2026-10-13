@@ -19,6 +19,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $path = Join-Path $PWD 'native-bridge/ops/ACTIVATE_V2_ONCE.ps1'
           $got = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($got -ne 'ff4348052827cec41b957c429fdbae17ead7ac89a970ee686dfe72d74ae1c340') {
+            # Windows checkout may convert the Git blob LF to CRLF. Rehydrate raw blob
+            # without autocrlf, then require exact SHA-256 of the user-facing ZIP script.
+            Remove-Item -LiteralPath $path -Force
+            git -c core.autocrlf=false checkout HEAD -- native-bridge/ops/ACTIVATE_V2_ONCE.ps1
+            if ($LASTEXITCODE -ne 0) { throw 'RAW_GIT_BLOB_CHECKOUT_FAILED' }
+            $got = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
           if ($got -ne 'ff4348052827cec41b957c429fdbae17ead7ac89a970ee686dfe72d74ae1c340') { throw 'SCRIPT_SHA256_MISMATCH' }
           $tokens = $null
           $errors = $null
