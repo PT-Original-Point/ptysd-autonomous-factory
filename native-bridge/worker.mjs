@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync,
 import { homedir, hostname, platform } from 'node:os';
 import { join, resolve, relative, isAbsolute, delimiter } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { qualifyOpenCodeV2, validateV2Model, buildV2ReadOnlyConfig, buildV2ReadOnlyArgs } from './opencode-v2.mjs';
 
 export const PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
 export const REPO = 'PT-Original-Point/ptysd-autonomous-factory';
@@ -18,8 +19,6 @@ const HASH = /^[a-f0-9]{64}$/;
 const REQUEST = /^[A-Z][A-Z0-9_-]{7,79}$/;
 const V1_KEYS = ['schema', 'project_id', 'host', 'request_id', 'kind', 'source_sha', 'spec_path', 'spec_sha256'];
 const V2_KEYS = [...V1_KEYS, 'model', 'variant'];
-const MODEL_ID = /^[a-z][a-z0-9_-]{1,39}\/[A-Za-z0-9_.:-]{1,100}$/;
-const VARIANTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const RECEIPT_STATES = new Set(['STARTED', 'FINISHED', 'BLOCKED']);
 const terminalStates = new Set(['FINISHED', 'BLOCKED']);
 const commandTimeout = 60000;
@@ -41,7 +40,7 @@ export function parseJob(body) {
   if (obj.schema !== 2 || obj.kind !== 'opencode_plan') return null;
   if (typeof obj.spec_path !== 'string' || !/^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(obj.spec_path)) return null;
   if (typeof obj.spec_sha256 !== 'string' || !HASH.test(obj.spec_sha256)) return null;
-  if (typeof obj.model !== 'string' || !MODEL_ID.test(obj.model) || !VARIANTS.has(obj.variant)) return null;
+  if (!validateV2Model(obj.model, obj.variant)) return null;
   return obj;
 }
 export function parseReceipt(body) {
@@ -118,29 +117,23 @@ function guardConfig(c) {
     if (!c.allowed_models || typeof c.allowed_models !== 'object' || Array.isArray(c.allowed_models))
       throw new Error('MODEL_ALLOWLIST_INVALID');
     for (const [model, variants] of Object.entries(c.allowed_models)) {
-      if (!MODEL_ID.test(model) || !Array.isArray(variants) || !variants.length ||
-          !variants.every(v => VARIANTS.has(v))) throw new Error('MODEL_ALLOWLIST_INVALID');
+      if (!Array.isArray(variants) || !variants.length ||
+          !variants.every(v => validateV2Model(model, v))) throw new Error('MODEL_ALLOWLIST_INVALID');
     }
   }
+  if (c.enable_v2_model_runs !== undefined && typeof c.enable_v2_model_runs !== 'boolean')
+    throw new Error('V2_MODEL_ENABLE_FLAG_INVALID');
   mkdirSync(c.state_dir, { recursive: true });
   return c;
 }
 // Never put public paths, environment variables or provider credentials in a receipt.
 // OpenCode's official Windows installation may expose a .cmd shim instead of .exe;
 // resolve only a native binary for child_process shell=false to avoid CMD injection.
+// Compatibility export for existing source tests. The file name alone never
+// establishes trust: version 2.x is mandatory, rejecting V1 even if named opencode.
 export function findNativeCLI(env = process.env, win = platform() === 'win32') {
-  const parts = String(env.PATH || env.Path || '').split(delimiter).filter(Boolean).slice(0, 120);
-  const nativeName = win ? 'opencode.exe' : 'opencode';
-  let hasWrapper = false;
-  const names = win ? ['opencode.cmd', 'opencode.bat'] : [];
-  for (const dir of parts) {
-    for (const n of names) {
-      try { if (statSync(join(dir, n)).isFile()) hasWrapper = true; } catch { /* not present */ }
-    }
-    try { const bin = join(dir, nativeName); if (statSync(bin).isFile()) return { bin, hasWrapper }; }
-    catch { /* not present */ }
-  }
-  return { bin: null, hasWrapper };
+  const check = qualifyOpenCodeV2(env, win);
+  return { bin: check.bin, hasWrapper: false, v2_version: check.version };
 }
 function localEvidence(config, requestId, value) {
   const file = join(config.state_dir, `native-evidence-${requestId}-${randomUUID()}.json`);
@@ -154,43 +147,62 @@ export function checkModelAuthorization(job, config) {
   return Array.isArray(variants) && variants.includes(job.variant);
 }
 function nativePreflight(config, job) {
-  const cli = findNativeCLI();
+  const cli = qualifyOpenCodeV2();
   const facts = {
     schema: 1, project_id: PROJECT, host: config.host, request_id: job.request_id,
     kind: 'native_preflight', source_sha: job.source_sha,
     node_version: process.version, platform: platform(), architecture: process.arch,
-    opencode_native_executable_in_path: cli.bin !== null,
-    opencode_cmd_wrapper_in_path: cli.hasWrapper,
+    opencode_v2_verified: cli.ready,
+    native_executables_checked: cli.candidates_checked,
     model_allowlist_entries: Object.keys(config.allowed_models || {}).length,
-    cli_version: 'NOT_TESTED', model_auth: 'NOT_TESTED',
+    v2_model_execution_enabled: config.enable_v2_model_runs === true,
+    cli_version: cli.version ?? 'NOT_FOUND_OR_WRONG_MAJOR', model_auth: 'NOT_TESTED',
     elevated: 'NOT_CHECKED', old_windows_services: 'NOT_CHECKED',
   };
-  return { outcome: cli.bin ? 'CLI_NATIVE_CANDIDATE_NOT_AUTH_VERIFIED' :
-    cli.hasWrapper ? 'CLI_WRAPPER_ONLY_NOT_SUPPORTED' : 'CLI_NOT_FOUND',
+  return { outcome: cli.ready ? 'OPENCODE_V2_VERSION_CONFIRMED_NO_MODEL_AUTH' : 'OPENCODE_V2_CLI_NOT_QUALIFIED',
     exit_code: 0, ...localEvidence(config, job.request_id, facts) };
 }
 async function runPlan(spec, config, job) {
+  if (config.enable_v2_model_runs !== true) {
+    return { outcome: 'V2_MODEL_EXECUTION_NOT_YET_APPROVED', exit_code: 44,
+      evidence_sha256: null, evidence_bytes: 0 };
+  }
   if (!checkModelAuthorization(job, config)) {
     return { outcome: 'MODEL_NOT_EXPLICITLY_ALLOWED', exit_code: 42,
       evidence_sha256: null, evidence_bytes: 0 };
   }
-  const cli = findNativeCLI();
-  if (!cli.bin) return { outcome: cli.hasWrapper ? 'CLI_NATIVE_EXE_REQUIRED_WRAPPER_ONLY' : 'CLI_NOT_FOUND',
-    exit_code: 43, evidence_sha256: null, evidence_bytes: 0 };
-  const safePolicy = JSON.stringify({
-    share: 'disabled',
-    permission: { '*': 'deny', edit: 'deny', bash: 'deny', task: 'deny', external_directory: 'deny', webfetch: 'deny', websearch: 'deny', read: 'allow', glob: 'allow', grep: 'allow', list: 'allow' },
-    agent: { plan: { permission: { '*': 'deny', edit: 'deny', bash: 'deny', task: 'deny', external_directory: 'deny', webfetch: 'deny', websearch: 'deny', read: 'allow', glob: 'allow', grep: 'allow', list: 'allow' } } },
-  });
-  const args = ['--pure', 'run', '--agent', 'plan', '--model', job.model, '--variant', job.variant,
-    '--format', 'json', '--dir', config.workspace,
-    '--title', job.request_id, `${spec}\n\nOnly inspect data readable in the current workspace. Do not change files, launch shell, access external directories, or share sessions.`];
+  const cli = qualifyOpenCodeV2();
+  if (!cli.ready) return { outcome: 'OPENCODE_V2_CLI_NOT_QUALIFIED', exit_code: 43,
+    evidence_sha256: null, evidence_bytes: 0 };
+  // V2, not V1: ordered permissions, shell/subagent, provider/model#variant.
+  // Config is private, never echoed to the GitHub Issue; no shell expansion of prompts.
+  const safePolicy = JSON.stringify(buildV2ReadOnlyConfig());
+  // V2 beta builds have ignored OPENCODE_CONFIG[_CONTENT] in some execution paths.
+  // The documented project-local opencode.json is the authoritative V2 policy input.
+  // Never overwrite unrelated project configuration or allow higher-priority .opencode.
+  const configFile = join(config.workspace, 'opencode.json');
+  if (existsSync(join(config.workspace, 'opencode.jsonc')) ||
+      existsSync(join(config.workspace, '.opencode')))
+    return { outcome: 'V2_WORKSPACE_CONFIG_CONFLICT', exit_code: 45, evidence_sha256: null, evidence_bytes: 0 };
+  if (existsSync(configFile)) {
+    if (readFileSync(configFile, 'utf8') !== safePolicy)
+      return { outcome: 'V2_WORKSPACE_CONFIG_UNKNOWN', exit_code: 45, evidence_sha256: null, evidence_bytes: 0 };
+  } else writeFileSync(configFile, safePolicy, { flag: 'wx', mode: 0o600 });
+  if (readFileSync(configFile, 'utf8') !== safePolicy)
+    return { outcome: 'V2_WORKSPACE_CONFIG_READBACK_FAILED', exit_code: 45, evidence_sha256: null, evidence_bytes: 0 };
+  const args = buildV2ReadOnlyArgs(job, config.workspace, spec);
   const outFile = join(config.state_dir, `output-${job.request_id}-${randomUUID()}.jsonl`);
+  // Forbid inherited config injections from silently weakening our project file.
+  // Model credentials remain inherited from the same non-privileged OS user.
+  const childEnv = { ...process.env };
+  for (const key of ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR',
+    'OPENCODE_CONFIG_CONTENT', 'OPENCODE_PERMISSION', 'OPENCODE_AUTO_SHARE'])
+    delete childEnv[key];
+  childEnv.OPENCODE_DISABLE_AUTOUPDATE = 'true';
   return await new Promise((res) => {
     const chunks = []; const errors = []; let size = 0; let killed = false;
     const cmd = spawn(cli.bin, args, { cwd: config.workspace, windowsHide: true, shell: false,
-      env: { ...process.env, OPENCODE_CONFIG_CONTENT: safePolicy, OPENCODE_AUTO_SHARE: 'false',
-        OPENCODE_DISABLE_AUTOUPDATE: 'true', OPENCODE_DISABLE_DEFAULT_PLUGINS: 'true' } });
+      env: childEnv });
     const cap = (arr) => (chunk) => { size += chunk.length; if (size <= 2 * 1024 * 1024) arr.push(Buffer.from(chunk));
       else { killed = true; killTree(cmd); } };
     cmd.stdout.on('data', cap(chunks)); cmd.stderr.on('data', cap(errors));
@@ -200,7 +212,7 @@ async function runPlan(spec, config, job) {
       clearTimeout(timer);
       const stdout = Buffer.concat(chunks); const stderr = Buffer.concat(errors);
       writeFileSync(outFile, Buffer.concat([stdout, Buffer.from('\n--- STDERR ---\n'), stderr]), { mode: 0o600 });
-      res({ exit_code: code ?? -1, outcome: killed ? 'TIMEOUT_OR_TOO_LARGE' : code === 0 ? 'OPENCODE_EXIT_0_UNTRUSTED' : 'OPENCODE_FAILED',
+      res({ exit_code: code ?? -1, outcome: killed ? 'TIMEOUT_OR_TOO_LARGE' : code === 0 ? 'OPENCODE_V2_EXIT_0_UNTRUSTED' : 'OPENCODE_V2_FAILED',
         evidence_sha256: digest(readFileSync(outFile)), evidence_bytes: statSync(outFile).size });
     });
   });

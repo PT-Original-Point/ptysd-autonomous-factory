@@ -1,4 +1,4 @@
-# PTYSD native OpenCode Issue bridge (version-neutral)
+# PTYSD native GitHub Issue bridge — OpenCode V2 only
 
 This is a **native, non-privileged candidate** for replacing manual ChatGPT↔OpenCode
 copy/paste. It is not a second governance database, MCP gateway, supervisor or
@@ -17,9 +17,16 @@ no new process stays resident between polls.
   file from the **exact current main commit** and carries SHA-256 of its contents.
   Neither an Issue body nor a free-form comment becomes a shell instruction.
 * `ping` is native, zero-token, and verifies round-trip GitHub comments.
-* `opencode_plan` uses `opencode --pure run --agent plan` with inline denied
-  mutation, shell, external-directory, task delegation, web and sharing. OpenCode
-  exit code 0 is **not** trusted verifier acceptance or deployment evidence.
+* `opencode_plan` is **OpenCode V2 ONLY**. A native binary must return version
+  2.x. V1 executables are rejected, regardless of file name. Jobs pin exact
+  `provider/model` plus `variant`; V2 receives `provider/model#variant`.
+  The worker installs only a reviewed V2 project-local `opencode.json` with
+  ordered `permissions` rules, denying edit/shell/subagent/external access.
+  It refuses unknown workspace configuration rather than overriding it.
+  V2 model invocation is **disabled by default** until local
+  `enable_v2_model_runs=true` and an exact `allowed_models` entry are set
+  after version, config and provider authorization qualification. OpenCode
+  exit code 0 alone is **not** accepted verifier or reasoning-strength evidence.
 * Neither job type can request elevated privilege, delete archive/MCP/Runner,
   modify branch protection, or approve a change to trusted verifier sources.
 * Output stays in `%LOCALAPPDATA%\PTYSDNativeBridge`; only machine-readable
@@ -32,9 +39,12 @@ no new process stays resident between polls.
 
 ## Native Windows installer (one-time, NOT executed by ChatGPT Web)
 
-Prerequisites: Windows user workspace under `%USERPROFILE%`, Node 24+, official
-`gh` authenticated for the current OS user, `opencode` CLI, and a user already
-logged in. `Install` runs at *Limited* privilege; it never requests UAC.
+Prerequisites for ping/preflight: Windows user workspace under `%USERPROFILE%`,
+Node 24+, official `gh` authenticated for the current OS user, and a user
+already logged in. OpenCode V2 CLI is **not** required for GitHub transport.
+AI model work additionally needs an official V2 native binary, verified
+`--version` 2.x, matching authenticated provider, and explicit local enablement.
+`Install` runs at *Limited* privilege; it never requests UAC.
 
 Within an actual Win11 OpenCode/Codex session (not in a ChatGPT browser sandbox):
 
@@ -75,3 +85,17 @@ is authorized to change accepted tasks, production approvals, or canonical refs.
   classifications, Factory MCP/HostGuard/JEA/secrets, self-hosted Runner #405.
 * `main` source merge, a `ping` result or an OpenCode plan result is **not** a
   canonical CP promotion or Windows retirement PASS.
+
+## V2-only support boundary
+
+The existing Windows Task Scheduler has already returned real native `ping` and
+`native_preflight` receipts. Source changes in a GitHub PR are **not** deployed
+until the old on-disk Worker is replaced under the original Limited Task and
+read back by SHA-256. No OpenCode 1 npm package, legacy `--pure`, legacy
+`permission`/ `bash` / `task` rules, or default paid model fallback is allowed.
+Use official `@opencode/cli` V2 only after a pinned version and native Windows
+binary are independently qualified. The user must not need an additional MCP,
+port listener, or administrative service for this step.
+
+The relevant model/version qualification is detailed in
+`native-bridge/CLI-PREFLIGHT.md`.

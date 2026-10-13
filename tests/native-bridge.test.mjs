@@ -28,7 +28,8 @@ test('strict exact job contract rejects injection, cross-project, unknown keys a
     spec_sha256: hash, model:'opencode/spark', variant:'high' };
   assert.equal(parseJob(encoded(modelJob)).kind, 'opencode_plan');
   assert.equal(parseJob(encoded({...modelJob, model:'https://wrong'})),null);
-  assert.equal(parseJob(encoded({...modelJob, variant:'unverified'})),null);
+  assert.equal(parseJob(encoded({...modelJob, variant:'unverified'})).variant,'unverified');
+  assert.equal(checkModelAuthorization({...modelJob, variant:'unverified'}, {allowed_models:{'opencode/spark':['high']}}),false);
   assert.equal(parseJob(encoded({...modelJob, shell:'pwsh'})),null);
   assert.equal(parseJob(encoded(mkjob({kind:'native_preflight'}))).kind,'native_preflight');
   assert.ok(checkModelAuthorization(modelJob,{ allowed_models:{ 'opencode/spark':['high'] } }));
@@ -76,7 +77,7 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
     writeFileSync(join(bin,'opencode'),'#!/bin/sh\necho UNEXPECTED_OPEN_CODE >&2\nexit 88\n');
     chmodSync(join(bin,'opencode'),0o755);
     const config=join(home,'config.json');
-    writeFileSync(config,JSON.stringify({ repo:REPO,project_id:PROJECT,host:hostname().toUpperCase(),issue:101,workspace:work,state_dir:state,dispatchers:['t14210184'],allowed_models:{'opencode/spark':['high']} }));
+    writeFileSync(config,JSON.stringify({ repo:REPO,project_id:PROJECT,host:hostname().toUpperCase(),issue:101,workspace:work,state_dir:state,dispatchers:['t14210184'],allowed_models:{'opencode/spark':['high']}, enable_v2_model_runs:true }));
     const env={...process.env, PATH:`${bin}:${process.env.PATH}`,MOCK_GH_STATE:mock};
     const path=resolve('native-bridge/worker.mjs');
     const first=spawnSync(process.execPath,[path,'--config',config],{cwd:resolve('.'),env,encoding:'utf8',timeout:15000});
@@ -97,16 +98,17 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
     const planJob={...mkjob({ host:hostname().toUpperCase(),request_id:'PTYSD_NATIVE_PLAN_20261012',
       kind:'opencode_plan',spec_path:'native-bridge/tasks/readonly-host-inventory.md',spec_sha256:h(plan)}),schema:2,model:'opencode/spark',variant:'high'};
     m.comments.push(com(m.next++,encoded(planJob))); writeFileSync(mock,JSON.stringify(m));
-    writeFileSync(join(bin,'opencode'),`#!/usr/bin/env node\nconst fs=require('fs');if(!process.argv.includes('--pure')||!process.argv.includes('plan')||!process.argv.includes('--model')||!process.argv.includes('opencode/spark')||!process.argv.includes('--variant')||!process.argv.includes('high')||!process.env.OPENCODE_CONFIG_CONTENT.includes('"bash":"deny"'))process.exit(43);console.log('SAFE_REVIEW_MOCK');\n`);
-    chmodSync(join(bin,'opencode'),0o755);
+    writeFileSync(join(bin,'opencode'),`#!/usr/bin/env node\nconst fs=require('fs');const a=process.argv.slice(2);\nif(a.length===1&&a[0]==='--version'){console.log('opencode v2.0.27');process.exit(0)}\nconst c=JSON.parse(fs.readFileSync(require('path').join(process.cwd(),'opencode.json'),'utf8'));\nif(a[0]!=='run'||a.includes('--pure')||a.includes('--variant')||!a.includes('ptysd-readonly')||!a.includes('--model')||a[a.indexOf('--model')+1]!=='opencode/spark#high'||!c.permissions?.some(x=>x.action==='shell'&&x.effect==='deny')||!c.agents?.['ptysd-readonly'])process.exit(43);\nconsole.log('SAFE_V2_REVIEW_MOCK');\n`);
+        chmodSync(join(bin,'opencode'),0o755);
     const run=spawnSync(process.execPath,[path,'--config',config],{cwd:resolve('.'),env,encoding:'utf8',timeout:15000});
     assert.equal(run.status,0,run.stderr);
     assert.match(run.stdout,/FINISHED_PTYSD_NATIVE_PLAN/);
     const m2=JSON.parse(readFileSync(mock,'utf8'));
     const end=parseReceipt(m2.comments.at(-1).body);
-    assert.equal(end.outcome,'OPENCODE_EXIT_0_UNTRUSTED');
+    assert.equal(end.outcome,'OPENCODE_V2_EXIT_0_UNTRUSTED');
     assert.match(end.evidence_sha256,/^[a-f0-9]{64}$/);
-    assert.ok(!m2.comments.at(-1).body.includes('SAFE_REVIEW_MOCK'));
+    assert.equal(JSON.parse(readFileSync(join(work,'opencode.json'),'utf8')).default_agent, 'ptysd-readonly');
+    assert.ok(!m2.comments.at(-1).body.includes('SAFE_V2_REVIEW_MOCK'));
   } finally { rmSync(home,{recursive:true,force:true}); }
 });
 
