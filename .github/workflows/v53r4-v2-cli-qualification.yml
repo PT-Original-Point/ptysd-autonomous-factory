@@ -7,6 +7,7 @@ on:
       - 'tests/opencode-v2.test.mjs'
       - 'tests/v2-readiness.test.mjs'
       - 'tests/v2-cli-contract-smoke.mjs'
+      - 'tests/v2-config-source-smoke.mjs'
       - 'package.json'
       - '.github/workflows/v53r4-v2-cli-qualification.yml'
 permissions:
@@ -36,3 +37,6 @@ jobs:
       - name: Verify official V2 version, list commands, auth-list JSON without model or credentials
         shell: pwsh
         run: node tests/v2-cli-contract-smoke.mjs
+      - name: Verify V2 isolated project config source discovery without model
+        shell: pwsh
+        run: node tests/v2-config-source-smoke.mjs
