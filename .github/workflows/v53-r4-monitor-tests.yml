@@ -1,0 +1,35 @@
+name: V5.3-R4 monitor source-only tests
+
+on:
+  pull_request:
+    paths:
+      - 'monitor/**'
+      - '.github/workflows/v53-r4-monitor-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v53-r4-monitor-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  monitor-node-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout candidate without persistent credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Use Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Validate source and offline regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check monitor/server.mjs
+          cd monitor
+          node --test ./*.test.mjs
