@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { discoverV2Executables, qualifyOpenCodeV2, parseOpenCodeV2Version, validateV2Model, buildV2ReadOnlyArgs, buildV2ReadOnlyConfig } from '../native-bridge/opencode-v2.mjs';
+import { discoverV2Executables, qualifyOpenCodeV2, parseOpenCodeV2Version, validateV2Model, buildV2ReadOnlyArgs, buildV2ReadOnlyConfig, buildV2ScopedEditConfig, buildV2ScopedEditArgs } from '../native-bridge/opencode-v2.mjs';
 
 test('V2-only version recognition rejects V1, nonversion and contaminated output', () => {
   for (const s of ['2.0.27', 'v2.0.27', 'opencode v2.0.27', 'opencode2 2.0.27', '2.3.0-beta.2']) assert.ok(parseOpenCodeV2Version(s));
@@ -47,4 +47,29 @@ test('V2 arguments use provider/model#variant; never call V1 --pure/--variant', 
   assert.ok(!args.includes('--variant'));assert.ok(!args.includes('--pure'));
   assert.ok(!args.includes('build'));
   assert.throws(()=>buildV2ReadOnlyArgs({model:'bad',variant:'high'},process.cwd(),''));
+});
+
+test('scoped V2 writer has only explicit edit paths; no implicit shell, external or secret grant', () => {
+  const workspace=mkdtempSync(join(tmpdir(),'ptysd-v2-code-contract-'));
+  try {
+    const cfg=buildV2ScopedEditConfig(workspace,['src/output.mjs']);
+    const agent=cfg.agents['ptysd-scoped-write'];
+    const exact=join(workspace,'src','output.mjs').replaceAll('\\','/');
+    assert.equal(cfg.default_agent,'ptysd-scoped-write');
+    assert.equal(cfg.permissions[0].action,'*');
+    assert.equal(cfg.permissions[0].effect,'deny');
+    assert.deepEqual(agent.permissions.filter(p=>p.action==='edit' && p.effect==='allow').map(p=>p.resource),[exact]);
+    assert.equal(agent.permissions.filter(p=>p.action==='shell'&&p.effect==='allow').length,0);
+    assert.equal(agent.permissions.filter(p=>p.action==='external_directory'&&p.effect==='allow').length,0);
+    for (const file of ['../escape.mjs','src/../escape.mjs','.github/workflows/ci.yml',
+      '.git/config','governance/policy.json','runs/last.json','native-bridge/worker.mjs',
+      'src/.env','src/auth.json','src/token.txt','src/opencode.json','src/*.mjs'])
+      assert.throws(()=>buildV2ScopedEditConfig(workspace,[file]),file);
+    assert.throws(()=>buildV2ScopedEditConfig(workspace,['src/output.mjs','src/output.mjs']));
+    const args=buildV2ScopedEditArgs({request_id:'PTYSD_CODE_CANARY_20261013',
+      model:'opencode/muse',variant:'high'},workspace,'Edit exact reviewed file');
+    assert.equal(args[args.indexOf('--agent')+1],'ptysd-scoped-write');
+    assert.equal(args[args.indexOf('--model')+1],'opencode/muse#high');
+    assert.ok(!args.includes('--pure')&&!args.includes('--variant'));
+  } finally {rmSync(workspace,{recursive:true,force:true});}
 });
