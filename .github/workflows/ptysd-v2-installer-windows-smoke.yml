@@ -43,3 +43,20 @@ jobs:
           powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\native-bridge\ops\ACTIVATE_V2_ONCE.ps1 -Mode SelfTest
           if ($LASTEXITCODE -ne 0) { throw 'WINDOWS_POWERSHELL_51_SELFTEST_FAIL' }
           Write-Output 'WINDOWS_POWERSHELL_51_SELFTEST_PASS'
+      - name: Install pinned official V2 on ephemeral Windows host (no model)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prefix = Join-Path $env:RUNNER_TEMP 'ptysd-official-opencode-v2'
+          New-Item -Path $prefix -ItemType Directory -Force | Out-Null
+          & npm.cmd install --prefix $prefix --no-audit --no-fund --save-exact '@opencode/cli@2.0.27'
+          if ($LASTEXITCODE -ne 0) { throw 'OFFICIAL_V2_NPM_INSTALL_FAILED' }
+          $manifest = Join-Path $prefix 'node_modules\@opencode\cli\package.json'
+          if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw 'OFFICIAL_V2_PACKAGE_MANIFEST_MISSING' }
+          $metadata = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+          if ($metadata.name -ne '@opencode/cli' -or $metadata.version -ne '2.0.27') { throw 'OFFICIAL_V2_VERSION_WRONG' }
+          $exe = Join-Path $prefix 'node_modules\@opencode\cli\bin\opencode.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'OFFICIAL_V2_POSTINSTALL_BIN_NOT_FOUND' }
+          $version = & $exe --version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^(?:opencode\s+)?v?2\.0\.27$') { throw 'OFFICIAL_V2_EXE_VERSION_FAILED' }
+          Write-Output ('OFFICIAL_V2_NPM_NATIVE_PATH_PASS_version=' + $version)
