@@ -111,6 +111,23 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
     assert.match(end.evidence_sha256,/^[a-f0-9]{64}$/);
     assert.equal(JSON.parse(readFileSync(join(work,'opencode.json'),'utf8')).default_agent, 'ptysd-readonly');
     assert.ok(!m2.comments.at(-1).body.includes('SAFE_V2_REVIEW_MOCK'));
+    // A crashed model attempt is ambiguous, but independent native probes continue.
+    const orphan={...planJob,request_id:'PTYSD_NATIVE_ORPHAN_20261013'};
+    const orphanStart=receipt(orphan.request_id,'00000000-0000-0000-0000-000000000001','STARTED',orphan);
+    m2.comments.push(com(m2.next++,encoded(orphan)));
+    m2.comments.push(com(m2.next++,RECEIPT_MARKER+JSON.stringify(orphanStart),'win11-worker'));
+    m2.comments.push(com(m2.next++,encoded(mkjob({host:hostname().toUpperCase(),
+      request_id:'PTYSD_NATIVE_INDEPENDENT_20261013'}))));
+    writeFileSync(mock,JSON.stringify(m2));
+    const independent=spawnSync(process.execPath,[path,'--config',config],{cwd:resolve('.'),
+      env,encoding:'utf8',timeout:15000});
+    assert.equal(independent.status,0,independent.stderr);
+    assert.match(independent.stdout,/AMBIGUOUS_STARTED_PTYSD_NATIVE_ORPHAN_20261013/);
+    assert.match(independent.stdout,/FINISHED_PTYSD_NATIVE_INDEPENDENT_20261013/);
+    const after=JSON.parse(readFileSync(mock,'utf8'));
+    assert.equal(parseReceipt(after.comments.at(-1).body).state,'FINISHED');
+    assert.equal(after.comments.filter(x=>x.body.startsWith(RECEIPT_MARKER) &&
+      parseReceipt(x.body)?.request_id===orphan.request_id).length,1);
   } finally { rmSync(home,{recursive:true,force:true}); }
 });
 
@@ -207,4 +224,13 @@ test('V2 metadata task completes source-pinned GitHub receipts without model inf
     assert.match(second.stdout,/NO_DELTA_NO_LLM/);
     assert.equal(readFileSync(seen,'utf8').trim().split('\n').length,3);
   }finally{rmSync(home,{recursive:true,force:true});}
+});
+
+test('receipt identity rejects foreign project and wrong source cannot mask current job', () => {
+  const job=mkjob(), start=receipt(job.request_id,'00000000-0000-0000-0000-000000000002','STARTED',job);
+  assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify({...start,project_id:'OTHER'})),null);
+  assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify({...start,source_sha:'x'.repeat(40)})),null);
+  const other={...start,source_sha:'c'.repeat(40)};
+  const state=[com(1,encoded(job)),com(2,RECEIPT_MARKER+JSON.stringify(other),'worker')];
+  assert.equal(selectNext(state,['t14210184'],'worker',job.host,job.source_sha)?.id,1);
 });

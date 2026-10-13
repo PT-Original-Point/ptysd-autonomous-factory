@@ -48,13 +48,17 @@ export function parseReceipt(body) {
   if (typeof body !== 'string' || body.length > 5000 || !body.startsWith(RECEIPT_MARKER)) return null;
   try {
     const o = JSON.parse(body.slice(RECEIPT_MARKER.length));
-    if (typeof o?.request_id !== 'string' || !REQUEST.test(o.request_id) ||
+    if (o?.schema !== 1 || o.project_id !== PROJECT ||
+        typeof o.host !== 'string' || !/^[A-Z0-9-]{3,64}$/.test(o.host) ||
+        !SHA.test(o.source_sha) || typeof o.kind !== 'string' ||
+        !['ping', 'native_preflight', 'native_v2_qualify', 'opencode_plan'].includes(o.kind) ||
+        typeof o.request_id !== 'string' || !REQUEST.test(o.request_id) ||
         !RECEIPT_STATES.has(o.state) || typeof o.attempt_id !== 'string' ||
         !/^[a-f0-9-]{36}$/.test(o.attempt_id)) return null;
     return o;
   } catch { return null; }
 }
-export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha = null) {
+export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha = null, blockedKinds = []) {
   const jobs = new Map();
   const receipts = new Map();
   for (const c of comments) {
@@ -71,8 +75,11 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     }
   }
   for (const [, v] of jobs) {
-    const r = receipts.get(v.job.request_id) || [];
-    if (v.duplicate || r.some(x => terminalStates.has(x.state)) || r.some(x => x.state === 'STARTED')) continue;
+    const r = (receipts.get(v.job.request_id) || []).filter(x =>
+      x.host.toUpperCase() === v.job.host.toUpperCase() &&
+      x.source_sha === v.job.source_sha && x.kind === v.job.kind);
+    if (v.duplicate || blockedKinds.includes(v.job.kind) ||
+        r.some(x => terminalStates.has(x.state)) || r.some(x => x.state === 'STARTED')) continue;
     // A stale unsigned/unclaimed job must not starve a newer exact-main task.
     if (liveMainSha !== null && v.job.source_sha !== liveMainSha) continue;
     return { job: v.job, id: v.id, originalBody: v.content };
@@ -269,26 +276,34 @@ async function main() {
   const issue = api(`repos/${REPO}/issues/${config.issue}`);
   if (issue.title !== ISSUE_TITLE || issue.state !== 'open' || issue.pull_request) throw new Error('ISSUE_IDENTITY_MISMATCH');
   const comments = issueComments(config);
-  // Replay terminal receipt only when local exact same-attempt evidence exists; NEVER repeat the effect.
+  // Reconcile ambiguous model effects by scope; keep independent zero-token jobs runnable.
+  // Never replay an OpenCode operation without its exact persisted terminal evidence.
+  const blockedKinds = new Set();
   for (const c of comments) {
     if (c.user?.login !== me) continue;
     const s = parseReceipt(c.body);
-    if (!s || s.state !== 'STARTED') continue;
-    const hasTerminal = comments.some(v => v.user?.login === me && (r => r?.request_id === s.request_id && r?.attempt_id === s.attempt_id && terminalStates.has(r.state))(parseReceipt(v.body)));
+    if (!s || s.state !== 'STARTED' || s.host.toUpperCase() !== config.host.toUpperCase()) continue;
+    const hasTerminal = comments.some(v => v.user?.login === me &&
+      (r => r?.request_id === s.request_id && r?.attempt_id === s.attempt_id &&
+        r?.source_sha === s.source_sha && r?.kind === s.kind && terminalStates.has(r.state))(parseReceipt(v.body)));
     if (hasTerminal) continue;
     const path = join(config.state_dir, `result-${s.request_id}-${s.attempt_id}.json`);
     if (existsSync(path)) {
       const result = JSON.parse(readFileSync(path, 'utf8'));
-      if (result.request_id !== s.request_id || result.attempt_id !== s.attempt_id) throw new Error('LOCAL_RECEIPT_IDENTITY_MISMATCH');
+      if (result.request_id !== s.request_id || result.attempt_id !== s.attempt_id ||
+          result.terminal?.source_sha !== s.source_sha || result.terminal?.kind !== s.kind ||
+          !parseReceipt(RECEIPT_MARKER + JSON.stringify(result.terminal)))
+        throw new Error('LOCAL_RECEIPT_IDENTITY_MISMATCH');
       writeReceipt(config, result.terminal, me);
       console.log(`RECOVERED_TERMINAL_${s.request_id}`);
       return;
     }
-    console.log(`AMBIGUOUS_STARTED_${s.request_id}: NO_REEXECUTION`); return;
+    if (s.kind === 'opencode_plan') blockedKinds.add(s.kind);
+    console.log(`AMBIGUOUS_STARTED_${s.request_id}: NO_REEXECUTION`);
   }
   const head = api(`repos/${REPO}/git/ref/heads/main`).object?.sha;
   if (!SHA.test(head || '')) throw new Error('MAIN_HEAD_UNREADABLE');
-  const next = selectNext(comments, config.dispatchers, me, config.host, head);
+  const next = selectNext(comments, config.dispatchers, me, config.host, head, [...blockedKinds]);
   if (!next) { console.log('NO_DELTA_NO_LLM'); return; }
   const job = next.job;
   if (job.source_sha !== head) { console.log(`STALE_SHA_SKIP_${job.request_id}`); return; }
