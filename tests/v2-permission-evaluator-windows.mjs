@@ -86,6 +86,15 @@ async function effect(sessionID, agent, action, resource) {
 }
 try {
   await ready();
+  const agents = await request('GET', '/api/agent');
+  if (agents.status !== 200 || !Array.isArray(agents.data)) throw new Error('V2_AGENT_CATALOG_NOT_READABLE');
+  // Only report booleans and permission counts; never print loaded private config.
+  for (const name of ['ptysd-allow','ptysd-deny']) {
+    const item = agents.data.find(a => a.id === name);
+    console.log('V2_AGENT_' + name.toUpperCase().replaceAll('-','_') +
+      '_PRESENT=' + Boolean(item) + '_RULES=' + (Array.isArray(item?.permissions) ? item.permissions.length : 0));
+    assert.ok(item && Array.isArray(item.permissions), 'V2_EXPECTED_CUSTOM_AGENT_NOT_LOADED_' + name);
+  }
   const response = await request('POST', '/api/session', {
     agent: 'ptysd-allow', title: 'PTYSD ephemeral no-inference permission canary',
   });
