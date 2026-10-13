@@ -1,0 +1,38 @@
+name: V53R4 OpenCode V2 CLI zero-token qualification
+on:
+  pull_request:
+    paths:
+      - 'native-bridge/**'
+      - 'tests/native-bridge.test.mjs'
+      - 'tests/opencode-v2.test.mjs'
+      - 'tests/v2-readiness.test.mjs'
+      - 'tests/v2-cli-contract-smoke.mjs'
+      - 'package.json'
+      - '.github/workflows/v53r4-v2-cli-qualification.yml'
+permissions:
+  contents: read
+jobs:
+  v2-native-windows:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Run platform-neutral verifier and V2 metadata unit tests on Windows
+        shell: pwsh
+        run: node --test tests/csg/csg-trusted-pr-verifier-cli.test.mjs tests/opencode-v2.test.mjs tests/v2-readiness.test.mjs
+      - name: Install pinned official V2 in temporary runner scope
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prefix = Join-Path $env:RUNNER_TEMP 'v53r4-cli-v2'
+          & npm.cmd install --prefix $prefix --save-exact --no-fund --no-audit '@opencode/cli@2.0.27'
+          if ($LASTEXITCODE -ne 0) { throw 'V2_NPM_INSTALL_FAILED' }
+          "PTYSD_CI_V2_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Verify official V2 version, list commands, auth-list JSON without model or credentials
+        shell: pwsh
+        run: node tests/v2-cli-contract-smoke.mjs
