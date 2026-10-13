@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
+import { randomBytes } from 'node:crypto';
 
 const prefix = process.env.PTYSD_CI_V2_PREFIX;
 assert.ok(prefix, 'V2_PREFIX_REQUIRED');
@@ -31,6 +32,11 @@ writeFileSync(join(configDir, 'opencode.json'), JSON.stringify(config));
 const env = { ...process.env, OPENCODE_DISABLE_AUTOUPDATE: 'true' };
 for (const key of ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG_CONTENT',
   'OPENCODE_PERMISSION', 'OPENCODE_AUTO_SHARE']) delete env[key];
+// V2's native foreground API requires HTTP Basic Auth. Never use real credentials.
+const ephemeralPassword = randomBytes(24).toString('hex');
+env.OPENCODE_SERVER_PASSWORD = ephemeralPassword;
+env.OPENCODE_SERVER_USERNAME = 'opencode';
+const authHeader = 'Basic ' + Buffer.from('opencode:' + ephemeralPassword).toString('base64');
 
 const port = await new Promise((resolvePort, reject) => {
   const server = net.createServer();
@@ -50,7 +56,7 @@ async function request(method, path, body) {
   const timeout = setTimeout(() => c.abort(), 8000);
   try {
     const response = await fetch(endpoint + path, {
-      method, headers: { 'content-type': 'application/json' },
+      method, headers: { 'content-type': 'application/json', authorization: authHeader },
       ...(body === undefined ? {} : {body: JSON.stringify(body)}), signal: c.signal,
     });
     let payload;
@@ -62,7 +68,7 @@ async function ready() {
   for (let i = 0; i < 65; i++) {
     if (child.exitCode !== null) throw new Error('V2_LOCAL_SERVER_EARLY_EXIT');
     try {
-      const r = await request('GET', '/api/server');
+      const r = await request('GET', '/api/info');
       if (r.status === 200) return;
     } catch { /* process starting */ }
     await new Promise(r => setTimeout(r, 200));
