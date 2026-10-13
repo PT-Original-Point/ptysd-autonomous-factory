@@ -10,6 +10,9 @@ const UUID = /^[a-f0-9-]{36}$/;
 const REQUEST = /^[A-Z][A-Z0-9_-]{7,79}$/;
 const STATES = new Set(['STARTED', 'FINISHED', 'BLOCKED']);
 const JOB_KINDS = new Set(['ping', 'native_preflight', 'native_v2_qualify', 'opencode_plan']);
+// Display-only issuer pin from verified Issue #407 native job/receipt authors.
+// A public GitHub comment cannot authenticate a Worker or prove OS liveness.
+const TRUSTED_ISSUE_AUTHOR = 't14210184';
 const MAX_COMMENTS = 300;
 
 function asTime(value) {
@@ -107,8 +110,10 @@ export function deriveNativeV2Status({ provider, windows, sectionFreshness, now 
   safe.source = 'FRESH';
   safe.checked_at = provider.checked_at;
   const comments = Array.isArray(provider.comments) ? provider.comments.slice().sort((a,b) => a.id - b.id) : [];
-  const jobs = comments.map(c => ({ ...c, job: parseNativeJob(c.body) })).filter(c => c.job);
-  const receipts = comments.map(c => ({ ...c, receipt: parseNativeReceipt(c.body) })).filter(c => c.receipt);
+  const jobs = comments.filter(c => c.login === TRUSTED_ISSUE_AUTHOR)
+    .map(c => ({ ...c, job: parseNativeJob(c.body) })).filter(c => c.job);
+  const receipts = comments.filter(c => c.login === TRUSTED_ISSUE_AUTHOR)
+    .map(c => ({ ...c, receipt: parseNativeReceipt(c.body) })).filter(c => c.receipt);
   if (!jobs.length) {
     safe.last_receipt = 'Issue #407 尚無有效的接單任務';
     safe.note = '只查到 GitHub 服務，不代表主機正在寫碼';

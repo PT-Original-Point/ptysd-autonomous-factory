@@ -99,3 +99,31 @@ test('native dashboard renders at original read-only localhost, no write endpoin
     assert.equal(bad.status,405);
   }finally{await new Promise(ok=>app.close(ok));}
 });
+
+test('untrusted Issue author cannot inject a newer native work item',()=>{
+  const fake={...job,request_id:'PTYSD_NATIVE_FAKED_20261013'};
+  const outsider={...comment(4,body('PTYSD_NATIVE_JOB_V1',fake)),login:'random-outsider'};
+  const d=deriveNativeV2Status({provider:snapshot([task,start,finished,outsider]),now});
+  assert.equal(d.last_request,req);
+  assert.match(d.last_receipt,/FINISHED/);
+});
+test('untrusted Issue author cannot forge a FINISHED receipt for a real STARTED',()=>{
+  const outsider={...finished,login:'random-outsider'};
+  const d=deriveNativeV2Status({provider:snapshot([task,start,outsider]),now});
+  assert.equal(d.last_request,req);
+  assert.match(d.last_receipt,/STARTED/);
+  assert.equal(d.last_outcome,null);
+});
+test('missing GitHub author does not establish native job or terminal identity',()=>{
+  const anonymous=[task,start,finished].map(({login,...rest})=>rest);
+  const d=deriveNativeV2Status({provider:snapshot(anonymous),now});
+  assert.equal(d.last_request,null);
+  assert.match(d.last_receipt,/尚無有效/);
+});
+test('untrusted STARTED cannot allow authorized terminal to masquerade as paired execution',()=>{
+  const outsider={...start,login:'random-outsider'};
+  const d=deriveNativeV2Status({provider:snapshot([task,outsider,finished]),now});
+  assert.equal(d.last_request,req);
+  assert.match(d.last_receipt,/還沒有匹配/);
+  assert.equal(d.last_outcome,null);
+});
