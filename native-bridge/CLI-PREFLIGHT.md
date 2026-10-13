@@ -32,6 +32,35 @@ Some historical V2 beta paths silently ignored environment-injected `OPENCODE_CO
 
 Only pinned jobs with exact project, Issue, trusted author, host, accepted main source SHA and pinned task spec SHA may be processed. Transport `ping` and zero-token `native_preflight` are retained. V2 `opencode_plan` uses schema 2 with `model` and `variant` in the task; both are locally allowlisted. STARTED/terminal receipts publish only bounded metadata and local evidence digests, never raw output or credentials. A STARTED without terminal is ambiguous; it must never reexecute the effect blindly.
 
+## Zero-inference provider/catalog evidence (candidate)
+
+The existing Issue #407 queue gains `kind: native_v2_qualify` under the existing
+schema-1 eight-key envelope. This is not a new queue, service or controller. It
+invokes only the qualified V2 native executable with `auth list --format json`
+and `models`; each command is bounded to 12 seconds and never invokes `run`,
+`auth login`, or a model provider for inference.
+
+The private user-local evidence file holds **only** parsed counts, an SHA-256
+digest of public catalog IDs, version, error class and no-inference flags. Raw
+authentication JSON, usernames, emails, API keys, raw model output and provider
+account IDs are deliberately never persisted or posted to the public Issue.
+The GitHub STARTED / terminal receipt retains the original fixed fields and
+publishes only a bounded outcome and evidence SHA/size.
+
+**Definitions:** saved authentication record count is not proof of account
+validity or subscription entitlement. `opencode models` enumerates catalog
+entries, not guaranteed usable or free models; a name containing `free` is not
+a pricing verification. Neither output authorizes costs or enables model
+inference. Terminal `FINISHED` means metadata scan executed, not permission
+negative tests, model success or autonomous coding. If the subcommand errors,
+returns unknown schema or provides no parseable catalog, the exact lane is
+`BLOCKED` with evidence for readback.
+
+This job requires the **updated** Win11 Worker and `v2-readiness.mjs` to be
+installed together under the existing Limited Task. GitHub source merge alone
+cannot run it. Do not enqueue it until same-source runtime SHA readback is
+available; retain existing task, 2667 monitor, WinRM and all other projects.
+
 ## Acceptance phases
 
 1. **Source candidate:** native Node V2-only unit and negative tests + trusted hosted CI.

@@ -8,6 +8,7 @@ import { homedir, hostname, platform } from 'node:os';
 import { join, resolve, relative, isAbsolute, delimiter } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { qualifyOpenCodeV2, validateV2Model, buildV2ReadOnlyConfig, buildV2ReadOnlyArgs } from './opencode-v2.mjs';
+import { runV2Readiness } from './v2-readiness.mjs';
 
 export const PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
 export const REPO = 'PT-Original-Point/ptysd-autonomous-factory';
@@ -31,7 +32,7 @@ export function parseJob(body) {
   if (!keys || JSON.stringify(Object.keys(obj).sort()) !== JSON.stringify(keys.slice().sort())) return null;
   if (obj.project_id !== PROJECT || !REQUEST.test(obj.request_id)) return null;
   if (typeof obj.host !== 'string' || !/^[A-Z0-9-]{3,64}$/.test(obj.host) || !SHA.test(obj.source_sha)) return null;
-  if (obj.schema === 1 && (obj.kind === 'ping' || obj.kind === 'native_preflight')) {
+  if (obj.schema === 1 && (obj.kind === 'ping' || obj.kind === 'native_preflight' || obj.kind === 'native_v2_qualify')) {
     if (obj.spec_path !== null || obj.spec_sha256 !== null) return null;
     return obj;
   }
@@ -162,6 +163,25 @@ function nativePreflight(config, job) {
   return { outcome: cli.ready ? 'OPENCODE_V2_VERSION_CONFIRMED_NO_MODEL_AUTH' : 'OPENCODE_V2_CLI_NOT_QUALIFIED',
     exit_code: 0, ...localEvidence(config, job.request_id, facts) };
 }
+function nativeV2Qualify(config, job) {
+  const cli = qualifyOpenCodeV2();
+  if (!cli.ready) return { outcome: 'OPENCODE_V2_CLI_NOT_QUALIFIED',
+    exit_code: 43, evidence_sha256: null, evidence_bytes: 0 };
+  const summary = runV2Readiness(cli.bin, config.state_dir);
+  const facts = { schema: 1, project_id: PROJECT, host: config.host, kind: job.kind,
+    request_id: job.request_id, source_sha: job.source_sha, v2_cli_version: cli.version,
+    auth_metadata: summary.auth, model_catalog: summary.models, issues: summary.issues,
+    inference_executed: false, credential_values_collected: false,
+    model_execution_enabled: config.enable_v2_model_runs === true };
+  const evidence = localEvidence(config, job.request_id, facts);
+  const bad = summary.issues.length ||
+    !summary.auth?.status?.startsWith('SAVED_ACCOUNT_') &&
+    summary.auth?.status !== 'NO_SAVED_ACCOUNT_RECORDS' ||
+    summary.models?.status !== 'PUBLIC_CATALOG_IDS_PARSED_NOT_USABLE_PROOF';
+  return { outcome: bad ? 'V2_METADATA_INCOMPLETE_NOT_MODEL_ACCEPTANCE' :
+    'V2_ZERO_TOKEN_METADATA_ONLY_NOT_MODEL_ACCEPTANCE',
+    exit_code: bad ? 47 : 0, ...evidence };
+}
 async function runPlan(spec, config, job) {
   if (config.enable_v2_model_runs !== true) {
     return { outcome: 'V2_MODEL_EXECUTION_NOT_YET_APPROVED', exit_code: 44,
@@ -284,6 +304,7 @@ async function main() {
   let result;
   if (job.kind === 'ping') result = { outcome: 'BRIDGE_PING_OK_NOT_OS_ACCEPTANCE', exit_code: 0, evidence_sha256: null, evidence_bytes: 0 };
   else if (job.kind === 'native_preflight') result = nativePreflight(config, job);
+  else if (job.kind === 'native_v2_qualify') result = nativeV2Qualify(config, job);
   else { try { result = await runPlan(spec, config, job); }
     catch (err) { result = { outcome: `EXECUTION_ERROR_${String(err.code || 'UNKNOWN').slice(0, 36)}`, exit_code: -1, evidence_sha256: null, evidence_bytes: 0 }; } }
   const terminal = receipt(job.request_id, attemptId, result.exit_code === 0 ? 'FINISHED' : 'BLOCKED', job, result);

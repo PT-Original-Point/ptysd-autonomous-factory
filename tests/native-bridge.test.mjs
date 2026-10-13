@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync, readdirSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -32,6 +32,8 @@ test('strict exact job contract rejects injection, cross-project, unknown keys a
   assert.equal(checkModelAuthorization({...modelJob, variant:'unverified'}, {allowed_models:{'opencode/spark':['high']}}),false);
   assert.equal(parseJob(encoded({...modelJob, shell:'pwsh'})),null);
   assert.equal(parseJob(encoded(mkjob({kind:'native_preflight'}))).kind,'native_preflight');
+  assert.equal(parseJob(encoded(mkjob({kind:'native_v2_qualify'}))).kind,'native_v2_qualify');
+  assert.equal(parseJob(encoded(mkjob({kind:'native_v2_qualify',spec_path:'tasks/other.md'}))),null);
   assert.ok(checkModelAuthorization(modelJob,{ allowed_models:{ 'opencode/spark':['high'] } }));
   assert.ok(!checkModelAuthorization(modelJob, {allowed_models:{}}));
   assert.equal(parseJob('garbage'), null);
@@ -142,4 +144,67 @@ const fs=require('fs');const a=process.argv.slice(2);const p=process.env.MOCK_GH
     assert.equal(c[2].body.includes(home),false);
     assert.equal(c[2].body.includes('secret'),false);
   } finally {rmSync(home,{recursive:true,force:true});}
+});
+
+test('V2 metadata task completes source-pinned GitHub receipts without model inference or credential leak', () => {
+  const home=mkdtempSync(join(homedir(), '.ptysd-v2-meta-test-'));
+  try {
+    const bin=join(home,'bin'), work=join(home,'work'), state=join(home,'state');
+    mkdirSync(bin);mkdirSync(work);mkdirSync(state);
+    const mock=join(home,'mock.json'), seen=join(home,'calls.txt');
+    const job=mkjob({kind:'native_v2_qualify',host:hostname().toUpperCase(),
+      request_id:'PTYSD_NATIVE_V2_META_20261013'});
+    writeFileSync(mock,JSON.stringify({main:commit,user:'worker',issue:101,
+      comments:[com(1,encoded(job))],next:2,spec:''}));
+    const ghScript = [
+      '#!/usr/bin/env node',
+      'const fs=require("fs"),a=process.argv.slice(2),p=process.env.MOCK_GH_STATE,x=JSON.parse(fs.readFileSync(p,"utf8"));',
+      'if(a[0]==="api"){if(a[1]==="user")console.log(JSON.stringify({login:x.user}));',
+      'else if(a[1].includes("/git/ref/heads/main"))console.log(JSON.stringify({object:{sha:x.main}}));',
+      'else if(a[1].includes("/issues/comments/"))console.log(JSON.stringify(x.comments.find(c=>c.id===Number(a[1].split("/").pop()))));',
+      'else if(a[1].includes("/issues/101/comments"))console.log(JSON.stringify([x.comments]));',
+      'else if(a[1].endsWith("/issues/101"))console.log(JSON.stringify({title:"[PTYSD-NATIVE] OpenCode dispatch and receipts",state:"open"}));',
+      'else process.exit(20);}else if(a[0]==="issue"&&a[1]==="comment"){x.comments.push({id:x.next++,body:fs.readFileSync(a[a.indexOf("--body-file")+1],"utf8"),user:{login:x.user}});fs.writeFileSync(p,JSON.stringify(x));}else process.exit(21);'
+    ].join('\n')+'\n';
+    writeFileSync(join(bin,'gh'),ghScript);chmodSync(join(bin,'gh'),0o755);
+    const opencodeScript=[
+      '#!/usr/bin/env node',
+      'const fs=require("fs"),a=process.argv.slice(2);fs.appendFileSync(process.env.PROBE_CALLS,a.join(" ")+"\\n");',
+      'if(a.length===1&&a[0]==="--version")console.log("opencode v2.0.27");',
+      'else if(a[0]==="auth"&&a[1]==="list")console.log(JSON.stringify([{provider:"opencode",token:"PRIVATE_TOKEN_CANARY"}]));',
+      'else if(a[0]==="models")console.log("opencode/spark-free");',
+      'else process.exit(89);'
+    ].join('\n')+'\n';
+    writeFileSync(join(bin,'opencode'),opencodeScript);chmodSync(join(bin,'opencode'),0o755);
+    const config=join(home,'config.json'),runner=resolve('native-bridge/worker.mjs');
+    writeFileSync(config,JSON.stringify({repo:REPO,project_id:PROJECT,
+      host:hostname().toUpperCase(),issue:101,workspace:work,state_dir:state,
+      dispatchers:['t14210184']}));
+    const env={...process.env,PATH:bin+':'+process.env.PATH,MOCK_GH_STATE:mock,PROBE_CALLS:seen};
+    const first=spawnSync(process.execPath,[runner,'--config',config],{cwd:resolve('.'),
+      env,encoding:'utf8',timeout:15000});
+    assert.equal(first.status,0,first.stderr);
+    assert.match(first.stdout,/FINISHED_PTYSD_NATIVE_V2_META_20261013/);
+    const c=JSON.parse(readFileSync(mock,'utf8')).comments;
+    assert.equal(c.length,3);
+    const end=parseReceipt(c.at(-1).body);
+    assert.equal(end.state,'FINISHED');
+    assert.equal(end.outcome,'V2_ZERO_TOKEN_METADATA_ONLY_NOT_MODEL_ACCEPTANCE');
+    assert.match(end.evidence_sha256,/^[a-f0-9]{64}$/);
+    assert.ok(!c.at(-1).body.includes('PRIVATE_TOKEN_CANARY'));
+    const e=readdirSync(state).find(x=>x.startsWith('native-evidence-'));
+    assert.ok(e);
+    const facts=JSON.parse(readFileSync(join(state,e),'utf8'));
+    assert.equal(facts.auth_metadata.saved_account_count,1);
+    assert.equal(facts.model_catalog.catalog_count,1);
+    assert.equal(facts.inference_executed,false);
+    assert.ok(!JSON.stringify(facts).includes('PRIVATE_TOKEN_CANARY'));
+    const calls=readFileSync(seen,'utf8').trim().split('\n');
+    assert.deepEqual(calls,['--version','auth list --format json','models']);
+    const second=spawnSync(process.execPath,[runner,'--config',config],{cwd:resolve('.'),
+      env,encoding:'utf8',timeout:15000});
+    assert.equal(second.status,0,second.stderr);
+    assert.match(second.stdout,/NO_DELTA_NO_LLM/);
+    assert.equal(readFileSync(seen,'utf8').trim().split('\n').length,3);
+  }finally{rmSync(home,{recursive:true,force:true});}
 });
