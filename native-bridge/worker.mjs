@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 // PTYSD native issue bridge. No listener, MCP, model router, or privileged daemon.
 // Public GitHub issue comments are only pointers to immutable, reviewed source.
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir, hostname, platform } from 'node:os';
-import { join, resolve, relative, isAbsolute, delimiter } from 'node:path';
+import { basename, join, resolve, relative, isAbsolute, delimiter } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { qualifyOpenCodeV2, validateV2Model, buildV2ReadOnlyConfig, buildV2ReadOnlyArgs } from './opencode-v2.mjs';
 import { runV2Readiness } from './v2-readiness.mjs';
+import { runCapturedProcess } from './captured-process.mjs';
+import { assertExecutorTaskReady, cleanupExecutorAttempt, dispatchToExecutor, executorResultPath,
+  validateExecutorDescriptor } from './windows-executor.mjs';
 
 export const PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
 export const REPO = 'PT-Original-Point/ptysd-autonomous-factory';
@@ -24,6 +27,13 @@ const RECEIPT_STATES = new Set(['STARTED', 'FINISHED', 'BLOCKED']);
 const terminalStates = new Set(['FINISHED', 'BLOCKED']);
 const commandTimeout = 60000;
 function digest(data) { return createHash('sha256').update(data).digest('hex'); }
+export function terminalStateForResult(result) {
+  // This field records only the execution attempt lifecycle. A zero exit code
+  // never upgrades the outcome to semantic, coding, PR, or source acceptance.
+  if (!result || result.exit_code !== 0 || typeof result.outcome !== 'string') return 'BLOCKED';
+  if (/(?:^|_)(?:FAILED|ERROR)(?:_|$)/.test(result.outcome)) return 'BLOCKED';
+  return 'FINISHED';
+}
 export function parseJob(body) {
   if (typeof body !== 'string' || body.length > 5000 || !body.startsWith(JOB_MARKER)) return null;
   let obj; try { obj = JSON.parse(body.slice(JOB_MARKER.length)); } catch { return null; }
@@ -109,7 +119,7 @@ function atomicJSON(path, data) {
   writeFileSync(temp, JSON.stringify(data, null, 2), { flag: 'wx', mode: 0o600 });
   renameSync(temp, path);
 }
-function guardConfig(c) {
+export function guardConfig(c) {
   if (c.repo !== REPO || c.project_id !== PROJECT || c.host.toUpperCase() !== hostname().toUpperCase())
     throw new Error('WRONG_PROJECT_OR_HOST');
   if (!Number.isSafeInteger(c.issue) || c.issue < 1) throw new Error('INVALID_ISSUE');
@@ -131,6 +141,7 @@ function guardConfig(c) {
   }
   if (c.enable_v2_model_runs !== undefined && typeof c.enable_v2_model_runs !== 'boolean')
     throw new Error('V2_MODEL_ENABLE_FLAG_INVALID');
+  if (c.executor !== undefined) validateExecutorDescriptor(c.executor);
   mkdirSync(c.state_dir, { recursive: true });
   return c;
 }
@@ -189,7 +200,7 @@ function nativeV2Qualify(config, job) {
     'V2_ZERO_TOKEN_METADATA_ONLY_NOT_MODEL_ACCEPTANCE',
     exit_code: bad ? 47 : 0, ...evidence };
 }
-async function runPlan(spec, config, job) {
+export async function runPlan(spec, config, job, attemptId) {
   if (config.enable_v2_model_runs !== true) {
     return { outcome: 'V2_MODEL_EXECUTION_NOT_YET_APPROVED', exit_code: 44,
       evidence_sha256: null, evidence_bytes: 0 };
@@ -218,41 +229,43 @@ async function runPlan(spec, config, job) {
   if (readFileSync(configFile, 'utf8') !== safePolicy)
     return { outcome: 'V2_WORKSPACE_CONFIG_READBACK_FAILED', exit_code: 45, evidence_sha256: null, evidence_bytes: 0 };
   const args = buildV2ReadOnlyArgs(job, config.workspace, spec);
-  const outFile = join(config.state_dir, `output-${job.request_id}-${randomUUID()}.jsonl`);
+  const outputStem = `output-${job.request_id}-${attemptId}`;
+  const stdoutPath = join(config.state_dir, `${outputStem}.stdout.bin`);
+  const stderrPath = join(config.state_dir, `${outputStem}.stderr.bin`);
   // Forbid inherited config injections from silently weakening our project file.
   // Model credentials remain inherited from the same non-privileged OS user.
   const childEnv = { ...process.env };
-  for (const key of ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR',
-    'OPENCODE_CONFIG_CONTENT', 'OPENCODE_PERMISSION', 'OPENCODE_AUTO_SHARE'])
+  for (const key of ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG_CONTENT',
+    'OPENCODE_PERMISSION', 'OPENCODE_AUTO_SHARE', 'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN'])
     delete childEnv[key];
   childEnv.OPENCODE_DISABLE_AUTOUPDATE = 'true';
-  return await new Promise((res) => {
-    const chunks = []; const errors = []; let size = 0; let killed = false;
-    const cmd = spawn(cli.bin, args, { cwd: config.workspace, windowsHide: true, shell: false,
-      env: childEnv });
-    const cap = (arr) => (chunk) => { size += chunk.length; if (size <= 2 * 1024 * 1024) arr.push(Buffer.from(chunk));
-      else { killed = true; killTree(cmd); } };
-    cmd.stdout.on('data', cap(chunks)); cmd.stderr.on('data', cap(errors));
-    const timer = setTimeout(() => { killed = true; killTree(cmd); }, 600000);
-    cmd.on('error', (err) => { errors.push(Buffer.from(err.code || 'SPAWN_ERROR')); });
-    cmd.on('close', (code) => {
-      clearTimeout(timer);
-      const stdout = Buffer.concat(chunks); const stderr = Buffer.concat(errors);
-      writeFileSync(outFile, Buffer.concat([stdout, Buffer.from('\n--- STDERR ---\n'), stderr]), { mode: 0o600 });
-      res({ exit_code: code ?? -1, outcome: killed ? 'TIMEOUT_OR_TOO_LARGE' : code === 0 ? 'OPENCODE_V2_EXIT_0_UNTRUSTED' : 'OPENCODE_V2_FAILED',
-        evidence_sha256: digest(readFileSync(outFile)), evidence_bytes: statSync(outFile).size });
-    });
+  return runCapturedProcess(cli.bin, args, {
+    cwd: config.workspace, env: childEnv, stdoutPath, stderrPath,
+    terminate: killTree,
   });
 }
 function killTree(child) {
   if (!child.pid) return;
-  try {
-    if (platform() === 'win32') execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { timeout: 10000, windowsHide: true });
-    else child.kill('SIGKILL');
-  } catch { try { child.kill(); } catch { /* already exited */ } }
+  // Never target a PID after Node has observed the root exit: Windows may have
+  // reused it. A root-only fallback is best effort and explicitly not tree proof.
+  if (child.exitCode !== null || child.signalCode) {
+    return { rootOnly: true, error: 'ROOT_EXITED_TREE_STATUS_UNKNOWN' };
+  }
+  if (platform() === 'win32') {
+    try {
+      execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'],
+        { timeout: 10000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      return { treeConfirmed: true };
+    } catch {
+      try { return { rootOnly: child.kill(), error: 'TASKKILL_TREE_FAILED' }; }
+      catch { return { rootOnly: false, error: 'TASKKILL_AND_ROOT_TERMINATION_FAILED' }; }
+    }
+  }
+  try { return { rootOnly: child.kill('SIGKILL'), error: 'NON_WINDOWS_TREE_TERMINATION_UNVERIFIED' }; }
+  catch { return { rootOnly: false, error: 'ROOT_TERMINATION_FAILED' }; }
 }
-function readSpec(job) {
-  const b = api(`repos/${REPO}/contents/${job.spec_path}?ref=${job.source_sha}`);
+function readSpec(job, apiRead = api) {
+  const b = apiRead(`repos/${REPO}/contents/${job.spec_path}?ref=${job.source_sha}`);
   if (b.encoding !== 'base64' || typeof b.content !== 'string') throw new Error('SPEC_UNREADABLE');
   const bytes = Buffer.from(b.content.replace(/\s+/g, ''), 'base64');
   if (digest(bytes) !== job.spec_sha256) throw new Error('SPEC_HASH_MISMATCH');
@@ -267,15 +280,67 @@ export function receipt(requestId, attemptId, state, job, result = null) {
     evidence_bytes: result?.evidence_bytes ?? null,
     ...(job.schema === 2 ? { model: job.model, variant: job.variant } : {}) };
 }
-async function main() {
-  const i = process.argv.indexOf('--config');
-  if (i === -1 || !process.argv[i + 1]) throw new Error('USAGE: --config config.json');
-  const config = guardConfig(JSON.parse(readFileSync(resolve(process.argv[i + 1]), 'utf8').replace(/^\uFEFF/, '')));
-  const me = api('user').login;
+async function hashEvidenceFile(path) {
+  const hash = createHash('sha256');
+  let bytes = 0;
+  for await (const chunk of createReadStream(path)) { hash.update(chunk); bytes += chunk.length; }
+  return { sha256: hash.digest('hex'), bytes };
+}
+async function updateCombinedHash(hash, path) {
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+}
+export async function verifyCapturedEvidence(resultDir, result) {
+  const local = result?.local_evidence;
+  const terminal = result?.terminal ?? result;
+  if (!local && terminal?.evidence_sha256 == null && terminal?.evidence_bytes === 0) return true;
+  if (local && (local.storage_error || local.capture_error || local.spawn_error) &&
+      terminal?.state === 'BLOCKED' && /(?:FAILED|ERROR)/.test(terminal?.outcome || '')) return true;
+  const names = [local?.stdout_file, local?.stderr_file];
+  if (!local || names.some(name => typeof name !== 'string' || basename(name) !== name ||
+      !/^[A-Za-z0-9._-]{1,180}$/.test(name))) throw new Error('CAPTURED_EVIDENCE_PATH_INVALID');
+  const paths = names.map(name => join(resultDir, name));
+  for (const path of paths) {
+    let info;
+    try { info = lstatSync(path); } catch { throw new Error('CAPTURED_EVIDENCE_READBACK_FAILED'); }
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error('CAPTURED_EVIDENCE_PATH_NOT_REGULAR_FILE');
+  }
+  let stdout, stderr;
+  try { [stdout, stderr] = await Promise.all(paths.map(hashEvidenceFile)); }
+  catch { throw new Error('CAPTURED_EVIDENCE_READBACK_FAILED'); }
+  if (stdout.sha256 !== local.stdout_sha256 || stdout.bytes !== local.stdout_bytes ||
+      stderr.sha256 !== local.stderr_sha256 || stderr.bytes !== local.stderr_bytes)
+    throw new Error('CAPTURED_EVIDENCE_FILE_HASH_MISMATCH');
+  const combined = createHash('sha256');
+  try {
+    await updateCombinedHash(combined, paths[0]);
+    combined.update(Buffer.from('\n--- STDERR ---\n', 'utf8'));
+    await updateCombinedHash(combined, paths[1]);
+  } catch { throw new Error('CAPTURED_EVIDENCE_READBACK_FAILED'); }
+  if (combined.digest('hex') !== terminal.evidence_sha256 ||
+      stdout.bytes + Buffer.byteLength('\n--- STDERR ---\n') + stderr.bytes !== terminal.evidence_bytes)
+    throw new Error('CAPTURED_EVIDENCE_COMBINED_HASH_MISMATCH');
+  return true;
+}
+function executorProcessTerminationUnconfirmed(result) {
+  return ['ORPHAN_POSSIBLE', 'TERMINATION_UNCONFIRMED', 'TERMINATION_REQUESTED']
+    .includes(result?.local_evidence?.termination_state);
+}
+export async function runWorker(configInput, adapters = {}) {
+  const config = guardConfig(configInput);
+  const apiRead = adapters.apiRead ?? api;
+  const commentsRead = adapters.commentsRead ?? issueComments;
+  const postReceipt = adapters.writeReceipt ?? writeReceipt;
+  const verifyExecutor = adapters.assertExecutorTaskReady ?? assertExecutorTaskReady;
+  const dispatchExecutor = adapters.dispatchToExecutor ?? dispatchToExecutor;
+  const resolveExecutorResultsDir = adapters.executorResultsDir ?? (descriptor => descriptor.results_dir);
+  const resolveExecutorResultPath = adapters.executorResultPath ?? executorResultPath;
+  const executeInline = adapters.runPlan ?? runPlan;
+  const log = adapters.log ?? (message => console.log(message));
+  const me = apiRead('user').login;
   if (!me) throw new Error('GH_AUTH_REQUIRED');
-  const issue = api(`repos/${REPO}/issues/${config.issue}`);
+  const issue = apiRead(`repos/${REPO}/issues/${config.issue}`);
   if (issue.title !== ISSUE_TITLE || issue.state !== 'open' || issue.pull_request) throw new Error('ISSUE_IDENTITY_MISMATCH');
-  const comments = issueComments(config);
+  const comments = commentsRead(config);
   // Reconcile ambiguous model effects by scope; keep independent zero-token jobs runnable.
   // Never replay an OpenCode operation without its exact persisted terminal evidence.
   const blockedKinds = new Set();
@@ -286,47 +351,101 @@ async function main() {
     const hasTerminal = comments.some(v => v.user?.login === me &&
       (r => r?.request_id === s.request_id && r?.attempt_id === s.attempt_id &&
         r?.source_sha === s.source_sha && r?.kind === s.kind && terminalStates.has(r.state))(parseReceipt(v.body)));
-    if (hasTerminal) continue;
-    const path = join(config.state_dir, `result-${s.request_id}-${s.attempt_id}.json`);
+    const resultDir = s.kind === 'opencode_plan' && config.executor ?
+      resolveExecutorResultsDir(config.executor) : config.state_dir;
+    const path = s.kind === 'opencode_plan' && config.executor ?
+      resolveExecutorResultPath(resultDir, s.request_id, s.attempt_id) :
+      join(resultDir, `result-${s.request_id}-${s.attempt_id}.json`);
+    if (hasTerminal) {
+      if (s.kind === 'opencode_plan' && config.executor) {
+        if (existsSync(path)) {
+          const result = JSON.parse(readFileSync(path, 'utf8'));
+          if (executorProcessTerminationUnconfirmed(result)) {
+            blockedKinds.add(s.kind);
+            log(`EXECUTOR_PROCESS_TERMINATION_UNRESOLVED_${s.request_id}`);
+            continue;
+          }
+        }
+        try { cleanupExecutorAttempt(config.executor, s.attempt_id); } catch { /* retain remote terminal evidence */ }
+      }
+      continue;
+    }
     if (existsSync(path)) {
       const result = JSON.parse(readFileSync(path, 'utf8'));
       if (result.request_id !== s.request_id || result.attempt_id !== s.attempt_id ||
           result.terminal?.source_sha !== s.source_sha || result.terminal?.kind !== s.kind ||
           !parseReceipt(RECEIPT_MARKER + JSON.stringify(result.terminal)))
         throw new Error('LOCAL_RECEIPT_IDENTITY_MISMATCH');
-      writeReceipt(config, result.terminal, me);
-      console.log(`RECOVERED_TERMINAL_${s.request_id}`);
-      return;
+      if (s.kind === 'opencode_plan' && executorProcessTerminationUnconfirmed(result)) {
+        blockedKinds.add(s.kind);
+        log(`EXECUTOR_PROCESS_TERMINATION_UNRESOLVED_${s.request_id}`);
+        continue;
+      }
+      if (s.kind === 'opencode_plan') await verifyCapturedEvidence(resultDir, result);
+      postReceipt(config, result.terminal, me);
+      if (s.kind === 'opencode_plan' && config.executor) {
+        try { cleanupExecutorAttempt(config.executor, s.attempt_id); } catch { /* exact result and receipt remain durable */ }
+      }
+      log(`RECOVERED_TERMINAL_${s.request_id}`);
+      return { state: 'RECOVERED_TERMINAL', request_id: s.request_id };
     }
     if (s.kind === 'opencode_plan') blockedKinds.add(s.kind);
-    console.log(`AMBIGUOUS_STARTED_${s.request_id}: NO_REEXECUTION`);
+    log(`AMBIGUOUS_STARTED_${s.request_id}: NO_REEXECUTION`);
   }
-  const head = api(`repos/${REPO}/git/ref/heads/main`).object?.sha;
+  const head = apiRead(`repos/${REPO}/git/ref/heads/main`).object?.sha;
   if (!SHA.test(head || '')) throw new Error('MAIN_HEAD_UNREADABLE');
   const next = selectNext(comments, config.dispatchers, me, config.host, head, [...blockedKinds]);
-  if (!next) { console.log('NO_DELTA_NO_LLM'); return; }
+  if (!next) { log('NO_DELTA_NO_LLM'); return { state: 'NO_DELTA' }; }
   const job = next.job;
-  if (job.source_sha !== head) { console.log(`STALE_SHA_SKIP_${job.request_id}`); return; }
+  if (job.source_sha !== head) { log(`STALE_SHA_SKIP_${job.request_id}`); return { state: 'STALE_SOURCE' }; }
   // Check full issue comment remains immutable since selection. Edits/races abort the lane.
-  const original = api(`repos/${REPO}/issues/comments/${next.id}`);
+  const original = apiRead(`repos/${REPO}/issues/comments/${next.id}`);
   if (original.body !== next.originalBody)
     throw new Error('DISPATCH_COMMENT_CHANGED');
   let spec = null;
-  if (job.kind === 'opencode_plan') spec = readSpec(job);
+  if (job.kind === 'opencode_plan') spec = readSpec(job, apiRead);
+  const executorDispatch = job.kind === 'opencode_plan' && config.enable_v2_model_runs === true &&
+    checkModelAuthorization(job, config);
+  if (executorDispatch) {
+    if (!config.executor) { log('EXECUTOR_NOT_CONFIGURED_NO_MODEL_DISPATCH'); return { state: 'EXECUTOR_NOT_CONFIGURED' }; }
+    try { verifyExecutor(config.executor); }
+    catch (err) {
+      log(`EXECUTOR_NOT_READY_${String(err.code || 'UNKNOWN').slice(0, 64)}`);
+      return { state: 'EXECUTOR_NOT_READY', code: String(err.code || 'UNKNOWN') };
+    }
+  }
   const attemptId = randomUUID();
   const start = receipt(job.request_id, attemptId, 'STARTED', job);
-  writeReceipt(config, start, me);
+  postReceipt(config, start, me);
+  if (executorDispatch) {
+    const dispatched = dispatchExecutor(config.executor, {
+      request_id: job.request_id, attempt_id: attemptId, source_sha: job.source_sha, job, spec,
+    });
+    log(`DISPATCHED_${job.request_id}_${dispatched.outcome}`);
+    return { state: 'DISPATCHED', request_id: job.request_id, attempt_id: attemptId,
+      outcome: dispatched.outcome };
+  }
   let result;
   if (job.kind === 'ping') result = { outcome: 'BRIDGE_PING_OK_NOT_OS_ACCEPTANCE', exit_code: 0, evidence_sha256: null, evidence_bytes: 0 };
   else if (job.kind === 'native_preflight') result = nativePreflight(config, job);
   else if (job.kind === 'native_v2_qualify') result = nativeV2Qualify(config, job);
-  else { try { result = await runPlan(spec, config, job); }
+  else { try { result = await executeInline(spec, config, job, attemptId); }
     catch (err) { result = { outcome: `EXECUTION_ERROR_${String(err.code || 'UNKNOWN').slice(0, 36)}`, exit_code: -1, evidence_sha256: null, evidence_bytes: 0 }; } }
-  const terminal = receipt(job.request_id, attemptId, result.exit_code === 0 ? 'FINISHED' : 'BLOCKED', job, result);
+  const terminal = receipt(job.request_id, attemptId, terminalStateForResult(result), job, result);
   const terminalPath = join(config.state_dir, `result-${job.request_id}-${attemptId}.json`);
-  atomicJSON(terminalPath, { request_id: job.request_id, attempt_id: attemptId, terminal });
-  writeReceipt(config, terminal, me);
-  console.log(`${terminal.state}_${job.request_id}_${terminal.outcome}`);
+  atomicJSON(terminalPath, { request_id: job.request_id, attempt_id: attemptId, terminal,
+    local_evidence: result.local_evidence ?? null });
+  postReceipt(config, terminal, me);
+  log(`${terminal.state}_${job.request_id}_${terminal.outcome}`);
+  return { state: terminal.state, request_id: job.request_id, attempt_id: attemptId,
+    outcome: terminal.outcome };
+}
+
+async function main() {
+  const i = process.argv.indexOf('--config');
+  if (i === -1 || !process.argv[i + 1]) throw new Error('USAGE: --config config.json');
+  const config = JSON.parse(readFileSync(resolve(process.argv[i + 1]), 'utf8').replace(/^\uFEFF/, ''));
+  await runWorker(config);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch(err => { console.error(`NATIVE_BRIDGE_BLOCKED: ${String(err.message || err).slice(0, 140)}`); process.exitCode = 2; });

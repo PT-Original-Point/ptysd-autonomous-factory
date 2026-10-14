@@ -37,6 +37,7 @@ test('readonly V2 permissions use V2 names and deny mutations after any source',
   assert.equal(c.permissions.find(x=>x.action==='subagent')?.effect,'deny');
   assert.ok(c.permissions.find(x=>x.action==='read'&&x.effect==='allow'));
   assert.equal(c.agents['ptysd-readonly'].mode,'primary');
+  assert.equal(Object.hasOwn(c.agents['ptysd-readonly'],'steps'),false);
   assert.equal(c.agents['ptysd-readonly'].permissions.find(x=>x.action==='shell')?.effect,'deny');
   assert.deepEqual(c.plugins,[]);
 });
@@ -56,6 +57,7 @@ test('scoped V2 writer has only explicit edit paths; no implicit shell, external
     const agent=cfg.agents['ptysd-scoped-write'];
     const exact=join(workspace,'src','output.mjs').replaceAll('\\','/');
     assert.equal(cfg.default_agent,'ptysd-scoped-write');
+    assert.equal(Object.hasOwn(agent,'steps'),false);
     assert.equal(cfg.permissions[0].action,'*');
     assert.equal(cfg.permissions[0].effect,'deny');
     assert.deepEqual(agent.permissions.filter(p=>p.action==='edit' && p.effect==='allow').map(p=>p.resource),[exact]);

@@ -6,7 +6,7 @@ import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
-  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI } from '../native-bridge/worker.mjs';
+  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI, terminalStateForResult } from '../native-bridge/worker.mjs';
 
 const commit = 'a'.repeat(40); const hash = 'b'.repeat(64);
 const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1B6PD2P',
@@ -15,6 +15,30 @@ const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1
 const encoded = o => JOB_MARKER + JSON.stringify(o);
 const com = (id, body, login = 't14210184') => ({ id, body, user: { login } });
 const h = x => createHash('sha256').update(x).digest('hex');
+// These integration fixtures provide a POSIX shebang file named "gh".
+// Windows PATH resolution can select the installed gh.exe instead, so keep
+// those provider-facing scenarios in Linux CI and never contact live GitHub here.
+const fakeShellIntegration = process.platform === 'win32' ? test.skip : test;
+
+test('terminal state fails closed on capture/storage errors even when child exit is zero', () => {
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'EVIDENCE_STORAGE_FAILED' }), 'BLOCKED');
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'OUTPUT_CAPTURE_FAILED' }), 'BLOCKED');
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'BRIDGE_PING_OK_NOT_OS_ACCEPTANCE' }), 'FINISHED');
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'OPENCODE_V2_EXIT_0_UNTRUSTED' }), 'FINISHED');
+  assert.equal(terminalStateForResult({ exit_code: 0 }), 'BLOCKED');
+});
+
+test('FINISHED is attempt lifecycle only and preserves an unverified semantic outcome', () => {
+  const job = mkjob({ schema: 2, kind: 'opencode_plan', spec_path: 'native-bridge/tasks/review.md',
+    spec_sha256: hash, model: 'opencode/spark', variant: 'high' });
+  const result = { exit_code: 0, outcome: 'OPENCODE_V2_EXIT_0_UNTRUSTED',
+    evidence_sha256: hash, evidence_bytes: 24 };
+  const finalReceipt = receipt(job.request_id, '0'.repeat(8) + '-0000-4000-8000-000000000000',
+    terminalStateForResult(result), job, result);
+  assert.equal(finalReceipt.state, 'FINISHED');
+  assert.equal(finalReceipt.outcome, 'OPENCODE_V2_EXIT_0_UNTRUSTED');
+  assert.equal(Object.hasOwn(finalReceipt, 'accepted'), false);
+});
 
 test('strict exact job contract rejects injection, cross-project, unknown keys and paths', () => {
   assert.deepEqual(parseJob(encoded(mkjob())), mkjob());
@@ -63,7 +87,7 @@ test('duplicate changed dispatch same request ID is blocked', () => {
   const a = encoded(mkjob()), b = encoded(mkjob({ source_sha: 'c'.repeat(40) }));
   assert.equal(selectNext([com(1,a),com(2,b)],['t14210184'],'worker','DESKTOP-1B6PD2P'),null);
 });
-test('worker integration: GitHub queued ping -> start + terminal with same-source readback; no delta zero LLM', () => {
+fakeShellIntegration('worker integration: GitHub queued ping -> start + terminal with same-source readback; no delta zero LLM', () => {
   // The only mocked surfaces are gh and opencode binaries. No GitHub or Windows host is contacted.
   const home = mkdtempSync(join(homedir(), '.ptysd-native-test-'));
   try {
@@ -104,13 +128,10 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
         chmodSync(join(bin,'opencode'),0o755);
     const run=spawnSync(process.execPath,[path,'--config',config],{cwd:resolve('.'),env,encoding:'utf8',timeout:15000});
     assert.equal(run.status,0,run.stderr);
-    assert.match(run.stdout,/FINISHED_PTYSD_NATIVE_PLAN/);
+    assert.match(run.stdout,/EXECUTOR_NOT_CONFIGURED_NO_MODEL_DISPATCH/);
     const m2=JSON.parse(readFileSync(mock,'utf8'));
-    const end=parseReceipt(m2.comments.at(-1).body);
-    assert.equal(end.outcome,'OPENCODE_V2_EXIT_0_UNTRUSTED');
-    assert.match(end.evidence_sha256,/^[a-f0-9]{64}$/);
-    assert.equal(JSON.parse(readFileSync(join(work,'opencode.json'),'utf8')).default_agent, 'ptysd-readonly');
-    assert.ok(!m2.comments.at(-1).body.includes('SAFE_V2_REVIEW_MOCK'));
+    assert.equal(m2.comments.length,m.comments.length,'no receipt is emitted without a ready separate Executor');
+    assert.equal(readdirSync(work).includes('opencode.json'),false,'the dispatcher must not start inline model work');
     // A crashed model attempt is ambiguous, but independent native probes continue.
     const orphan={...planJob,request_id:'PTYSD_NATIVE_ORPHAN_20261013'};
     const orphanStart=receipt(orphan.request_id,'00000000-0000-0000-0000-000000000001','STARTED',orphan);
@@ -132,7 +153,7 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
 });
 
 // No real GitHub host, Windows service or model API is invoked in these tests.
-test('no-LLM preflight yields a terminal receipt and local evidence hash', () => {
+fakeShellIntegration('no-LLM preflight yields a terminal receipt and local evidence hash', () => {
   const home=mkdtempSync(join(homedir(), '.ptysd-preflight-test-'));
   try {
     const bin=join(home,'bin'), work=join(home,'work'), state=join(home,'state');
@@ -163,7 +184,7 @@ const fs=require('fs');const a=process.argv.slice(2);const p=process.env.MOCK_GH
   } finally {rmSync(home,{recursive:true,force:true});}
 });
 
-test('V2 metadata task completes source-pinned GitHub receipts without model inference or credential leak', () => {
+fakeShellIntegration('V2 metadata task completes source-pinned GitHub receipts without model inference or credential leak', () => {
   const home=mkdtempSync(join(homedir(), '.ptysd-v2-meta-test-'));
   try {
     const bin=join(home,'bin'), work=join(home,'work'), state=join(home,'state');
