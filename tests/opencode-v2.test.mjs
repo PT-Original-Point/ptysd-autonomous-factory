@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { discoverV2Executables, qualifyOpenCodeV2, parseOpenCodeV2Version, validateV2Model, buildV2ReadOnlyArgs, buildV2ReadOnlyConfig, buildV2ScopedEditConfig, buildV2ScopedEditArgs } from '../native-bridge/opencode-v2.mjs';
@@ -37,6 +37,7 @@ test('readonly V2 permissions use V2 names and deny mutations after any source',
   assert.equal(c.permissions.find(x=>x.action==='subagent')?.effect,'deny');
   assert.ok(c.permissions.find(x=>x.action==='read'&&x.effect==='allow'));
   assert.equal(c.agents['ptysd-readonly'].mode,'primary');
+  assert.equal(Object.hasOwn(c.agents['ptysd-readonly'],'steps'),false);
   assert.equal(c.agents['ptysd-readonly'].permissions.find(x=>x.action==='shell')?.effect,'deny');
   assert.deepEqual(c.plugins,[]);
 });
@@ -52,10 +53,12 @@ test('V2 arguments use provider/model#variant; never call V1 --pure/--variant', 
 test('scoped V2 writer has only explicit edit paths; no implicit shell, external or secret grant', () => {
   const workspace=mkdtempSync(join(tmpdir(),'ptysd-v2-code-contract-'));
   try {
+    mkdirSync(join(workspace,'src'));
     const cfg=buildV2ScopedEditConfig(workspace,['src/output.mjs']);
     const agent=cfg.agents['ptysd-scoped-write'];
     const exact=join(workspace,'src','output.mjs').replaceAll('\\','/');
     assert.equal(cfg.default_agent,'ptysd-scoped-write');
+    assert.equal(Object.hasOwn(agent,'steps'),false);
     assert.equal(cfg.permissions[0].action,'*');
     assert.equal(cfg.permissions[0].effect,'deny');
     assert.deepEqual(agent.permissions.filter(p=>p.action==='edit' && p.effect==='allow').map(p=>p.resource),[exact]);
@@ -71,5 +74,26 @@ test('scoped V2 writer has only explicit edit paths; no implicit shell, external
     assert.equal(args[args.indexOf('--agent')+1],'ptysd-scoped-write');
     assert.equal(args[args.indexOf('--model')+1],'opencode/muse#high');
     assert.ok(!args.includes('--pure')&&!args.includes('--variant'));
+  } finally {rmSync(workspace,{recursive:true,force:true});}
+});
+
+test('scoped V2 writer rejects NTFS junctions and symbolic links escaping the worktree', () => {
+  const workspace=mkdtempSync(join(tmpdir(),'ptysd-v2-code-junction-'));
+  const outside=mkdtempSync(join(tmpdir(),'ptysd-v2-code-outside-'));
+  try {
+    symlinkSync(outside,join(workspace,'src'),process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(() => buildV2ScopedEditConfig(workspace,['src/escaped.mjs']),
+      /SCOPED_EDIT_REPARSE_POINT/);
+  } finally {
+    rmSync(workspace,{recursive:true,force:true});
+    rmSync(outside,{recursive:true,force:true});
+  }
+});
+
+test('scoped V2 writer requires existing non-link parent directories', () => {
+  const workspace=mkdtempSync(join(tmpdir(),'ptysd-v2-code-parent-'));
+  try {
+    assert.throws(() => buildV2ScopedEditConfig(workspace,['missing/output.mjs']),
+      /SCOPED_EDIT_PARENT_PATH_MISSING/);
   } finally {rmSync(workspace,{recursive:true,force:true});}
 });
