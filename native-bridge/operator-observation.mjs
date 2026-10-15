@@ -39,8 +39,10 @@ export function parseOperatorObservation(body) {
       !validTime(value.observed_at) || !validTime(value.published_at) ||
       !validTime(value.expires_at) || containsForbiddenKey(value)) return null;
   const observed = Date.parse(value.observed_at);
+  const published = Date.parse(value.published_at);
   const expires = Date.parse(value.expires_at);
-  if (expires <= observed || expires - observed > 15 * 60 * 1000) return null;
+  if (published < observed || published >= expires ||
+      expires <= observed || expires - observed > 15 * 60 * 1000) return null;
   return value;
 }
 

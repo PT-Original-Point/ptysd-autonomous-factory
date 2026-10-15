@@ -44,6 +44,23 @@ test('operator snapshot requires exact project identity, time bounds, and de-ide
   })), /INVALID_OPERATOR_OBSERVATION/);
 });
 
+test('published_at must be at or after observation and strictly before expiry', () => {
+  const parseWithPublishedAt = publishedAt => parseOperatorObservation(
+    OPERATOR_MARKER + JSON.stringify(observation({ published_at: publishedAt })),
+  );
+  const observedAt = new Date(now).toISOString();
+  const expiresAt = new Date(now + 5 * 60 * 1000).toISOString();
+
+  assert.equal(parseWithPublishedAt(new Date(now - 1).toISOString()), null,
+    'publication before observation is invalid');
+  assert.equal(parseWithPublishedAt(expiresAt), null,
+    'publication at expiry is invalid');
+  assert.equal(parseWithPublishedAt(new Date(now + 5 * 60 * 1000 + 1).toISOString()), null,
+    'publication after expiry is invalid');
+  assert.equal(parseWithPublishedAt(observedAt).published_at, observedAt,
+    'publication equal to observation is valid');
+});
+
 test('one trusted observation comment is updated; missing, duplicate, or foreign author fails closed', () => {
   assert.equal(findOperatorComment([], 'trusted-publisher').status, 'NOT_SEEDED');
   assert.equal(findOperatorComment([comment(observation())], 'trusted-publisher').status, 'OK');
