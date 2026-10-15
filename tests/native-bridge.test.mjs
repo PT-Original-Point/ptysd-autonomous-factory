@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync, readdirSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, delimiter } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
   RECEIPT_MARKER, checkModelAuthorization, findNativeCLI } from '../native-bridge/worker.mjs';
@@ -36,6 +36,14 @@ test('strict exact job contract rejects injection, cross-project, unknown keys a
   assert.equal(parseJob(encoded(mkjob({kind:'native_v2_qualify',spec_path:'tasks/other.md'}))),null);
   assert.ok(checkModelAuthorization(modelJob,{ allowed_models:{ 'opencode/spark':['high'] } }));
   assert.ok(!checkModelAuthorization(modelJob, {allowed_models:{}}));
+  const codexJob = { ...mkjob(), schema: 3, kind: 'codex_plan', request_id: 'PTYSD_CODEX_TEST_20261015',
+    spec_path: 'native-bridge/tasks/codex-review.md', spec_sha256: hash, model: 'gpt-6.1-sol',
+    reasoning_effort: 'medium', write_paths: ['native-bridge/sample.mjs'] };
+  assert.equal(parseJob(encoded(codexJob)).kind, 'codex_plan');
+  const codexStart = receipt(codexJob.request_id, '00000000-0000-0000-0000-000000000001', 'STARTED', codexJob);
+  assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify(codexStart)).kind, 'codex_plan');
+  assert.equal(selectNext([com(1, encoded(codexJob))], ['t14210184'], 'worker',
+    codexJob.host, codexJob.source_sha).job.kind, 'codex_plan');
   assert.equal(parseJob('garbage'), null);
 });
 test('only allowlisted sender and host are eligible, completed/started jobs never rerun', () => {
@@ -63,7 +71,8 @@ test('duplicate changed dispatch same request ID is blocked', () => {
   const a = encoded(mkjob()), b = encoded(mkjob({ source_sha: 'c'.repeat(40) }));
   assert.equal(selectNext([com(1,a),com(2,b)],['t14210184'],'worker','DESKTOP-1B6PD2P'),null);
 });
-test('worker integration: GitHub queued ping -> start + terminal with same-source readback; no delta zero LLM', () => {
+test('worker integration: GitHub queued ping -> start + terminal with same-source readback; no delta zero LLM',
+  { skip: process.platform === 'win32' }, () => {
   // The only mocked surfaces are gh and opencode binaries. No GitHub or Windows host is contacted.
   const home = mkdtempSync(join(homedir(), '.ptysd-native-test-'));
   try {
@@ -80,7 +89,7 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
     chmodSync(join(bin,'opencode'),0o755);
     const config=join(home,'config.json');
     writeFileSync(config,JSON.stringify({ repo:REPO,project_id:PROJECT,host:hostname().toUpperCase(),issue:101,workspace:work,state_dir:state,dispatchers:['t14210184'],allowed_models:{'opencode/spark':['high']}, enable_v2_model_runs:true }));
-    const env={...process.env, PATH:`${bin}:${process.env.PATH}`,MOCK_GH_STATE:mock};
+    const env={...process.env, PATH:`${bin}${delimiter}${process.env.PATH}`,MOCK_GH_STATE:mock};
     const path=resolve('native-bridge/worker.mjs');
     const first=spawnSync(process.execPath,[path,'--config',config],{cwd:resolve('.'),env,encoding:'utf8',timeout:15000});
     assert.equal(first.status,0,first.stderr);
@@ -132,7 +141,8 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
 });
 
 // No real GitHub host, Windows service or model API is invoked in these tests.
-test('no-LLM preflight yields a terminal receipt and local evidence hash', () => {
+test('no-LLM preflight yields a terminal receipt and local evidence hash',
+  { skip: process.platform === 'win32' }, () => {
   const home=mkdtempSync(join(homedir(), '.ptysd-preflight-test-'));
   try {
     const bin=join(home,'bin'), work=join(home,'work'), state=join(home,'state');
@@ -148,7 +158,7 @@ const fs=require('fs');const a=process.argv.slice(2);const p=process.env.MOCK_GH
     const config=join(home,'config.json');
     writeFileSync(config,JSON.stringify({repo:REPO,project_id:PROJECT,host:hostname().toUpperCase(),issue:101,workspace:work,state_dir:state,dispatchers:['t14210184']}));
     const runner=resolve('native-bridge/worker.mjs');
-    const env={...process.env,PATH:`${bin}:${process.env.PATH}`,MOCK_GH_STATE:mock};
+    const env={...process.env,PATH:`${bin}${delimiter}${process.env.PATH}`,MOCK_GH_STATE:mock};
     const res=spawnSync(process.execPath,[runner,'--config',config],{cwd:resolve('.'),env,encoding:'utf8',timeout:15000});
     assert.equal(res.status,0,res.stderr);
     assert.match(res.stdout,/FINISHED_PTYSD_NATIVE_PROBE_20261012/);
@@ -163,7 +173,8 @@ const fs=require('fs');const a=process.argv.slice(2);const p=process.env.MOCK_GH
   } finally {rmSync(home,{recursive:true,force:true});}
 });
 
-test('V2 metadata task completes source-pinned GitHub receipts without model inference or credential leak', () => {
+test('V2 metadata task completes source-pinned GitHub receipts without model inference or credential leak',
+  { skip: process.platform === 'win32' }, () => {
   const home=mkdtempSync(join(homedir(), '.ptysd-v2-meta-test-'));
   try {
     const bin=join(home,'bin'), work=join(home,'work'), state=join(home,'state');
@@ -197,7 +208,7 @@ test('V2 metadata task completes source-pinned GitHub receipts without model inf
     writeFileSync(config,JSON.stringify({repo:REPO,project_id:PROJECT,
       host:hostname().toUpperCase(),issue:101,workspace:work,state_dir:state,
       dispatchers:['t14210184']}));
-    const env={...process.env,PATH:bin+':'+process.env.PATH,MOCK_GH_STATE:mock,PROBE_CALLS:seen};
+    const env={...process.env,PATH:bin+delimiter+process.env.PATH,MOCK_GH_STATE:mock,PROBE_CALLS:seen};
     const first=spawnSync(process.execPath,[runner,'--config',config],{cwd:resolve('.'),
       env,encoding:'utf8',timeout:15000});
     assert.equal(first.status,0,first.stderr);
