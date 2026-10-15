@@ -1,12 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync, readdirSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
-  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI } from '../native-bridge/worker.mjs';
+  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI, terminalStateForResult,
+  runWorker as executeWorker, main as runWorker, writeReceipt, runPlan, ISSUE_TITLE,
+  createScopedCodingWorkspace, assertCodingWorkspace, captureScopedCodingDiff,
+} from '../native-bridge/worker.mjs';
+import { OPERATOR_MARKER, encodeOperatorObservation, parseOperatorObservation }
+  from '../native-bridge/operator-observation.mjs';
 
 const commit = 'a'.repeat(40); const hash = 'b'.repeat(64);
 const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1B6PD2P',
@@ -15,6 +20,251 @@ const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1
 const encoded = o => JOB_MARKER + JSON.stringify(o);
 const com = (id, body, login = 't14210184') => ({ id, body, user: { login } });
 const h = x => createHash('sha256').update(x).digest('hex');
+function seededOperatorObservation(commentId, sequence, mainSha, at = Date.now()) {
+  const timestamp = new Date(at).toISOString();
+  return {
+    schema: 1, project_id: PROJECT, repo: REPO, issue: 407,
+    host_alias: 'win11-primary', snapshot_id: randomUUID(), sequence,
+    observed_at: timestamp, published_at: timestamp,
+    expires_at: new Date(at + 5 * 60_000).toISOString(),
+    source: { kind: 'WIN11_NATIVE_TASK_READBACK', comment_id: commentId,
+      issue_comments_observed_at: timestamp, main_sha: mainSha },
+    windows: { status: 'FRESH', native_task: { enabled: true, state: 'Ready' },
+      opencode_process_count: 0, runner_service_count: 0, runner_service_running: false },
+    native_worker: { state: 'POLL_EXECUTED_TASK_TRIGGER_UNVERIFIED',
+      current_task: null, latest_task: null, files_modified: 'UNPROVEN',
+      remote_commit: null, pull_request: null, ci: 'UNKNOWN', next_owner: 'NO_CURRENT_TASK' },
+    opencode_v2: { process_observed_at: timestamp, process_count: 0,
+      active_session_count: null, active_session_state: 'UNKNOWN_NO_PASSIVE_API',
+      task_binding: 'UNPROVEN', code_changes: 'UNPROVEN',
+      remote_commit: null, pull_request: null, ci: 'UNKNOWN' },
+    github: { observed_at: timestamp, main_sha: mainSha, issue_comments_count: 2,
+      runner_registration: { status: 'UNKNOWN', count: null, observed_at: timestamp },
+      organization_runner_registration: 'UNKNOWN_ORG_SCOPE_NOT_AVAILABLE',
+      runner_service_count: 0, runner_service_running: false },
+    monitor_candidate: null, incident: null,
+  };
+}
+
+function makeObservationWorkerFixture({ ambiguousReadback = false, jobOverrides = {}, configOverrides = {}, jobSpec = null } = {}) {
+  const root = mkdtempSync(join(homedir(), '.ptysd-worker-observation-'));
+  const workspace = join(root, 'workspace');
+  const stateDir = join(root, 'state');
+  mkdirSync(workspace);
+  mkdirSync(stateDir);
+  const host = hostname().toUpperCase();
+  const publisher = 'trusted-publisher';
+  const observationId = 701;
+  const job = mkjob({ host, request_id: 'PTYSD_NATIVE_OBSERVE_PING_20261014', ...jobOverrides });
+  const store = {
+    next: 703,
+    comments: [
+      com(observationId, encodeOperatorObservation(
+        seededOperatorObservation(observationId, 17, commit, Date.now() - 60_000),
+      ), publisher),
+      com(702, encoded(job), 't14210184'),
+    ],
+    patches: 0,
+    posts: 0,
+    failReadback: ambiguousReadback,
+    now: Date.now(),
+  };
+  const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
+    workspace, state_dir: stateDir, dispatchers: ['t14210184'], ...configOverrides };
+  const api = uri => {
+    if (uri === 'user') return { login: publisher };
+    if (uri === `repos/${REPO}/issues/407`)
+      return { title: ISSUE_TITLE, state: 'open' };
+    if (uri === `repos/${REPO}/git/ref/heads/main`)
+      return { object: { sha: commit } };
+    if (uri.includes('/contents/') && jobSpec !== null)
+      return { encoding: 'base64', content: Buffer.from(jobSpec, 'utf8').toString('base64') };
+    const match = uri.match(/\/issues\/comments\/(\d+)$/);
+    if (match) return store.comments.find(c => c.id === Number(match[1]));
+    throw new Error(`UNEXPECTED_MOCK_API_ROUTE:${uri}`);
+  };
+  const observationDependencies = {
+    now: () => new Date(store.now),
+    collectWindowsObservation: () => ({ status: 'FRESH', observed_at: new Date(store.now).toISOString(),
+      tasks_total: 2, legacy_monitor_registered: false, listener_2667: false,
+      opencode_process_count: 0, runner_service_count: 0, runner_service_running: false,
+      native_task: { registered: true, enabled: true, state: 'Ready', last_run: null,
+        last_result: '0x00000000', action_kind: 'WINDOWLESS_LAUNCHER',
+        identity_class: 'INTERACTIVE_LIMITED', multiple_instances: 'IGNORENEW',
+        trigger_interval_minutes: 5 } }),
+    readRunnerRegistration: () => ({ total_count: 0 }),
+    readComment: id => structuredClone(store.comments.find(c => c.id === id)),
+    patchComment: (id, body) => {
+      const comment = store.comments.find(c => c.id === id);
+      if (!comment) throw new Error('MOCK_COMMENT_MISSING');
+      comment.body = body;
+      store.patches++;
+    },
+    readComments: () => {
+      if (store.failReadback) {
+        store.failReadback = false;
+        throw new Error('MOCK_READBACK_UNAVAILABLE_AFTER_PATCH');
+      }
+      return structuredClone(store.comments);
+    },
+  };
+  const receiptWrites = [];
+  const logs = [];
+  const run = (extra = {}) => executeWorker(config, {
+    apiRead: api, commentsRead: () => store.comments, observationDependencies,
+    writeReceipt: (_config, data, login) => {
+      store.comments.push(com(store.next++, RECEIPT_MARKER + JSON.stringify(data), login));
+      store.posts++;
+      receiptWrites.push(data);
+    },
+    log: value => logs.push(value),
+    ...extra,
+  });
+  return { root, store, run, logs, receiptWrites, observationId, config, job,
+    cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+// These integration fixtures provide a POSIX shebang file named "gh".
+// Windows PATH resolution can select the installed gh.exe instead, so keep
+// those provider-facing scenarios in Linux CI and never contact live GitHub here.
+const fakeShellIntegration = process.platform === 'win32' ? test.skip : test;
+
+test('terminal state fails closed on capture/storage errors even when child exit is zero', () => {
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'EVIDENCE_STORAGE_FAILED' }), 'BLOCKED');
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'OUTPUT_CAPTURE_FAILED' }), 'BLOCKED');
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'BRIDGE_PING_OK_NOT_OS_ACCEPTANCE' }), 'FINISHED');
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'OPENCODE_V2_EXIT_0_UNTRUSTED' }), 'FINISHED');
+  assert.equal(terminalStateForResult({ exit_code: 0 }), 'BLOCKED');
+});
+
+test('FINISHED is attempt lifecycle only and preserves an unverified semantic outcome', () => {
+  const job = mkjob({ schema: 2, kind: 'opencode_plan', spec_path: 'native-bridge/tasks/review.md',
+    spec_sha256: hash, model: 'opencode/spark', variant: 'high' });
+  const result = { exit_code: 0, outcome: 'OPENCODE_V2_EXIT_0_UNTRUSTED',
+    evidence_sha256: hash, evidence_bytes: 24 };
+  const finalReceipt = receipt(job.request_id, '0'.repeat(8) + '-0000-4000-8000-000000000000',
+    terminalStateForResult(result), job, result);
+  assert.equal(finalReceipt.state, 'FINISHED');
+  assert.equal(finalReceipt.outcome, 'OPENCODE_V2_EXIT_0_UNTRUSTED');
+  assert.equal(Object.hasOwn(finalReceipt, 'accepted'), false);
+});
+
+test('Worker main publishes the seeded observation, verifies sequence readback, and preserves legal dispatch on ambiguity', async () => {
+  const successful = makeObservationWorkerFixture();
+  try {
+    await successful.run();
+    let observations = successful.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].id, successful.observationId);
+    assert.equal(observations[0].user.login, 'trusted-publisher');
+    let value = parseOperatorObservation(observations[0].body);
+    assert.equal(value.sequence, 18);
+    assert.ok(successful.logs.includes('OPERATOR_OBSERVATION_UPDATED'));
+    assert.deepEqual(successful.receiptWrites.map(x => x.state), ['STARTED', 'FINISHED']);
+    assert.equal(successful.store.patches, 1);
+
+    successful.store.now += 60_000;
+    await successful.run();
+    observations = successful.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
+    value = parseOperatorObservation(observations[0].body);
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].id, successful.observationId);
+    assert.equal(value.sequence, 19);
+    assert.equal(successful.receiptWrites.length, 2);
+    assert.ok(successful.logs.includes('NO_DELTA_NO_LLM'));
+  } finally { successful.cleanup(); }
+
+  const ambiguous = makeObservationWorkerFixture({ ambiguousReadback: true });
+  try {
+    await ambiguous.run();
+    const observations = ambiguous.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].id, ambiguous.observationId);
+    assert.equal(ambiguous.store.patches, 1);
+    assert.ok(ambiguous.logs.includes('OPERATOR_OBSERVATION_UPDATE_UNKNOWN'));
+    assert.ok(!ambiguous.logs.includes('OPERATOR_OBSERVATION_UPDATED'));
+    assert.deepEqual(ambiguous.receiptWrites.map(x => x.state), ['STARTED', 'FINISHED'],
+      'an ambiguous status readback must not block an otherwise valid ping dispatch');
+
+    ambiguous.store.now += 60_000;
+    await ambiguous.run();
+    const recovered = ambiguous.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0].id, ambiguous.observationId);
+    assert.equal(parseOperatorObservation(recovered[0].body).sequence, 19);
+    assert.equal(ambiguous.receiptWrites.length, 2,
+      'reconciliation must not replay the completed task or create duplicate receipts');
+    assert.ok(ambiguous.logs.includes('OPERATOR_OBSERVATION_UPDATED'));
+  } finally { ambiguous.cleanup(); }
+});
+
+test('a self-declared VERIFIED config string cannot dispatch scoped coding without host isolation readback', async () => {
+  const spec = 'Edit exactly one public fixture file and produce a diff.';
+  const jobOverrides = { schema: 3, kind: 'opencode_edit',
+    spec_path: 'native-bridge/tasks/read-only-check.md', spec_sha256: h(spec),
+    model: 'opencode/spark', variant: 'high', write_paths: ['src/output.mjs'] };
+  const executor = { task_name: '\\PTYSD\\OpenCodeExecutor',
+    user_sid: 'S-1-5-21-100-200-300-1001', publisher_sid: 'S-1-5-21-100-200-300-1002',
+    node_bin: 'C:\\Node\\node.exe', script_path: 'C:\\PTYSDExecutor\\executor.mjs',
+    config_path: 'C:\\PTYSDExecutor\\executor.json', manifest_dir: 'C:\\PTYSDExecutor\\inbox',
+    results_dir: 'C:\\PTYSDExecutor\\results', working_directory: 'C:\\PTYSDExecutor\\Work' };
+  const fixture = makeObservationWorkerFixture({ jobSpec: spec, jobOverrides, configOverrides: {
+    allowed_models: { 'opencode/spark': ['high'] }, enable_v2_model_runs: true,
+    enable_v2_coding_runs: true, coding_workspace_os_isolation: 'VERIFIED', executor,
+  } });
+  let dispatchCalls = 0;
+  let executorChecks = 0;
+  try {
+    const result = await fixture.run({
+      assertExecutorTaskReady: () => { executorChecks++; return { coding_workspace_os_isolation: 'NOT_VERIFIED' }; },
+      dispatchToExecutor: () => { dispatchCalls++; throw new Error('MUST_NOT_DISPATCH'); },
+    });
+    assert.equal(executorChecks, 1);
+    assert.equal(dispatchCalls, 0);
+    assert.equal(result.state, 'BLOCKED');
+    assert.equal(result.outcome, 'V2_CODING_WORKSPACE_NOT_VERIFIED');
+    assert.deepEqual(fixture.receiptWrites.map(item => item.state), ['STARTED', 'BLOCKED']);
+    assert.ok(fixture.logs.includes('CODING_ISOLATION_READBACK_UNVERIFIED_NO_MODEL_EXECUTION'));
+  } finally { fixture.cleanup(); }
+});
+
+test('receipt write reconciles POST-success/readback-failure without posting a duplicate', () => {
+  const job = mkjob();
+  const attemptId = 'e416334f-404c-4e61-9b0e-f9283ee07013';
+  const terminal = receipt(job.request_id, attemptId, 'FINISHED', job, {
+    outcome: 'BRIDGE_PING_OK_NOT_OS_ACCEPTANCE', exit_code: 0,
+  });
+  const comments = [];
+  let postCalls = 0;
+  let failAfterPost = true;
+  const dependencies = {
+    readComments: () => {
+      if (postCalls && failAfterPost) {
+        failAfterPost = false;
+        throw new Error('MOCK_REMOTE_READBACK_FAILED');
+      }
+      return structuredClone(comments);
+    },
+    postComment: body => {
+      postCalls++;
+      comments.push(com(1, body, 'worker'));
+    },
+  };
+  assert.throws(() => writeReceipt({}, terminal, 'worker', dependencies),
+    /RECEIPT_WRITE_AMBIGUOUS_NO_EXECUTION/);
+  assert.equal(comments.length, 1);
+  assert.equal(writeReceipt({}, terminal, 'worker', dependencies).status, 'ALREADY_PRESENT');
+  assert.equal(postCalls, 1);
+  assert.equal(comments.filter(c => parseReceipt(c.body)?.attempt_id === attemptId).length, 1);
+
+  const conflicting = { ...terminal, outcome: 'DIFFERENT_ORIGINAL_CONTENT' };
+  let conflictPosts = 0;
+  assert.throws(() => writeReceipt({}, conflicting, 'worker', {
+    readComments: () => comments,
+    postComment: () => conflictPosts++,
+  }), /RECEIPT_IDENTITY_CONFLICT/);
+  assert.equal(conflictPosts, 0);
+});
 
 test('strict exact job contract rejects injection, cross-project, unknown keys and paths', () => {
   assert.deepEqual(parseJob(encoded(mkjob())), mkjob());
@@ -38,6 +288,68 @@ test('strict exact job contract rejects injection, cross-project, unknown keys a
   assert.ok(!checkModelAuthorization(modelJob, {allowed_models:{}}));
   assert.equal(parseJob('garbage'), null);
 });
+test('V2 scoped coding jobs require exact writable paths and verified coding isolation before model execution', async () => {
+  const editJob = { ...mkjob({ schema: 3, kind: 'opencode_edit',
+    spec_path: 'native-bridge/tasks/read-only-check.md', spec_sha256: hash }),
+    model: 'opencode/spark', variant: 'high', write_paths: ['src/output.mjs'] };
+  assert.equal(parseJob(encoded(editJob)).kind, 'opencode_edit');
+  assert.equal(parseJob(encoded({ ...editJob, write_paths: ['native-bridge/worker.mjs'] })), null);
+  assert.equal(parseJob(encoded({ ...editJob, write_paths: ['src/../worker.mjs'] })), null);
+  assert.ok(checkModelAuthorization(editJob, { allowed_models: { 'opencode/spark': ['high'] } }));
+  assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify(receipt(editJob.request_id,
+    '11111111-1111-4111-8111-111111111111', 'STARTED', editJob))).kind, 'opencode_edit');
+  const blocked = await runPlan('Source-only task', { enable_v2_model_runs: true,
+    enable_v2_coding_runs: true, coding_workspace_os_isolation: 'VERIFIED',
+    allowed_models: { 'opencode/spark': ['high'] },
+    executor_runtime: { user_sid: 'S-1-5-21-100-200-300-1001', publisher_sid: 'S-1-5-21-100-200-300-1002' } },
+  editJob, '11111111-1111-4111-8111-111111111111');
+  assert.deepEqual(blocked, { outcome: 'V2_CODING_WORKSPACE_NOT_VERIFIED', exit_code: 46,
+    evidence_sha256: null, evidence_bytes: 0 });
+});
+
+test('scoped coding clone pins exact canonical source and stores only the allowlisted tracked diff', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-scoped-edit-test-'));
+  const source = join(root, 'source');
+  const stateDir = join(root, 'state');
+  mkdirSync(join(source, 'src'), { recursive: true });
+  mkdirSync(stateDir);
+  const git = args => execFileSync('git', args, { encoding: 'utf8', windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'] });
+  const attemptId = '11111111-1111-4111-8111-111111111111';
+  try {
+    git(['init', source]);
+    git(['-C', source, 'config', 'user.name', 'PTYSD Scoped Edit Test']);
+    git(['-C', source, 'config', 'user.email', 'ptysd-test@example.invalid']);
+    git(['-C', source, 'remote', 'add', 'origin', 'https://github.com/PT-Original-Point/ptysd-autonomous-factory.git']);
+    const sourceFile = join(source, 'src', 'output.mjs');
+    writeFileSync(sourceFile, 'export const value = 1;\n', 'utf8');
+    git(['-C', source, 'add', '--', 'src/output.mjs']);
+    git(['-C', source, 'commit', '-m', 'synthetic scoped edit base']);
+    const sourceSha = git(['-C', source, 'rev-parse', 'HEAD']).trim();
+    const job = { schema: 3, kind: 'opencode_edit', project_id: PROJECT, host: hostname().toUpperCase(),
+      request_id: 'PTYSD_SCOPED_EDIT_TEST_20261015', source_sha: sourceSha,
+      spec_path: 'native-bridge/tasks/read-only-check.md', spec_sha256: hash,
+      model: 'opencode/spark', variant: 'high', write_paths: ['src/output.mjs'] };
+    const target = join(root, 'coding-workspaces', attemptId);
+    const proof = createScopedCodingWorkspace(job, source, target);
+    assert.equal(proof.source_sha, sourceSha);
+    assert.equal(proof.clean, true);
+    assert.deepEqual(assertCodingWorkspace(job, target).write_paths, ['src/output.mjs']);
+    writeFileSync(join(target, 'src', 'output.mjs'), 'export const value = 2;\n', 'utf8');
+    const diff = await captureScopedCodingDiff(job, target, stateDir, attemptId);
+    assert.equal(diff.status, 'CAPTURED_UNVERIFIED');
+    assert.deepEqual(diff.changed_paths, ['src/output.mjs']);
+    const patch = readFileSync(join(stateDir, diff.diff_file));
+    assert.equal(diff.diff_sha256, h(patch));
+    assert.ok(patch.toString('utf8').includes('+export const value = 2;'));
+    assert.throws(() => assertCodingWorkspace(job, target), /SCOPED_CODING_WORKSPACE_NOT_CLEAN/);
+    mkdirSync(join(target, 'docs'), { recursive: true });
+    writeFileSync(join(target, 'docs', 'outside.txt'), 'out of scope', 'utf8');
+    await assert.rejects(captureScopedCodingDiff(job, target, stateDir, '22222222-2222-4222-8222-222222222222'),
+      /SCOPED_CODING_UNTRACKED_OR_RENAMED_PATH/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('only allowlisted sender and host are eligible, completed/started jobs never rerun', () => {
   const a = encoded(mkjob());
   const state = [com(1,a,'outsider'), com(2,a)];
@@ -54,6 +366,61 @@ test('stale unsigned job does not starve newer exact-main job', () => {
   const s=[com(1,encoded(first)),com(2,encoded(second))];
   assert.equal(selectNext(s,['t14210184'],'worker','DESKTOP-1B6PD2P','c'.repeat(40)).id,2);
 });
+test('corrupt per-attempt result is isolated and does not starve an independent ping', async () => {
+  const home=mkdtempSync(join(homedir(),'.ptysd-native-reconcile-'));
+  try {
+    const workspace=join(home,'workspace'),stateDir=join(home,'state');
+    mkdirSync(workspace); mkdirSync(stateDir);
+    const attemptId='11111111-1111-4111-8111-111111111111';
+    const requestId='PTYSD_NATIVE_CORRUPT_PLAN_20261015';
+    const plan={...mkjob({host:hostname().toUpperCase(),request_id:requestId,kind:'opencode_plan',
+      spec_path:'native-bridge/tasks/readonly-host-inventory.md',spec_sha256:hash}),
+      schema:2,model:'opencode/spark',variant:'high'};
+    const ping=mkjob({host:hostname().toUpperCase(),request_id:'PTYSD_NATIVE_INDEPENDENT_PING_20261015'});
+    const start=receipt(requestId,attemptId,'STARTED',plan);
+    const terminal=receipt(requestId,attemptId,'BLOCKED',plan,
+      {outcome:'EVIDENCE_STORAGE_FAILED',exit_code:1,evidence_sha256:null,evidence_bytes:0});
+    const cases=[false,true];
+    for (const hasTerminal of cases) {
+      const comments=[com(1,encoded(plan)),com(2,RECEIPT_MARKER+JSON.stringify(start),'worker')];
+      if (hasTerminal) comments.push(com(3,RECEIPT_MARKER+JSON.stringify(terminal),'worker'));
+      comments.push(com(4,encoded(ping)));
+      const resultPath=join(stateDir,`result-${requestId}-${attemptId}.json`);
+      writeFileSync(resultPath,'{"truncated":', 'utf8');
+      const logs=[]; let nextId=comments.length+1;
+      const executor={task_name:'\\PTYSD\\OpenCodeExecutor',user_sid:'S-1-5-21-100-200-300-1001',
+        publisher_sid:'S-1-5-21-100-200-300-1002',node_bin:'C:\\Node\\node.exe',
+        script_path:'C:\\PTYSD\\executor.mjs',config_path:'C:\\PTYSD\\executor.json',
+        manifest_dir:'C:\\PTYSD\\manifests',results_dir:'C:\\PTYSD\\results',
+        working_directory:'C:\\PTYSD'};
+      const result=await executeWorker({repo:REPO,project_id:PROJECT,host:hostname().toUpperCase(),issue:101,
+        workspace,state_dir:stateDir,dispatchers:['t14210184'],executor,
+        enable_v2_model_runs:true,allowed_models:{'opencode/spark':['high']}},{
+        apiRead(endpoint) {
+          if (endpoint==='user') return {login:'worker'};
+          if (endpoint.endsWith('/issues/101')) return {title:'[PTYSD-NATIVE] OpenCode dispatch and receipts',state:'open'};
+          if (endpoint.includes('/git/ref/heads/main')) return {object:{sha:commit}};
+          const match=endpoint.match(/\/issues\/comments\/(\d+)$/);
+          if (match) return comments.find(item=>item.id===Number(match[1]));
+          throw new Error(`UNEXPECTED_TEST_API_${endpoint}`);
+        },
+        commentsRead:()=>comments,
+        writeReceipt(_config,data,login) { comments.push(com(nextId++,RECEIPT_MARKER+JSON.stringify(data),login)); },
+        executorResultsDir:()=>stateDir,
+        executorResultPath:()=>resultPath,
+        runPlan:()=>{ throw new Error('TEST_MUST_NOT_START_A_MODEL'); },
+        log:value=>logs.push(value),
+      });
+      assert.equal(result.state,'FINISHED');
+      assert.equal(result.request_id,ping.request_id);
+      assert.ok(logs.some(value=>/NO_REPLAY/.test(value)),logs.join(' | '));
+      assert.equal(comments.filter(item=>parseReceipt(item.body)?.request_id===requestId &&
+        parseReceipt(item.body)?.state!=='STARTED').length,hasTerminal?1:0);
+      assert.equal(parseReceipt(comments.at(-1).body)?.request_id,ping.request_id);
+      rmSync(resultPath,{force:true});
+    }
+  } finally { rmSync(home,{recursive:true,force:true}); }
+});
 test('native CLI probe is bounded; no shell wrapper is treated as executable', () => {
   const empty=findNativeCLI({PATH:'/this/directory/does/not/exist'},false);
   assert.equal(empty.bin,null);
@@ -63,7 +430,7 @@ test('duplicate changed dispatch same request ID is blocked', () => {
   const a = encoded(mkjob()), b = encoded(mkjob({ source_sha: 'c'.repeat(40) }));
   assert.equal(selectNext([com(1,a),com(2,b)],['t14210184'],'worker','DESKTOP-1B6PD2P'),null);
 });
-test('worker integration: GitHub queued ping -> start + terminal with same-source readback; no delta zero LLM', () => {
+fakeShellIntegration('worker integration: GitHub queued ping -> start + terminal with same-source readback; no delta zero LLM', () => {
   // The only mocked surfaces are gh and opencode binaries. No GitHub or Windows host is contacted.
   const home = mkdtempSync(join(homedir(), '.ptysd-native-test-'));
   try {
@@ -104,13 +471,10 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
         chmodSync(join(bin,'opencode'),0o755);
     const run=spawnSync(process.execPath,[path,'--config',config],{cwd:resolve('.'),env,encoding:'utf8',timeout:15000});
     assert.equal(run.status,0,run.stderr);
-    assert.match(run.stdout,/FINISHED_PTYSD_NATIVE_PLAN/);
+    assert.match(run.stdout,/EXECUTOR_NOT_CONFIGURED_NO_MODEL_DISPATCH/);
     const m2=JSON.parse(readFileSync(mock,'utf8'));
-    const end=parseReceipt(m2.comments.at(-1).body);
-    assert.equal(end.outcome,'OPENCODE_V2_EXIT_0_UNTRUSTED');
-    assert.match(end.evidence_sha256,/^[a-f0-9]{64}$/);
-    assert.equal(JSON.parse(readFileSync(join(work,'opencode.json'),'utf8')).default_agent, 'ptysd-readonly');
-    assert.ok(!m2.comments.at(-1).body.includes('SAFE_V2_REVIEW_MOCK'));
+    assert.equal(m2.comments.length,m.comments.length,'no receipt is emitted without a ready separate Executor');
+    assert.equal(readdirSync(work).includes('opencode.json'),false,'the dispatcher must not start inline model work');
     // A crashed model attempt is ambiguous, but independent native probes continue.
     const orphan={...planJob,request_id:'PTYSD_NATIVE_ORPHAN_20261013'};
     const orphanStart=receipt(orphan.request_id,'00000000-0000-0000-0000-000000000001','STARTED',orphan);
@@ -132,7 +496,7 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
 });
 
 // No real GitHub host, Windows service or model API is invoked in these tests.
-test('no-LLM preflight yields a terminal receipt and local evidence hash', () => {
+fakeShellIntegration('no-LLM preflight yields a terminal receipt and local evidence hash', () => {
   const home=mkdtempSync(join(homedir(), '.ptysd-preflight-test-'));
   try {
     const bin=join(home,'bin'), work=join(home,'work'), state=join(home,'state');
@@ -163,7 +527,7 @@ const fs=require('fs');const a=process.argv.slice(2);const p=process.env.MOCK_GH
   } finally {rmSync(home,{recursive:true,force:true});}
 });
 
-test('V2 metadata task completes source-pinned GitHub receipts without model inference or credential leak', () => {
+fakeShellIntegration('V2 metadata task completes source-pinned GitHub receipts without model inference or credential leak', () => {
   const home=mkdtempSync(join(homedir(), '.ptysd-v2-meta-test-'));
   try {
     const bin=join(home,'bin'), work=join(home,'work'), state=join(home,'state');
