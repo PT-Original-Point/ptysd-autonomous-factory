@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -159,6 +159,7 @@ test('OpenCode agents no longer carry a fixed iteration cap', () => {
   const readonly = buildV2ReadOnlyConfig().agents['ptysd-readonly'];
   const home = mkdtempSync(join(tmpdir(), 'ptysd-no-step-cap-'));
   try {
+    mkdirSync(join(home, 'src'));
     const writer = buildV2ScopedEditConfig(home, ['src/output.mjs']).agents['ptysd-scoped-write'];
     assert.equal(Object.hasOwn(readonly, 'steps'), false);
     assert.equal(Object.hasOwn(writer, 'steps'), false);

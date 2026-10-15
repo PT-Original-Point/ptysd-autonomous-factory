@@ -1,7 +1,7 @@
 // OpenCode V2-only native CLI qualification and minimal read-only run contract.
 // No package installation, authentication, model invocation, or OS mutation here.
 import { execFileSync } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, join, isAbsolute, normalize, resolve, relative } from 'node:path';
 import { homedir, platform } from 'node:os';
 
@@ -117,11 +117,40 @@ export function buildV2ScopedEditConfig(workspace, editableFiles) {
   if (typeof workspace !== 'string' || !isAbsolute(workspace))
     throw new Error('SCOPED_EDIT_WORKSPACE_MUST_BE_ABSOLUTE');
   const root = resolve(workspace);
+  const samePath = (left, right) => platform() === 'win32'
+    ? normalize(left).toLowerCase() === normalize(right).toLowerCase()
+    : normalize(left) === normalize(right);
+  let physicalRoot;
+  try { physicalRoot = realpathSync(root); }
+  catch { throw new Error('SCOPED_EDIT_WORKSPACE_UNVERIFIABLE'); }
+  if (!samePath(physicalRoot, root))
+    throw new Error('SCOPED_EDIT_WORKSPACE_REPARSE_POINT');
   const allowed = validateV2ScopedEditPaths(editableFiles).map(file => {
     const absolute = resolve(root, ...file.split('/'));
     const inside = relative(root, absolute);
     if (!inside || inside.startsWith('..') || isAbsolute(inside))
       throw new Error('SCOPED_EDIT_PATH_OUTSIDE_WORKSPACE');
+    let current = root;
+    const parts = file.split('/');
+    for (let index = 0; index < parts.length; index++) {
+      current = join(current, parts[index]);
+      let entry;
+      try { entry = lstatSync(current); }
+      catch (error) {
+        if (error.code === 'ENOENT' && index === parts.length - 1) break;
+        if (error.code === 'ENOENT') throw new Error('SCOPED_EDIT_PARENT_PATH_MISSING');
+        throw new Error('SCOPED_EDIT_PATH_UNVERIFIABLE');
+      }
+      if (entry.isSymbolicLink()) throw new Error('SCOPED_EDIT_REPARSE_POINT');
+      if (index < parts.length - 1 && !entry.isDirectory())
+        throw new Error('SCOPED_EDIT_PARENT_NOT_DIRECTORY');
+      if (index === parts.length - 1 && !entry.isFile())
+        throw new Error('SCOPED_EDIT_TARGET_NOT_FILE');
+      let physical;
+      try { physical = realpathSync(current); }
+      catch { throw new Error('SCOPED_EDIT_PATH_UNVERIFIABLE'); }
+      if (!samePath(physical, current)) throw new Error('SCOPED_EDIT_REPARSE_POINT');
+    }
     return absolute.replaceAll('\\', '/');
   });
   return {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { discoverV2Executables, qualifyOpenCodeV2, parseOpenCodeV2Version, validateV2Model, buildV2ReadOnlyArgs, buildV2ReadOnlyConfig, buildV2ScopedEditConfig, buildV2ScopedEditArgs, validateV2ScopedEditPaths } from '../native-bridge/opencode-v2.mjs';
@@ -53,6 +53,7 @@ test('V2 arguments use provider/model#variant; never call V1 --pure/--variant', 
 test('scoped V2 writer has only explicit edit paths; no implicit shell, external or secret grant', () => {
   const workspace=mkdtempSync(join(tmpdir(),'ptysd-v2-code-contract-'));
   try {
+    mkdirSync(join(workspace,'src'));
     const cfg=buildV2ScopedEditConfig(workspace,['src/output.mjs']);
     const agent=cfg.agents['ptysd-scoped-write'];
     const exact=join(workspace,'src','output.mjs').replaceAll('\\','/');
@@ -76,5 +77,26 @@ test('scoped V2 writer has only explicit edit paths; no implicit shell, external
     assert.ok(!args.includes('--pure')&&!args.includes('--variant'));
     assert.deepEqual(validateV2ScopedEditPaths(['src/output.mjs']),['src/output.mjs']);
     assert.throws(()=>buildV2ScopedEditArgs({...editJob,kind:'opencode_plan'},workspace,'bad'),/INVALID_V2_CODING_JOB/);
+  } finally {rmSync(workspace,{recursive:true,force:true});}
+});
+
+test('scoped V2 writer rejects NTFS junctions and symbolic links escaping the worktree', () => {
+  const workspace=mkdtempSync(join(tmpdir(),'ptysd-v2-code-junction-'));
+  const outside=mkdtempSync(join(tmpdir(),'ptysd-v2-code-outside-'));
+  try {
+    symlinkSync(outside,join(workspace,'src'),process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(() => buildV2ScopedEditConfig(workspace,['src/escaped.mjs']),
+      /SCOPED_EDIT_REPARSE_POINT/);
+  } finally {
+    rmSync(workspace,{recursive:true,force:true});
+    rmSync(outside,{recursive:true,force:true});
+  }
+});
+
+test('scoped V2 writer requires existing non-link parent directories', () => {
+  const workspace=mkdtempSync(join(tmpdir(),'ptysd-v2-code-parent-'));
+  try {
+    assert.throws(() => buildV2ScopedEditConfig(workspace,['missing/output.mjs']),
+      /SCOPED_EDIT_PARENT_PATH_MISSING/);
   } finally {rmSync(workspace,{recursive:true,force:true});}
 });
