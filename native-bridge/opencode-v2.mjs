@@ -1,7 +1,7 @@
 // OpenCode V2-only native CLI qualification and minimal read-only run contract.
 // No package installation, authentication, model invocation, or OS mutation here.
 import { execFileSync } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, join, isAbsolute, normalize, resolve, relative } from 'node:path';
 import { homedir, platform } from 'node:os';
 
@@ -68,7 +68,7 @@ export function buildV2ReadOnlyConfig() {
     default_agent: 'ptysd-readonly',
     permissions,
     agents: { 'ptysd-readonly': {
-      mode: 'primary', steps: 8,
+      mode: 'primary',
       description: 'Read repository only; never run shell, write files, or delegate',
       system: 'Only inspect non-secret files in the assigned repository. Do not edit, run commands, browse the web, use plugins, access external directories, or delegate. Explain any limitation without requesting permission.',
       permissions: NEVER.map(action => ({ action, resource: '*', effect: 'deny' })),
@@ -95,6 +95,14 @@ export function buildV2ScopedEditConfig(workspace, editableFiles) {
   if (!Array.isArray(editableFiles) || editableFiles.length < 1 || editableFiles.length > 16)
     throw new Error('SCOPED_EDIT_FILE_ALLOWLIST_INVALID');
   const root = resolve(workspace);
+  const samePath = (left, right) => platform() === 'win32'
+    ? normalize(left).toLowerCase() === normalize(right).toLowerCase()
+    : normalize(left) === normalize(right);
+  let physicalRoot;
+  try { physicalRoot = realpathSync(root); }
+  catch { throw new Error('SCOPED_EDIT_WORKSPACE_UNVERIFIABLE'); }
+  if (!samePath(physicalRoot, root))
+    throw new Error('SCOPED_EDIT_WORKSPACE_REPARSE_POINT');
   const allowed = new Set();
   for (const file of editableFiles) {
     if (typeof file !== 'string' || file.length > 180 ||
@@ -114,6 +122,26 @@ export function buildV2ScopedEditConfig(workspace, editableFiles) {
     const inside = relative(root, absolute);
     if (!inside || inside.startsWith('..') || isAbsolute(inside))
       throw new Error('SCOPED_EDIT_PATH_OUTSIDE_WORKSPACE');
+    let current = root;
+    for (let index = 0; index < parts.length; index++) {
+      current = join(current, parts[index]);
+      let entry;
+      try { entry = lstatSync(current); }
+      catch (error) {
+        if (error.code === 'ENOENT' && index === parts.length - 1) break;
+        if (error.code === 'ENOENT') throw new Error('SCOPED_EDIT_PARENT_PATH_MISSING');
+        throw new Error('SCOPED_EDIT_PATH_UNVERIFIABLE');
+      }
+      if (entry.isSymbolicLink()) throw new Error('SCOPED_EDIT_REPARSE_POINT');
+      if (index < parts.length - 1 && !entry.isDirectory())
+        throw new Error('SCOPED_EDIT_PARENT_NOT_DIRECTORY');
+      if (index === parts.length - 1 && !entry.isFile())
+        throw new Error('SCOPED_EDIT_TARGET_NOT_FILE');
+      let physical;
+      try { physical = realpathSync(current); }
+      catch { throw new Error('SCOPED_EDIT_PATH_UNVERIFIABLE'); }
+      if (!samePath(physical, current)) throw new Error('SCOPED_EDIT_REPARSE_POINT');
+    }
     allowed.add(absolute.replaceAll('\\', '/'));
   }
   if (allowed.size !== editableFiles.length)
@@ -130,7 +158,7 @@ export function buildV2ScopedEditConfig(workspace, editableFiles) {
     ],
     agents: {
       'ptysd-scoped-write': {
-        mode: 'primary', steps: 12,
+        mode: 'primary',
         description: 'Modify only exact operator-approved source files; no shell or network tools',
         system: 'Edit only exact allowlisted source files for the reviewed task. Do not run commands, access secrets, call subagents or tools outside the project. Explain blocked actions instead of bypassing policy.',
         permissions: [
