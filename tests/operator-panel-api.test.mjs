@@ -282,3 +282,26 @@ test('a HEAD change clears the old checks binding and summary', async () => {
   assert.equal(store.checksSummaryForHead(head), null);
   assert.equal(store.resources.checks.data, null);
 });
+
+test('schema-4 scoped OpenCode edit is visible as a queued task without implying execution', () => {
+  const editJob = { schema:4, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',
+    host:'DESKTOP-1B6PD2P', request_id:'PTYSD_NATIVE_EDIT_ROUTE_20261015',
+    kind:'opencode_edit', source_sha:head,
+    spec_path:'native-bridge/tasks/scoped-edit.md', spec_sha256:'b'.repeat(64),
+    model:'opencode/spark', variant:'high', write_paths:['operator-panel/index.html'] };
+  assert.equal(panel.validJob(editJob), true);
+  const task = panel.latestTask([{ id:41, body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(editJob),
+    user:{ login:'t14210184' } }], head);
+  assert.equal(task.job.kind, 'opencode_edit');
+  assert.equal(task.state, '已接單／尚無 STARTED 收據');
+  assert.equal(panel.normalizeFormalTask(task).state, 'QUEUED_NOT_STARTED');
+
+  for (const invalid of [
+    { ...editJob, write_paths:['../outside.txt'] },
+    { ...editJob, write_paths:['.github/workflows/release.yml'] },
+    { ...editJob, write_paths:['native-bridge/worker.mjs'] },
+    { ...editJob, write_paths:['src/secret-config.json'] },
+    { ...editJob, write_paths:['src/file.js','SRC/FILE.JS'] },
+    { ...editJob, extra:'not in the schema' },
+  ]) assert.equal(panel.validJob(invalid), false);
+});

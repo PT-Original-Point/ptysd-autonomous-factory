@@ -338,15 +338,35 @@
     const keys = Object.keys(job).sort();
     const base = ['schema','project_id','host','request_id','kind','source_sha','spec_path','spec_sha256'].sort();
     const extended = [...base,'model','variant'].sort();
+    const scopedEdit = [...extended,'write_paths'].sort();
     if (job.schema === 1) return JSON.stringify(keys) === JSON.stringify(base) &&
       ['ping','native_preflight','native_v2_qualify'].includes(job.kind) &&
       job.spec_path === null && job.spec_sha256 === null;
-    return job.schema === 2 && JSON.stringify(keys) === JSON.stringify(extended) &&
-      job.kind === 'opencode_plan' &&
-      /^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(job.spec_path || '') &&
+    const taskFields = /^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(job.spec_path || '') &&
       /^[a-f0-9]{64}$/.test(job.spec_sha256 || '') &&
       typeof job.model === 'string' && job.model.length <= 160 &&
       typeof job.variant === 'string' && job.variant.length <= 60;
+    if (job.schema === 2) return JSON.stringify(keys) === JSON.stringify(extended) &&
+      taskFields && job.kind === 'opencode_plan';
+    if (job.schema !== 4 || JSON.stringify(keys) !== JSON.stringify(scopedEdit) ||
+        job.kind !== 'opencode_edit' || !taskFields ||
+        !Array.isArray(job.write_paths) || job.write_paths.length < 1 || job.write_paths.length > 16)
+      return false;
+    const paths = new Set();
+    for (const file of job.write_paths) {
+      if (typeof file !== 'string' || file.length > 180 ||
+          !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(file)) return false;
+      const parts = file.split('/');
+      if (parts.some(part => !part || part === '.' || part === '..') ||
+          parts.some(part => /^\.(?:git|github|opencode)$/i.test(part)) ||
+          ['governance','runs','native-bridge'].includes(parts[0].toLowerCase()) ||
+          parts.some(part => /^\.env(?:\.|$)/i.test(part) || /^opencode\.jsonc?$/i.test(part) ||
+            /(?:secret|credential|token|password|auth\.json)/i.test(part))) return false;
+      const key = file.toLowerCase();
+      if (paths.has(key)) return false;
+      paths.add(key);
+    }
+    return true;
   }
   function latestTask(comments, mainSha) {
     const jobs = [], receipts = [];
