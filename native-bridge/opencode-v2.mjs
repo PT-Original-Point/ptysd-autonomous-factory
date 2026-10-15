@@ -68,7 +68,7 @@ export function buildV2ReadOnlyConfig() {
     default_agent: 'ptysd-readonly',
     permissions,
     agents: { 'ptysd-readonly': {
-      mode: 'primary', steps: 8,
+      mode: 'primary',
       description: 'Read repository only; never run shell, write files, or delegate',
       system: 'Only inspect non-secret files in the assigned repository. Do not edit, run commands, browse the web, use plugins, access external directories, or delegate. Explain any limitation without requesting permission.',
       permissions: NEVER.map(action => ({ action, resource: '*', effect: 'deny' })),
@@ -130,7 +130,7 @@ export function buildV2ScopedEditConfig(workspace, editableFiles) {
     ],
     agents: {
       'ptysd-scoped-write': {
-        mode: 'primary', steps: 12,
+        mode: 'primary',
         description: 'Modify only exact operator-approved source files; no shell or network tools',
         system: 'Edit only exact allowlisted source files for the reviewed task. Do not run commands, access secrets, call subagents or tools outside the project. Explain blocked actions instead of bypassing policy.',
         permissions: [
