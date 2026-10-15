@@ -85,25 +85,15 @@ export function buildV2ReadOnlyArgs(job, workspace, spec) {
 }
 
 /**
- * Source-only V2 edit contract for a future OS-isolated coding worker.
- * This DOES NOT authorize execution under the GitHub publisher's OS identity:
- * agent permissions are not a filesystem or credential sandbox.
+ * V2 edit policy for the separately scheduled coding executor. The caller must
+ * independently verify that executor's Windows identity and source worktree;
+ * agent permissions are not an OS filesystem or credential sandbox.
  */
-export function buildV2ScopedEditConfig(workspace, editableFiles) {
-  if (typeof workspace !== 'string' || !isAbsolute(workspace))
-    throw new Error('SCOPED_EDIT_WORKSPACE_MUST_BE_ABSOLUTE');
-  if (!Array.isArray(editableFiles) || editableFiles.length < 1 || editableFiles.length > 16)
+export function validateV2ScopedEditPaths(editableFiles) {
+  if (!Array.isArray(editableFiles) || editableFiles.length < 1)
     throw new Error('SCOPED_EDIT_FILE_ALLOWLIST_INVALID');
-  const root = resolve(workspace);
-  const samePath = (left, right) => platform() === 'win32'
-    ? normalize(left).toLowerCase() === normalize(right).toLowerCase()
-    : normalize(left) === normalize(right);
-  let physicalRoot;
-  try { physicalRoot = realpathSync(root); }
-  catch { throw new Error('SCOPED_EDIT_WORKSPACE_UNVERIFIABLE'); }
-  if (!samePath(physicalRoot, root))
-    throw new Error('SCOPED_EDIT_WORKSPACE_REPARSE_POINT');
   const allowed = new Set();
+  const entries = [];
   for (const file of editableFiles) {
     if (typeof file !== 'string' || file.length > 180 ||
         !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(file))
@@ -118,6 +108,29 @@ export function buildV2ScopedEditConfig(workspace, editableFiles) {
           /^opencode\.jsonc?$/i.test(p) ||
           /(?:secret|credential|token|password|auth\.json)/i.test(p)))
       throw new Error('SCOPED_EDIT_CONTROL_OR_SECRET_PATH');
+    const key = platform() === 'win32' ? file.toLowerCase() : file;
+    if (allowed.has(key)) throw new Error('SCOPED_EDIT_DUPLICATE_PATH');
+    allowed.add(key);
+    entries.push({ file, parts });
+  }
+  return entries;
+}
+
+export function buildV2ScopedEditConfig(workspace, editableFiles) {
+  if (typeof workspace !== 'string' || !isAbsolute(workspace))
+    throw new Error('SCOPED_EDIT_WORKSPACE_MUST_BE_ABSOLUTE');
+  const entries = validateV2ScopedEditPaths(editableFiles);
+  const root = resolve(workspace);
+  const samePath = (left, right) => platform() === 'win32'
+    ? normalize(left).toLowerCase() === normalize(right).toLowerCase()
+    : normalize(left) === normalize(right);
+  let physicalRoot;
+  try { physicalRoot = realpathSync(root); }
+  catch { throw new Error('SCOPED_EDIT_WORKSPACE_UNVERIFIABLE'); }
+  if (!samePath(physicalRoot, root))
+    throw new Error('SCOPED_EDIT_WORKSPACE_REPARSE_POINT');
+  const allowed = new Set();
+  for (const { file, parts } of entries) {
     const absolute = resolve(root, ...parts);
     const inside = relative(root, absolute);
     if (!inside || inside.startsWith('..') || isAbsolute(inside))
@@ -144,8 +157,6 @@ export function buildV2ScopedEditConfig(workspace, editableFiles) {
     }
     allowed.add(absolute.replaceAll('\\', '/'));
   }
-  if (allowed.size !== editableFiles.length)
-    throw new Error('SCOPED_EDIT_DUPLICATE_PATH');
   return {
     autoupdate: false, share: 'disabled', snapshots: false, plugins: [],
     default_agent: 'ptysd-scoped-write',

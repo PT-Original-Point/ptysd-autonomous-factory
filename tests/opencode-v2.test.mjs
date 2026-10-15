@@ -77,6 +77,19 @@ test('scoped V2 writer has only explicit edit paths; no implicit shell, external
   } finally {rmSync(workspace,{recursive:true,force:true});}
 });
 
+test('scoped V2 writer allows an exact reviewed path set above the removed arbitrary 16-file cap', () => {
+  const workspace=mkdtempSync(join(tmpdir(),'ptysd-v2-code-many-paths-'));
+  try {
+    mkdirSync(join(workspace,'src'));
+    const paths=Array.from({length:17},(_,index)=>`src/reviewed-file-${index}.mjs`);
+    const cfg=buildV2ScopedEditConfig(workspace,paths);
+    const edit=cfg.agents['ptysd-scoped-write'].permissions.filter(p =>
+      p.action==='edit' && p.effect==='allow').map(p => p.resource);
+    assert.equal(edit.length,17);
+    assert.deepEqual(edit,paths.map(file=>join(workspace,file).replaceAll('\\','/')));
+  } finally {rmSync(workspace,{recursive:true,force:true});}
+});
+
 test('scoped V2 writer rejects NTFS junctions and symbolic links escaping the worktree', () => {
   const workspace=mkdtempSync(join(tmpdir(),'ptysd-v2-code-junction-'));
   const outside=mkdtempSync(join(tmpdir(),'ptysd-v2-code-outside-'));

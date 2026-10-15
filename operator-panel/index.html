@@ -350,7 +350,7 @@
       taskFields && job.kind === 'opencode_plan';
     if (job.schema !== 4 || JSON.stringify(keys) !== JSON.stringify(scopedEdit) ||
         job.kind !== 'opencode_edit' || !taskFields ||
-        !Array.isArray(job.write_paths) || job.write_paths.length < 1 || job.write_paths.length > 16)
+        !Array.isArray(job.write_paths) || job.write_paths.length < 1)
       return false;
     const paths = new Set();
     for (const file of job.write_paths) {

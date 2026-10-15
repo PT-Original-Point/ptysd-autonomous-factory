@@ -295,6 +295,9 @@ test('schema-4 scoped OpenCode edit is visible as a queued task without implying
   assert.equal(task.job.kind, 'opencode_edit');
   assert.equal(task.state, '已接單／尚無 STARTED 收據');
   assert.equal(panel.normalizeFormalTask(task).state, 'QUEUED_NOT_STARTED');
+  const manyPaths={...editJob,write_paths:Array.from({length:17},(_,index)=>`src/reviewed-file-${index}.mjs`)};
+  assert.equal(panel.validJob(manyPaths),true,
+    'the dashboard must not reject exact path scopes accepted by the source policy');
 
   for (const invalid of [
     { ...editJob, write_paths:['../outside.txt'] },
