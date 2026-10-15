@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,7 +13,7 @@ import {
   makeCodexExecutorRequest, publishCodexExecutorRequest, validateCodexExecutorRequest,
   executorResultPath, validateCodexExecutorResult,
 } from '../native-bridge/codex-continuation.mjs';
-import { buildCodexChildEnvironment, runExecutorOnce, takeNextRequest } from '../native-bridge/codex-executor.mjs';
+import { buildCodexChildEnvironment, changedPaths, runExecutorOnce, takeNextRequest } from '../native-bridge/codex-executor.mjs';
 import { codexTerminalReceipt, dispatchCodexJob, selectNext, selectNextWithCodexClaim,
   writeCodexReceiptOnce } from '../native-bridge/worker.mjs';
 
@@ -57,6 +58,40 @@ function readyConfig(overrides = {}) {
     ...overrides,
   };
 }
+
+test('executor write-scope snapshot includes committed and ignored untracked files', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'pty-codex-scope-snapshot-'));
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], {
+    encoding: 'utf8', windowsHide: true, shell: false, timeout: 30000,
+  }).trim();
+  try {
+    git('init');
+    git('config', 'user.name', 'PTYSD Test');
+    git('config', 'user.email', 'ptysd-test@example.invalid');
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    mkdirSync(join(repo, 'docs'), { recursive: true });
+    writeFileSync(join(repo, '.gitignore'), 'ignored-output/\n');
+    writeFileSync(join(repo, 'src', 'base.txt'), 'baseline\n');
+    git('add', '.');
+    git('commit', '-m', 'baseline');
+    const sourceSha = git('rev-parse', 'HEAD');
+
+    writeFileSync(join(repo, 'docs', 'out-of-scope.md'), 'committed outside declared scope\n');
+    git('add', 'docs/out-of-scope.md');
+    git('commit', '-m', 'commit outside declared scope');
+    mkdirSync(join(repo, 'ignored-output'), { recursive: true });
+    writeFileSync(join(repo, 'ignored-output', 'trace.txt'), 'ignored output\n');
+
+    assert.equal(git('status', '--porcelain'), '');
+    assert.deepEqual(changedPaths(repo, sourceSha), [
+      'docs/out-of-scope.md',
+      'ignored-output/trace.txt',
+    ]);
+    assert.throws(() => changedPaths(repo, 'not-a-commit'), /WORKSPACE_SOURCE_SHA_INVALID/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
 
 test('Codex task schema is exact, immutable-source-bound and path-scoped', () => {
   const parsed = parseCodexJob(body(job()));

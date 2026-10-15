@@ -203,11 +203,18 @@ async function findSession(path) {
   } finally { lines.close(); }
 }
 
-function changedPaths(worktree) {
-  const raw = execFileSync('git', ['-C', worktree, 'status', '--porcelain', '-z', '--untracked-files=all'], {
+export function changedPaths(worktree, sourceSha) {
+  if (!/^[a-f0-9]{40}$/.test(sourceSha || '')) throw new Error('WORKSPACE_SOURCE_SHA_INVALID');
+  const diff = execFileSync('git', ['-C', worktree, 'diff', '--name-only', '-z', '--no-renames', sourceSha, '--'], {
     encoding: 'buffer', windowsHide: true, shell: false, timeout: 60000, maxBuffer: 16 * 1024 * 1024,
   });
-  return raw.toString('utf8').split('\0').filter(Boolean).map(entry => entry.slice(3));
+  const untracked = execFileSync('git', ['-C', worktree, 'ls-files', '--others', '-z'], {
+    encoding: 'buffer', windowsHide: true, shell: false, timeout: 60000, maxBuffer: 16 * 1024 * 1024,
+  });
+  return [...new Set([
+    ...diff.toString('utf8').split('\0'),
+    ...untracked.toString('utf8').split('\0'),
+  ].filter(Boolean))].sort();
 }
 
 async function diffDigest(worktree, paths) {
@@ -304,7 +311,7 @@ export async function runExecutorOnce(config, deps = {}) {
     const evidenceDir = join(config.spool_dir, 'evidence');
     mkdirSync(evidenceDir, { recursive: true });
     const execution = await runCodex(request, config, worktree, evidenceDir);
-    const changed = changedPaths(worktree);
+    const changed = changedPaths(worktree, verified.job.source_sha);
     const allowed = new Set(verified.job.write_paths);
     const outOfScope = changed.filter(path => !allowed.has(path.replaceAll('\\', '/')));
     const result = {
