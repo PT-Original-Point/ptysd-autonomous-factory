@@ -5,9 +5,9 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync,
 import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, ISSUE_TITLE, JOB_MARKER,
-  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI, main as runWorker,
-  writeReceipt } from '../native-bridge/worker.mjs';
+import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
+  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI, terminalStateForResult,
+  runWorker as executeWorker, main as runWorker, writeReceipt, ISSUE_TITLE } from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
 
@@ -124,6 +124,26 @@ function makeObservationWorkerFixture({ ambiguousReadback = false } = {}) {
 // Windows PATH resolution can select the installed gh.exe instead, so keep
 // those provider-facing scenarios in Linux CI and never contact live GitHub here.
 const fakeShellIntegration = process.platform === 'win32' ? test.skip : test;
+
+test('terminal state fails closed on capture/storage errors even when child exit is zero', () => {
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'EVIDENCE_STORAGE_FAILED' }), 'BLOCKED');
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'OUTPUT_CAPTURE_FAILED' }), 'BLOCKED');
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'BRIDGE_PING_OK_NOT_OS_ACCEPTANCE' }), 'FINISHED');
+  assert.equal(terminalStateForResult({ exit_code: 0, outcome: 'OPENCODE_V2_EXIT_0_UNTRUSTED' }), 'FINISHED');
+  assert.equal(terminalStateForResult({ exit_code: 0 }), 'BLOCKED');
+});
+
+test('FINISHED is attempt lifecycle only and preserves an unverified semantic outcome', () => {
+  const job = mkjob({ schema: 2, kind: 'opencode_plan', spec_path: 'native-bridge/tasks/review.md',
+    spec_sha256: hash, model: 'opencode/spark', variant: 'high' });
+  const result = { exit_code: 0, outcome: 'OPENCODE_V2_EXIT_0_UNTRUSTED',
+    evidence_sha256: hash, evidence_bytes: 24 };
+  const finalReceipt = receipt(job.request_id, '0'.repeat(8) + '-0000-4000-8000-000000000000',
+    terminalStateForResult(result), job, result);
+  assert.equal(finalReceipt.state, 'FINISHED');
+  assert.equal(finalReceipt.outcome, 'OPENCODE_V2_EXIT_0_UNTRUSTED');
+  assert.equal(Object.hasOwn(finalReceipt, 'accepted'), false);
+});
 
 test('Worker main publishes the seeded observation, verifies sequence readback, and preserves legal dispatch on ambiguity', async () => {
   const successful = makeObservationWorkerFixture();
@@ -250,6 +270,61 @@ test('stale unsigned job does not starve newer exact-main job', () => {
   const s=[com(1,encoded(first)),com(2,encoded(second))];
   assert.equal(selectNext(s,['t14210184'],'worker','DESKTOP-1B6PD2P','c'.repeat(40)).id,2);
 });
+test('corrupt per-attempt result is isolated and does not starve an independent ping', async () => {
+  const home=mkdtempSync(join(homedir(),'.ptysd-native-reconcile-'));
+  try {
+    const workspace=join(home,'workspace'),stateDir=join(home,'state');
+    mkdirSync(workspace); mkdirSync(stateDir);
+    const attemptId='11111111-1111-4111-8111-111111111111';
+    const requestId='PTYSD_NATIVE_CORRUPT_PLAN_20261015';
+    const plan={...mkjob({host:hostname().toUpperCase(),request_id:requestId,kind:'opencode_plan',
+      spec_path:'native-bridge/tasks/readonly-host-inventory.md',spec_sha256:hash}),
+      schema:2,model:'opencode/spark',variant:'high'};
+    const ping=mkjob({host:hostname().toUpperCase(),request_id:'PTYSD_NATIVE_INDEPENDENT_PING_20261015'});
+    const start=receipt(requestId,attemptId,'STARTED',plan);
+    const terminal=receipt(requestId,attemptId,'BLOCKED',plan,
+      {outcome:'EVIDENCE_STORAGE_FAILED',exit_code:1,evidence_sha256:null,evidence_bytes:0});
+    const cases=[false,true];
+    for (const hasTerminal of cases) {
+      const comments=[com(1,encoded(plan)),com(2,RECEIPT_MARKER+JSON.stringify(start),'worker')];
+      if (hasTerminal) comments.push(com(3,RECEIPT_MARKER+JSON.stringify(terminal),'worker'));
+      comments.push(com(4,encoded(ping)));
+      const resultPath=join(stateDir,`result-${requestId}-${attemptId}.json`);
+      writeFileSync(resultPath,'{"truncated":', 'utf8');
+      const logs=[]; let nextId=comments.length+1;
+      const executor={task_name:'\\PTYSD\\OpenCodeExecutor',user_sid:'S-1-5-21-100-200-300-1001',
+        publisher_sid:'S-1-5-21-100-200-300-1002',node_bin:'C:\\Node\\node.exe',
+        script_path:'C:\\PTYSD\\executor.mjs',config_path:'C:\\PTYSD\\executor.json',
+        manifest_dir:'C:\\PTYSD\\manifests',results_dir:'C:\\PTYSD\\results',
+        working_directory:'C:\\PTYSD'};
+      const result=await executeWorker({repo:REPO,project_id:PROJECT,host:hostname().toUpperCase(),issue:101,
+        workspace,state_dir:stateDir,dispatchers:['t14210184'],executor,
+        enable_v2_model_runs:true,allowed_models:{'opencode/spark':['high']}},{
+        apiRead(endpoint) {
+          if (endpoint==='user') return {login:'worker'};
+          if (endpoint.endsWith('/issues/101')) return {title:'[PTYSD-NATIVE] OpenCode dispatch and receipts',state:'open'};
+          if (endpoint.includes('/git/ref/heads/main')) return {object:{sha:commit}};
+          const match=endpoint.match(/\/issues\/comments\/(\d+)$/);
+          if (match) return comments.find(item=>item.id===Number(match[1]));
+          throw new Error(`UNEXPECTED_TEST_API_${endpoint}`);
+        },
+        commentsRead:()=>comments,
+        writeReceipt(_config,data,login) { comments.push(com(nextId++,RECEIPT_MARKER+JSON.stringify(data),login)); },
+        executorResultsDir:()=>stateDir,
+        executorResultPath:()=>resultPath,
+        runPlan:()=>{ throw new Error('TEST_MUST_NOT_START_A_MODEL'); },
+        log:value=>logs.push(value),
+      });
+      assert.equal(result.state,'FINISHED');
+      assert.equal(result.request_id,ping.request_id);
+      assert.ok(logs.some(value=>/NO_REPLAY/.test(value)),logs.join(' | '));
+      assert.equal(comments.filter(item=>parseReceipt(item.body)?.request_id===requestId &&
+        parseReceipt(item.body)?.state!=='STARTED').length,hasTerminal?1:0);
+      assert.equal(parseReceipt(comments.at(-1).body)?.request_id,ping.request_id);
+      rmSync(resultPath,{force:true});
+    }
+  } finally { rmSync(home,{recursive:true,force:true}); }
+});
 test('native CLI probe is bounded; no shell wrapper is treated as executable', () => {
   const empty=findNativeCLI({PATH:'/this/directory/does/not/exist'},false);
   assert.equal(empty.bin,null);
@@ -300,13 +375,10 @@ fakeShellIntegration('worker integration: GitHub queued ping -> start + terminal
         chmodSync(join(bin,'opencode'),0o755);
     const run=spawnSync(process.execPath,[path,'--config',config],{cwd:resolve('.'),env,encoding:'utf8',timeout:15000});
     assert.equal(run.status,0,run.stderr);
-    assert.match(run.stdout,/FINISHED_PTYSD_NATIVE_PLAN/);
+    assert.match(run.stdout,/EXECUTOR_NOT_CONFIGURED_NO_MODEL_DISPATCH/);
     const m2=JSON.parse(readFileSync(mock,'utf8'));
-    const end=parseReceipt(m2.comments.at(-1).body);
-    assert.equal(end.outcome,'OPENCODE_V2_EXIT_0_UNTRUSTED');
-    assert.match(end.evidence_sha256,/^[a-f0-9]{64}$/);
-    assert.equal(JSON.parse(readFileSync(join(work,'opencode.json'),'utf8')).default_agent, 'ptysd-readonly');
-    assert.ok(!m2.comments.at(-1).body.includes('SAFE_V2_REVIEW_MOCK'));
+    assert.equal(m2.comments.length,m.comments.length,'no receipt is emitted without a ready separate Executor');
+    assert.equal(readdirSync(work).includes('opencode.json'),false,'the dispatcher must not start inline model work');
     // A crashed model attempt is ambiguous, but independent native probes continue.
     const orphan={...planJob,request_id:'PTYSD_NATIVE_ORPHAN_20261013'};
     const orphanStart=receipt(orphan.request_id,'00000000-0000-0000-0000-000000000001','STARTED',orphan);

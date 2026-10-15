@@ -79,8 +79,8 @@ is authorized to change accepted tasks, production approvals, or canonical refs.
 
 ## Evidence / disabled scopes
 
-* Protected: `PTYSD-Factory-Monitor` and 2667 listener; WinRM;
-  `.codex-chatgpt-web`; unrelated projects; immutable `governance/**`/`runs/**`.
+* Retired: legacy `PTYSD-Factory-Monitor` / `127.0.0.1:2667`. Win11 readback on 2026-10-15 found no registered monitor task or listener; do not reinstall it.
+* Protected: WinRM; `.codex-chatgpt-web`; unrelated projects; immutable `governance/**`/`runs/**`.
 * Separate human-gated lanes: exact elevated v47 delete, 22 legacy task
   classifications, Factory MCP/HostGuard/JEA/secrets, self-hosted Runner #405.
 * `main` source merge, a `ping` result or an OpenCode plan result is **not** a
