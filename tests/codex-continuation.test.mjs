@@ -601,7 +601,7 @@ test('executor refuses static sandbox configuration when the Publisher ACL probe
     publishCodexExecutorRequest(dir, request);
     const config = readyConfig({ codex_sandbox_probe_path: undefined });
     Object.assign(config, { spool_dir: dir, workspace_root: join(dir, 'workspaces'),
-      codex_executable: 'C:\\fake\\codex.exe' });
+      codex_executable: join(dir, 'codex.exe') });
     const result = await runExecutorOnce(config, { currentSid: config.executor_identity_sid, environment: {},
       sandboxProbeDeps: { platform: 'win32' } });
     assert.equal(result.state, 'BLOCKED');
