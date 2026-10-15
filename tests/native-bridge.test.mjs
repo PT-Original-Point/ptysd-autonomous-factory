@@ -6,7 +6,9 @@ import { homedir, hostname } from 'node:os';
 import { join, resolve, delimiter } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
-  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI } from '../native-bridge/worker.mjs';
+  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI,
+  reconcileCodexExecutorResult } from '../native-bridge/worker.mjs';
+import { executorResultPath } from '../native-bridge/codex-continuation.mjs';
 
 const commit = 'a'.repeat(40); const hash = 'b'.repeat(64);
 const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1B6PD2P',
@@ -244,4 +246,48 @@ test('receipt identity rejects foreign project and wrong source cannot mask curr
   const other={...start,source_sha:'c'.repeat(40)};
   const state=[com(1,encoded(job)),com(2,RECEIPT_MARKER+JSON.stringify(other),'worker')];
   assert.equal(selectNext(state,['t14210184'],'worker',job.host,job.source_sha)?.id,1);
+});
+
+test('bad Codex result reconciliation stays UNKNOWN without replay and does not starve an independent ping', async () => {
+  const home=mkdtempSync(join(homedir(),'.ptysd-codex-reconcile-test-'));
+  try {
+    const spool=join(home,'codex-spool');
+    const resultDir=join(spool,'results');
+    mkdirSync(resultDir,{recursive:true});
+    const attempt='11111111-1111-4111-8111-111111111111';
+    const codexJob={...mkjob({request_id:'PTYSD_CODEX_CORRUPT_RESULT_20261015'}),
+      schema:3,kind:'codex_plan',spec_path:'native-bridge/tasks/review.md',spec_sha256:hash,
+      model:'gpt-6.1-sol',reasoning_effort:'medium',write_paths:['README.md']};
+    const started={...receipt(codexJob.request_id,attempt,'STARTED',codexJob),task_fingerprint:hash};
+    const ping=mkjob({request_id:'PTYSD_NATIVE_INDEPENDENT_PING_20261015'});
+    const comments=[com(1,encoded(codexJob)),
+      com(2,RECEIPT_MARKER+JSON.stringify(started),'worker'),com(3,encoded(ping))];
+    const config={codex_spool:spool,state_dir:join(home,'state')};
+    const resultPath=executorResultPath(spool,codexJob.request_id,attempt);
+    writeFileSync(resultPath,'{ truncated executor result');
+    const blockedKinds=new Set();
+
+    const corrupt=await reconcileCodexExecutorResult(started,config,'worker',blockedKinds);
+    assert.deepEqual(corrupt,{status:'UNKNOWN_NO_REPLAY',reason:'RESULT_OR_RECEIPT_INVALID'});
+    assert.ok(blockedKinds.has('codex_plan'));
+    assert.equal(parseReceipt(comments[1].body).state,'STARTED');
+    assert.equal(selectNext(comments,['t14210184'],'worker',codexJob.host,commit,
+      [...blockedKinds]).job.request_id,ping.request_id);
+
+    // A publish/readback error is also attempt-local: do not replay it or stop the ping lane.
+    writeFileSync(resultPath,JSON.stringify({schema:1,kind:'codex_plan',
+      request_id:codexJob.request_id,attempt_id:attempt,source_sha:codexJob.source_sha,
+      exit_code:0,fingerprint:hash,session_id:null,diff_sha256:null,
+      stdout_sha256:hash,stderr_sha256:hash,outcome:'CODEX_CLI_EXIT_0_UNVERIFIED',
+      model_invoked:true,changed_paths:[],out_of_scope_paths:[],pr_url:null,tests:'NOT_RUN'}));
+    let publicationCalls=0;
+    const unknownWrite=await reconcileCodexExecutorResult(started,config,'worker',blockedKinds,{
+      writeReceiptOnce:async()=>{publicationCalls++;throw new Error('CODEX_RECEIPT_READBACK_UNKNOWN_NO_REPLAY');}
+    });
+    assert.deepEqual(unknownWrite,{status:'UNKNOWN_NO_REPLAY',reason:'CODEX_RECEIPT_READBACK_UNKNOWN_NO_REPLAY'});
+    assert.equal(publicationCalls,1);
+    assert.equal(selectNext(comments,['t14210184'],'worker',codexJob.host,commit,
+      [...blockedKinds]).job.request_id,ping.request_id);
+    assert.equal(comments.filter(c=>parseReceipt(c.body)?.request_id===codexJob.request_id).length,1);
+  } finally { rmSync(home,{recursive:true,force:true}); }
 });

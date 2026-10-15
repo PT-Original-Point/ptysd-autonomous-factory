@@ -353,6 +353,32 @@ export function codexTerminalReceipt(started, result) {
   return terminal;
 }
 
+export async function reconcileCodexExecutorResult(started, config, workerLogin, blockedKinds,
+  deps = {}) {
+  const resultPath = executorResultPath(config.codex_spool || '', started.request_id, started.attempt_id);
+  const exists = deps.exists || existsSync;
+  if (!exists(resultPath)) {
+    blockedKinds.add('codex_plan');
+    return { status: 'WAITING' };
+  }
+  try {
+    const read = deps.read || readFileSync;
+    const result = JSON.parse(read(resultPath, 'utf8'));
+    const terminal = codexTerminalReceipt(started, result);
+    const publish = deps.writeReceiptOnce || writeCodexReceiptOnce;
+    await publish(config, terminal, workerLogin);
+    return { status: 'RECOVERED' };
+  } catch (error) {
+    // A malformed result or uncertain receipt write belongs to this attempt only.
+    // Preserve the STARTED claim, never replay it, and let independent job kinds run.
+    blockedKinds.add('codex_plan');
+    const safe = value => typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(value);
+    const reason = safe(error?.code) ? error.code : safe(error?.message) ? error.message :
+      'RESULT_OR_RECEIPT_INVALID';
+    return { status: 'UNKNOWN_NO_REPLAY', reason };
+  }
+}
+
 export async function dispatchCodexJob({ config, job, spec, workerLogin, attemptId = randomUUID(),
   createBundle = async (bundlePath, sourceSha) => {
     mkdirSync(join(config.codex_spool, 'bundles'), { recursive: true });
@@ -411,16 +437,15 @@ async function main() {
     if (hasTerminal) continue;
     const path = join(config.state_dir, `result-${s.request_id}-${s.attempt_id}.json`);
     if (s.kind === 'codex_plan') {
-      const executorPath = executorResultPath(config.codex_spool || '', s.request_id, s.attempt_id);
-      if (existsSync(executorPath)) {
-        const result = JSON.parse(readFileSync(executorPath, 'utf8'));
-        const terminal = codexTerminalReceipt(s, result);
-        await writeCodexReceiptOnce(config, terminal, me);
+      const recovery = await reconcileCodexExecutorResult(s, config, me, blockedKinds);
+      if (recovery.status === 'RECOVERED') {
         console.log(`RECOVERED_CODEX_TERMINAL_${s.request_id}`);
         return;
       }
-      blockedKinds.add('codex_plan');
-      console.log(`CODEX_EXECUTOR_RESULT_NOT_YET_READABLE_${s.request_id}: NO_REPLAY`);
+      if (recovery.status === 'WAITING')
+        console.log(`CODEX_EXECUTOR_RESULT_NOT_YET_READABLE_${s.request_id}: NO_REPLAY`);
+      else
+        console.log(`CODEX_EXECUTOR_RESULT_${recovery.reason}_${s.request_id}: UNKNOWN_NO_REPLAY`);
       continue;
     }
     if (existsSync(path)) {
