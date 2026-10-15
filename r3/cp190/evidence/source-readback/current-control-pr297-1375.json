@@ -1,0 +1,18 @@
+{
+  "schema_version": "csg.pointer.v1",
+  "project_id": "CHATGPT_GLOBAL_SKILL_GOVERNANCE",
+  "binding_id": "CSG-GOVERNANCE-BINDING-V2",
+  "binding_generation": 2,
+  "checkpoint_seq": 191,
+  "checkpoint_path": "governance/csg/checkpoints/000191.json",
+  "checkpoint_digest": "sha256:167225ba4431852061992540c7a8ee06d501b10e30f3da87b6927cef575fc9f6",
+  "previous_control_oid": {
+    "algorithm": "sha1",
+    "hex": "209e0ad9040a08965a49109e18f783cfd9c7c7f4"
+  },
+  "transition_id": "GOV-HARDENING-P5-OP025-RECOVERY-READBACK-191",
+  "reader_compatibility": {
+    "min_schema": "csg.checkpoint.v1",
+    "max_schema": "csg.checkpoint.v1"
+  }
+}
