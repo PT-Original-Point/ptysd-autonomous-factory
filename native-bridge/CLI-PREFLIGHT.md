@@ -59,7 +59,8 @@ returns unknown schema or provides no parseable catalog, the exact lane is
 This job requires the **updated** Win11 Worker and `v2-readiness.mjs` to be
 installed together under the existing Limited Task. GitHub source merge alone
 cannot run it. Do not enqueue it until same-source runtime SHA readback is
-available; retain existing task, 2667 monitor, WinRM and all other projects.
+available; retain the independent `PTYSD-Native-OpenCode` task, WinRM and all other projects.
+The legacy `PTYSD-Factory-Monitor` / `127.0.0.1:2667` was absent from Win11 task/listener readback on 2026-10-15; do not restart or reinstall it.
 
 ## Acceptance phases
 
@@ -69,4 +70,4 @@ available; retain existing task, 2667 monitor, WinRM and all other projects.
 4. **Readonly model task:** verify provider, model ID, variant, costs/quotas; explicitly enable exact model pair; capture exact STARTED/terminal and local evidence hash; `exit 0` is not canonical acceptance.
 5. **Coding/CI/rework:** independently gated future work. Never merge trusted-verifier edits with untrusted candidate proof.
 
-No new MCP or supervisor; preserve 2667, WinRM, separate Codex tunnel, unrelated projects, `governance/**`, `runs/**`, and the draft #405 Runner trust-root boundary. Do not claim login-free 24/7 or OS retirement from this phase.
+No new MCP or supervisor; do not restart the retired 2667 monitor. Preserve WinRM, the separate Codex tunnel, unrelated projects, `governance/**`, `runs/**`, and the draft #405 Runner trust-root boundary. Do not claim login-free 24/7 or OS retirement from this phase.
