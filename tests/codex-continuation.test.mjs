@@ -572,7 +572,8 @@ test('executor consumes a request into an explicit blocked receipt when identity
     config.spool_dir = dir;
     config.workspace_root = join(dir, 'workspaces');
     config.codex_executable = join(dir, 'codex.exe');
-    const result = await runExecutorOnce(config, { currentSid: config.executor_identity_sid, environment: {} });
+    const result = await runExecutorOnce(config, { currentSid: config.executor_identity_sid, environment: {},
+      sandboxProbeDeps: { platform: 'win32' } });
     assert.equal(result.state, 'BLOCKED');
     assert.equal(result.model_invoked, false);
     assert.equal(existsSync(join(dir, 'locks', 'executor.active')), false);
