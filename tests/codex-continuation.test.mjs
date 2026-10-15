@@ -572,8 +572,7 @@ test('executor consumes a request into an explicit blocked receipt when identity
     config.spool_dir = dir;
     config.workspace_root = join(dir, 'workspaces');
     config.codex_executable = join(dir, 'codex.exe');
-    const result = await runExecutorOnce(config, { currentSid: config.executor_identity_sid, environment: {},
-      sandboxProbeDeps: { platform: 'win32' } });
+    const result = await runExecutorOnce(config, { currentSid: config.executor_identity_sid, environment: {} });
     assert.equal(result.state, 'BLOCKED');
     assert.equal(result.model_invoked, false);
     assert.equal(existsSync(join(dir, 'locks', 'executor.active')), false);
@@ -603,7 +602,8 @@ test('executor refuses static sandbox configuration when the Publisher ACL probe
     const config = readyConfig({ codex_sandbox_probe_path: undefined });
     Object.assign(config, { spool_dir: dir, workspace_root: join(dir, 'workspaces'),
       codex_executable: 'C:\\fake\\codex.exe' });
-    const result = await runExecutorOnce(config, { currentSid: config.executor_identity_sid, environment: {} });
+    const result = await runExecutorOnce(config, { currentSid: config.executor_identity_sid, environment: {},
+      sandboxProbeDeps: { platform: 'win32' } });
     assert.equal(result.state, 'BLOCKED');
     assert.equal(result.model_invoked, false);
     assert.ok(result.reasons.includes('SANDBOX_PROBE_PATH_INVALID'));
