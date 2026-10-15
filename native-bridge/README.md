@@ -17,11 +17,19 @@ no new process stays resident between polls.
   file from the **exact current main commit** and carries SHA-256 of its contents.
   Neither an Issue body nor a free-form comment becomes a shell instruction.
 * `ping` is native, zero-token, and verifies round-trip GitHub comments.
-* `opencode_plan` is **OpenCode V2 ONLY**. A native binary must return version
+* `opencode_plan` is **OpenCode V2 ONLY** and read-only. A native binary must return version
   2.x. V1 executables are rejected, regardless of file name. Jobs pin exact
   `provider/model` plus `variant`; V2 receives `provider/model#variant`.
   The worker installs only a reviewed V2 project-local `opencode.json` with
   ordered `permissions` rules, denying edit/shell/subagent/external access.
+* `opencode_edit` is a separate schema-3 candidate using the same Executor, with an exact
+  `write_paths` allowlist. It creates a detached local clone at the pinned source SHA and
+  captures an allowlisted Git diff plus SHA-256 as local attempt evidence. It does not
+  commit, push, run tests, or imply acceptance. Runs fail closed unless the user-local
+  config explicitly enables coding and the Executor returns a request/source-bound
+  Windows isolation readback. A config string is not proof; the current native readiness
+  path reports `NOT_VERIFIED`, and the current Executor does not wire an ACL verifier, so
+  this candidate cannot invoke a coding model.
   It refuses unknown workspace configuration rather than overriding it.
   V2 model invocation is **disabled by default** until local
   `enable_v2_model_runs=true` and an exact `allowed_models` entry are set
@@ -79,8 +87,8 @@ is authorized to change accepted tasks, production approvals, or canonical refs.
 
 ## Evidence / disabled scopes
 
-* Protected: `PTYSD-Factory-Monitor` and 2667 listener; WinRM;
-  `.codex-chatgpt-web`; unrelated projects; immutable `governance/**`/`runs/**`.
+* Retired: legacy `PTYSD-Factory-Monitor` / `127.0.0.1:2667`. Win11 readback on 2026-10-15 found no registered monitor task or listener; do not reinstall it.
+* Protected: WinRM; `.codex-chatgpt-web`; unrelated projects; immutable `governance/**`/`runs/**`.
 * Separate human-gated lanes: exact elevated v47 delete, 22 legacy task
   classifications, Factory MCP/HostGuard/JEA/secrets, self-hosted Runner #405.
 * `main` source merge, a `ping` result or an OpenCode plan result is **not** a

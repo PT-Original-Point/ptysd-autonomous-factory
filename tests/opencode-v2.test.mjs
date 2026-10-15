@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { discoverV2Executables, qualifyOpenCodeV2, parseOpenCodeV2Version, validateV2Model, buildV2ReadOnlyArgs, buildV2ReadOnlyConfig, buildV2ScopedEditConfig, buildV2ScopedEditArgs } from '../native-bridge/opencode-v2.mjs';
+import { discoverV2Executables, qualifyOpenCodeV2, parseOpenCodeV2Version, validateV2Model, buildV2ReadOnlyArgs, buildV2ReadOnlyConfig, buildV2ScopedEditConfig, buildV2ScopedEditArgs, validateV2ScopedEditPaths } from '../native-bridge/opencode-v2.mjs';
 
 test('V2-only version recognition rejects V1, nonversion and contaminated output', () => {
   for (const s of ['2.0.27', 'v2.0.27', 'opencode v2.0.27', 'opencode2 2.0.27', '2.3.0-beta.2']) assert.ok(parseOpenCodeV2Version(s));
@@ -37,6 +37,7 @@ test('readonly V2 permissions use V2 names and deny mutations after any source',
   assert.equal(c.permissions.find(x=>x.action==='subagent')?.effect,'deny');
   assert.ok(c.permissions.find(x=>x.action==='read'&&x.effect==='allow'));
   assert.equal(c.agents['ptysd-readonly'].mode,'primary');
+  assert.equal(Object.hasOwn(c.agents['ptysd-readonly'],'steps'),false);
   assert.equal(c.agents['ptysd-readonly'].permissions.find(x=>x.action==='shell')?.effect,'deny');
   assert.deepEqual(c.plugins,[]);
 });
@@ -56,6 +57,7 @@ test('scoped V2 writer has only explicit edit paths; no implicit shell, external
     const agent=cfg.agents['ptysd-scoped-write'];
     const exact=join(workspace,'src','output.mjs').replaceAll('\\','/');
     assert.equal(cfg.default_agent,'ptysd-scoped-write');
+    assert.equal(Object.hasOwn(agent,'steps'),false);
     assert.equal(cfg.permissions[0].action,'*');
     assert.equal(cfg.permissions[0].effect,'deny');
     assert.deepEqual(agent.permissions.filter(p=>p.action==='edit' && p.effect==='allow').map(p=>p.resource),[exact]);
@@ -66,10 +68,13 @@ test('scoped V2 writer has only explicit edit paths; no implicit shell, external
       'src/.env','src/auth.json','src/token.txt','src/opencode.json','src/*.mjs'])
       assert.throws(()=>buildV2ScopedEditConfig(workspace,[file]),file);
     assert.throws(()=>buildV2ScopedEditConfig(workspace,['src/output.mjs','src/output.mjs']));
-    const args=buildV2ScopedEditArgs({request_id:'PTYSD_CODE_CANARY_20261013',
-      model:'opencode/muse',variant:'high'},workspace,'Edit exact reviewed file');
+    const editJob={request_id:'PTYSD_CODE_CANARY_20261013',kind:'opencode_edit',
+      write_paths:['src/output.mjs'],model:'opencode/muse',variant:'high'};
+    const args=buildV2ScopedEditArgs(editJob,workspace,'Edit exact reviewed file');
     assert.equal(args[args.indexOf('--agent')+1],'ptysd-scoped-write');
     assert.equal(args[args.indexOf('--model')+1],'opencode/muse#high');
     assert.ok(!args.includes('--pure')&&!args.includes('--variant'));
+    assert.deepEqual(validateV2ScopedEditPaths(['src/output.mjs']),['src/output.mjs']);
+    assert.throws(()=>buildV2ScopedEditArgs({...editJob,kind:'opencode_plan'},workspace,'bad'),/INVALID_V2_CODING_JOB/);
   } finally {rmSync(workspace,{recursive:true,force:true});}
 });

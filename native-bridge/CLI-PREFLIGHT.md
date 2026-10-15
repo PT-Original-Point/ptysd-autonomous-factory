@@ -28,6 +28,10 @@ V2 uses ordered `permissions: [{action,resource,effect}]` rules, **not** V1 `per
 
 Some historical V2 beta paths silently ignored environment-injected `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT` permissions. Accordingly the worker uses the **project-local** `opencode.json` under its already isolated user-local `workspace`, checks exact byte readback, refuses unknown `opencode.json`, `opencode.jsonc` or `.opencode` overrides, and strips inherited config-injection variables. An actual host test must still prove that this exact installed V2 build loads the agent/permissions before model inference is enabled. GitHub source/mock CI alone is not sufficient.
 
+## Scoped coding candidate (schema 3)
+
+`opencode_edit` uses `ptysd-scoped-write` with an exact `write_paths` list, creates a detached local clone at the pinned source SHA, and stores a local allowlisted diff with SHA-256. A self-declared config string is not OS isolation evidence. Coding dispatch requires a request/source-bound Windows isolation readback from the Executor; the current native readiness path returns `NOT_VERIFIED` and the Executor does not wire an ACL verifier, so this candidate cannot invoke a coding model. A captured diff remains unverified until independent tests, review, commit/PR, and exact-head CI.
+
 ## Durable dispatch and privacy
 
 Only pinned jobs with exact project, Issue, trusted author, host, accepted main source SHA and pinned task spec SHA may be processed. Transport `ping` and zero-token `native_preflight` are retained. V2 `opencode_plan` uses schema 2 with `model` and `variant` in the task; both are locally allowlisted. STARTED/terminal receipts publish only bounded metadata and local evidence digests, never raw output or credentials. A STARTED without terminal is ambiguous; it must never reexecute the effect blindly.
@@ -59,7 +63,8 @@ returns unknown schema or provides no parseable catalog, the exact lane is
 This job requires the **updated** Win11 Worker and `v2-readiness.mjs` to be
 installed together under the existing Limited Task. GitHub source merge alone
 cannot run it. Do not enqueue it until same-source runtime SHA readback is
-available; retain existing task, 2667 monitor, WinRM and all other projects.
+available; retain the independent `PTYSD-Native-OpenCode` task, WinRM and all other projects.
+The legacy `PTYSD-Factory-Monitor` / `127.0.0.1:2667` was absent from Win11 task/listener readback on 2026-10-15; do not restart or reinstall it.
 
 ## Acceptance phases
 
@@ -69,4 +74,4 @@ available; retain existing task, 2667 monitor, WinRM and all other projects.
 4. **Readonly model task:** verify provider, model ID, variant, costs/quotas; explicitly enable exact model pair; capture exact STARTED/terminal and local evidence hash; `exit 0` is not canonical acceptance.
 5. **Coding/CI/rework:** independently gated future work. Never merge trusted-verifier edits with untrusted candidate proof.
 
-No new MCP or supervisor; preserve 2667, WinRM, separate Codex tunnel, unrelated projects, `governance/**`, `runs/**`, and the draft #405 Runner trust-root boundary. Do not claim login-free 24/7 or OS retirement from this phase.
+No new MCP or supervisor; do not restart the retired 2667 monitor. Preserve WinRM, the separate Codex tunnel, unrelated projects, `governance/**`, `runs/**`, and the draft #405 Runner trust-root boundary. Do not claim login-free 24/7 or OS retirement from this phase.
