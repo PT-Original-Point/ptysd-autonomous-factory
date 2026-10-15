@@ -3,12 +3,17 @@
 // Public GitHub issue comments are only pointers to immutable, reviewed source.
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync,
+  openSync, closeSync, fsyncSync } from 'node:fs';
 import { homedir, hostname, platform } from 'node:os';
 import { basename, join, resolve, relative, isAbsolute, delimiter } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { qualifyOpenCodeV2, validateV2Model, buildV2ReadOnlyConfig, buildV2ReadOnlyArgs } from './opencode-v2.mjs';
 import { runV2Readiness } from './v2-readiness.mjs';
+import { parseCodexJob, codexExecutionGate, claimCodexAttempt,
+  releaseCodexAttempt, makeCodexExecutorRequest, publishCodexExecutorRequest,
+  executorResultPath as codexExecutorResultPath,
+  validateCodexExecutorResult } from './codex-continuation.mjs';
 import {
   OPERATOR_REPO, OPERATOR_PROJECT, OPERATOR_ISSUE,
   collectWindowsObservation, encodeOperatorObservation, findOperatorComment,
@@ -40,6 +45,8 @@ export function terminalStateForResult(result) {
   return 'FINISHED';
 }
 export function parseJob(body) {
+  const codexJob = parseCodexJob(body);
+  if (codexJob) return codexJob;
   if (typeof body !== 'string' || body.length > 5000 || !body.startsWith(JOB_MARKER)) return null;
   let obj; try { obj = JSON.parse(body.slice(JOB_MARKER.length)); } catch { return null; }
   if (!obj || Array.isArray(obj) || typeof obj !== 'object') return null;
@@ -66,7 +73,7 @@ export function parseReceipt(body) {
     if (o?.schema !== 1 || o.project_id !== PROJECT ||
         typeof o.host !== 'string' || !/^[A-Z0-9-]{3,64}$/.test(o.host) ||
         !SHA.test(o.source_sha) || typeof o.kind !== 'string' ||
-        !['ping', 'native_preflight', 'native_v2_qualify', 'opencode_plan'].includes(o.kind) ||
+        !['ping', 'native_preflight', 'native_v2_qualify', 'opencode_plan', 'codex_plan'].includes(o.kind) ||
         typeof o.request_id !== 'string' || !REQUEST.test(o.request_id) ||
         !RECEIPT_STATES.has(o.state) || typeof o.attempt_id !== 'string' ||
         !/^[a-f0-9-]{36}$/.test(o.attempt_id)) return null;
@@ -100,6 +107,16 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     return { job: v.job, id: v.id, originalBody: v.content };
   }
   return null;
+}
+export function selectNextWithCodexClaim(comments, dispatchers, workerLogin, host,
+  liveMainSha, stateDir, blockedKinds = []) {
+  const next = selectNext(comments, dispatchers, workerLogin, host, liveMainSha, blockedKinds);
+  if (next?.job.kind !== 'codex_plan' ||
+      !existsSync(join(stateDir, `codex-claim-${next.job.request_id}.json`)))
+    return { next, unresolvedRequestId: null };
+  const blocked = [...new Set([...blockedKinds, 'codex_plan'])];
+  return { next: selectNext(comments, dispatchers, workerLogin, host, liveMainSha, blocked),
+    unresolvedRequestId: next.job.request_id };
 }
 function gh(args, options = {}) {
   return execFileSync('gh', args, { encoding: 'utf8', timeout: commandTimeout,
@@ -279,6 +296,64 @@ export function writeReceipt(config, data, workerLogin, dependencies = {}) {
   if (confirmed.length > 1) throw new Error('DUPLICATE_RECEIPT_IDENTITY');
   throw new Error('RECEIPT_WRITE_AMBIGUOUS_NO_EXECUTION');
 }
+export async function writeCodexReceiptOnce(config, data, workerLogin, deps = {}) {
+  const body = RECEIPT_MARKER + JSON.stringify(data);
+  const identity = parseReceipt(body);
+  if (!identity || identity.kind !== 'codex_plan') throw new Error('CODEX_RECEIPT_INVALID');
+  const readComments = deps.readComments || (() => issueComments(config));
+  const matching = comments => comments.filter(comment => {
+    if (comment.user?.login !== workerLogin) return false;
+    const value = parseReceipt(comment.body);
+    return value?.request_id === identity.request_id && value?.attempt_id === identity.attempt_id &&
+      value?.host === identity.host && value?.source_sha === identity.source_sha &&
+      value?.kind === identity.kind && value?.state === identity.state;
+  });
+  const before = matching(await readComments());
+  if (before.length) {
+    if (before.length !== 1 || before[0].body !== body)
+      throw new Error('CODEX_RECEIPT_IDENTITY_CONFLICT_NO_REPLAY');
+    return { state: 'ALREADY_READ_BACK' };
+  }
+
+  // This per-body file is an effect barrier only. GitHub remains the sole task
+  // and receipt authority; an uncertain POST is never repeated blindly.
+  const bodySha = digest(Buffer.from(body, 'utf8'));
+  const claimPath = join(config.state_dir, `codex-receipt-${bodySha}.json`);
+  const claim = { schema: 1, body_sha256: bodySha, request_id: data.request_id,
+    attempt_id: data.attempt_id, state: 'POST_CLAIMED', updated_at: new Date().toISOString() };
+  let fd;
+  try {
+    fd = openSync(claimPath, 'wx', 0o600);
+    writeFileSync(fd, JSON.stringify(claim)); fsyncSync(fd); closeSync(fd); fd = undefined;
+  } catch (error) {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve original failure */ } }
+    if (error.code === 'EEXIST') throw new Error('CODEX_RECEIPT_ALREADY_CLAIMED_NO_REPLAY');
+    throw error;
+  }
+  const updateClaim = state => atomicJSON(claimPath,
+    { ...claim, state, updated_at: new Date().toISOString() });
+  try {
+    if (deps.post) await deps.post(body);
+    else {
+      const temp = join(config.state_dir, `codex-comment-${randomUUID()}.txt`);
+      writeFileSync(temp, body, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      try { gh(['issue', 'comment', String(config.issue), '-R', REPO, '--body-file', temp]); }
+      finally { rmSync(temp, { force: true }); }
+    }
+  } catch {
+    updateClaim('POST_OUTCOME_UNKNOWN_NO_REPLAY');
+    throw new Error('CODEX_RECEIPT_POST_UNKNOWN_NO_REPLAY');
+  }
+  let after;
+  try { after = matching(await readComments()); }
+  catch { updateClaim('READBACK_UNKNOWN_NO_REPLAY'); throw new Error('CODEX_RECEIPT_READBACK_UNKNOWN_NO_REPLAY'); }
+  if (after.length !== 1 || after[0].body !== body) {
+    updateClaim('BODY_NOT_READ_BACK_NO_REPLAY');
+    throw new Error('CODEX_RECEIPT_BODY_NOT_READ_BACK_NO_REPLAY');
+  }
+  updateClaim('READBACK_VERIFIED');
+  return { state: 'READBACK_VERIFIED', body_sha256: bodySha };
+}
 function atomicJSON(path, data) {
   const temp = `${path}.${randomUUID()}.tmp`;
   writeFileSync(temp, JSON.stringify(data, null, 2), { flag: 'wx', mode: 0o600 });
@@ -294,6 +369,12 @@ export function guardConfig(c) {
     if (typeof c[p] !== 'string') throw new Error(`INVALID_${p.toUpperCase()}_TYPE`);
     const rel = relative(resolve(homedir()), resolve(c[p]));
     if (rel.startsWith('..') || isAbsolute(rel) || rel === '') throw new Error(`INVALID_${p.toUpperCase()}_NOT_UNDER_HOME`);
+  }
+  if (c.codex_spool !== undefined) {
+    if (typeof c.codex_spool !== 'string') throw new Error('INVALID_CODEX_SPOOL_TYPE');
+    const rel = relative(resolve(homedir()), resolve(c.codex_spool));
+    if (rel.startsWith('..') || isAbsolute(rel) || rel === '')
+      throw new Error('INVALID_CODEX_SPOOL_NOT_UNDER_HOME');
   }
   if (!existsSync(c.workspace) || !statSync(c.workspace).isDirectory()) throw new Error('WORKSPACE_NOT_DIRECTORY');
   if (c.allowed_models !== undefined) {
@@ -443,7 +524,110 @@ export function receipt(requestId, attemptId, state, job, result = null) {
     exit_code: result?.exit_code ?? null,
     evidence_sha256: result?.evidence_sha256 ?? null,
     evidence_bytes: result?.evidence_bytes ?? null,
-    ...(job.schema === 2 ? { model: job.model, variant: job.variant } : {}) };
+    ...(job.schema === 2 ? { model: job.model, variant: job.variant } : {}),
+    ...(job.schema === 3 ? { model: job.model, reasoning_effort: job.reasoning_effort,
+      task_fingerprint: result?.fingerprint ?? result?.task_fingerprint ?? null,
+      session_id: result?.session_id ?? null, diff_sha256: result?.diff_sha256 ?? null,
+      stdout_sha256: result?.stdout_sha256 ?? null, stderr_sha256: result?.stderr_sha256 ?? null,
+      tests: result?.tests ?? 'NOT_RUN', pr_url: result?.pr_url ?? null } : {}) };
+}
+function triggerCodexExecutor(config) {
+  if (config.codex_executor_task !== 'PTYSD-Codex-Executor')
+    throw new Error('CODEX_EXECUTOR_TASK_IDENTITY_MISMATCH');
+  execFileSync('schtasks.exe', ['/run', '/tn', config.codex_executor_task], {
+    encoding: 'utf8', timeout: 20000, maxBuffer: 65536, windowsHide: true, shell: false,
+  });
+}
+export function codexTerminalReceipt(started, result) {
+  if (!HASH.test(started?.task_fingerprint || '')) throw new Error('CODEX_START_FINGERPRINT_REQUIRED');
+  validateCodexExecutorResult(result, started);
+  const job = { ...started, schema: 3, model: started.model,
+    reasoning_effort: started.reasoning_effort };
+  // FINISHED describes this attempt's terminal lifecycle only. Even the
+  // unverified zero-exit outcome is never evidence of coding or acceptance.
+  const endedWithCapturedSession = result.exit_code === 0 &&
+    result.outcome === 'CODEX_CLI_EXIT_0_UNVERIFIED' && result.model_invoked === true &&
+    result.session_id !== null && Array.isArray(result.out_of_scope_paths) &&
+    result.out_of_scope_paths.length === 0;
+  const terminal = receipt(started.request_id, started.attempt_id,
+    endedWithCapturedSession ? 'FINISHED' : 'BLOCKED', job, result);
+  terminal.outcome = result.outcome || (result.exit_code === 0 ?
+    'CODEX_CLI_EXIT_0_UNVERIFIED' : 'CODEX_CLI_FAILED');
+  return terminal;
+}
+export async function reconcileCodexExecutorResult(started, config, workerLogin,
+  blockedKinds, deps = {}) {
+  const resultPath = codexExecutorResultPath(config.codex_spool || '', started.request_id,
+    started.attempt_id);
+  const exists = deps.exists || existsSync;
+  if (!exists(resultPath)) {
+    blockedKinds.add('codex_plan');
+    return { status: 'WAITING' };
+  }
+  try {
+    const read = deps.read || readFileSync;
+    const result = JSON.parse(read(resultPath, 'utf8'));
+    const terminal = codexTerminalReceipt(started, result);
+    const publish = deps.writeReceiptOnce || deps.writeReceipt || writeCodexReceiptOnce;
+    await publish(config, terminal, workerLogin, deps.receiptDependencies || deps);
+    return { status: 'RECOVERED' };
+  } catch (error) {
+    // A malformed result or uncertain receipt write belongs to this attempt.
+    // Preserve the STARTED claim and let independent zero-token jobs continue.
+    blockedKinds.add('codex_plan');
+    const safe = value => typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(value);
+    const reason = safe(error?.code) ? error.code : safe(error?.message) ? error.message :
+      'RESULT_OR_RECEIPT_INVALID';
+    return { status: 'UNKNOWN_NO_REPLAY', reason };
+  }
+}
+export async function dispatchCodexJob({ config, job, spec, workerLogin,
+  attemptId = randomUUID(),
+  createBundle = async (bundlePath, sourceSha) => {
+    mkdirSync(join(config.codex_spool, 'bundles'), { recursive: true });
+    execFileSync('git', ['-C', config.workspace, 'bundle', 'create', bundlePath, sourceSha], {
+      encoding: 'utf8', timeout: 120000, maxBuffer: 1024 * 1024, windowsHide: true,
+      shell: false,
+    });
+  },
+  claim = claimCodexAttempt, release = releaseCodexAttempt,
+  publishRequest = publishCodexExecutorRequest,
+  publishStarted = async data => writeCodexReceiptOnce(config, data, workerLogin),
+  trigger = () => triggerCodexExecutor(config),
+  cleanupBundle = path => rmSync(path, { force: true }) }) {
+  if (!config.codex_spool) throw new Error('CODEX_SPOOL_NOT_CONFIGURED');
+  const bundleDir = join(config.codex_spool, 'bundles');
+  mkdirSync(bundleDir, { recursive: true });
+  const bundlePath = join(bundleDir, `${job.request_id}-${attemptId}.bundle`);
+  await createBundle(bundlePath, job.source_sha);
+  const bundleSha = digest(readFileSync(bundlePath));
+  const request = makeCodexExecutorRequest(job, attemptId, spec, bundlePath, bundleSha);
+  const ownedClaim = claim(config.state_dir, job, attemptId);
+  if (!ownedClaim.claimed) {
+    cleanupBundle(bundlePath);
+    return { state: 'CODEX_ATTEMPT_AMBIGUOUS', invoked: false, reason: ownedClaim.reason };
+  }
+  const requestPath = join(config.codex_spool, 'requests',
+    `${job.request_id}-${attemptId}.json`);
+  try { await publishRequest(config.codex_spool, request); }
+  catch (error) {
+    // Releasing a claim is safe only when the exact attempt request is absent.
+    // Existing bytes may already be consumable by a scheduled executor.
+    if (!existsSync(requestPath)) {
+      release(job, ownedClaim);
+      cleanupBundle(bundlePath);
+    }
+    throw error;
+  }
+  const started = { ...receipt(job.request_id, attemptId, 'STARTED', job),
+    outcome: 'CODEX_EXECUTOR_DISPATCH_ACK_NOT_ACCEPTANCE',
+    task_fingerprint: request.fingerprint };
+  // The same source-bound, idempotent receipt writer used by the OpenCode lane
+  // verifies pre-write identity and remote readback before a task is triggered.
+  await publishStarted(started);
+  await trigger();
+  return { state: 'CODEX_EXECUTOR_REQUESTED', invoked: false, attemptId,
+    requestPath };
 }
 async function hashEvidenceFile(path) {
   const hash = createHash('sha256');
@@ -501,6 +685,12 @@ export async function runWorker(configInput, adapters = {}) {
   const resolveExecutorResultPath = adapters.executorResultPath ?? executorResultPath;
   const executeInline = adapters.runPlan ?? runPlan;
   const log = adapters.log ?? (message => console.log(message));
+  const dispatchCodex = adapters.dispatchCodexJob ?? (options => dispatchCodexJob({
+    ...options,
+    ...(adapters.codexDispatchOptions || {}),
+    publishStarted: adapters.codexDispatchOptions?.publishStarted ??
+      (data => writeCodexReceiptOnce(config, data, me)),
+  }));
   const me = apiRead('user').login;
   if (!me) throw new Error('GH_AUTH_REQUIRED');
   const issue = apiRead(`repos/${REPO}/issues/${config.issue}`);
@@ -516,6 +706,23 @@ export async function runWorker(configInput, adapters = {}) {
     const hasTerminal = comments.some(v => v.user?.login === me &&
       (r => r?.request_id === s.request_id && r?.attempt_id === s.attempt_id &&
         r?.source_sha === s.source_sha && r?.kind === s.kind && terminalStates.has(r.state))(parseReceipt(v.body)));
+    if (s.kind === 'codex_plan') {
+      if (hasTerminal) continue;
+      const recovery = await reconcileCodexExecutorResult(s, config, me, blockedKinds, {
+        ...(adapters.codexReconcileDependencies || {}),
+        writeReceiptOnce: adapters.codexReconcileDependencies?.writeReceiptOnce ??
+          adapters.codexReconcileDependencies?.writeReceipt ??
+          ((receiptConfig, data, login) => writeCodexReceiptOnce(receiptConfig, data, login)),
+      });
+      if (recovery.status === 'RECOVERED') {
+        log(`RECOVERED_CODEX_TERMINAL_${s.request_id}`);
+        return { state: 'RECOVERED_TERMINAL', request_id: s.request_id };
+      }
+      if (recovery.status === 'WAITING')
+        log(`CODEX_EXECUTOR_RESULT_NOT_YET_READABLE_${s.request_id}_NO_REPLAY`);
+      else log(`CODEX_EXECUTOR_RESULT_${recovery.reason}_${s.request_id}_UNKNOWN_NO_REPLAY`);
+      continue;
+    }
     const resultDir = s.kind === 'opencode_plan' && config.executor ?
       resolveExecutorResultsDir(config.executor) : config.state_dir;
     const path = s.kind === 'opencode_plan' && config.executor ?
@@ -572,7 +779,11 @@ export async function runWorker(configInput, adapters = {}) {
   }
   const head = apiRead(`repos/${REPO}/git/ref/heads/main`).object?.sha;
   if (!SHA.test(head || '')) throw new Error('MAIN_HEAD_UNREADABLE');
-  const next = selectNext(comments, config.dispatchers, me, config.host, head, [...blockedKinds]);
+  const selected = selectNextWithCodexClaim(comments, config.dispatchers, me, config.host,
+    head, config.state_dir, [...blockedKinds]);
+  let next = selected.next;
+  if (selected.unresolvedRequestId)
+    log(`CODEX_LOCAL_CLAIM_UNRECONCILED_${selected.unresolvedRequestId}_NO_REPLAY`);
   try {
     const observation = await publishOperatorObservation(
       config, me, comments, head, adapters.observationDependencies,
@@ -583,6 +794,19 @@ export async function runWorker(configInput, adapters = {}) {
     // Status publishing failure must not block a valid queued task.
     log('OPERATOR_OBSERVATION_UPDATE_UNKNOWN');
   }
+  if (next?.job.kind === 'codex_plan') {
+    const gate = codexExecutionGate(next.job, config);
+    if (!gate.allowed) {
+      log(`CODEX_LANE_WAITING_AUTH_${gate.reasons.join(',')}`);
+      blockedKinds.add('codex_plan');
+      next = selectNext(comments, config.dispatchers, me, config.host, head, [...blockedKinds]);
+    } else if (!config.codex_spool ||
+        existsSync(join(config.codex_spool, 'executor.active'))) {
+      log('CODEX_EXECUTOR_SPOOL_OR_OWNER_NOT_READY');
+      blockedKinds.add('codex_plan');
+      next = selectNext(comments, config.dispatchers, me, config.host, head, [...blockedKinds]);
+    }
+  }
   if (!next) { log('NO_DELTA_NO_LLM'); return { state: 'NO_DELTA' }; }
   const job = next.job;
   if (job.source_sha !== head) { log(`STALE_SHA_SKIP_${job.request_id}`); return { state: 'STALE_SOURCE' }; }
@@ -591,7 +815,7 @@ export async function runWorker(configInput, adapters = {}) {
   if (original.body !== next.originalBody)
     throw new Error('DISPATCH_COMMENT_CHANGED');
   let spec = null;
-  if (job.kind === 'opencode_plan') spec = readSpec(job, apiRead);
+  if (job.kind === 'opencode_plan' || job.kind === 'codex_plan') spec = readSpec(job, apiRead);
   const executorDispatch = job.kind === 'opencode_plan' && config.enable_v2_model_runs === true &&
     checkModelAuthorization(job, config);
   if (executorDispatch) {
@@ -603,6 +827,12 @@ export async function runWorker(configInput, adapters = {}) {
     }
   }
   const attemptId = randomUUID();
+  if (job.kind === 'codex_plan') {
+    const dispatched = await dispatchCodex({ config, job, spec, workerLogin: me, attemptId });
+    log(`${dispatched.state}_${job.request_id}_${attemptId}`);
+    return { state: dispatched.state, request_id: job.request_id, attempt_id: attemptId,
+      outcome: dispatched.reason ?? 'CODEX_EXECUTOR_DISPATCH_ACK_NOT_ACCEPTANCE' };
+  }
   const start = receipt(job.request_id, attemptId, 'STARTED', job);
   postReceipt(config, start, me);
   if (executorDispatch) {
@@ -641,6 +871,9 @@ export async function main(options = {}) {
     commentsRead: options.commentsRead ?? options.issueComments,
     writeReceipt: options.writeReceipt,
     observationDependencies: options.observationDependencies,
+    dispatchCodexJob: options.dispatchCodexJob,
+    codexDispatchOptions: options.codexDispatchOptions,
+    codexReconcileDependencies: options.codexReconcileDependencies,
     log: options.log,
   });
 }

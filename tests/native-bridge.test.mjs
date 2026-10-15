@@ -7,7 +7,8 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
   RECEIPT_MARKER, checkModelAuthorization, findNativeCLI, terminalStateForResult,
-  runWorker as executeWorker, main as runWorker, writeReceipt, ISSUE_TITLE } from '../native-bridge/worker.mjs';
+  runWorker as executeWorker, main as runWorker, writeReceipt, ISSUE_TITLE,
+  codexTerminalReceipt, selectNextWithCodexClaim } from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
 
@@ -501,4 +502,141 @@ test('receipt identity rejects foreign project and wrong source cannot mask curr
   const other={...start,source_sha:'c'.repeat(40)};
   const state=[com(1,encoded(job)),com(2,RECEIPT_MARKER+JSON.stringify(other),'worker')];
   assert.equal(selectNext(state,['t14210184'],'worker',job.host,job.source_sha)?.id,1);
+});
+
+test('Worker routes an authorized Codex job through the isolated executor adapter without invoking a model inline', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-codex-worker-route-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const stateDir = join(root, 'state');
+    const codexSpool = join(root, 'codex-spool');
+    mkdirSync(workspace); mkdirSync(stateDir); mkdirSync(codexSpool);
+    const host = hostname().toUpperCase();
+    const spec = '# Synthetic source-only task\nNo model execution is allowed in this test.\n';
+    const codexJob = { schema: 3, project_id: PROJECT, host,
+      request_id: 'PTYSD_CODEX_DISPATCH_TEST_20261015', kind: 'codex_plan',
+      source_sha: commit, spec_path: 'native-bridge/tasks/codex-review.md',
+      spec_sha256: h(spec), model: 'gpt-6.1-sol', reasoning_effort: 'medium',
+      write_paths: ['native-bridge/sample.mjs'] };
+    const comment = com(9001, encoded(codexJob));
+    const comments = [comment];
+    const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
+      workspace, state_dir: stateDir, codex_spool: codexSpool,
+      dispatchers: ['t14210184'], github_transport_verified: true,
+      codex_cli_qualified: true, codex_login_verified: true,
+      enable_codex_model_runs: true, codex_usage_authorized: true,
+      codex_sandbox_boundary: 'VERIFIED_WORKSPACE_ONLY',
+      publisher_identity_sid: 'S-1-5-21-1000', executor_identity_sid: 'S-1-5-21-2000',
+      codex_executor_task: 'PTYSD-Codex-Executor', codex_executor_task_verified: true,
+      codex_executor_is_standard_user: true,
+      allowed_codex_models: { 'gpt-6.1-sol': ['medium'] } };
+    const apiRead = uri => {
+      if (uri === 'user') return { login: 'worker' };
+      if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
+      if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: commit } };
+      if (uri === `repos/${REPO}/issues/comments/${comment.id}`) return comment;
+      if (uri === `repos/${REPO}/contents/${codexJob.spec_path}?ref=${commit}`)
+        return { encoding: 'base64', content: Buffer.from(spec).toString('base64') };
+      throw new Error(`UNEXPECTED_MOCK_API_ROUTE:${uri}`);
+    };
+    const calls = { bundle: 0, start: 0, trigger: 0, inline: 0 };
+    const result = await executeWorker(config, {
+      apiRead, commentsRead: () => comments,
+      writeReceipt: () => { throw new Error('GENERIC_RECEIPT_PATH_MUST_NOT_RUN'); },
+      runPlan: () => { calls.inline++; throw new Error('MODEL_MUST_NOT_RUN_INLINE'); },
+      codexDispatchOptions: {
+        createBundle: async path => { calls.bundle++; writeFileSync(path, 'synthetic immutable bundle'); },
+        publishStarted: async data => {
+          calls.start++;
+          comments.push(com(9002, RECEIPT_MARKER + JSON.stringify(data), 'worker'));
+        },
+        trigger: () => { calls.trigger++; },
+      },
+      log: () => {},
+    });
+    assert.equal(result.state, 'CODEX_EXECUTOR_REQUESTED');
+    assert.equal(calls.bundle, 1);
+    assert.equal(calls.start, 1);
+    assert.equal(calls.trigger, 1, 'only the injected synthetic trigger runs');
+    assert.equal(calls.inline, 0, 'the five-minute dispatcher never runs a model inline');
+    const started = parseReceipt(comments.at(-1).body);
+    assert.equal(started.kind, 'codex_plan');
+    assert.equal(started.state, 'STARTED');
+    assert.equal(started.outcome, 'CODEX_EXECUTOR_DISPATCH_ACK_NOT_ACCEPTANCE');
+    assert.equal(started.task_fingerprint?.length, 64);
+    assert.equal(comments.filter(item => parseReceipt(item.body)?.request_id === codexJob.request_id).length, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('corrupt Codex attempt remains UNKNOWN and does not starve a separate Worker ping', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-codex-corrupt-worker-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const stateDir = join(root, 'state');
+    const codexSpool = join(root, 'codex-spool');
+    const resultDir = join(codexSpool, 'results');
+    mkdirSync(workspace); mkdirSync(stateDir); mkdirSync(resultDir, { recursive: true });
+    const host = hostname().toUpperCase();
+    const codexJob = { schema: 3, project_id: PROJECT, host,
+      request_id: 'PTYSD_CODEX_CORRUPT_ATTEMPT_20261015', kind: 'codex_plan',
+      source_sha: commit, spec_path: 'native-bridge/tasks/codex-review.md',
+      spec_sha256: hash, model: 'gpt-6.1-sol', reasoning_effort: 'medium',
+      write_paths: ['native-bridge/sample.mjs'] };
+    const attemptId = '11111111-1111-4111-8111-111111111111';
+    const started = { ...receipt(codexJob.request_id, attemptId, 'STARTED', codexJob),
+      task_fingerprint: hash };
+    const codexComment = com(9101, encoded(codexJob));
+    const pingJob = mkjob({ host, request_id: 'PTYSD_NATIVE_INDEPENDENT_PING_20261015' });
+    const comments = [codexComment,
+      com(9102, RECEIPT_MARKER + JSON.stringify(started), 'worker'),
+      com(9103, encoded(pingJob))];
+    writeFileSync(join(resultDir, `${codexJob.request_id}-${attemptId}.json`), '{ broken result');
+    const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
+      workspace, state_dir: stateDir, codex_spool: codexSpool,
+      dispatchers: ['t14210184'] };
+    const apiRead = uri => {
+      if (uri === 'user') return { login: 'worker' };
+      if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
+      if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: commit } };
+      if (uri === `repos/${REPO}/issues/comments/${codexComment.id}`) return codexComment;
+      if (uri === `repos/${REPO}/issues/comments/${9103}`) return comments[2];
+      throw new Error(`UNEXPECTED_MOCK_API_ROUTE:${uri}`);
+    };
+    const writes = [];
+    const logs = [];
+    const result = await executeWorker(config, {
+      apiRead, commentsRead: () => comments,
+      writeReceipt: (_config, data, login) => {
+        writes.push(data);
+        comments.push(com(9104 + writes.length, RECEIPT_MARKER + JSON.stringify(data), login));
+      },
+      dispatchCodexJob: () => { throw new Error('CORRUPT_CODEX_ATTEMPT_MUST_NOT_REDISPATCH'); },
+      runPlan: () => { throw new Error('PING_MUST_NOT_INVOKE_MODEL'); },
+      log: value => logs.push(value),
+    });
+    assert.equal(result.request_id, pingJob.request_id);
+    assert.deepEqual(writes.map(item => item.kind), ['ping', 'ping']);
+    assert.equal(comments.filter(item => parseReceipt(item.body)?.request_id === codexJob.request_id).length, 1);
+    assert.ok(logs.some(value => value.includes('UNKNOWN_NO_REPLAY')));
+    assert.ok(!logs.some(value => value.includes('RECOVERED_CODEX_TERMINAL')));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Codex terminal receipt keeps exit-zero execution explicitly unverified', () => {
+  const started = { schema: 1, project_id: PROJECT, host: 'DESKTOP-1B6PD2P',
+    request_id: 'PTYSD_CODEX_TERMINAL_TEST_20261015', kind: 'codex_plan',
+    source_sha: commit, attempt_id: '11111111-1111-4111-8111-111111111111',
+    state: 'STARTED', model: 'gpt-6.1-sol', reasoning_effort: 'medium',
+    task_fingerprint: hash };
+  const result = { schema: 1, kind: 'codex_plan', request_id: started.request_id,
+    attempt_id: started.attempt_id, source_sha: commit, exit_code: 0,
+    fingerprint: hash, session_id: 'session_12345678', diff_sha256: null,
+    stdout_sha256: hash, stderr_sha256: hash, outcome: 'CODEX_CLI_EXIT_0_UNVERIFIED',
+    model_invoked: true, changed_paths: [], out_of_scope_paths: [], pr_url: null, tests: 'NOT_RUN' };
+  const terminal = codexTerminalReceipt(started, result);
+  assert.equal(terminal.state, 'FINISHED');
+  assert.equal(terminal.outcome, 'CODEX_CLI_EXIT_0_UNVERIFIED');
+  assert.equal(Object.hasOwn(terminal, 'accepted'), false);
+  const incomplete = codexTerminalReceipt(started, { ...result, outcome: 'EVIDENCE_STORAGE_FAILED' });
+  assert.equal(incomplete.state, 'BLOCKED');
 });
