@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,7 +13,8 @@ import {
   makeCodexExecutorRequest, publishCodexExecutorRequest, validateCodexExecutorRequest,
   executorResultPath, validateCodexExecutorResult,
 } from '../native-bridge/codex-continuation.mjs';
-import { buildCodexChildEnvironment, runExecutorOnce, takeNextRequest, terminateChildTree } from '../native-bridge/codex-executor.mjs';
+import { buildCodexChildEnvironment, runExecutorOnce, takeNextRequest, terminateChildTree,
+  verifyPublisherCredentialBoundary } from '../native-bridge/codex-executor.mjs';
 import { codexTerminalReceipt, dispatchCodexJob, selectNext, selectNextWithCodexClaim,
   writeCodexReceiptOnce } from '../native-bridge/worker.mjs';
 
@@ -40,6 +42,12 @@ function job(overrides = {}) {
 }
 function body(value) { return NATIVE_JOB_MARKER + JSON.stringify(value); }
 function comment(id, text, login = author) { return { id, body: text, user: { login } }; }
+function sandboxProof(config) {
+  return { verified: true, executor_sid: config.executor_identity_sid,
+    publisher_sid: config.publisher_identity_sid, probe_path: config.codex_sandbox_probe_path,
+    probe_stat_succeeded: true, probe_deny_ace_verified: true, probe_read_denied: true };
+}
+
 function readyConfig(overrides = {}) {
   return {
     github_transport_verified: true,
@@ -50,6 +58,7 @@ function readyConfig(overrides = {}) {
     codex_sandbox_boundary: 'VERIFIED_WORKSPACE_ONLY',
     publisher_identity_sid: 'S-1-5-21-PUBLISHER',
     executor_identity_sid: 'S-1-5-21-EXECUTOR',
+    codex_sandbox_probe_path: 'C:\\Users\\publisher\\AppData\\Local\\PTYSDCodexExecutor\\publisher-boundary.probe',
     codex_executor_task: 'PTYSD-Codex-Executor',
     codex_executor_task_verified: true,
     codex_executor_is_standard_user: true,
@@ -177,8 +186,12 @@ test('unreconciled Codex claim blocks replay but does not starve independent nat
 });
 
 test('execution gate fails closed on missing cost, identity, sandbox, provider or model authorization', () => {
-  const ready = codexExecutionGate(job(), readyConfig());
+  const readyConfiguration = readyConfig();
+  const ready = codexExecutionGate(job(), readyConfiguration, sandboxProof(readyConfiguration));
   assert.deepEqual(ready, { allowed: true, reasons: [] });
+  const staticOnly = codexExecutionGate(job(), readyConfiguration);
+  assert.equal(staticOnly.allowed, false);
+  assert.ok(staticOnly.reasons.includes('SANDBOX_OS_READ_PROBE_NOT_VERIFIED'));
   for (const config of [
     readyConfig({ enable_codex_model_runs: false }),
     readyConfig({ codex_usage_authorized: false }),
@@ -188,9 +201,71 @@ test('execution gate fails closed on missing cost, identity, sandbox, provider o
     readyConfig({ codex_login_verified: false }),
     readyConfig({ github_transport_verified: false }),
     readyConfig({ allowed_codex_models: {} }),
-  ]) assert.equal(codexExecutionGate(job(), config).allowed, false);
+  ]) assert.equal(codexExecutionGate(job(), config, sandboxProof(config)).allowed, false);
   assert.ok(codexExecutionGate(job(), readyConfig({ codex_usage_authorized: false }))
     .reasons.includes('USAGE_AUTHORIZATION_UNKNOWN'));
+});
+
+test('Publisher-profile probe requires the actual Executor SID, fixed profile path, and OS read denial', () => {
+  const config = readyConfig();
+  const reads = [];
+  const result = verifyPublisherCredentialBoundary(config, config.executor_identity_sid, {
+    platform: 'win32',
+    profilePathForSid: sid => { assert.equal(sid, config.publisher_identity_sid); return 'C:\\Users\\publisher'; },
+    lstat: path => { reads.push(['stat', path]); return { isFile: () => true, isSymbolicLink: () => false, size: 32 }; },
+    hasReadDataDeny: () => true,
+    open: path => { reads.push(['open', path]); const error = new Error('access denied'); error.code = 'EACCES'; throw error; },
+  });
+  assert.equal(result.verified, true);
+  assert.equal(result.probe_read_denied, true);
+  assert.equal(reads.length, 2);
+
+  const readable = verifyPublisherCredentialBoundary(config, config.executor_identity_sid, {
+    platform: 'win32', profilePathForSid: () => 'C:\\Users\\publisher',
+    lstat: () => ({ isFile: () => true, isSymbolicLink: () => false, size: 1 }),
+    hasReadDataDeny: () => true,
+    open: () => 17, close: () => {},
+  });
+  assert.equal(readable.verified, false);
+  assert.equal(readable.reason, 'PUBLISHER_CREDENTIAL_PROBE_READABLE_BY_EXECUTOR');
+
+  const missingDeny = verifyPublisherCredentialBoundary(config, config.executor_identity_sid, {
+    platform: 'win32', profilePathForSid: () => 'C:\\Users\\publisher',
+    lstat: () => ({ isFile: () => true, isSymbolicLink: () => false, size: 1 }),
+    hasReadDataDeny: () => false,
+  });
+  assert.equal(missingDeny.reason, 'SANDBOX_PROBE_READ_DENY_ACE_MISSING');
+
+  const wrongPath = verifyPublisherCredentialBoundary({ ...config,
+    codex_sandbox_probe_path: 'C:\\Users\\other\\probe.bin' }, config.executor_identity_sid, {
+    platform: 'win32', profilePathForSid: () => 'C:\\Users\\publisher',
+  });
+  assert.equal(wrongPath.reason, 'SANDBOX_PROBE_OUTSIDE_PUBLISHER_PROFILE');
+  assert.equal(verifyPublisherCredentialBoundary(config, config.publisher_identity_sid, {
+    platform: 'win32', profilePathForSid: () => 'C:\\Users\\publisher',
+  }).reason, 'SANDBOX_EXECUTOR_SID_MISMATCH');
+});
+
+test('Win32 probe observes a real NTFS data-read denial without reading probe bytes', { skip: process.platform !== 'win32' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-ntfs-probe-'));
+  const probe = join(dir, 'AppData', 'Local', 'PTYSDCodexExecutor', 'publisher-boundary.probe');
+  mkdirSync(join(dir, 'AppData', 'Local', 'PTYSDCodexExecutor'), { recursive: true });
+  writeFileSync(probe, 'nonsecret synthetic access probe');
+  const sid = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+    '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],
+  { encoding: 'utf8', windowsHide: true, shell: false, timeout: 10000 }).trim();
+  const acl = args => execFileSync('icacls.exe', args, { encoding: 'utf8', windowsHide: true,
+    shell: false, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
+  try {
+    acl([probe, '/deny', `*${sid}:(RD)`]);
+    const config = readyConfig({ publisher_identity_sid: 'S-1-5-18', executor_identity_sid: sid,
+      codex_sandbox_probe_path: probe });
+    const result = verifyPublisherCredentialBoundary(config, sid, { profilePathForSid: () => dir });
+    assert.equal(result.verified, true, JSON.stringify(result));
+  } finally {
+    try { acl([probe, '/remove:d', `*${sid}`]); } catch {}
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('task fingerprint binds scope, model and source without credentials', () => {
@@ -510,6 +585,30 @@ test('executor consumes a request into an explicit blocked receipt when identity
     assert.equal(stored.pr_url, null);
     assert.throws(() => validateCodexExecutorResult(stored, { request_id: picked.request_id,
       attempt_id: request.attempt_id, source_sha: picked.source_sha }), /EXECUTOR_RESULT_IDENTITY_INVALID/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor refuses static sandbox configuration when the Publisher ACL probe is absent', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-sandbox-required-'));
+  try {
+    const spec = '# No model call in this test\n';
+    const bundle = join(dir, 'source.bundle');
+    writeFileSync(bundle, 'synthetic bundle');
+    const specSha = createHash('sha256').update(spec).digest('hex');
+    const bundleSha = createHash('sha256').update(readFileSync(bundle)).digest('hex');
+    const picked = job({ request_id: 'PTYSD_CODEX_SANDBOX_GATE_20261015', spec_sha256: specSha });
+    const request = makeCodexExecutorRequest(picked, '00000000-0000-0000-0000-000000000091', spec, bundle, bundleSha);
+    publishCodexExecutorRequest(dir, request);
+    const config = readyConfig({ codex_sandbox_probe_path: undefined });
+    Object.assign(config, { spool_dir: dir, workspace_root: join(dir, 'workspaces'),
+      codex_executable: 'C:\\fake\\codex.exe' });
+    const result = await runExecutorOnce(config, { currentSid: config.executor_identity_sid, environment: {} });
+    assert.equal(result.state, 'BLOCKED');
+    assert.equal(result.model_invoked, false);
+    assert.ok(result.reasons.includes('SANDBOX_PROBE_PATH_INVALID'));
+    const saved = JSON.parse(readFileSync(executorResultPath(dir, picked.request_id, request.attempt_id), 'utf8'));
+    assert.equal(saved.model_invoked, false);
+    assert.equal(saved.outcome, 'CODEX_EXECUTION_GATE_BLOCKED');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -4,9 +4,11 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync,
+  mkdtempSync, rmSync,
   openSync, closeSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync, fsyncSync, unlinkSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { join, relative, resolve, isAbsolute, sep } from 'node:path';
+import { join, relative, resolve, isAbsolute, sep, win32 as windowsPath } from 'node:path';
+import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { codexExecutionGate, buildCodexExecArgs, codexSessionFromJsonl,
@@ -117,6 +119,99 @@ function getWindowsSid() {
   const output = nativeText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value']);
   return output.trim();
+}
+
+function getWindowsProfilePath(sid) {
+  if (typeof sid !== 'string' || !/^S-\d-\d+(?:-\d+)+$/.test(sid))
+    throw new Error('WINDOWS_PROFILE_SID_INVALID');
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    `$profiles = @(Get-CimInstance -ClassName Win32_UserProfile -Filter \"SID='${sid}'\" | Where-Object { $_.LocalPath })`,
+    "if ($profiles.Count -ne 1) { throw 'WINDOWS_PROFILE_NOT_UNIQUE' }",
+    '$profiles[0].LocalPath',
+  ].join(';');
+  const output = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8', windowsHide: true, shell: false, timeout: 10000,
+    maxBuffer: 32768, stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+  if (!windowsPath.isAbsolute(output)) throw new Error('WINDOWS_PROFILE_PATH_INVALID');
+  return output;
+}
+
+function hasExplicitReadDataDeny(path, sid) {
+  if (typeof sid !== 'string' || !/^S-\d-\d+(?:-\d+)+$/.test(sid))
+    throw new Error('WINDOWS_ACL_SID_INVALID');
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-acl-readback-'));
+  try {
+    const savedAcl = join(dir, 'acl.txt');
+    execFileSync('icacls.exe', [path, '/save', savedAcl], {
+      encoding: 'utf8', windowsHide: true, shell: false, timeout: 10000,
+      maxBuffer: 32768, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    // icacls /save writes Unicode SDDL. The probe itself is known to be a
+    // regular file, so SDDL's CC (file ReadData) or mask 0x1 is the exact bit.
+    const saved = readFileSync(savedAcl, 'utf16le');
+    const escapedSid = sid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\(D;;(?:CC|0x0*1);;;${escapedSid}\\)`, 'i').test(saved);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A config string is intent only. This live probe checks a nonsecret file
+// provisioned under the Publisher SID's real Windows profile: metadata access
+// must succeed while opening the file for data read is denied to the actual
+// Executor SID. Probe bytes are never read or included in public receipts.
+export function verifyPublisherCredentialBoundary(config, currentSid, deps = {}) {
+  const fail = reason => ({ verified: false, reason });
+  if ((deps.platform || process.platform) !== 'win32') return fail('SANDBOX_WIN32_PROBE_UNAVAILABLE');
+  const publisherSid = config?.publisher_identity_sid;
+  const executorSid = config?.executor_identity_sid;
+  if (typeof currentSid !== 'string' || currentSid !== executorSid)
+    return fail('SANDBOX_EXECUTOR_SID_MISMATCH');
+  if (typeof publisherSid !== 'string' || publisherSid === executorSid)
+    return fail('SANDBOX_PUBLISHER_EXECUTOR_SID_NOT_SEPARATE');
+  const configuredPath = config?.codex_sandbox_probe_path;
+  if (typeof configuredPath !== 'string' || !windowsPath.isAbsolute(configuredPath))
+    return fail('SANDBOX_PROBE_PATH_INVALID');
+
+  let profilePath;
+  try { profilePath = (deps.profilePathForSid || getWindowsProfilePath)(publisherSid); }
+  catch { return fail('SANDBOX_PUBLISHER_PROFILE_UNRESOLVED'); }
+  if (typeof profilePath !== 'string' || !windowsPath.isAbsolute(profilePath))
+    return fail('SANDBOX_PUBLISHER_PROFILE_UNRESOLVED');
+  const expectedPath = windowsPath.join(profilePath, 'AppData', 'Local', 'PTYSDCodexExecutor',
+    'publisher-boundary.probe');
+  const probePath = windowsPath.resolve(configuredPath);
+  if (probePath.toLowerCase() !== windowsPath.resolve(expectedPath).toLowerCase())
+    return fail('SANDBOX_PROBE_OUTSIDE_PUBLISHER_PROFILE');
+
+  let info;
+  try { info = (deps.lstat || lstatSync)(probePath); }
+  catch { return fail('SANDBOX_PROBE_METADATA_UNAVAILABLE'); }
+  if (!info.isFile() || info.isSymbolicLink() || info.size < 1)
+    return fail('SANDBOX_PROBE_NOT_A_NONEMPTY_REGULAR_FILE');
+
+  let denyAceVerified;
+  try { denyAceVerified = (deps.hasReadDataDeny || hasExplicitReadDataDeny)(probePath, executorSid); }
+  catch (error) {
+    const code = Number.isInteger(error?.status) ? `EXIT_${error.status}` :
+      (typeof error?.code === 'string' ? error.code : 'READBACK_FAILED');
+    return fail(`SANDBOX_PROBE_ACL_UNVERIFIABLE_${code}`);
+  }
+  if (denyAceVerified !== true) return fail('SANDBOX_PROBE_READ_DENY_ACE_MISSING');
+
+  let fd;
+  try { fd = (deps.open || openSync)(probePath, 'r'); }
+  catch (error) {
+    if (error?.code !== 'EACCES' && error?.code !== 'EPERM')
+      return fail('SANDBOX_PROBE_READ_RESULT_INCONCLUSIVE');
+    return { verified: true, executor_sid: executorSid, publisher_sid: publisherSid,
+      probe_path: configuredPath, probe_stat_succeeded: true, probe_deny_ace_verified: true,
+      probe_read_denied: true };
+  }
+  try { (deps.close || closeSync)(fd); } catch { /* readable already fails the boundary */ }
+  return fail('PUBLISHER_CREDENTIAL_PROBE_READABLE_BY_EXECUTOR');
 }
 
 function assertNoGitHubTokenEnvironment() {
@@ -429,7 +524,8 @@ export async function runExecutorOnce(config, deps = {}) {
       writeResult(resultPath, blocked('CODEX_EXECUTOR_PREFLIGHT_BLOCKED', configGate.reasons));
       return { state: 'BLOCKED', reasons: configGate.reasons, model_invoked: false, result_path: resultPath };
     }
-    const gate = codexExecutionGate(request.job, config);
+    const sandboxProof = verifyPublisherCredentialBoundary(config, currentSid, deps.sandboxProbeDeps || {});
+    const gate = codexExecutionGate(request.job, config, sandboxProof);
     if (!gate.allowed) {
       writeResult(resultPath, blocked('CODEX_EXECUTION_GATE_BLOCKED', gate.reasons));
       return { state: 'BLOCKED', reasons: gate.reasons, model_invoked: false, result_path: resultPath };

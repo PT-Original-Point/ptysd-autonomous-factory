@@ -63,7 +63,7 @@ export function parseCodexReceipt(body) {
   return receipt;
 }
 
-export function codexExecutionGate(job, config) {
+export function codexExecutionGate(job, config, sandboxProof = null) {
   const reasons = [];
   if (!job || job.kind !== CODEX_JOB_KIND) reasons.push('INVALID_CODEX_JOB');
   if (config?.github_transport_verified !== true) reasons.push('GITHUB_SOURCE_NOT_VERIFIED');
@@ -72,6 +72,12 @@ export function codexExecutionGate(job, config) {
   if (config?.enable_codex_model_runs !== true) reasons.push('MODEL_RUNS_NOT_ENABLED');
   if (config?.codex_usage_authorized !== true) reasons.push('USAGE_AUTHORIZATION_UNKNOWN');
   if (config?.codex_sandbox_boundary !== 'VERIFIED_WORKSPACE_ONLY') reasons.push('SANDBOX_BOUNDARY_NOT_VERIFIED');
+  if (sandboxProof?.verified !== true || sandboxProof.executor_sid !== config?.executor_identity_sid ||
+      sandboxProof.publisher_sid !== config?.publisher_identity_sid ||
+      sandboxProof.probe_path !== config?.codex_sandbox_probe_path ||
+      sandboxProof.probe_stat_succeeded !== true || sandboxProof.probe_deny_ace_verified !== true ||
+      sandboxProof.probe_read_denied !== true)
+    reasons.push(sandboxProof?.reason || 'SANDBOX_OS_READ_PROBE_NOT_VERIFIED');
   const publisherSid = config?.publisher_identity_sid;
   const executorSid = config?.executor_identity_sid;
   if (typeof publisherSid !== 'string' || typeof executorSid !== 'string' || publisherSid === executorSid)
