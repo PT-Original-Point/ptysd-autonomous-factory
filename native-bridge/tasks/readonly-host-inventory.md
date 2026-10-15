@@ -4,7 +4,7 @@ Project: `CHATGPT_GLOBAL_SKILL_GOVERNANCE`.
 
 Read the current repository workspace only. Explain what the checked-out README and
 native-bridge README say about GitHub Issue / PR authority, source-only candidates,
-Windows host retirement gates, protected 2667 monitoring, and independent acceptance.
+Windows host retirement gates, the distinction between retired 2667 monitoring and the independent PTYSD-Native-OpenCode task, and separate source/host acceptance.
 
 Do not access `C:\ProgramData`, other projects, secrets, credentials, or Windows services.
 Do not execute shell commands, install packages, edit files, or trigger external effects.
