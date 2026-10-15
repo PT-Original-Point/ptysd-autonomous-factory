@@ -73,6 +73,31 @@ test('captured process preserves a nonzero native exit code', async () => {
   }
 });
 
+test('failed spawn preserves its error without misclassifying absent output pipes or terminating a child', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'ptysd-capture-spawn-failure-'));
+  try {
+    let terminateCalls = 0;
+    const result = await runCapturedProcess(join(home, 'missing-opencode-executable'), [], {
+      cwd: home, env: process.env,
+      stdoutPath: join(home, 'stdout.bin'), stderrPath: join(home, 'stderr.bin'),
+      terminate: child => {
+        terminateCalls += 1;
+        assert.equal(child.pid, undefined, 'a failed spawn has no child PID');
+      },
+    });
+    assert.notEqual(result.exit_code, 0, 'a failed spawn is not a successful child exit');
+    assert.equal(result.outcome, 'OPENCODE_SPAWN_FAILED');
+    assert.equal(result.local_evidence.spawn_error, 'ENOENT');
+    assert.equal(result.local_evidence.capture_error, null);
+    assert.equal(result.local_evidence.storage_error, null);
+    assert.equal(result.local_evidence.termination_state, 'NOT_REQUESTED');
+    assert.equal(terminateCalls, 0);
+    assert.match(result.evidence_sha256, /^[a-f0-9]{64}$/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('evidence storage failure is explicit and does not report model success', async () => {
   const home = mkdtempSync(join(tmpdir(), 'ptysd-capture-storage-'));
   try {

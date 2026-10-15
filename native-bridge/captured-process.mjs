@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { basename } from 'node:path';
 import { spawn } from 'node:child_process';
-import { pipeline } from 'node:stream/promises';
+import { finished, pipeline } from 'node:stream/promises';
 
 const STDERR_SEPARATOR = Buffer.from('\n--- STDERR ---\n', 'utf8');
 
@@ -63,6 +63,8 @@ export async function runCapturedProcess(command, args, {
   let storageError = null;
   let captureError = null;
   let spawnError = null;
+  let spawnStarted = false;
+  let missingOutputPipe = false;
   let terminateRequested = false;
   let terminationState = 'NOT_REQUESTED';
   let terminationError = null;
@@ -87,18 +89,28 @@ export async function runCapturedProcess(command, args, {
       terminationError = errorCode(error);
     }
   };
+  const classifyMissingOutputPipe = () => {
+    if (!missingOutputPipe || !spawnStarted) return;
+    captureError ??= 'OUTPUT_PIPE_UNAVAILABLE';
+    terminateOnce();
+  };
 
   const stdoutFile = createWriteStream(stdoutPath, { flags: 'wx', mode: 0o600 });
   const stderrFile = createWriteStream(stderrPath, { flags: 'wx', mode: 0o600 });
   stdoutFile.once('error', error => { storageError ??= errorCode(error); terminateOnce(); });
   stderrFile.once('error', error => { storageError ??= errorCode(error); terminateOnce(); });
+  child.once('spawn', () => {
+    spawnStarted = true;
+    classifyMissingOutputPipe();
+  });
   child.once('error', error => { spawnError ??= errorCode(error); });
 
   const pipe = (source, destination) => {
     if (!source) {
-      captureError ??= 'OUTPUT_PIPE_UNAVAILABLE';
-      terminateOnce();
-      return Promise.resolve();
+      missingOutputPipe = true;
+      classifyMissingOutputPipe();
+      destination.end();
+      return finished(destination).catch(() => {});
     }
     return pipeline(source, destination).catch(error => {
       if (!storageError && !spawnError) captureError ??= errorCode(error);
@@ -111,6 +123,8 @@ export async function runCapturedProcess(command, args, {
     child.once('close', (code, signal) => resolveClose({ code, signal }));
   });
   const [exit] = await Promise.all([closed, stdoutCapture, stderrCapture]);
+  if (missingOutputPipe && !spawnError && !captureError)
+    captureError = 'OUTPUT_PIPE_UNAVAILABLE';
 
   let evidence = null;
   try { evidence = await hashEvidence(stdoutPath, stderrPath); }
