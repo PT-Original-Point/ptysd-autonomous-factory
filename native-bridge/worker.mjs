@@ -9,6 +9,11 @@ import { join, resolve, relative, isAbsolute, delimiter } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { qualifyOpenCodeV2, validateV2Model, buildV2ReadOnlyConfig, buildV2ReadOnlyArgs } from './opencode-v2.mjs';
 import { runV2Readiness } from './v2-readiness.mjs';
+import {
+  OPERATOR_REPO, OPERATOR_PROJECT, OPERATOR_ISSUE,
+  collectWindowsObservation, encodeOperatorObservation, findOperatorComment,
+  updateExistingOperatorComment,
+} from './operator-observation.mjs';
 
 export const PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
 export const REPO = 'PT-Original-Point/ptysd-autonomous-factory';
@@ -95,14 +100,174 @@ function issueComments(config) {
   const raw = JSON.parse(gh(['api', `repos/${REPO}/issues/${config.issue}/comments?per_page=100`, '--paginate', '--slurp']));
   return raw.flat().filter(c => typeof c?.id === 'number').sort((a, b) => a.id - b.id);
 }
-function writeReceipt(config, data, workerLogin) {
+function latestOperatorJob(comments, config, workerLogin, mainSha) {
+  const jobs = comments.filter(c => config.dispatchers.includes(c.user?.login))
+    .map(c => ({ id: c.id, body: c.body, job: parseJob(c.body) }))
+    .filter(x => x.job && x.job.host.toUpperCase() === config.host.toUpperCase())
+    .sort((a, b) => a.id - b.id);
+  if (!jobs.length) return null;
+  const job = jobs.at(-1).job;
+  const duplicate = jobs.filter(entry => entry.job.request_id === job.request_id);
+  if (new Set(duplicate.map(entry => entry.body)).size > 1) {
+    return { request_id: job.request_id, attempt_id: null, kind: job.kind,
+      source_sha: job.source_sha, state: 'AMBIGUOUS_DUPLICATE' };
+  }
+  const receipts = comments.filter(c => c.user?.login === workerLogin)
+    .map(c => ({ id: c.id, receipt: parseReceipt(c.body) }))
+    .filter(x => x.receipt && x.receipt.request_id === job.request_id &&
+      x.receipt.host.toUpperCase() === job.host.toUpperCase() &&
+      x.receipt.source_sha === job.source_sha && x.receipt.kind === job.kind)
+    .sort((a, b) => a.id - b.id);
+  const attempts = new Map();
+  for (const entry of receipts) {
+    if (!attempts.has(entry.receipt.attempt_id)) attempts.set(entry.receipt.attempt_id, []);
+    attempts.get(entry.receipt.attempt_id).push(entry.receipt);
+  }
+  const latestAttempt = [...attempts.entries()].at(-1);
+  const attemptId = latestAttempt?.[0] ?? null;
+  const states = latestAttempt?.[1] ?? [];
+  const last = states.at(-1) ?? null;
+  let state = 'QUEUED_NOT_STARTED';
+  if (job.source_sha !== mainSha) state = 'STALE_SOURCE';
+  else if (last?.state === 'STARTED') state = 'STARTED_UNVERIFIED';
+  else if (last?.state === 'FINISHED') state = 'FINISHED_NOT_ACCEPTANCE';
+  else if (last?.state === 'BLOCKED') state = 'BLOCKED';
+  return { request_id: job.request_id, attempt_id: attemptId, kind: job.kind,
+    source_sha: job.source_sha, state,
+    outcome: typeof last?.outcome === 'string' && /^[A-Z0-9_-]{1,80}$/.test(last.outcome)
+      ? last.outcome : 'UNKNOWN',
+    exit_code: Number.isSafeInteger(last?.exit_code) ? last.exit_code : null };
+}
+export async function publishOperatorObservation(config, workerLogin, comments, mainSha, dependencies = {}) {
+  const existing = comments.find(c =>
+    typeof c?.body === 'string' && c.body.startsWith('PTYSD_OPERATOR_OBSERVATION_V1\n'));
+  if (!existing) return { status: 'NOT_SEEDED' };
+  const now = dependencies.now ? dependencies.now() : new Date();
+  const observedAt = now.toISOString();
+  const windows = (dependencies.collectWindowsObservation || collectWindowsObservation)();
+  const prior = findOperatorComment(comments, workerLogin);
+  if (prior.status !== 'OK') throw new Error(prior.error || 'OPERATOR_COMMENT_UNKNOWN');
+  let repositoryRunner = { status: 'UNKNOWN', count: null, observed_at: observedAt };
+  try {
+    const response = await (dependencies.readRunnerRegistration
+      ? dependencies.readRunnerRegistration()
+      : api('repos/' + OPERATOR_REPO + '/actions/runners?per_page=100'));
+    if (Number.isSafeInteger(response.total_count) && response.total_count >= 0)
+      repositoryRunner = { status: 'FRESH', count: response.total_count, observed_at: observedAt };
+  } catch {}
+  const latestTask = latestOperatorJob(comments, config, workerLogin, mainSha);
+  const activeTask = latestTask &&
+    ['QUEUED_NOT_STARTED', 'STARTED_UNVERIFIED'].includes(latestTask.state)
+    ? latestTask : null;
+  const nextOwner = windows.status !== 'FRESH' ? 'OS_OBSERVATION_UNKNOWN'
+    : windows.native_task.enabled === false ? 'NATIVE_SCHEDULER_REPAIR'
+      : activeTask?.state === 'QUEUED_NOT_STARTED' ? 'NATIVE_WORKER'
+        : activeTask?.state === 'STARTED_UNVERIFIED' ? 'VERIFY_ACTIVE_WORK'
+          : latestTask?.state === 'BLOCKED' ? 'REVIEW_BLOCKER' : 'NO_CURRENT_TASK';
+  const snapshot = {
+    schema: 1, project_id: OPERATOR_PROJECT, repo: OPERATOR_REPO, issue: OPERATOR_ISSUE,
+    host_alias: 'win11-primary', snapshot_id: randomUUID(),
+    sequence: (Number.isSafeInteger(prior.observation.sequence) ? prior.observation.sequence : 0) + 1,
+    observed_at: observedAt, published_at: observedAt,
+    expires_at: new Date(now.getTime() + 10 * 60 * 1000).toISOString(),
+    source: {
+      kind: 'WIN11_NATIVE_TASK_READBACK',
+      comment_id: prior.comment.id,
+      issue_comments_observed_at: observedAt,
+      main_sha: mainSha,
+    },
+    windows,
+    native_worker: {
+      observed_at: observedAt,
+      state: windows.status !== 'FRESH' ? 'OS_OBSERVATION_UNKNOWN'
+        : windows.native_task.state === 'RUNNING' ? 'TASK_RUNNING_DURING_POLL'
+          : 'POLL_EXECUTED_TASK_TRIGGER_UNVERIFIED',
+      current_task: activeTask,
+      latest_task: latestTask,
+      files_modified: 'UNPROVEN',
+      remote_commit: null, pull_request: null, ci: 'UNKNOWN',
+      next_owner: nextOwner,
+    },
+    opencode_v2: {
+      ...(prior.observation.opencode_v2 || {}),
+      process_observed_at: windows.observed_at,
+      process_count: windows.opencode_process_count,
+      active_session_count: null,
+      active_session_state: 'UNKNOWN_NO_PASSIVE_API',
+      task_binding: 'UNPROVEN',
+      code_changes: 'UNPROVEN',
+      remote_commit: null, pull_request: null, ci: 'UNKNOWN',
+    },
+    github: {
+      observed_at: observedAt, main_sha: mainSha,
+      issue_comments_count: comments.length,
+      runner_registration: repositoryRunner,
+      organization_runner_registration: 'UNKNOWN_ORG_SCOPE_NOT_AVAILABLE',
+      runner_service_count: windows.runner_service_count,
+      runner_service_running: windows.runner_service_running,
+    },
+    monitor_candidate: prior.observation.monitor_candidate || null,
+    incident: prior.observation.incident || null,
+  };
+  const body = encodeOperatorObservation(snapshot);
+  return updateExistingOperatorComment({
+    comments, expectedLogin: workerLogin, body,
+    readComment: dependencies.readComment ||
+      (id => api('repos/' + OPERATOR_REPO + '/issues/comments/' + id)),
+    patchComment: (id, nextBody) => {
+      if (dependencies.patchComment) return dependencies.patchComment(id, nextBody);
+      const uri = 'repos/' + OPERATOR_REPO + '/issues/comments/' + id;
+      const temp = join(config.state_dir, 'operator-observation-' + randomUUID() + '.json');
+      writeFileSync(temp, JSON.stringify({ body: nextBody }),
+        { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      try { gh(['api', uri, '--method', 'PATCH', '--input', temp]); }
+      finally { rmSync(temp, { force: true }); }
+    },
+    readComments: dependencies.readComments || (() => issueComments(config)),
+  });
+}
+export function writeReceipt(config, data, workerLogin, dependencies = {}) {
   const body = RECEIPT_MARKER + JSON.stringify(data);
-  const temp = join(config.state_dir, `comment-${randomUUID()}.txt`);
-  writeFileSync(temp, body, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-  try { gh(['issue', 'comment', String(config.issue), '-R', REPO, '--body-file', temp]); }
-  finally { rmSync(temp, { force: true }); }
-  const matched = issueComments(config).some(c => c.user?.login === workerLogin && c.body === body);
-  if (!matched) throw new Error('RECEIPT_WRITE_AMBIGUOUS_NO_EXECUTION');
+  const identity = parseReceipt(body);
+  if (!identity) throw new Error('INVALID_RECEIPT');
+  const readComments = dependencies.readComments || issueComments;
+  const postComment = dependencies.postComment || (nextBody => {
+    const temp = join(config.state_dir, `comment-${randomUUID()}.txt`);
+    writeFileSync(temp, nextBody, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    try { gh(['issue', 'comment', String(config.issue), '-R', REPO, '--body-file', temp]); }
+    finally { rmSync(temp, { force: true }); }
+  });
+  const matchingReceipts = comments => comments
+    .filter(c => c.user?.login === workerLogin)
+    .map(c => ({ comment: c, receipt: parseReceipt(c.body) }))
+    .filter(x => x.receipt && x.receipt.request_id === identity.request_id &&
+      x.receipt.attempt_id === identity.attempt_id && x.receipt.source_sha === identity.source_sha &&
+      x.receipt.kind === identity.kind && x.receipt.state === identity.state);
+  let existing;
+  try { existing = matchingReceipts(readComments(config)); }
+  catch { throw new Error('RECEIPT_PREWRITE_READ_UNAVAILABLE_NO_WRITE'); }
+  if (existing.some(x => x.comment.body === body)) {
+    if (existing.length !== 1) throw new Error('DUPLICATE_RECEIPT_IDENTITY');
+    return { status: 'ALREADY_PRESENT' };
+  }
+  if (existing.length) throw new Error('RECEIPT_IDENTITY_CONFLICT');
+  try { postComment(body); }
+  catch {
+    let afterError;
+    try { afterError = matchingReceipts(readComments(config)); }
+    catch { throw new Error('RECEIPT_WRITE_AMBIGUOUS_NO_EXECUTION'); }
+    if (afterError.length === 1 && afterError[0].comment.body === body)
+      return { status: 'ALREADY_PRESENT' };
+    if (afterError.length) throw new Error('RECEIPT_IDENTITY_CONFLICT');
+    throw new Error('RECEIPT_WRITE_AMBIGUOUS_NO_EXECUTION');
+  }
+  let confirmed;
+  try { confirmed = matchingReceipts(readComments(config)); }
+  catch { throw new Error('RECEIPT_WRITE_AMBIGUOUS_NO_EXECUTION'); }
+  if (confirmed.length === 1 && confirmed[0].comment.body === body)
+    return { status: 'WRITTEN' };
+  if (confirmed.length > 1) throw new Error('DUPLICATE_RECEIPT_IDENTITY');
+  throw new Error('RECEIPT_WRITE_AMBIGUOUS_NO_EXECUTION');
 }
 function atomicJSON(path, data) {
   const temp = `${path}.${randomUUID()}.tmp`;
@@ -267,15 +432,23 @@ export function receipt(requestId, attemptId, state, job, result = null) {
     evidence_bytes: result?.evidence_bytes ?? null,
     ...(job.schema === 2 ? { model: job.model, variant: job.variant } : {}) };
 }
-async function main() {
-  const i = process.argv.indexOf('--config');
-  if (i === -1 || !process.argv[i + 1]) throw new Error('USAGE: --config config.json');
-  const config = guardConfig(JSON.parse(readFileSync(resolve(process.argv[i + 1]), 'utf8').replace(/^\uFEFF/, '')));
-  const me = api('user').login;
+export async function main(options = {}) {
+  let configInput = options.config;
+  if (!configInput) {
+    const i = process.argv.indexOf('--config');
+    if (i === -1 || !process.argv[i + 1]) throw new Error('USAGE: --config config.json');
+    configInput = JSON.parse(readFileSync(resolve(process.argv[i + 1]), 'utf8').replace(/^\uFEFF/, ''));
+  }
+  const config = guardConfig(configInput);
+  const apiRead = options.api || api;
+  const readIssueComments = options.issueComments || issueComments;
+  const persistReceipt = options.writeReceipt || writeReceipt;
+  const log = options.log || console.log;
+  const me = apiRead('user').login;
   if (!me) throw new Error('GH_AUTH_REQUIRED');
-  const issue = api(`repos/${REPO}/issues/${config.issue}`);
+  const issue = apiRead(`repos/${REPO}/issues/${config.issue}`);
   if (issue.title !== ISSUE_TITLE || issue.state !== 'open' || issue.pull_request) throw new Error('ISSUE_IDENTITY_MISMATCH');
-  const comments = issueComments(config);
+  const comments = readIssueComments(config);
   // Reconcile ambiguous model effects by scope; keep independent zero-token jobs runnable.
   // Never replay an OpenCode operation without its exact persisted terminal evidence.
   const blockedKinds = new Set();
@@ -294,28 +467,38 @@ async function main() {
           result.terminal?.source_sha !== s.source_sha || result.terminal?.kind !== s.kind ||
           !parseReceipt(RECEIPT_MARKER + JSON.stringify(result.terminal)))
         throw new Error('LOCAL_RECEIPT_IDENTITY_MISMATCH');
-      writeReceipt(config, result.terminal, me);
-      console.log(`RECOVERED_TERMINAL_${s.request_id}`);
+      persistReceipt(config, result.terminal, me);
+      log(`RECOVERED_TERMINAL_${s.request_id}`);
       return;
     }
     if (s.kind === 'opencode_plan') blockedKinds.add(s.kind);
-    console.log(`AMBIGUOUS_STARTED_${s.request_id}: NO_REEXECUTION`);
+    log(`AMBIGUOUS_STARTED_${s.request_id}: NO_REEXECUTION`);
   }
-  const head = api(`repos/${REPO}/git/ref/heads/main`).object?.sha;
+  const head = apiRead(`repos/${REPO}/git/ref/heads/main`).object?.sha;
   if (!SHA.test(head || '')) throw new Error('MAIN_HEAD_UNREADABLE');
   const next = selectNext(comments, config.dispatchers, me, config.host, head, [...blockedKinds]);
-  if (!next) { console.log('NO_DELTA_NO_LLM'); return; }
+  try {
+    const observation = await publishOperatorObservation(
+      config, me, comments, head, options.observationDependencies,
+    );
+    if (observation.status === 'UPDATED') log('OPERATOR_OBSERVATION_UPDATED');
+    else if (observation.status === 'UNKNOWN') log('OPERATOR_OBSERVATION_UPDATE_UNKNOWN');
+  } catch {
+    // A status publishing failure must never block or replay a real queued task.
+    log('OPERATOR_OBSERVATION_UPDATE_UNKNOWN');
+  }
+  if (!next) { log('NO_DELTA_NO_LLM'); return; }
   const job = next.job;
-  if (job.source_sha !== head) { console.log(`STALE_SHA_SKIP_${job.request_id}`); return; }
+  if (job.source_sha !== head) { log(`STALE_SHA_SKIP_${job.request_id}`); return; }
   // Check full issue comment remains immutable since selection. Edits/races abort the lane.
-  const original = api(`repos/${REPO}/issues/comments/${next.id}`);
+  const original = apiRead(`repos/${REPO}/issues/comments/${next.id}`);
   if (original.body !== next.originalBody)
     throw new Error('DISPATCH_COMMENT_CHANGED');
   let spec = null;
   if (job.kind === 'opencode_plan') spec = readSpec(job);
   const attemptId = randomUUID();
   const start = receipt(job.request_id, attemptId, 'STARTED', job);
-  writeReceipt(config, start, me);
+  persistReceipt(config, start, me);
   let result;
   if (job.kind === 'ping') result = { outcome: 'BRIDGE_PING_OK_NOT_OS_ACCEPTANCE', exit_code: 0, evidence_sha256: null, evidence_bytes: 0 };
   else if (job.kind === 'native_preflight') result = nativePreflight(config, job);
@@ -325,8 +508,8 @@ async function main() {
   const terminal = receipt(job.request_id, attemptId, result.exit_code === 0 ? 'FINISHED' : 'BLOCKED', job, result);
   const terminalPath = join(config.state_dir, `result-${job.request_id}-${attemptId}.json`);
   atomicJSON(terminalPath, { request_id: job.request_id, attempt_id: attemptId, terminal });
-  writeReceipt(config, terminal, me);
-  console.log(`${terminal.state}_${job.request_id}_${terminal.outcome}`);
+  persistReceipt(config, terminal, me);
+  log(`${terminal.state}_${job.request_id}_${terminal.outcome}`);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch(err => { console.error(`NATIVE_BRIDGE_BLOCKED: ${String(err.message || err).slice(0, 140)}`); process.exitCode = 2; });

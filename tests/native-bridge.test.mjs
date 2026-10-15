@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync, readdirSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
-  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI } from '../native-bridge/worker.mjs';
+import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, ISSUE_TITLE, JOB_MARKER,
+  RECEIPT_MARKER, checkModelAuthorization, findNativeCLI, main as runWorker,
+  writeReceipt } from '../native-bridge/worker.mjs';
+import { OPERATOR_MARKER, encodeOperatorObservation, parseOperatorObservation }
+  from '../native-bridge/operator-observation.mjs';
 
 const commit = 'a'.repeat(40); const hash = 'b'.repeat(64);
 const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1B6PD2P',
@@ -15,6 +18,199 @@ const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1
 const encoded = o => JOB_MARKER + JSON.stringify(o);
 const com = (id, body, login = 't14210184') => ({ id, body, user: { login } });
 const h = x => createHash('sha256').update(x).digest('hex');
+function seededOperatorObservation(commentId, sequence, mainSha, at = Date.now()) {
+  const timestamp = new Date(at).toISOString();
+  return {
+    schema: 1, project_id: PROJECT, repo: REPO, issue: 407,
+    host_alias: 'win11-primary', snapshot_id: randomUUID(), sequence,
+    observed_at: timestamp, published_at: timestamp,
+    expires_at: new Date(at + 5 * 60_000).toISOString(),
+    source: { kind: 'WIN11_NATIVE_TASK_READBACK', comment_id: commentId,
+      issue_comments_observed_at: timestamp, main_sha: mainSha },
+    windows: { status: 'FRESH', native_task: { enabled: true, state: 'Ready' },
+      opencode_process_count: 0, runner_service_count: 0, runner_service_running: false },
+    native_worker: { state: 'POLL_EXECUTED_TASK_TRIGGER_UNVERIFIED',
+      current_task: null, latest_task: null, files_modified: 'UNPROVEN',
+      remote_commit: null, pull_request: null, ci: 'UNKNOWN', next_owner: 'NO_CURRENT_TASK' },
+    opencode_v2: { process_observed_at: timestamp, process_count: 0,
+      active_session_count: null, active_session_state: 'UNKNOWN_NO_PASSIVE_API',
+      task_binding: 'UNPROVEN', code_changes: 'UNPROVEN',
+      remote_commit: null, pull_request: null, ci: 'UNKNOWN' },
+    github: { observed_at: timestamp, main_sha: mainSha, issue_comments_count: 2,
+      runner_registration: { status: 'UNKNOWN', count: null, observed_at: timestamp },
+      organization_runner_registration: 'UNKNOWN_ORG_SCOPE_NOT_AVAILABLE',
+      runner_service_count: 0, runner_service_running: false },
+    monitor_candidate: null, incident: null,
+  };
+}
+
+function makeObservationWorkerFixture({ ambiguousReadback = false } = {}) {
+  const root = mkdtempSync(join(homedir(), '.ptysd-worker-observation-'));
+  const workspace = join(root, 'workspace');
+  const stateDir = join(root, 'state');
+  mkdirSync(workspace);
+  mkdirSync(stateDir);
+  const host = hostname().toUpperCase();
+  const publisher = 'trusted-publisher';
+  const observationId = 701;
+  const job = mkjob({ host, request_id: 'PTYSD_NATIVE_OBSERVE_PING_20261014' });
+  const store = {
+    next: 703,
+    comments: [
+      com(observationId, encodeOperatorObservation(
+        seededOperatorObservation(observationId, 17, commit, Date.now() - 60_000),
+      ), publisher),
+      com(702, encoded(job), 't14210184'),
+    ],
+    patches: 0,
+    posts: 0,
+    failReadback: ambiguousReadback,
+    now: Date.now(),
+  };
+  const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
+    workspace, state_dir: stateDir, dispatchers: ['t14210184'] };
+  const api = uri => {
+    if (uri === 'user') return { login: publisher };
+    if (uri === `repos/${REPO}/issues/407`)
+      return { title: ISSUE_TITLE, state: 'open' };
+    if (uri === `repos/${REPO}/git/ref/heads/main`)
+      return { object: { sha: commit } };
+    const match = uri.match(/\/issues\/comments\/(\d+)$/);
+    if (match) return store.comments.find(c => c.id === Number(match[1]));
+    throw new Error(`UNEXPECTED_MOCK_API_ROUTE:${uri}`);
+  };
+  const observationDependencies = {
+    now: () => new Date(store.now),
+    collectWindowsObservation: () => ({ status: 'FRESH', observed_at: new Date(store.now).toISOString(),
+      tasks_total: 2, legacy_monitor_registered: false, listener_2667: false,
+      opencode_process_count: 0, runner_service_count: 0, runner_service_running: false,
+      native_task: { registered: true, enabled: true, state: 'Ready', last_run: null,
+        last_result: '0x00000000', action_kind: 'WINDOWLESS_LAUNCHER',
+        identity_class: 'INTERACTIVE_LIMITED', multiple_instances: 'IGNORENEW',
+        trigger_interval_minutes: 5 } }),
+    readRunnerRegistration: () => ({ total_count: 0 }),
+    readComment: id => structuredClone(store.comments.find(c => c.id === id)),
+    patchComment: (id, body) => {
+      const comment = store.comments.find(c => c.id === id);
+      if (!comment) throw new Error('MOCK_COMMENT_MISSING');
+      comment.body = body;
+      store.patches++;
+    },
+    readComments: () => {
+      if (store.failReadback) {
+        store.failReadback = false;
+        throw new Error('MOCK_READBACK_UNAVAILABLE_AFTER_PATCH');
+      }
+      return structuredClone(store.comments);
+    },
+  };
+  const receiptWrites = [];
+  const logs = [];
+  const run = () => runWorker({
+    config, api, issueComments: () => store.comments,
+    observationDependencies,
+    writeReceipt: (_config, data, login) => {
+      store.comments.push(com(store.next++, RECEIPT_MARKER + JSON.stringify(data), login));
+      store.posts++;
+      receiptWrites.push(data);
+    },
+    log: value => logs.push(value),
+  });
+  return { root, store, run, logs, receiptWrites, observationId,
+    cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+// These integration fixtures provide a POSIX shebang file named "gh".
+// Windows PATH resolution can select the installed gh.exe instead, so keep
+// those provider-facing scenarios in Linux CI and never contact live GitHub here.
+const fakeShellIntegration = process.platform === 'win32' ? test.skip : test;
+
+test('Worker main publishes the seeded observation, verifies sequence readback, and preserves legal dispatch on ambiguity', async () => {
+  const successful = makeObservationWorkerFixture();
+  try {
+    await successful.run();
+    let observations = successful.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].id, successful.observationId);
+    assert.equal(observations[0].user.login, 'trusted-publisher');
+    let value = parseOperatorObservation(observations[0].body);
+    assert.equal(value.sequence, 18);
+    assert.ok(successful.logs.includes('OPERATOR_OBSERVATION_UPDATED'));
+    assert.deepEqual(successful.receiptWrites.map(x => x.state), ['STARTED', 'FINISHED']);
+    assert.equal(successful.store.patches, 1);
+
+    successful.store.now += 60_000;
+    await successful.run();
+    observations = successful.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
+    value = parseOperatorObservation(observations[0].body);
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].id, successful.observationId);
+    assert.equal(value.sequence, 19);
+    assert.equal(successful.receiptWrites.length, 2);
+    assert.ok(successful.logs.includes('NO_DELTA_NO_LLM'));
+  } finally { successful.cleanup(); }
+
+  const ambiguous = makeObservationWorkerFixture({ ambiguousReadback: true });
+  try {
+    await ambiguous.run();
+    const observations = ambiguous.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].id, ambiguous.observationId);
+    assert.equal(ambiguous.store.patches, 1);
+    assert.ok(ambiguous.logs.includes('OPERATOR_OBSERVATION_UPDATE_UNKNOWN'));
+    assert.ok(!ambiguous.logs.includes('OPERATOR_OBSERVATION_UPDATED'));
+    assert.deepEqual(ambiguous.receiptWrites.map(x => x.state), ['STARTED', 'FINISHED'],
+      'an ambiguous status readback must not block an otherwise valid ping dispatch');
+
+    ambiguous.store.now += 60_000;
+    await ambiguous.run();
+    const recovered = ambiguous.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0].id, ambiguous.observationId);
+    assert.equal(parseOperatorObservation(recovered[0].body).sequence, 19);
+    assert.equal(ambiguous.receiptWrites.length, 2,
+      'reconciliation must not replay the completed task or create duplicate receipts');
+    assert.ok(ambiguous.logs.includes('OPERATOR_OBSERVATION_UPDATED'));
+  } finally { ambiguous.cleanup(); }
+});
+
+test('receipt write reconciles POST-success/readback-failure without posting a duplicate', () => {
+  const job = mkjob();
+  const attemptId = 'e416334f-404c-4e61-9b0e-f9283ee07013';
+  const terminal = receipt(job.request_id, attemptId, 'FINISHED', job, {
+    outcome: 'BRIDGE_PING_OK_NOT_OS_ACCEPTANCE', exit_code: 0,
+  });
+  const comments = [];
+  let postCalls = 0;
+  let failAfterPost = true;
+  const dependencies = {
+    readComments: () => {
+      if (postCalls && failAfterPost) {
+        failAfterPost = false;
+        throw new Error('MOCK_REMOTE_READBACK_FAILED');
+      }
+      return structuredClone(comments);
+    },
+    postComment: body => {
+      postCalls++;
+      comments.push(com(1, body, 'worker'));
+    },
+  };
+  assert.throws(() => writeReceipt({}, terminal, 'worker', dependencies),
+    /RECEIPT_WRITE_AMBIGUOUS_NO_EXECUTION/);
+  assert.equal(comments.length, 1);
+  assert.equal(writeReceipt({}, terminal, 'worker', dependencies).status, 'ALREADY_PRESENT');
+  assert.equal(postCalls, 1);
+  assert.equal(comments.filter(c => parseReceipt(c.body)?.attempt_id === attemptId).length, 1);
+
+  const conflicting = { ...terminal, outcome: 'DIFFERENT_ORIGINAL_CONTENT' };
+  let conflictPosts = 0;
+  assert.throws(() => writeReceipt({}, conflicting, 'worker', {
+    readComments: () => comments,
+    postComment: () => conflictPosts++,
+  }), /RECEIPT_IDENTITY_CONFLICT/);
+  assert.equal(conflictPosts, 0);
+});
 
 test('strict exact job contract rejects injection, cross-project, unknown keys and paths', () => {
   assert.deepEqual(parseJob(encoded(mkjob())), mkjob());
@@ -63,7 +259,7 @@ test('duplicate changed dispatch same request ID is blocked', () => {
   const a = encoded(mkjob()), b = encoded(mkjob({ source_sha: 'c'.repeat(40) }));
   assert.equal(selectNext([com(1,a),com(2,b)],['t14210184'],'worker','DESKTOP-1B6PD2P'),null);
 });
-test('worker integration: GitHub queued ping -> start + terminal with same-source readback; no delta zero LLM', () => {
+fakeShellIntegration('worker integration: GitHub queued ping -> start + terminal with same-source readback; no delta zero LLM', () => {
   // The only mocked surfaces are gh and opencode binaries. No GitHub or Windows host is contacted.
   const home = mkdtempSync(join(homedir(), '.ptysd-native-test-'));
   try {
@@ -132,7 +328,7 @@ test('worker integration: GitHub queued ping -> start + terminal with same-sourc
 });
 
 // No real GitHub host, Windows service or model API is invoked in these tests.
-test('no-LLM preflight yields a terminal receipt and local evidence hash', () => {
+fakeShellIntegration('no-LLM preflight yields a terminal receipt and local evidence hash', () => {
   const home=mkdtempSync(join(homedir(), '.ptysd-preflight-test-'));
   try {
     const bin=join(home,'bin'), work=join(home,'work'), state=join(home,'state');
@@ -163,7 +359,7 @@ const fs=require('fs');const a=process.argv.slice(2);const p=process.env.MOCK_GH
   } finally {rmSync(home,{recursive:true,force:true});}
 });
 
-test('V2 metadata task completes source-pinned GitHub receipts without model inference or credential leak', () => {
+fakeShellIntegration('V2 metadata task completes source-pinned GitHub receipts without model inference or credential leak', () => {
   const home=mkdtempSync(join(homedir(), '.ptysd-v2-meta-test-'));
   try {
     const bin=join(home,'bin'), work=join(home,'work'), state=join(home,'state');

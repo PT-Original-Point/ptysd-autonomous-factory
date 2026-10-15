@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/csg/csg-trusted-pr-verifier-cli.test.mjs tests/native-bridge.test.mjs tests/opencode-v2.test.mjs tests/v2-readiness.test.mjs",
+    "test": "node --test tests/csg/csg-trusted-pr-verifier-cli.test.mjs tests/native-bridge.test.mjs tests/opencode-v2.test.mjs tests/v2-readiness.test.mjs tests/operator-observation.test.mjs",
     "test:trusted": "node --test tests/csg/csg-trusted-pr-verifier-cli.test.mjs"
   },
   "engines": {
