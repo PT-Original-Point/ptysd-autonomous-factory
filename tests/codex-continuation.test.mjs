@@ -12,7 +12,7 @@ import {
   makeCodexExecutorRequest, publishCodexExecutorRequest, validateCodexExecutorRequest,
   executorResultPath, validateCodexExecutorResult,
 } from '../native-bridge/codex-continuation.mjs';
-import { buildCodexChildEnvironment, runExecutorOnce, takeNextRequest } from '../native-bridge/codex-executor.mjs';
+import { buildCodexChildEnvironment, runExecutorOnce, takeNextRequest, terminateChildTree } from '../native-bridge/codex-executor.mjs';
 import { codexTerminalReceipt, dispatchCodexJob, selectNext, selectNextWithCodexClaim,
   writeCodexReceiptOnce } from '../native-bridge/worker.mjs';
 
@@ -57,6 +57,73 @@ function readyConfig(overrides = {}) {
     ...overrides,
   };
 }
+
+test('taskkill failure is confirmed only after exact captured process identities disappear', async () => {
+  const initial = [
+    { pid: 900, parent_pid: 800, creation_ticks: '1000' },
+    { pid: 901, parent_pid: 900, creation_ticks: '2000' },
+  ];
+  let reads = 0, taskkillCalls = 0, directKills = 0;
+  const result = await terminateChildTree({ pid: 900 }, {
+    parentPid: 800,
+    readProcessTable: async () => (++reads === 1 ? initial : []),
+    killTree: async () => { taskkillCalls++; throw new Error('synthetic taskkill failure'); },
+    killDirect: () => { directKills++; },
+    delay: async () => {},
+  });
+  assert.deepEqual(result, { state: 'TREE_TERMINATION_CONFIRMED', process_count: 2,
+    method: 'readback-after-taskkill-failure' });
+  assert.equal(reads, 2);
+  assert.equal(taskkillCalls, 1);
+  assert.equal(directKills, 1);
+});
+
+test('orphaned descendant after taskkill failure stays UNKNOWN within a bounded readback window', async () => {
+  const initial = [
+    { pid: 900, parent_pid: 800, creation_ticks: '1000' },
+    { pid: 901, parent_pid: 900, creation_ticks: '2000' },
+  ];
+  let reads = 0, directKills = 0, delays = 0;
+  await assert.rejects(terminateChildTree({ pid: 900 }, {
+    parentPid: 800,
+    readProcessTable: async () => {
+      reads++;
+      return reads === 1 ? initial : [{ pid: 901, parent_pid: 900, creation_ticks: '2000' }];
+    },
+    killTree: async () => { throw new Error('synthetic taskkill failure'); },
+    killDirect: () => { directKills++; },
+    delay: async () => { delays++; },
+  }), error => error.code === 'CODEX_PROCESS_TREE_TERMINATION_UNCONFIRMED');
+  assert.equal(reads, 7);
+  assert.equal(directKills, 1);
+  assert.equal(delays, 5);
+});
+
+test('process identity mismatch never sends taskkill to a reused or unrelated PID', async () => {
+  let taskkillCalls = 0, directKills = 0;
+  await assert.rejects(terminateChildTree({ pid: 900 }, {
+    parentPid: 800,
+    readProcessTable: async () => [{ pid: 900, parent_pid: 799, creation_ticks: '1000' }],
+    killTree: async () => { taskkillCalls++; },
+    killDirect: () => { directKills++; },
+  }), error => error.code === 'CODEX_PROCESS_TREE_TERMINATION_UNKNOWN' &&
+    error.cause?.code === 'CODEX_PROCESS_TREE_IDENTITY_MISMATCH');
+  assert.equal(taskkillCalls, 0);
+  assert.equal(directKills, 1);
+});
+
+test('missing root before the first process-tree snapshot remains UNKNOWN', async () => {
+  let taskkillCalls = 0, directKills = 0;
+  await assert.rejects(terminateChildTree({ pid: 900 }, {
+    parentPid: 800,
+    readProcessTable: async () => [],
+    killTree: async () => { taskkillCalls++; },
+    killDirect: () => { directKills++; },
+  }), error => error.code === 'CODEX_PROCESS_TREE_TERMINATION_UNKNOWN' &&
+    error.cause?.code === 'CODEX_PROCESS_TREE_ROOT_ABSENT_BEFORE_SNAPSHOT');
+  assert.equal(taskkillCalls, 0);
+  assert.equal(directKills, 0);
+});
 
 test('Codex task schema is exact, immutable-source-bound and path-scoped', () => {
   const parsed = parseCodexJob(body(job()));

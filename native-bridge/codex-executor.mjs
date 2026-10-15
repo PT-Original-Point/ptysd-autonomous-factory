@@ -136,11 +136,134 @@ async function qualifyCodex(config) {
   } catch { throw new Error('CODEX_LOGIN_NOT_READY'); }
 }
 
-function killTree(child) {
-  if (!child.pid) return;
-  try { execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
-    windowsHide: true, shell: false, timeout: 15000, stdio: 'ignore' }); }
-  catch { try { child.kill(); } catch { /* process already closed */ } }
+function processTreeError(code, cause) {
+  const error = new Error(code);
+  error.code = code;
+  if (cause) error.cause = cause;
+  return error;
+}
+
+function readWindowsProcessTable() {
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    "$ProgressPreference='SilentlyContinue'",
+    "$rows = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate | ForEach-Object {",
+    "  if ($null -eq $_.CreationDate) { throw 'PROCESS_CREATION_TIME_UNAVAILABLE' }",
+    "  [pscustomobject]@{ pid=[uint32]$_.ProcessId; parent_pid=[uint32]$_.ParentProcessId; creation_ticks=[string]$_.CreationDate.ToUniversalTime().Ticks }",
+    "})",
+    'ConvertTo-Json -InputObject $rows -Compress -Depth 3',
+  ].join(';');
+  const output = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8', windowsHide: true, shell: false, timeout: 5000,
+    maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const parsed = JSON.parse(output.trim() || '[]');
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  if (rows.some(row => !Number.isSafeInteger(Number(row.pid)) || Number(row.pid) < 1 ||
+      !Number.isSafeInteger(Number(row.parent_pid)) || Number(row.parent_pid) < 0 ||
+      !/^\d+$/.test(String(row.creation_ticks))))
+    throw processTreeError('CODEX_PROCESS_TREE_READBACK_INVALID');
+  return rows.map(row => ({ pid: Number(row.pid), parent_pid: Number(row.parent_pid),
+    creation_ticks: String(row.creation_ticks) }));
+}
+
+function processTreeSnapshot(rows, rootPid, expectedParentPid) {
+  const byPid = new Map();
+  for (const row of rows) {
+    if (byPid.has(row.pid)) throw processTreeError('CODEX_PROCESS_TREE_READBACK_INVALID');
+    byPid.set(row.pid, row);
+  }
+  const root = byPid.get(rootPid);
+  if (!root) return [];
+  if (root.parent_pid !== expectedParentPid)
+    throw processTreeError('CODEX_PROCESS_TREE_IDENTITY_MISMATCH');
+  const members = new Map([[root.pid, root]]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of rows) {
+      const parent = members.get(row.parent_pid);
+      if (!parent || row.pid === parent.pid ||
+          BigInt(row.creation_ticks) < BigInt(parent.creation_ticks)) continue;
+      const existing = members.get(row.pid);
+      if (existing && existing.creation_ticks !== row.creation_ticks)
+        throw processTreeError('CODEX_PROCESS_TREE_READBACK_INVALID');
+      if (!existing) { members.set(row.pid, row); changed = true; }
+    }
+  }
+  return [...members.values()];
+}
+
+function processTreeSurvivors(snapshot, rows) {
+  const knownParents = new Map();
+  const survivors = new Map();
+  for (const row of snapshot) {
+    const ticks = knownParents.get(row.pid) || new Set();
+    ticks.add(row.creation_ticks);
+    knownParents.set(row.pid, ticks);
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of rows) {
+      const parentTicks = knownParents.get(row.parent_pid);
+      if (!parentTicks || ![...parentTicks].some(ticks => BigInt(row.creation_ticks) >= BigInt(ticks))) continue;
+      const key = `${row.pid}:${row.creation_ticks}`;
+      if (!survivors.has(key)) survivors.set(key, row);
+      const childTicks = knownParents.get(row.pid) || new Set();
+      if (!childTicks.has(row.creation_ticks)) { childTicks.add(row.creation_ticks); knownParents.set(row.pid, childTicks); changed = true; }
+    }
+  }
+  for (const original of snapshot) {
+    if (rows.some(row => row.pid === original.pid && row.creation_ticks === original.creation_ticks))
+      survivors.set(`${original.pid}:${original.creation_ticks}`, original);
+  }
+  return [...survivors.values()];
+}
+
+export async function terminateChildTree(child, deps = {}) {
+  const pid = Number(child?.pid);
+  if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0xffffffff)
+    return { state: 'NO_CHILD_PROCESS', process_count: 0 };
+  const parentPid = Number(deps.parentPid ?? process.pid);
+  const readTable = deps.readProcessTable || readWindowsProcessTable;
+  const killTree = deps.killTree || (targetPid => execFileSync('taskkill.exe',
+    ['/PID', String(targetPid), '/T', '/F'], { windowsHide: true, shell: false,
+      timeout: 15000, stdio: 'ignore' }));
+  const killDirect = deps.killDirect || (() => child.kill());
+  const delay = deps.delay || (ms => new Promise(resolveDelay => setTimeout(resolveDelay, ms)));
+  let snapshot;
+  try { snapshot = processTreeSnapshot(await readTable(), pid, parentPid); }
+  catch (error) {
+    try { killDirect(); } catch { /* no verified process identity; preserve unknown state */ }
+    throw processTreeError('CODEX_PROCESS_TREE_TERMINATION_UNKNOWN', error);
+  }
+  if (!snapshot.length)
+    throw processTreeError('CODEX_PROCESS_TREE_TERMINATION_UNKNOWN',
+      processTreeError('CODEX_PROCESS_TREE_ROOT_ABSENT_BEFORE_SNAPSHOT'));
+  let taskkillFailed = false;
+  try { await killTree(pid); }
+  catch {
+    taskkillFailed = true;
+    try { killDirect(); } catch { /* exact readback below decides the state */ }
+  }
+  for (let attempt = 0; attempt < 6; attempt++) {
+    let current;
+    try { current = await readTable(); }
+    catch (error) { throw processTreeError('CODEX_PROCESS_TREE_TERMINATION_UNKNOWN', error); }
+    const survivors = processTreeSurvivors(snapshot, current);
+    if (!survivors.length) return { state: 'TREE_TERMINATION_CONFIRMED',
+      process_count: snapshot.length, method: taskkillFailed ? 'readback-after-taskkill-failure' : 'readback' };
+    if (attempt < 5) await delay(500);
+  }
+  throw processTreeError('CODEX_PROCESS_TREE_TERMINATION_UNCONFIRMED');
+}
+
+function detachUnknownChild(child, stdoutFile, stderrFile) {
+  for (const stream of [child.stdin, child.stdout, child.stderr, stdoutFile, stderrFile]) {
+    try { stream?.destroy(); } catch { /* preserve the attempt as unknown */ }
+  }
+  try { child.unref(); } catch { /* preserve the attempt as unknown */ }
 }
 
 export function buildCodexChildEnvironment(request, evidenceDir, source = process.env) {
@@ -172,16 +295,57 @@ async function runCodex(request, config, worktree, evidenceDir) {
   const child = spawn(config.codex_executable, args, {
     cwd: worktree, env, windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'],
   });
-  const monitor = stream => stream.on('error', error => { writeError ||= error; killTree(child); });
+  let terminationRequested = false;
+  let resolveTermination;
+  const terminationPromise = new Promise(resolvePromise => { resolveTermination = resolvePromise; });
+  const requestTermination = () => {
+    if (terminationRequested) return;
+    terminationRequested = true;
+    terminateChildTree(child).then(
+      result => resolveTermination({ confirmed: true, result }),
+      error => resolveTermination({ confirmed: false, error }),
+    );
+  };
+  const monitor = stream => stream.on('error', error => { writeError ||= error; requestTermination(); });
   monitor(stdout); monitor(stderr);
-  child.stdin.on('error', error => { if (error.code !== 'EPIPE') writeError ||= error; });
-  const stdoutDone = pipeline(child.stdout, stdout).catch(error => { writeError ||= error; killTree(child); });
-  const stderrDone = pipeline(child.stderr, stderr).catch(error => { writeError ||= error; killTree(child); });
+  child.stdin.on('error', error => {
+    if (error.code !== 'EPIPE') { writeError ||= error; requestTermination(); }
+  });
+  const stdoutDone = pipeline(child.stdout, stdout).catch(error => { writeError ||= error; requestTermination(); });
+  const stderrDone = pipeline(child.stderr, stderr).catch(error => { writeError ||= error; requestTermination(); });
   let spawnError = null;
   child.on('error', error => { spawnError = error; });
   child.stdin.end(validateCodexExecutorRequest(request).spec);
-  const exit = await new Promise(resolveExit => child.once('close', (code, signal) => resolveExit({ code, signal })));
+  const closePromise = new Promise(resolveExit => child.once('close', (code, signal) => resolveExit({ code, signal })));
+  const first = await Promise.race([
+    closePromise.then(exit => ({ kind: 'closed', exit })),
+    terminationPromise.then(outcome => ({ kind: 'termination', outcome })),
+  ]);
+  let exit;
+  if (first.kind === 'termination') {
+    if (!first.outcome.confirmed) {
+      detachUnknownChild(child, stdout, stderr);
+      await Promise.all([stdoutDone, stderrDone]);
+      throw first.outcome.error;
+    }
+    const closed = await Promise.race([
+      closePromise.then(value => ({ value })),
+      new Promise(resolveTimeout => setTimeout(() => resolveTimeout({ timedOut: true }), 5000)),
+    ]);
+    if (closed.timedOut) {
+      detachUnknownChild(child, stdout, stderr);
+      await Promise.all([stdoutDone, stderrDone]);
+      throw processTreeError('CODEX_PROCESS_TREE_CLOSE_EVENT_UNCONFIRMED');
+    }
+    exit = closed.value;
+  } else {
+    exit = first.exit;
+  }
   await Promise.all([stdoutDone, stderrDone]);
+  if (terminationRequested) {
+    const outcome = await terminationPromise;
+    if (!outcome.confirmed) throw outcome.error;
+  }
   if (spawnError) throw spawnError;
   if (writeError) throw new Error('CODEX_EVIDENCE_WRITE_FAILED_PROCESS_TERMINATED');
   const sessionId = await findSession(outPath);
