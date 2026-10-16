@@ -534,6 +534,50 @@ test('same-PR source pin changes stay UNKNOWN until the shared PR poll interval 
   assert.equal(store.checksSummaryForHead(oldSha,434),null);
 });
 
+test('late PR and check responses cannot repopulate resources after the candidate binding changes', async () => {
+  const oldSha='b'.repeat(40), nextSha='c'.repeat(40);
+  const prUrl=urls.prFor(434);
+  const oldChecksUrl=`https://api.github.com/repos/PT-Original-Point/ptysd-autonomous-factory/commits/${oldSha}/check-runs?per_page=100`;
+  const newChecksUrl=`https://api.github.com/repos/PT-Original-Point/ptysd-autonomous-factory/commits/${nextSha}/check-runs?per_page=100`;
+  let prStarted, checksStarted, finishPr, finishChecks;
+  const prIsStarted=new Promise(resolve=>{prStarted=resolve;});
+  const checksAreStarted=new Promise(resolve=>{checksStarted=resolve;});
+  const client=panel.createApiClient(url=>{
+    if(url===prUrl) {
+      prStarted();
+      return new Promise(resolve=>{finishPr=resolve;});
+    }
+    if(url===oldChecksUrl) {
+      checksStarted();
+      return new Promise(resolve=>{finishChecks=resolve;});
+    }
+    return Promise.resolve(response(200,{check_runs:[]},quotaHeaders(baseTime,500)));
+  },{now:()=>baseTime});
+  const store=panel.createResourceStore(client,()=>baseTime);
+
+  store.bindCandidatePr({number:434,request_id:'PTYSD_PANEL_RACE_A',source_sha:oldSha,error:null});
+  const oldPrRead=store.loadResource('pr',prUrl,0);
+  await prIsStarted;
+  store.bindCandidatePr({number:434,request_id:'PTYSD_PANEL_RACE_B',source_sha:nextSha,error:null});
+  const overlappingPrRead=store.loadResource('pr',prUrl,0);
+  finishPr(response(200,{number:434,head:{sha:oldSha}},quotaHeaders(baseTime,500)));
+  await Promise.all([oldPrRead,overlappingPrRead]);
+  assert.equal(store.resources.pr.data,null,'an obsolete PR response must not restore the former task pin');
+  assert.equal(store.resources.pr.pinRevalidationPending,true);
+
+  store.bindChecksHead(oldSha);
+  const oldChecksRead=store.loadResource('checks',oldChecksUrl,0);
+  await checksAreStarted;
+  store.bindCandidatePr({number:434,request_id:'PTYSD_PANEL_RACE_C',source_sha:nextSha,error:null});
+  store.bindChecksHead(nextSha);
+  finishChecks(response(200,{check_runs:[{head_sha:oldSha,status:'completed',conclusion:'success'}]},
+    quotaHeaders(baseTime,500)));
+  await oldChecksRead;
+  assert.equal(store.resources.checks.url,newChecksUrl);
+  assert.equal(store.resources.checks.data,null,'an obsolete checks response must not be attached to the new HEAD URL');
+  assert.equal(store.checksSummaryForHead(nextSha,434),null);
+});
+
 test('without a fresh authorized candidate_pr reference the panel does not guess an open PR', async () => {
   const calls=[];
   const client=panel.createApiClient(async url=>{
