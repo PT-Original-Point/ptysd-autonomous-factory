@@ -2620,3 +2620,217 @@ test('Codex terminal receipt keeps exit-zero execution explicitly unverified', (
   const incomplete = codexTerminalReceipt(started, { ...result, outcome: 'EVIDENCE_STORAGE_FAILED' });
   assert.equal(incomplete.state, 'BLOCKED');
 });
+
+function makeIssue310TaskFixture({ taskCommentOverrides = {}, taskReadback = null } = {}) {
+  const root = mkdtempSync(join(homedir(), '.ptysd-issue310-task-'));
+  const workspace = join(root, 'workspace');
+  const stateDir = join(root, 'state');
+  const manifestDir = join(root, 'manifests');
+  const resultsDir = join(root, 'results');
+  mkdirSync(workspace); mkdirSync(stateDir); mkdirSync(manifestDir); mkdirSync(resultsDir);
+  mkdirSync(join(manifestDir, 'candidate-bundles'));
+  const host = hostname().toUpperCase();
+  const mainSha = 'c'.repeat(40);
+  const candidateSha = 'd'.repeat(40);
+  const spec = 'Edit only the reviewed file and return a diff.';
+  const job = bindGoalJob({ ...mkjob({ host,
+    request_id: 'PTYSD_ISSUE310_STRUCTURED_TASK_20261017', kind: 'opencode_edit',
+    source_sha: candidateSha, spec_path: 'native-bridge/tasks/scoped-edit.md', spec_sha256: h(spec) }),
+    model: 'opencode/spark', variant: 'high', write_paths: ['README.md'] }, 434);
+  const taskBody = encoded(job);
+  const taskComment = { ...com(31001, taskBody, 'dispatcher'),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310`, ...taskCommentOverrides };
+  const comments = [];
+  const executor = { task_name: '\\PTYSD\\OpenCodeExecutor', user_sid: 'S-1-5-21-100-200-300-1001',
+    publisher_sid: 'S-1-5-21-100-200-300-1002', node_bin: 'C:\\Node\\node.exe',
+    script_path: 'C:\\PTYSD\\executor.mjs', config_path: 'C:\\PTYSD\\executor.json',
+    manifest_dir: manifestDir, results_dir: resultsDir, working_directory: 'C:\\PTYSD' };
+  const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
+    workspace, state_dir: stateDir, dispatchers: ['dispatcher'], enable_v2_edit_runs: true,
+    allowed_edit_models: { 'opencode/spark': ['high'] }, executor };
+  const dispatches = [];
+  const writes = [];
+  const recoveryTriggers = [];
+  let nextCommentId = 32000;
+  const adapters = {
+    apiRead(endpoint) {
+      if (endpoint === 'user') return { login: 'worker' };
+      if (endpoint.endsWith('/issues/407')) return { title: ISSUE_TITLE, state: 'open' };
+      if (endpoint.includes('/git/ref/heads/main')) return { object: { sha: mainSha } };
+      if (endpoint.endsWith('/pulls/434')) return testCandidatePull(candidateSha, mainSha, 434);
+      if (endpoint.endsWith(`/issues/comments/${TEST_GOAL_REF.comment_id}`)) return TEST_GOAL_COMMENT;
+      if (endpoint.endsWith(`/issues/comments/${taskComment.id}`))
+        return typeof taskReadback === 'function'
+          ? taskReadback({ endpoint, comment: taskComment, dispatches })
+          : taskReadback ?? taskComment;
+      if (endpoint.includes('/contents/')) return { encoding: 'base64', content: Buffer.from(spec).toString('base64') };
+      const match = endpoint.match(/\/issues\/comments\/(\d+)$/);
+      if (match) return comments.find(item => item.id === Number(match[1]));
+      throw new Error(`UNEXPECTED_ISSUE310_TASK_API:${endpoint}`);
+    },
+    commentsRead: () => comments,
+    goalCommentsRead: () => [TEST_GOAL_COMMENT, taskComment],
+    writeReceipt(receiptConfig, data, login) {
+      assert.equal(receiptConfig.issue, 407, 'the only receipt destination remains Issue #407');
+      writes.push(data);
+      comments.push(com(nextCommentId++, RECEIPT_MARKER + JSON.stringify(data), login));
+    },
+    qualifyOpenCodeV2: () => ({ ready: true }),
+    assertExecutorTaskReady: () => ({ ready: true }),
+    inspectOpenCodeExecutorAttempt: (_descriptor, expected = {}) => expected.job
+      ? { state: 'STARTED' } : { state: 'EMPTY' },
+    createCandidateSourceBundle: ({ job: sourceJob }) => ({ source_sha: sourceJob.source_sha, sha256: 'f'.repeat(64) }),
+    dispatchToExecutor: (_descriptor, manifest) => {
+      dispatches.push(manifest);
+      return { outcome: 'EXECUTOR_TASK_DISPATCHED_NOT_ACCEPTANCE' };
+    },
+    triggerPendingExecutorAttempt: (_descriptor, attemptId) => {
+      recoveryTriggers.push(attemptId);
+      return { outcome: 'EXECUTOR_PENDING_ATTEMPT_TRIGGERED_NOT_ACCEPTANCE' };
+    },
+    runPlan: () => { throw new Error('DISPATCHER_MUST_NOT_RUN_MODEL_INLINE'); },
+    log: () => {},
+  };
+  return { root, config, adapters, job, taskComment, comments, dispatches, writes, recoveryTriggers };
+}
+
+test('Issue #310 accepts only an exact structured task and publishes its receipt once to #407', async () => {
+  const f = makeIssue310TaskFixture();
+  try {
+    const sourceRef = { issue: 310, comment_id: f.taskComment.id, author: 'dispatcher',
+      body_sha256: h(f.taskComment.body) };
+    const first = await executeWorker(f.config, f.adapters);
+    assert.equal(first.state, 'DISPATCHED');
+    assert.equal(f.dispatches.length, 1);
+    assert.equal(f.dispatches[0].job.request_id, f.job.request_id);
+    assert.equal(f.writes.length, 1);
+    assert.equal(f.writes[0].state, 'STARTED');
+    assert.deepEqual(f.writes[0].task_source_ref, sourceRef);
+    assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify(f.writes[0])).task_source_ref.comment_id,
+      f.taskComment.id);
+
+    const second = await executeWorker(f.config, f.adapters);
+    assert.equal(second.state, 'NO_DELTA');
+    assert.equal(f.dispatches.length, 1, 'the same #310 task cannot create a second executor attempt');
+    assert.equal(f.writes.filter(item => item.request_id === f.job.request_id).length, 1);
+    assert.ok(f.recoveryTriggers.every(id => id === f.writes[0].attempt_id),
+      'recovery may only refer to the exact already-started attempt');
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('Issue #310 wrong-author, wrong-issue, or edited task readback never dispatches', async () => {
+  for (const overrides of [
+    { user: { login: 'untrusted' } },
+    { issue_url: `https://api.github.com/repos/${REPO}/issues/311` },
+  ]) {
+    const f = makeIssue310TaskFixture({ taskCommentOverrides: overrides });
+    try {
+      const result = await executeWorker(f.config, f.adapters);
+      assert.equal(result.state, 'NO_DELTA');
+      assert.equal(f.dispatches.length, 0);
+      assert.equal(f.writes.length, 0);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  }
+  const changed = makeIssue310TaskFixture();
+  try {
+    await assert.rejects(executeWorker(changed.config, { ...changed.adapters,
+      apiRead(endpoint) {
+        if (endpoint.endsWith(`/issues/comments/${changed.taskComment.id}`))
+          return { ...changed.taskComment, body: `${changed.taskComment.body} edited` };
+        return changed.adapters.apiRead(endpoint);
+      } }), error => error.message === 'DISPATCH_COMMENT_CHANGED');
+  } finally {
+    assert.equal(changed.dispatches.length, 0);
+    assert.equal(changed.writes.length, 0);
+    rmSync(changed.root, { recursive: true, force: true });
+  }
+});
+
+test('Issue #310 prose is not an executable task', async () => {
+  const f = makeIssue310TaskFixture({ taskCommentOverrides: {
+    body: 'Please run this task now and modify the repository.' } });
+  try {
+    const result = await executeWorker(f.config, f.adapters);
+    assert.equal(result.state, 'NO_DELTA');
+    assert.equal(f.dispatches.length, 0);
+    assert.equal(f.writes.length, 0);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('Issue #310 mutation after executor start publishes no STARTED receipt and cannot replay', async () => {
+  let dispatched = false;
+  const f = makeIssue310TaskFixture({ taskReadback: ({ comment }) => dispatched
+    ? { ...comment, body: `${comment.body} edited after start` } : comment });
+  const dispatchToExecutor = f.adapters.dispatchToExecutor;
+  f.adapters.dispatchToExecutor = (...args) => {
+    const result = dispatchToExecutor(...args);
+    dispatched = true;
+    return result;
+  };
+  try {
+    const first = await executeWorker(f.config, f.adapters);
+    assert.equal(first.state, 'UNKNOWN_EXECUTOR_START_SOURCE_READBACK');
+    assert.equal(f.dispatches.length, 1, 'the executor was launched once before the source race was observed');
+    assert.equal(f.writes.some(item => item.request_id === f.job.request_id && item.state === 'STARTED'), false,
+      'no public STARTED receipt may be written after source readback changes');
+
+    await assert.rejects(executeWorker(f.config, f.adapters),
+      error => error.message === 'DISPATCH_COMMENT_CHANGED');
+    assert.equal(f.dispatches.length, 1, 'an uncertain process start must not be replayed');
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('Issue #310 read failure does not starve an independent #407 ping', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-issue310-read-failure-'));
+  try {
+    const workspace = join(root, 'workspace'); const stateDir = join(root, 'state');
+    mkdirSync(workspace); mkdirSync(stateDir);
+    const ping = mkjob({ host: hostname().toUpperCase(), request_id: 'PTYSD_407_PING_DURING_310_FAILURE_20261017' });
+    const comments = [com(1, encoded(ping), 'dispatcher')];
+    const writes = []; const logs = [];
+    const result = await executeWorker({ repo: REPO, project_id: PROJECT, host: ping.host,
+      issue: 407, workspace, state_dir: stateDir, dispatchers: ['dispatcher'] }, {
+      apiRead(endpoint) {
+        if (endpoint === 'user') return { login: 'worker' };
+        if (endpoint.endsWith('/issues/407')) return { title: ISSUE_TITLE, state: 'open' };
+        if (endpoint.includes('/git/ref/heads/main')) return { object: { sha: commit } };
+        const match = endpoint.match(/\/issues\/comments\/(\d+)$/);
+        if (match) return comments.find(item => item.id === Number(match[1]));
+        throw new Error(`UNEXPECTED_ISSUE310_FAILURE_API:${endpoint}`);
+      },
+      commentsRead: () => comments,
+      goalCommentsRead: () => { throw new Error('SIMULATED_ISSUE310_API_UNAVAILABLE'); },
+      writeReceipt: (_config, data) => writes.push(data),
+      runPlan: () => { throw new Error('NO_MODEL_CALL_EXPECTED'); },
+      log: value => logs.push(value),
+    });
+    assert.equal(result.state, 'FINISHED');
+    assert.equal(result.request_id, ping.request_id);
+    assert.ok(logs.includes('HUMAN_TASK_DISCOVERY_READ_UNKNOWN'));
+    assert.deepEqual(writes.map(item => [item.request_id, item.state]), [
+      [ping.request_id, 'STARTED'], [ping.request_id, 'FINISHED'],
+    ]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a #407 receipt with no matching #310 source identity suppresses a colliding task', () => {
+  const job = bindGoalJob({ ...mkjob({ host: TEST_HOST,
+    request_id: 'PTYSD_ISSUE310_SOURCE_COLLISION_20261017', kind: 'opencode_edit',
+    spec_path: 'native-bridge/tasks/scoped-edit.md', spec_sha256: hash }),
+    model: 'opencode/spark', variant: 'high', write_paths: ['README.md'] }, 434);
+  const body = encoded(job);
+  const sourceRef = { issue: 310, comment_id: 31001, author: 'dispatcher', body_sha256: h(body) };
+  const source = { ...com(31001, body, 'dispatcher'), issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
+    task_source_ref: sourceRef };
+  const startedWithoutSource = receipt(job.request_id, '11111111-1111-4111-8111-111111111111',
+    'STARTED', job);
+  const comments = [source, com(40701, RECEIPT_MARKER + JSON.stringify(startedWithoutSource), 'worker')];
+  assert.equal(selectNext(comments, ['dispatcher'], 'worker', TEST_HOST, commit, [],
+    new Set([`434:${job.source_sha}`])), null,
+  'an older receipt for the same request from another source cannot authorize replay');
+  const boundStarted = receipt(job.request_id, '22222222-2222-4222-8222-222222222222',
+    'STARTED', job, null, sourceRef);
+  assert.deepEqual(parseReceipt(RECEIPT_MARKER + JSON.stringify(boundStarted)).task_source_ref, sourceRef);
+  assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify({ ...boundStarted,
+    task_source_ref: { ...sourceRef, issue: 311 } })), null);
+});

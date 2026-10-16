@@ -118,6 +118,36 @@ export function verifyGoalReference(job, dispatchers, apiRead = api,
     return { valid: false, reason: 'GOAL_COMMENT_CONTENT_MISMATCH' };
   return { valid: true, reason: null };
 }
+function validTaskSourceRef(value) {
+  return value && !Array.isArray(value) && typeof value === 'object' &&
+    JSON.stringify(Object.keys(value).sort()) === JSON.stringify(['author', 'body_sha256', 'comment_id', 'issue']) &&
+    value.issue === HUMAN_GOAL_ISSUE && Number.isSafeInteger(value.comment_id) && value.comment_id > 0 &&
+    typeof value.author === 'string' && /^[A-Za-z0-9-]{1,39}$/.test(value.author) &&
+    HASH.test(value.body_sha256 || '');
+}
+function taskSourceRefForComment(comment, dispatchers) {
+  if (comment?.issue_url !== `https://api.github.com/repos/${REPO}/issues/${HUMAN_GOAL_ISSUE}` ||
+      !Number.isSafeInteger(comment.id) || comment.id < 1 ||
+      typeof comment.user?.login !== 'string' || !dispatchers.includes(comment.user.login) ||
+      typeof comment.body !== 'string') return null;
+  return { issue: HUMAN_GOAL_ISSUE, comment_id: comment.id, author: comment.user.login,
+    body_sha256: digest(comment.body) };
+}
+function sameTaskSourceRef(left, right) {
+  const a = left ?? null;
+  const b = right ?? null;
+  if (a === null || b === null) return a === b;
+  return validTaskSourceRef(a) && validTaskSourceRef(b) && a.issue === b.issue &&
+    a.comment_id === b.comment_id && a.author === b.author && a.body_sha256 === b.body_sha256;
+}
+function selectedSourceCommentMatches(selection, comment) {
+  if (comment?.body !== selection?.originalBody) return false;
+  const source = selection?.task_source_ref ?? null;
+  if (source === null) return true;
+  return validTaskSourceRef(source) && comment.id === source.comment_id &&
+    comment.issue_url === `https://api.github.com/repos/${REPO}/issues/${source.issue}` &&
+    comment.user?.login === source.author && digest(comment.body) === source.body_sha256;
+}
 export function parseJob(body) {
   const codexJob = parseCodexJob(body);
   if (codexJob) return codexJob;
@@ -206,13 +236,16 @@ function readCandidatePullRequestPins(comments, dispatchers, workerLogin, host, 
   const jobs = new Map();
   const receipts = new Map();
   for (const comment of comments) {
-    const job = parseJob(comment.body);
+    const sourceRef = comment.task_source_ref ?? null;
+    const job = sourceRef !== null && !validTaskSourceRef(sourceRef) ? null : parseJob(comment.body);
     if ([5, 6].includes(job?.schema) && dispatchers.includes(comment.user?.login) &&
         job.host.toUpperCase() === host.toUpperCase() &&
         (!blockedKinds.has(job.kind) || job.request_id === latestRequestId)) {
       const prior = jobs.get(job.request_id);
-      if (!prior) jobs.set(job.request_id, { job, body: comment.body, duplicate: false });
-      else if (prior.body !== comment.body) prior.duplicate = true;
+      if (!prior) jobs.set(job.request_id, { job, body: comment.body,
+        task_source_ref: sourceRef, duplicate: false });
+      else if (prior.body !== comment.body || !sameTaskSourceRef(prior.task_source_ref, sourceRef))
+        prior.duplicate = true;
     }
     if (comment.user?.login === workerLogin) {
       const receiptValue = parseReceipt(comment.body);
@@ -224,12 +257,20 @@ function readCandidatePullRequestPins(comments, dispatchers, workerLogin, host, 
   }
   const prReadbacks = new Map();
   const pins = new Set();
-  for (const { job, duplicate } of jobs.values()) {
+  for (const { job, task_source_ref: sourceRef, duplicate } of jobs.values()) {
     if (duplicate) continue;
-    const prior = (receipts.get(job.request_id) || []).filter(value =>
+    const sameRequest = receipts.get(job.request_id) || [];
+    const sourceConflict = sameRequest.some(value =>
       value.host.toUpperCase() === job.host.toUpperCase() && value.source_sha === job.source_sha &&
       value.kind === job.kind && (value.candidate_pr ?? null) === job.candidate_pr &&
-      JSON.stringify(value.goal_ref ?? null) === JSON.stringify(job.goal_ref ?? null));
+      JSON.stringify(value.goal_ref ?? null) === JSON.stringify(job.goal_ref ?? null) &&
+      !sameTaskSourceRef(value.task_source_ref, sourceRef));
+    if (sourceConflict) continue;
+    const prior = sameRequest.filter(value =>
+      value.host.toUpperCase() === job.host.toUpperCase() && value.source_sha === job.source_sha &&
+      value.kind === job.kind && (value.candidate_pr ?? null) === job.candidate_pr &&
+      JSON.stringify(value.goal_ref ?? null) === JSON.stringify(job.goal_ref ?? null) &&
+      sameTaskSourceRef(value.task_source_ref, sourceRef));
     if (job.request_id !== latestRequestId &&
         prior.some(value => value.state === 'STARTED' || terminalStates.has(value.state))) continue;
     if (!prReadbacks.has(job.candidate_pr)) {
@@ -256,6 +297,8 @@ export function parseReceipt(body) {
     if (o.candidate_pr !== undefined &&
         (!Number.isSafeInteger(o.candidate_pr) || o.candidate_pr < 1 || o.kind !== 'opencode_edit')) return null;
     if (o.goal_ref !== undefined && (o.kind !== 'opencode_edit' || !validGoalReference(o.goal_ref))) return null;
+    if (o.task_source_ref !== undefined &&
+        (o.kind !== 'opencode_edit' || !validTaskSourceRef(o.task_source_ref))) return null;
     if (o.model_invoked !== undefined && typeof o.model_invoked !== 'boolean') return null;
     if (o.kind === 'opencode_edit' && (o.schema !== 1 ||
         !validateV2Model(o.model, o.variant) ||
@@ -315,10 +358,14 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
   const receipts = new Map();
   for (const c of comments) {
     const login = c.user?.login;
-    const j = parseJob(c.body);
+    const sourceRef = c.task_source_ref ?? null;
+    const j = sourceRef !== null && !validTaskSourceRef(sourceRef) ? null : parseJob(c.body);
     if (j && dispatchers.includes(login) && j.host.toUpperCase() === host.toUpperCase()) {
-      if (!jobs.has(j.request_id)) jobs.set(j.request_id, { job: j, content: c.body, id: c.id, duplicate: false });
-      else if (jobs.get(j.request_id).content !== c.body) jobs.get(j.request_id).duplicate = true;
+      if (!jobs.has(j.request_id)) jobs.set(j.request_id, { job: j, content: c.body, id: c.id,
+        task_source_ref: sourceRef, duplicate: false });
+      else if (jobs.get(j.request_id).content !== c.body ||
+          !sameTaskSourceRef(jobs.get(j.request_id).task_source_ref, sourceRef))
+        jobs.get(j.request_id).duplicate = true;
     }
     const r = parseReceipt(c.body);
     if (r && login === workerLogin) {
@@ -327,19 +374,26 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     }
   }
   for (const [, v] of jobs) {
-    const r = (receipts.get(v.job.request_id) || []).filter(x =>
+    const sameRequest = receipts.get(v.job.request_id) || [];
+    const sourceConflict = sameRequest.some(x =>
+      x.host.toUpperCase() === v.job.host.toUpperCase() && x.source_sha === v.job.source_sha &&
+      x.kind === v.job.kind && (x.candidate_pr ?? null) === (v.job.candidate_pr ?? null) &&
+      JSON.stringify(x.goal_ref ?? null) === JSON.stringify(v.job.goal_ref ?? null) &&
+      !sameTaskSourceRef(x.task_source_ref, v.task_source_ref));
+    const r = sameRequest.filter(x =>
       x.host.toUpperCase() === v.job.host.toUpperCase() &&
       x.source_sha === v.job.source_sha && x.kind === v.job.kind &&
       (x.candidate_pr ?? null) === (v.job.candidate_pr ?? null) &&
-      JSON.stringify(x.goal_ref ?? null) === JSON.stringify(v.job.goal_ref ?? null));
-    if (v.duplicate || v.job.kind === 'opencode_plan' || blockedKinds.includes(v.job.kind) ||
+      JSON.stringify(x.goal_ref ?? null) === JSON.stringify(v.job.goal_ref ?? null) &&
+      sameTaskSourceRef(x.task_source_ref, v.task_source_ref));
+    if (v.duplicate || sourceConflict || v.job.kind === 'opencode_plan' || blockedKinds.includes(v.job.kind) ||
         r.some(x => terminalStates.has(x.state)) || r.some(x => x.state === 'STARTED')) continue;
     // A stale unsigned/unclaimed job must not starve a newer exact-main task.
     const pinKey = v.job.candidate_pr === undefined ? null : candidatePinKey(v.job);
     if ((pinKey !== null && !candidatePins.has(pinKey)) ||
         (liveMainSha !== null && v.job.source_sha !== liveMainSha &&
           (pinKey === null || !candidatePins.has(pinKey)))) continue;
-    return { job: v.job, id: v.id, originalBody: v.content };
+    return { job: v.job, id: v.id, originalBody: v.content, task_source_ref: v.task_source_ref };
   }
   return null;
 }
@@ -365,23 +419,31 @@ function issueCommentsFor(issue) {
 function issueComments(config) { return issueCommentsFor(config.issue); }
 function latestOperatorJob(comments, config, workerLogin, mainSha, candidatePins = new Set()) {
   const jobs = comments.filter(c => config.dispatchers.includes(c.user?.login))
-    .map(c => ({ id: c.id, body: c.body, job: parseJob(c.body) }))
+    .map(c => ({ id: c.id, body: c.body, job: parseJob(c.body),
+      task_source_ref: c.task_source_ref ?? null }))
     .filter(x => x.job && x.job.host.toUpperCase() === config.host.toUpperCase())
     .sort((a, b) => a.id - b.id);
   if (!jobs.length) return null;
-  const job = jobs.at(-1).job;
+  const latest = jobs.at(-1);
+  const job = latest.job;
   const duplicate = jobs.filter(entry => entry.job.request_id === job.request_id);
-  if (new Set(duplicate.map(entry => entry.body)).size > 1) {
+  if (new Set(duplicate.map(entry => entry.body)).size > 1 ||
+      duplicate.some(entry => !sameTaskSourceRef(entry.task_source_ref, latest.task_source_ref))) {
     return { request_id: job.request_id, attempt_id: null, kind: job.kind,
       source_sha: job.source_sha, state: 'AMBIGUOUS_DUPLICATE' };
   }
-  const receipts = comments.filter(c => c.user?.login === workerLogin)
+  const sameRequest = comments.filter(c => c.user?.login === workerLogin)
     .map(c => ({ id: c.id, receipt: parseReceipt(c.body) }))
     .filter(x => x.receipt && x.receipt.request_id === job.request_id &&
       x.receipt.host.toUpperCase() === job.host.toUpperCase() &&
       x.receipt.source_sha === job.source_sha && x.receipt.kind === job.kind &&
       (x.receipt.candidate_pr ?? null) === (job.candidate_pr ?? null) &&
-      JSON.stringify(x.receipt.goal_ref ?? null) === JSON.stringify(job.goal_ref ?? null))
+      JSON.stringify(x.receipt.goal_ref ?? null) === JSON.stringify(job.goal_ref ?? null));
+  if (sameRequest.some(x => !sameTaskSourceRef(x.receipt.task_source_ref, latest.task_source_ref)))
+    return { request_id: job.request_id, attempt_id: null, kind: job.kind,
+      source_sha: job.source_sha, state: 'AMBIGUOUS_DUPLICATE' };
+  const receipts = sameRequest.filter(x =>
+      sameTaskSourceRef(x.receipt.task_source_ref, latest.task_source_ref))
     .sort((a, b) => a.id - b.id);
   const attempts = new Map();
   for (const entry of receipts) {
@@ -491,7 +553,8 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
     },
     github: {
       observed_at: observedAt, main_sha: mainSha,
-      issue_comments_count: comments.length,
+      issue_comments_count: Number.isSafeInteger(dependencies.issueCommentsCount)
+        ? dependencies.issueCommentsCount : comments.length,
       runner_registration: repositoryRunner,
       organization_runner_registration: 'UNKNOWN_ORG_SCOPE_NOT_AVAILABLE',
       runner_service_count: windows.runner_service_count,
@@ -535,6 +598,7 @@ export function writeReceipt(config, data, workerLogin, dependencies = {}) {
       x.receipt.attempt_id === identity.attempt_id && x.receipt.source_sha === identity.source_sha &&
       x.receipt.kind === identity.kind && (x.receipt.candidate_pr ?? null) === (identity.candidate_pr ?? null) &&
       JSON.stringify(x.receipt.goal_ref ?? null) === JSON.stringify(identity.goal_ref ?? null) &&
+      sameTaskSourceRef(x.receipt.task_source_ref, identity.task_source_ref) &&
       x.receipt.state === identity.state);
   let existing;
   try { existing = matchingReceipts(readComments(config)); }
@@ -572,7 +636,8 @@ export async function writeCodexReceiptOnce(config, data, workerLogin, deps = {}
     const value = parseReceipt(comment.body);
     return value?.request_id === identity.request_id && value?.attempt_id === identity.attempt_id &&
       value?.host === identity.host && value?.source_sha === identity.source_sha &&
-      value?.kind === identity.kind && value?.state === identity.state;
+      value?.kind === identity.kind && value?.state === identity.state &&
+      sameTaskSourceRef(value.task_source_ref, identity.task_source_ref);
   });
   const before = matching(await readComments());
   if (before.length) {
@@ -880,7 +945,9 @@ function readSpec(job, apiRead = api) {
   if (digest(bytes) !== job.spec_sha256) throw new Error('SPEC_HASH_MISMATCH');
   return bytes.toString('utf8');
 }
-export function receipt(requestId, attemptId, state, job, result = null) {
+export function receipt(requestId, attemptId, state, job, result = null, taskSourceRef = null) {
+  if (taskSourceRef !== null && !validTaskSourceRef(taskSourceRef))
+    throw new Error('TASK_SOURCE_REFERENCE_INVALID');
   return { schema: 1, project_id: PROJECT, host: job.host, request_id: requestId,
     attempt_id: attemptId, state, kind: job.kind, source_sha: job.source_sha,
     outcome: result?.outcome ?? (state === 'STARTED' ? 'DISPATCH_ACK_NOT_ACCEPTANCE' : 'UNKNOWN'),
@@ -924,7 +991,8 @@ export function receipt(requestId, attemptId, state, job, result = null) {
       stdout_sha256: result?.local_evidence?.stdout_sha256 ?? null,
       stderr_sha256: result?.local_evidence?.stderr_sha256 ?? null } : {}),
     ...([5, 6].includes(job.schema) ? { candidate_pr: job.candidate_pr } : {}),
-    ...(job.schema === 6 ? { goal_ref: job.goal_ref } : {}) };
+    ...(job.schema === 6 ? { goal_ref: job.goal_ref } : {}),
+    ...(taskSourceRef ? { task_source_ref: taskSourceRef } : {}) };
 }
 function completeInlineNativeTask(config, job, workerLogin, attemptId, postReceipt, log) {
   const start = receipt(job.request_id, attemptId, 'STARTED', job);
@@ -1295,7 +1363,27 @@ export async function runWorker(configInput, adapters = {}) {
   if (!me) throw new Error('GH_AUTH_REQUIRED');
   const issue = apiRead(`repos/${REPO}/issues/${config.issue}`);
   if (issue.title !== ISSUE_TITLE || issue.state !== 'open' || issue.pull_request) throw new Error('ISSUE_IDENTITY_MISMATCH');
-  const comments = commentsRead(config);
+  const receiptComments = commentsRead(config);
+  let humanTaskComments = [];
+  if (config.issue === OPERATOR_ISSUE) {
+    try {
+      const sourceComments = goalCommentsRead();
+      if (!Array.isArray(sourceComments)) throw new Error('HUMAN_TASK_COMMENT_LIST_INVALID');
+      humanTaskComments = sourceComments.flatMap(comment => {
+        const taskSourceRef = taskSourceRefForComment(comment, config.dispatchers);
+        const job = parseJob(comment?.body);
+        return taskSourceRef && job?.schema === 6
+          ? [{ ...comment, task_source_ref: taskSourceRef }] : [];
+      });
+    } catch {
+      // A #310 discovery outage parks only that source. Existing #407 jobs and
+      // receipts remain available to this native poll.
+      log('HUMAN_TASK_DISCOVERY_READ_UNKNOWN');
+    }
+  }
+  // Task comments may originate in #310, but all receipts and observation writes
+  // continue to use the configured #407 issue as their sole durable authority.
+  const comments = [...receiptComments, ...humanTaskComments].sort((a, b) => a.id - b.id);
   // Reconcile ambiguous model effects by scope; keep independent zero-token jobs runnable.
   // Never replay an OpenCode operation without its exact persisted terminal evidence.
   const blockedKinds = new Set();
@@ -1308,6 +1396,7 @@ export async function runWorker(configInput, adapters = {}) {
         r?.source_sha === s.source_sha && r?.kind === s.kind &&
         (r?.candidate_pr ?? null) === (s.candidate_pr ?? null) &&
         JSON.stringify(r?.goal_ref ?? null) === JSON.stringify(s.goal_ref ?? null) &&
+        sameTaskSourceRef(r?.task_source_ref, s.task_source_ref) &&
         terminalStates.has(r.state))(parseReceipt(v.body)));
     if (s.kind === 'codex_plan') {
       if (hasTerminal) continue;
@@ -1367,14 +1456,22 @@ export async function runWorker(configInput, adapters = {}) {
       let result;
       try {
         result = JSON.parse(readFileSync(path, 'utf8'));
+        const resultTaskSourceRef = result.terminal?.task_source_ref;
+        const taskSourceMatches = sameTaskSourceRef(resultTaskSourceRef, s.task_source_ref) ||
+          (s.task_source_ref && resultTaskSourceRef === undefined);
         if (result.request_id !== s.request_id || result.attempt_id !== s.attempt_id ||
             result.terminal?.source_sha !== s.source_sha || result.terminal?.kind !== s.kind ||
             (result.terminal?.candidate_pr ?? null) !== (s.candidate_pr ?? null) ||
             JSON.stringify(result.terminal?.goal_ref ?? null) !== JSON.stringify(s.goal_ref ?? null) ||
+            !taskSourceMatches ||
             !parseReceipt(RECEIPT_MARKER + JSON.stringify(result.terminal)))
           throw new Error('LOCAL_RECEIPT_IDENTITY_MISMATCH');
         if (openCodeTask) await verifyCapturedEvidence(resultDir, result);
         if (s.kind === 'opencode_edit') await verifyScopedEditEvidence(resultDir, result, s);
+        // The executor manifest remains bound to the native job schema. Bind
+        // its terminal receipt to the already-read-back source comment here.
+        if (s.task_source_ref && resultTaskSourceRef === undefined)
+          result.terminal = { ...result.terminal, task_source_ref: s.task_source_ref };
       } catch (error) {
         if (openCodeTask) blockedKinds.add(s.kind);
         log(`LOCAL_RESULT_RECONCILIATION_UNKNOWN_${s.request_id}_${String(error?.code || error?.message || 'UNKNOWN').slice(0, 48)}_NO_REPLAY`);
@@ -1399,12 +1496,14 @@ export async function runWorker(configInput, adapters = {}) {
       blockedKinds.add(s.kind);
       if (config.executor) {
         const original = comments.find(comment => config.dispatchers.includes(comment.user?.login) &&
+          sameTaskSourceRef(comment.task_source_ref, s.task_source_ref) &&
           (job => job?.request_id === s.request_id)(parseJob(comment.body)));
         const expectedJob = original ? parseJob(original.body) : null;
         const startMatchesJob = expectedJob && expectedJob.host?.toUpperCase() === s.host.toUpperCase() &&
           expectedJob.source_sha === s.source_sha && expectedJob.kind === s.kind &&
           (expectedJob.candidate_pr ?? null) === (s.candidate_pr ?? null) &&
           JSON.stringify(expectedJob.goal_ref ?? null) === JSON.stringify(s.goal_ref ?? null) &&
+          sameTaskSourceRef(original?.task_source_ref, s.task_source_ref) &&
           expectedJob.model === s.model &&
           (expectedJob.variant ?? null) === (s.variant ?? null) &&
           (s.spec_sha256 == null || expectedJob.spec_sha256 === s.spec_sha256) &&
@@ -1444,12 +1543,14 @@ export async function runWorker(configInput, adapters = {}) {
         if (verified.state === 'WAITING' || verified.state === 'STARTED') {
           const latest = apiRead(`repos/${REPO}/issues/comments/${original.id}`);
           const sameMailbox = verified.suffix === active.suffix && verified.bytes?.equals(active.bytes);
-          if (latest?.body !== original.body || !sameMailbox) {
+          if (!selectedSourceCommentMatches({ id: original.id, originalBody: original.body,
+            task_source_ref: original.task_source_ref ?? null }, latest) || !sameMailbox) {
             log(`OPENCODE_ACTIVE_ATTEMPT_READBACK_CHANGED_${active.attemptId}_NO_REPLAY`);
           } else {
             const attemptReceipts = comments.filter(comment => comment.user?.login === me)
               .map(comment => parseReceipt(comment.body))
-              .filter(value => value?.request_id === job.request_id && value?.attempt_id === active.attemptId);
+              .filter(value => value?.request_id === job.request_id && value?.attempt_id === active.attemptId &&
+                sameTaskSourceRef(value.task_source_ref, original.task_source_ref ?? null));
             if (verified.state === 'WAITING') {
               if (attemptReceipts.length === 0) {
                 try {
@@ -1461,7 +1562,8 @@ export async function runWorker(configInput, adapters = {}) {
                 }
               }
             } else if (attemptReceipts.length === 0) {
-              const started = receipt(job.request_id, active.attemptId, 'STARTED', job);
+              const started = receipt(job.request_id, active.attemptId, 'STARTED', job, null,
+                original.task_source_ref ?? null);
               postReceipt(config, started, me);
               const body = RECEIPT_MARKER + JSON.stringify(started);
               if (!comments.some(comment => comment.user?.login === me && comment.body === body)) {
@@ -1497,7 +1599,8 @@ export async function runWorker(configInput, adapters = {}) {
     log(`CODEX_LOCAL_CLAIM_UNRECONCILED_${selected.unresolvedRequestId}_NO_REPLAY`);
   try {
     const observation = await publishOperatorObservation(
-      config, me, comments, head, { ...adapters.observationDependencies, candidatePins },
+      config, me, comments, head, { ...adapters.observationDependencies, candidatePins,
+        issueCommentsCount: receiptComments.length },
     );
     if (observation.status === 'UPDATED') log('OPERATOR_OBSERVATION_UPDATED');
     else if (observation.status === 'UNKNOWN') log('OPERATOR_OBSERVATION_UPDATE_UNKNOWN');
@@ -1601,7 +1704,7 @@ export async function runWorker(configInput, adapters = {}) {
   }
   // Check full issue comment remains immutable since selection. Edits/races abort the lane.
   const original = apiRead(`repos/${REPO}/issues/comments/${next.id}`);
-  if (original.body !== next.originalBody)
+  if (!selectedSourceCommentMatches(next, original))
     throw new Error('DISPATCH_COMMENT_CHANGED');
   let spec = null;
   if (job.kind === 'opencode_edit' || job.kind === 'codex_plan')
@@ -1665,13 +1768,13 @@ export async function runWorker(configInput, adapters = {}) {
         const confirmedMain = apiRead(`repos/${REPO}/git/ref/heads/main`).object?.sha;
         if (!SHA.test(latestMain || '') || latestMain !== confirmedMain ||
             !candidatePullRequestEligible(job, latestMain, latestPullRequest) ||
-            unchangedComment.body !== next.originalBody) {
+            !selectedSourceCommentMatches(next, unchangedComment)) {
           rmSync(candidateBundlePath(config.executor.manifest_dir, attemptId), { force: true });
           log(`CANDIDATE_PR_PIN_CHANGED_NO_START_${job.candidate_pr}_${job.request_id}`);
           return { state: 'CANDIDATE_PR_PIN_CHANGED_NO_START', request_id: job.request_id };
         }
       } else if (!SHA.test(latestMain || '') || latestMain !== job.source_sha ||
-          unchangedComment.body !== next.originalBody) {
+          !selectedSourceCommentMatches(next, unchangedComment)) {
         rmSync(candidateBundlePath(config.executor.manifest_dir, attemptId), { force: true });
         log(`EDIT_SOURCE_HEAD_CHANGED_NO_START_${job.request_id}`);
         return { state: 'EDIT_SOURCE_HEAD_CHANGED_NO_START', request_id: job.request_id };
@@ -1698,14 +1801,16 @@ export async function runWorker(configInput, adapters = {}) {
     if (processStart.state === 'STARTED') {
       let unchanged = false;
       try {
-        unchanged = apiRead(`repos/${REPO}/issues/comments/${next.id}`)?.body === next.originalBody;
+        unchanged = selectedSourceCommentMatches(next,
+          apiRead(`repos/${REPO}/issues/comments/${next.id}`));
       } catch { /* an unknown source readback cannot authorize a public STARTED receipt */ }
       if (!unchanged) {
         log(`OPENCODE_START_SOURCE_READBACK_UNKNOWN_${job.request_id}_${attemptId}_NO_RECEIPT`);
         return { state: 'UNKNOWN_EXECUTOR_START_SOURCE_READBACK', request_id: job.request_id,
           attempt_id: attemptId, outcome: dispatched.outcome, model_invoked: false };
       }
-      const start = receipt(job.request_id, attemptId, 'STARTED', job);
+      const start = receipt(job.request_id, attemptId, 'STARTED', job, null,
+        next.task_source_ref ?? null);
       postReceipt(config, start, me);
       log(`PROCESS_START_CONFIRMED_${job.request_id}_${attemptId}`);
     } else {
