@@ -421,6 +421,36 @@ test('candidate PR pin readback preserves the exact state of an already-started 
   } finally { fixture.cleanup(); }
 });
 
+test('Codex candidate PR pin requires the exact #310 task source identity', () => {
+  const candidateSha = 'd'.repeat(40);
+  const mainSha = 'c'.repeat(40);
+  const codexCandidate = { ...mkjob({ host: TEST_HOST,
+    request_id: 'PTYSD_CODEX_CANDIDATE_RECEIPT_20261017', kind: 'codex_plan',
+    source_sha: candidateSha }), schema: 3, candidate_pr: 434 };
+  const pullRequest = {
+    number: 434, state: 'open',
+    base: { ref: 'main', sha: mainSha, repo: { id: REPO_ID, full_name: REPO } },
+    head: { sha: candidateSha, repo: { id: REPO_ID, full_name: REPO } },
+  };
+  const sourceRef = { issue: 310, comment_id: 6188322050, author: 't14210184',
+    body_sha256: hash };
+  assert.equal(candidatePullRequestEligible(codexCandidate, mainSha, pullRequest, sourceRef), true);
+  assert.equal(candidatePullRequestEligible(codexCandidate, mainSha, pullRequest), false,
+    'a Codex candidate task without a trusted #310 source identity is not eligible');
+  assert.equal(candidatePullRequestEligible(codexCandidate, mainSha, pullRequest,
+    { ...sourceRef, issue: 311 }), false);
+  assert.equal(candidatePullRequestEligible(codexCandidate, mainSha,
+    { ...pullRequest, head: { ...pullRequest.head, sha: 'e'.repeat(40) } }, sourceRef), false);
+  const unbound = receipt(codexCandidate.request_id,
+    '11111111-1111-4111-8111-111111111111', 'STARTED', codexCandidate);
+  assert.equal(unbound.candidate_pr, 434);
+  assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify(unbound)), null,
+    'candidate Codex receipts must retain their trusted task source binding');
+  const bound = receipt(codexCandidate.request_id,
+    '22222222-2222-4222-8222-222222222222', 'STARTED', codexCandidate, null, sourceRef);
+  assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify(bound)).candidate_pr, 434);
+});
+
 test('receipt write reconciles POST-success/readback-failure without posting a duplicate', () => {
   const job = mkjob();
   const attemptId = 'e416334f-404c-4e61-9b0e-f9283ee07013';
@@ -2729,10 +2759,14 @@ test('Issue #310 structured Codex jobs use the existing executor and bind their 
     const codexSpool = join(root, 'codex-spool');
     mkdirSync(workspace); mkdirSync(stateDir); mkdirSync(codexSpool);
     const host = hostname().toUpperCase();
+    const mainSha = 'c'.repeat(40);
+    const candidateSha = 'd'.repeat(40);
+    const candidatePr = 434;
     const spec = '# Synthetic read-only source task\nNo actual model runs in this test.\n';
     const job = { schema: 3, project_id: PROJECT, host,
       request_id: 'PTYSD_ISSUE310_CODEX_SOURCE_BINDING_20261017', kind: 'codex_plan',
-      source_sha: commit, spec_path: 'native-bridge/tasks/codex-review.md',
+      source_sha: candidateSha, candidate_pr: candidatePr,
+      spec_path: 'native-bridge/tasks/codex-review.md',
       spec_sha256: h(spec), model: 'gpt-6.1-sol', reasoning_effort: 'medium',
       write_paths: ['native-bridge/sample.mjs'] };
     const taskComment = { ...com(31002, encoded(job), 't14210184'),
@@ -2758,9 +2792,11 @@ test('Issue #310 structured Codex jobs use the existing executor and bind their 
     const apiRead = uri => {
       if (uri === 'user') return { login: 'worker' };
       if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
-      if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: commit } };
+      if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: mainSha } };
+      if (uri === `repos/${REPO}/pulls/${candidatePr}`)
+        return testCandidatePull(candidateSha, mainSha, candidatePr);
       if (uri === `repos/${REPO}/issues/comments/${taskComment.id}`) return taskComment;
-      if (uri === `repos/${REPO}/contents/${job.spec_path}?ref=${commit}`)
+      if (uri === `repos/${REPO}/contents/${job.spec_path}?ref=${candidateSha}`)
         return { encoding: 'base64', content: Buffer.from(spec).toString('base64') };
       throw new Error(`UNEXPECTED_ISSUE310_CODEX_API:${uri}`);
     };
@@ -2786,10 +2822,13 @@ test('Issue #310 structured Codex jobs use the existing executor and bind their 
     assert.equal(calls.inline, 0, 'the dispatcher never invokes Codex inline');
     const expectedSource = { issue: 310, comment_id: taskComment.id,
       author: 't14210184', body_sha256: h(taskComment.body) };
+    assert.equal(calls.start[0].candidate_pr, candidatePr);
     assert.deepEqual(calls.start[0].task_source_ref, expectedSource);
+    assert.equal(parseReceipt(comments.at(-1).body).candidate_pr, candidatePr);
     assert.equal(parseReceipt(comments.at(-1).body).task_source_ref.comment_id, taskComment.id);
     const merged = [...comments, { ...taskComment, task_source_ref: expectedSource }];
-    assert.equal(selectNext(merged, ['t14210184'], 'worker', host, commit), null,
+    assert.equal(selectNext(merged, ['t14210184'], 'worker', host, mainSha, [],
+      new Set([`${candidatePr}:${candidateSha}`])), null,
       'the #407 STARTED receipt suppresses redispatch of the same #310 task');
 
     taskComment.body += '\nEdited after the executor request was queued.';

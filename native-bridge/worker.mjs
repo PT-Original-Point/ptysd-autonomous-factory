@@ -181,8 +181,11 @@ export function parseJob(body) {
   if (obj.schema === 6 && !validGoalReference(obj.goal_ref)) return null;
   return obj;
 }
-export function candidatePullRequestEligible(job, liveMainSha, pullRequest) {
-  return [5, 6].includes(job?.schema) && job.kind === 'opencode_edit' &&
+export function candidatePullRequestEligible(job, liveMainSha, pullRequest, taskSourceRef = null) {
+  const supportedEdit = [5, 6].includes(job?.schema) && job.kind === 'opencode_edit';
+  const sourceBoundCodex = job?.schema === 3 && job.kind === 'codex_plan' &&
+    Boolean(validTaskSourceRef(taskSourceRef));
+  return (supportedEdit || sourceBoundCodex) &&
     Number.isSafeInteger(job.candidate_pr) && job.candidate_pr > 0 &&
     SHA.test(job.source_sha || '') && SHA.test(liveMainSha || '') &&
     pullRequest?.number === job.candidate_pr && pullRequest.state === 'open' &&
@@ -242,7 +245,10 @@ function readCandidatePullRequestPins(comments, dispatchers, workerLogin, host, 
   for (const comment of comments) {
     const sourceRef = comment.task_source_ref ?? null;
     const job = sourceRef !== null && !validTaskSourceRef(sourceRef) ? null : parseJob(comment.body);
-    if ([5, 6].includes(job?.schema) && dispatchers.includes(comment.user?.login) &&
+    const sourceBoundCodex = job?.schema === 3 && job.kind === 'codex_plan' &&
+      validTaskSourceRef(sourceRef);
+    const supportedEdit = [5, 6].includes(job?.schema) && job.kind === 'opencode_edit';
+    if ((supportedEdit || sourceBoundCodex) && dispatchers.includes(comment.user?.login) &&
         job.host.toUpperCase() === host.toUpperCase() &&
         (!blockedKinds.has(job.kind) || job.request_id === latestRequestId)) {
       const prior = jobs.get(job.request_id);
@@ -281,7 +287,7 @@ function readCandidatePullRequestPins(comments, dispatchers, workerLogin, host, 
       try { prReadbacks.set(job.candidate_pr, apiRead(`repos/${REPO}/pulls/${job.candidate_pr}`)); }
       catch { prReadbacks.set(job.candidate_pr, null); }
     }
-    if (candidatePullRequestEligible(job, liveMainSha, prReadbacks.get(job.candidate_pr)))
+    if (candidatePullRequestEligible(job, liveMainSha, prReadbacks.get(job.candidate_pr), sourceRef))
       pins.add(candidatePinKey(job));
     else log(`CANDIDATE_PR_PIN_NOT_CURRENT_${job.candidate_pr}_${job.request_id}`);
   }
@@ -299,7 +305,9 @@ export function parseReceipt(body) {
         !RECEIPT_STATES.has(o.state) || typeof o.attempt_id !== 'string' ||
         !/^[a-f0-9-]{36}$/.test(o.attempt_id)) return null;
     if (o.candidate_pr !== undefined &&
-        (!Number.isSafeInteger(o.candidate_pr) || o.candidate_pr < 1 || o.kind !== 'opencode_edit')) return null;
+        (!Number.isSafeInteger(o.candidate_pr) || o.candidate_pr < 1 ||
+          (o.kind !== 'opencode_edit' &&
+            !(o.kind === 'codex_plan' && validTaskSourceRef(o.task_source_ref))))) return null;
     if (o.goal_ref !== undefined && (o.kind !== 'opencode_edit' || !validGoalReference(o.goal_ref))) return null;
     if (o.task_source_ref !== undefined &&
         (!['opencode_edit', 'codex_plan'].includes(o.kind) || !validTaskSourceRef(o.task_source_ref))) return null;
@@ -640,7 +648,8 @@ export async function writeCodexReceiptOnce(config, data, workerLogin, deps = {}
     const value = parseReceipt(comment.body);
     return value?.request_id === identity.request_id && value?.attempt_id === identity.attempt_id &&
       value?.host === identity.host && value?.source_sha === identity.source_sha &&
-      value?.kind === identity.kind && value?.state === identity.state &&
+      value?.kind === identity.kind && (value?.candidate_pr ?? null) === (identity.candidate_pr ?? null) &&
+      value?.state === identity.state &&
       sameTaskSourceRef(value.task_source_ref, identity.task_source_ref);
   });
   const before = matching(await readComments());
@@ -994,7 +1003,8 @@ export function receipt(requestId, attemptId, state, job, result = null, taskSou
       token_usage: result?.token_usage ?? null,
       stdout_sha256: result?.local_evidence?.stdout_sha256 ?? null,
       stderr_sha256: result?.local_evidence?.stderr_sha256 ?? null } : {}),
-    ...([5, 6].includes(job.schema) ? { candidate_pr: job.candidate_pr } : {}),
+    ...([5, 6].includes(job.schema) || (job.schema === 3 && job.candidate_pr !== undefined)
+      ? { candidate_pr: job.candidate_pr } : {}),
     ...(job.schema === 6 ? { goal_ref: job.goal_ref } : {}),
     ...(taskSourceRef ? { task_source_ref: taskSourceRef } : {}) };
 }
@@ -1774,7 +1784,7 @@ export async function runWorker(configInput, adapters = {}) {
         throw new Error('MAIN_HEAD_CHANGED_DURING_CANDIDATE_READBACK');
     }
     catch { return { state: 'CANDIDATE_PR_READBACK_UNKNOWN_NO_START' }; }
-    if (!candidatePullRequestEligible(job, dispatchMainSha, pullRequest)) {
+    if (!candidatePullRequestEligible(job, dispatchMainSha, pullRequest, next.task_source_ref)) {
       log(`CANDIDATE_PR_PIN_CHANGED_NO_START_${job.candidate_pr}_${job.request_id}`);
       return { state: 'CANDIDATE_PR_PIN_CHANGED_NO_START' };
     }
@@ -1846,7 +1856,7 @@ export async function runWorker(configInput, adapters = {}) {
         const latestPullRequest = apiRead(`repos/${REPO}/pulls/${job.candidate_pr}`);
         const confirmedMain = apiRead(`repos/${REPO}/git/ref/heads/main`).object?.sha;
         if (!SHA.test(latestMain || '') || latestMain !== confirmedMain ||
-            !candidatePullRequestEligible(job, latestMain, latestPullRequest) ||
+            !candidatePullRequestEligible(job, latestMain, latestPullRequest, next.task_source_ref) ||
             !selectedSourceCommentMatches(next, unchangedComment)) {
           rmSync(candidateBundlePath(config.executor.manifest_dir, attemptId), { force: true });
           log(`CANDIDATE_PR_PIN_CHANGED_NO_START_${job.candidate_pr}_${job.request_id}`);

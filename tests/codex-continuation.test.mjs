@@ -507,6 +507,12 @@ test('Codex task schema is exact, immutable-source-bound and path-scoped', () =>
   assert.ok(broadReceipt.length > 8000, 'regression fixture exceeds the former receipt body ceiling');
   assert.ok(parseCodexReceipt(broadReceipt), 'a valid receipt is not rejected by a local serialized-size ceiling');
   assert.equal(parseCodexJob('PTYSD_NATIVE_JOB_V1\n{}'), null);
+  const candidateJob = job({ candidate_pr: 437 });
+  assert.deepEqual(parseCodexJob(body(candidateJob)), candidateJob,
+    'schema 3 Codex work may bind to an exact candidate PR');
+  for (const candidate_pr of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '437'])
+    assert.equal(parseCodexJob(body(job({ candidate_pr }))), null,
+      'candidate PR must be a positive safe integer');
 });
 
 test('selection requires trusted author, exact host and current main; duplicate or started requests never replay', () => {
@@ -582,6 +588,8 @@ test('task fingerprint binds scope, model and source without credentials', () =>
   assert.match(base, /^[a-f0-9]{64}$/);
   assert.notEqual(base, codexTaskFingerprint(job({ model: 'gpt-6.1-sol-next' })));
   assert.notEqual(base, codexTaskFingerprint(job({ write_paths: ['native-bridge/other.mjs'] })));
+  assert.notEqual(base, codexTaskFingerprint(job({ candidate_pr: 437 })),
+    'the candidate PR identity is included when a task is PR-bound');
   assert.equal(base.includes('S-1-5'), false);
 });
 

@@ -41,8 +41,14 @@ export function parseCodexJob(body) {
   if (typeof body !== 'string' || !body.startsWith(NATIVE_JOB_MARKER)) return null;
   let job;
   try { job = JSON.parse(body.slice(NATIVE_JOB_MARKER.length)); } catch { return null; }
-  if (!job || typeof job !== 'object' || Array.isArray(job) || job.schema !== 3 ||
-      JSON.stringify(Object.keys(job).sort()) !== JSON.stringify([...CODEX_JOB_KEYS].sort())) return null;
+  if (!job || typeof job !== 'object' || Array.isArray(job) || job.schema !== 3) return null;
+  const jobKeys = Object.keys(job).sort();
+  const baseKeys = [...CODEX_JOB_KEYS].sort();
+  const candidateKeys = [...CODEX_JOB_KEYS, 'candidate_pr'].sort();
+  if (JSON.stringify(jobKeys) !== JSON.stringify(baseKeys) &&
+      JSON.stringify(jobKeys) !== JSON.stringify(candidateKeys)) return null;
+  if (job.candidate_pr !== undefined &&
+      (!Number.isSafeInteger(job.candidate_pr) || job.candidate_pr < 1)) return null;
   if (job.project_id !== 'CHATGPT_GLOBAL_SKILL_GOVERNANCE' || job.kind !== CODEX_JOB_KIND ||
       !REQUEST.test(job.request_id) || typeof job.host !== 'string' ||
       !/^[A-Z0-9-]{3,64}$/.test(job.host) || !SHA.test(job.source_sha)) return null;
@@ -169,6 +175,7 @@ export function codexTaskFingerprint(job) {
     model: job.model,
     reasoning_effort: job.reasoning_effort,
     write_paths: [...job.write_paths].sort(),
+    ...(job.candidate_pr === undefined ? {} : { candidate_pr: job.candidate_pr }),
   };
   return sha256(JSON.stringify(identity));
 }
