@@ -1,6 +1,6 @@
 # PTYSD V5.3-R4 | OpenCode V2-only CLI qualification and rollout
 
-**Project:** `CHATGPT_GLOBAL_SKILL_GOVERNANCE`. **GitHub:** `PT-Original-Point/ptysd-autonomous-factory`, Issue #407. **Windows:** `DESKTOP-1B6PD2P`.
+**Project:** `CHATGPT_GLOBAL_SKILL_GOVERNANCE`. **GitHub:** `PT-Original-Point/ptysd-autonomous-factory`, Issue #407. **Windows:** `win11-primary` (de-identified).
 
 ## Human directive
 
@@ -8,7 +8,7 @@ Only the **official OpenCode V2** may be used as the OpenCode executor. No V1 in
 
 ## Already verified, and what is not
 
-The original low-privilege Windows `PTYSD-Native-OpenCode` Task Scheduler has live GitHub `ping` and `native_preflight` receipts. The previous Worker was successfully updated to SHA-256 `5b8b7e1194599bfe447753cfcafe22c7d45589c50e388d38e2af3c055bb30815`. The host preflight returned `CLI_NOT_FOUND`: this **does not** prove an OpenCode V2 executable or model provider is available in the background task's environment. Model inference, coding, automated red/green correction, privileged OS cleanup and reboot survival are not accepted.
+Historical host evidence recorded a prior Worker hash and a `CLI_NOT_FOUND` preflight; neither is current runtime proof. On 2026-10-16, the live `PTYSD-Native-OpenCode` task read back as `Ready`, Interactive, Limited, and `IgnoreNew`. OpenCode CLI `2.0.27` was present in the user's per-user installation with a valid Authenticode signature; the machine-specific executable path and binary hashes are intentionally omitted from this public candidate. `auth list` returned `No authenticated integrations`. A temporary, non-model configuration readback with `debug config` and `debug agents` exited 0, loaded the generated project config, and exposed `ptysd-scoped-write` with only the exact temporary edit path and no shell permission. The live config has no `executor` or `executor_runtime` descriptor, and `PTYSD-OpenCode-Executor` is absent. Therefore model inference, coding, automated red/green correction, privileged OS cleanup, and reboot survival remain unaccepted.
 
 ## Accepted commands and sources
 
@@ -16,21 +16,23 @@ Use the official V2 installation page: <https://opencode.ai/v2/docs/>. The offic
 
 The pure, no-model preflight executes a discovered native executable's `--version` with a five-second bound. Only an exact **2.x.y** output qualifies. A file returning V1, unverifiable text, or timeout is rejected. A configured local executable path (`PTYSD_OPENCODE_V2_EXE`) is accepted only when absolute and points to a real file; it is still version-qualified. Never use `cmd.exe` shell interpolation of a model prompt or an npm `.cmd` shim.
 
-V2 noninteractive readonly form:
+V2 noninteractive coding form (only in a separately isolated executor):
 ```text
-<verified V2 native executable> run --agent ptysd-readonly --model provider/model#variant --format json --dir <private-workspace> --title <request_id> <pinned-task-spec>
+<verified V2 native executable> run --agent ptysd-scoped-write --model provider/model#variant --format json --title <request_id> <pinned-task-spec>
 ```
-The `provider/model` name may contain additional slashes after the first slash (OpenRouter), and `variant` must exist for that model. A successful CLI exit code does not independently prove the provider honored reasoning effort or that work was accepted. No model inference is allowed without host-local `enable_v2_model_runs:true` AND a matching `allowed_models: {"provider/model":["variant"]}` setting. Both are absent by default.
+The executor sets the child process working directory to `<isolated-workspace>`;
+OpenCode V2 `run` does not define a `--dir` flag, so do not add one.
+The `provider/model` name may contain additional slashes after the first slash (OpenRouter), and `variant` must exist for that model. A successful CLI exit code does not independently prove a code change, test result, or acceptance. New coding requires host-local `enable_v2_edit_runs:true`, an exact `allowed_edit_models` entry, a separately verified low-privilege executor identity, an immutable source bundle, and explicit `write_paths`.
 
 ## Version 2 permissions and fail-closed policy
 
-V2 uses ordered `permissions: [{action,resource,effect}]` rules, **not** V1 `permission: {bash,task,...}`. The V2-only custom primary `ptysd-readonly` agent explicitly denies `shell`, `edit`, `subagent`, `external_directory`, web, plugins/execute, and questions. Only local `read` / `glob` / `grep` are enabled. Session sharing and auto-upgrade are disabled.
+V2 uses ordered `permissions: [{action,resource,effect}]` rules, **not** V1 `permission: {bash,task,...}`. The custom primary `ptysd-scoped-write` agent denies all actions by default, allows local `read` / `glob` / `grep`, and allows `edit` only for each exact validated workspace path. Shell, subagent, external-directory, web and plugin access remain denied. Session sharing and auto-upgrade are disabled. These CLI rules do not replace OS identity or filesystem isolation.
 
-Some historical V2 beta paths silently ignored environment-injected `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT` permissions. Accordingly the worker uses the **project-local** `opencode.json` under its already isolated user-local `workspace`, checks exact byte readback, refuses unknown `opencode.json`, `opencode.jsonc` or `.opencode` overrides, and strips inherited config-injection variables. An actual host test must still prove that this exact installed V2 build loads the agent/permissions before model inference is enabled. GitHub source/mock CI alone is not sufficient.
+Some historical V2 beta paths silently ignored environment-injected `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT` permissions. Accordingly the worker uses the **project-local** `opencode.json` under its isolated execution workspace, checks exact byte readback, refuses unknown `opencode.json`, `opencode.jsonc` or `.opencode` overrides, and strips inherited config-injection variables. An actual host test must still prove that this exact installed V2 build loads the agent/permissions before an authorized coding attempt. GitHub source/mock CI alone is not sufficient.
 
 ## Durable dispatch and privacy
 
-Only pinned jobs with exact project, Issue, trusted author, host, accepted main source SHA and pinned task spec SHA may be processed. Transport `ping` and zero-token `native_preflight` are retained. V2 `opencode_plan` uses schema 2 with `model` and `variant` in the task; both are locally allowlisted. STARTED/terminal receipts publish only bounded metadata and local evidence digests, never raw output or credentials. A STARTED without terminal is ambiguous; it must never reexecute the effect blindly.
+Only pinned jobs with exact project, Issue, trusted author, host, accepted source SHA and pinned task spec SHA may be processed. Transport `ping` and zero-token `native_preflight` are retained. New OpenCode coding uses `opencode_edit` with an exact source revision and write paths. Schema-2 `opencode_plan` remains parseable only for historical receipt recovery; it is excluded from new-work selection and rejected by the executor entry point, so it cannot launch a plan-only model run as a proxy for coding. STARTED/terminal receipts publish only bounded metadata and local evidence digests, never raw output or credentials. A STARTED without terminal is ambiguous; it must never reexecute the effect blindly.
 
 ## Zero-inference provider/catalog evidence (candidate)
 
@@ -59,14 +61,15 @@ returns unknown schema or provides no parseable catalog, the exact lane is
 This job requires the **updated** Win11 Worker and `v2-readiness.mjs` to be
 installed together under the existing Limited Task. GitHub source merge alone
 cannot run it. Do not enqueue it until same-source runtime SHA readback is
-available; retain existing task, 2667 monitor, WinRM and all other projects.
+available; retain the independent `PTYSD-Native-OpenCode` task, WinRM and all other projects.
+The legacy `PTYSD-Factory-Monitor` / `127.0.0.1:2667` was absent from Win11 task/listener readback on 2026-10-15; do not restart or reinstall it.
 
 ## Acceptance phases
 
 1. **Source candidate:** native Node V2-only unit and negative tests + trusted hosted CI.
 2. **Host V2 CLI qualification:** official `@opencode/cli` exact version; native bin `--version` = 2.x, real Worker path/readback, no model usage.
 3. **Host config/permissions qualification:** verify project config is consumed, malicious shell/edit/external attempts are denied, no paid fallback. Do not enable model until this proves true on that V2 build.
-4. **Readonly model task:** verify provider, model ID, variant, costs/quotas; explicitly enable exact model pair; capture exact STARTED/terminal and local evidence hash; `exit 0` is not canonical acceptance.
+4. **Scoped coding attempt:** verify provider, model ID, variant, costs/quotas and account authorization; explicitly enable the exact model pair; capture session/activity, changed-file diff, tests, exact STARTED/terminal and local evidence hashes. `exit 0` alone is not coding or acceptance evidence.
 5. **Coding/CI/rework:** independently gated future work. Never merge trusted-verifier edits with untrusted candidate proof.
 
-No new MCP or supervisor; preserve 2667, WinRM, separate Codex tunnel, unrelated projects, `governance/**`, `runs/**`, and the draft #405 Runner trust-root boundary. Do not claim login-free 24/7 or OS retirement from this phase.
+No new MCP or supervisor; do not restart the retired 2667 monitor. Preserve WinRM, the separate Codex tunnel, unrelated projects, `governance/**`, `runs/**`, and the draft #405 Runner trust-root boundary. Do not claim login-free 24/7 or OS retirement from this phase.
