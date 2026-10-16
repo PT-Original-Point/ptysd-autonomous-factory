@@ -920,6 +920,112 @@ test('executor does not claim or write a terminal receipt when the live executor
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('Codex login preflight WAITING releases only the no-effect attempt so the same task can be reevaluated', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-login-waiting-'));
+  try {
+    const source = join(dir, 'source');
+    mkdirSync(source);
+    execFileSync('git', ['-C', source, 'init', '-q'], { windowsHide: true, shell: false });
+    execFileSync('git', ['-C', source, 'config', 'user.name', 'PTYSD test'], { windowsHide: true, shell: false });
+    execFileSync('git', ['-C', source, 'config', 'user.email', 'ptysd-test@example.invalid'], {
+      windowsHide: true, shell: false,
+    });
+    writeFileSync(join(source, 'sample.mjs'), 'export const ready = true;\n');
+    execFileSync('git', ['-C', source, 'add', 'sample.mjs'], { windowsHide: true, shell: false });
+    execFileSync('git', ['-C', source, 'commit', '-q', '-m', 'test source'], { windowsHide: true, shell: false });
+    const sourceSha = execFileSync('git', ['-C', source, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8', windowsHide: true, shell: false,
+    }).trim();
+    const spec = '# Recoverable Codex request\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_LOGIN_WAIT_20261016', source_sha: sourceSha,
+      spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const spool = join(dir, 'spool');
+    const state = join(dir, 'publisher-state');
+    mkdirSync(spool); mkdirSync(state);
+    let started;
+    let startReceipts = 0;
+    let triggerCalls = 0;
+    const dispatched = await dispatchCodexJob({ config: {
+      codex_spool: spool, state_dir: state, workspace: source,
+    }, job: picked, spec, workerLogin: worker,
+    attemptId: '00000000-0000-0000-0000-000000000126',
+    createBundle: async path => execFileSync('git', ['-C', source, 'bundle', 'create', path, '--all'], {
+      windowsHide: true, shell: false,
+    }),
+    publishStarted: async value => { started = value; startReceipts++; },
+    trigger: async () => { triggerCalls++; },
+    });
+    assert.equal(dispatched.state, 'CODEX_EXECUTOR_REQUESTED');
+    assert.equal(startReceipts, 1);
+
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: join(dir, 'workspaces'),
+      codex_executable: join(dir, 'codex.exe') });
+    const retryPath = join(spool, 'locks',
+      `retrigger-${picked.request_id}-${dispatched.attemptId}.json`);
+    let qualifyCalls = 0;
+    let modelRunnerCalls = 0;
+    const preflightMiss = async () => {
+      qualifyCalls++;
+      throw Object.assign(new Error('login not ready'), { code: 'CODEX_LOGIN_NOT_READY' });
+    };
+    const first = await runExecutorOnce(config, { currentSid: config.executor_identity_sid,
+      environment: {}, qualifyCodex: preflightMiss });
+    assert.equal(first.state, 'WAITING');
+    assert.deepEqual(first.reasons, ['CODEX_LOGIN_NOT_READY']);
+    assert.equal(first.model_invoked, false);
+    assert.equal(existsSync(executorResultPath(spool, picked.request_id, dispatched.attemptId)), false);
+    assert.equal(existsSync(join(spool, 'claims', `${picked.request_id}-${dispatched.attemptId}.json`)), false);
+    assert.equal(existsSync(join(spool, 'requests', `${picked.request_id}-${dispatched.attemptId}.json`)), true);
+    assert.equal(existsSync(join(spool, 'locks', 'executor.active')), false);
+
+    const blockedKinds = new Set();
+    const retryOnce = () => reconcileCodexExecutorResult(started, { codex_spool: spool }, worker,
+      blockedKinds, { triggerExecutor: async () => { triggerCalls++; } });
+    assert.deepEqual(await retryOnce(), { status: 'RETRIGGERED' });
+    assert.equal(existsSync(retryPath), true);
+
+    const second = await runExecutorOnce(config, { currentSid: config.executor_identity_sid,
+      environment: {}, qualifyCodex: preflightMiss });
+    assert.equal(second.state, 'WAITING');
+    assert.equal(second.request_id, picked.request_id);
+    assert.equal(second.attempt_id, dispatched.attemptId);
+    assert.equal(existsSync(retryPath), false,
+      'a confirmed pre-model login miss releases only this attempt retry marker');
+    assert.equal(existsSync(executorResultPath(spool, picked.request_id, dispatched.attemptId)), false);
+    assert.deepEqual(await retryOnce(), { status: 'RETRIGGERED' },
+      'the same source-bound request remains eligible after a confirmed no-effect wait');
+
+    const emptyHash = createHash('sha256').update('').digest('hex');
+    const restored = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid,
+      environment: {},
+      qualifyCodex: async () => { qualifyCalls++; },
+      runCodex: async (_request, _config, worktree) => {
+        modelRunnerCalls++;
+        assert.equal(execFileSync('git', ['-C', worktree, 'rev-parse', 'HEAD'], {
+          encoding: 'utf8', windowsHide: true, shell: false,
+        }).trim(), sourceSha);
+        return { exit_code: 0, outcome: 'CODEX_SESSION_ID_MISSING_UNVERIFIED',
+          session_id: null, session_started: false, provider_usage_evidence: 'UNKNOWN',
+          model_activity_evidence: 'UNKNOWN', tool_execution_evidence: 'UNKNOWN',
+          tool_execution_count: 0, file_change_tool_evidence: 'UNKNOWN',
+          file_change_tool_completed_count: 0, file_change_tool_failed_count: 0,
+          file_change_tool_incomplete_count: 0, model_invoked: false,
+          process_tree_state: 'NOT_STARTED', termination_state: 'NOT_STARTED',
+          stdout_sha256: emptyHash, stderr_sha256: emptyHash, stdout_bytes: 0, stderr_bytes: 0 };
+      },
+    });
+    assert.equal(restored.state, 'RESULT_SAVED');
+    assert.equal(restored.model_invoked, false,
+      'the test proves re-evaluation without invoking an external model');
+    assert.equal(qualifyCalls, 3);
+    assert.equal(modelRunnerCalls, 1);
+    assert.equal(startReceipts, 1, 're-evaluation does not duplicate the STARTED receipt');
+    assert.equal(triggerCalls, 3, 'one initial and two bounded dispatcher recovery triggers');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('executor consumes a request into an explicit blocked receipt when identity or cost gates are not ready', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pty-codex-executor-gate-'));
   try {

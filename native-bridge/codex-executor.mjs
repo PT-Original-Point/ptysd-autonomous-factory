@@ -502,8 +502,16 @@ export async function runExecutorOnce(config, deps = {}) {
     }
     catch (error) {
       const reason = String(error.code || error.message || 'PREFLIGHT_FAILED').slice(0, 96);
-      writeResult(resultPath, blocked(`CODEX_EXECUTOR_PREFLIGHT_${reason}`, [reason]));
-      return { state: 'BLOCKED', reasons: [reason], model_invoked: false, result_path: resultPath };
+      try {
+        releasePreModelAttempt(config, picked, request);
+      } catch (releaseError) {
+        const releaseReason = String(releaseError.code || releaseError.message || 'PREFLIGHT_EFFECT_READBACK_UNKNOWN')
+          .replace(/[^A-Z0-9_]/gi, '_').slice(0, 96).toUpperCase();
+        return { state: 'WAITING', reasons: [reason, releaseReason], model_invoked: false,
+          request_id: request.job.request_id, attempt_id: request.attempt_id };
+      }
+      return { state: 'WAITING', reasons: [reason], model_invoked: false,
+        request_id: request.job.request_id, attempt_id: request.attempt_id };
     }
     const bundleRoot = resolve(config.spool_dir, 'bundles');
     const bundlePath = resolve(request.bundle_path);
@@ -611,6 +619,59 @@ function hasQueuedRequestFile(spoolDir) {
     if (error.code === 'ENOENT') return false;
     throw error;
   }
+}
+
+// Release only a task that is proven to be before model execution. This lets a
+// later five-minute Worker poll re-evaluate the same request after a CLI login
+// or other recoverable qualification becomes available. Any ambiguous artifact
+// keeps the claim as a no-replay barrier.
+function releasePreModelAttempt(config, picked, request) {
+  const requestId = request?.job?.request_id;
+  const attemptId = request?.attempt_id;
+  const expectedClaimPath = join(config.spool_dir, 'claims', `${requestId}-${attemptId}.json`);
+  if (!/^[A-Z][A-Z0-9_-]{7,79}$/.test(requestId || '') || !/^[a-f0-9-]{36}$/.test(attemptId || '') ||
+      picked?.claim_path !== expectedClaimPath ||
+      picked?.path !== join(config.spool_dir, 'requests', `${requestId}-${attemptId}.json`))
+    throw new Error('PREFLIGHT_CLAIM_IDENTITY_UNKNOWN');
+
+  const activePath = join(config.spool_dir, 'locks', 'executor.active');
+  const active = JSON.parse(readFileSync(activePath, 'utf8'));
+  if (active?.schema !== 1 || active.pid !== process.pid || active.phase !== 'CLAIMED_NO_MODEL' ||
+      active.request_id !== requestId || active.attempt_id !== attemptId ||
+      (active.child_pid !== undefined && active.child_pid !== null))
+    throw new Error('PREFLIGHT_EXECUTOR_OWNERSHIP_UNKNOWN');
+
+  if (existsSync(executorResultPath(config.spool_dir, requestId, attemptId)))
+    throw new Error('PREFLIGHT_RESULT_ALREADY_EXISTS');
+  const workspaceRoot = resolve(config.workspace_root);
+  const worktree = resolve(workspaceRoot, attemptId);
+  const worktreeRel = relative(workspaceRoot, worktree);
+  if (worktreeRel.startsWith(`..${sep}`) || worktreeRel === '..' || isAbsolute(worktreeRel) || existsSync(worktree))
+    throw new Error('PREFLIGHT_WORKTREE_EFFECT_UNKNOWN');
+
+  const currentRequest = JSON.parse(readFileSync(picked.path, 'utf8'));
+  validateCodexExecutorRequest(currentRequest);
+  if (JSON.stringify(currentRequest) !== JSON.stringify(request))
+    throw new Error('PREFLIGHT_REQUEST_CHANGED');
+
+  const expectedClaim = JSON.stringify({ request_id: requestId, attempt_id: attemptId,
+    source_sha: request.source_sha, fingerprint: request.fingerprint });
+  if (readFileSync(expectedClaimPath, 'utf8') !== expectedClaim)
+    throw new Error('PREFLIGHT_CLAIM_CHANGED');
+
+  const retryPath = join(config.spool_dir, 'locks', `retrigger-${requestId}-${attemptId}.json`);
+  let retryBytes = null;
+  try { retryBytes = readFileSync(retryPath, 'utf8'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (retryBytes !== null) {
+    let retry;
+    try { retry = JSON.parse(retryBytes); } catch { throw new Error('PREFLIGHT_RETRY_MARKER_INVALID'); }
+    if (retry?.schema !== 1 || retry.request_id !== requestId || retry.attempt_id !== attemptId ||
+        retry.fingerprint !== request.fingerprint)
+      throw new Error('PREFLIGHT_RETRY_MARKER_IDENTITY_MISMATCH');
+    unlinkSync(retryPath);
+  }
+  unlinkSync(expectedClaimPath);
 }
 
 async function main() {
