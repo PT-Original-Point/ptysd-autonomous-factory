@@ -28,6 +28,13 @@ const observation = (overrides = {}) => ({
 const comment = (value, login = 'trusted-publisher', id = 1) => ({
   id, body: encodeOperatorObservation(value), user: { login }, updated_at:value.published_at,
 });
+const candidatePrJobComment = (candidatePr=434, sourceSha='a'.repeat(40), id=10) => {
+  const job={schema:5,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+    request_id:'PTYSD_PANEL_INTEGRATION_TEST',kind:'opencode_edit',source_sha:sourceSha,
+    spec_path:'native-bridge/tasks/scoped-edit.md',spec_sha256:'c'.repeat(64),
+    model:'opencode/spark',variant:'high',write_paths:['src/demo.mjs'],candidate_pr:candidatePr};
+  return {id,body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job),user:{login:'t14210184'}};
+};
 
 test('operator snapshot requires exact project identity, time bounds, and de-identified keys', () => {
   const body = encodeOperatorObservation(observation());
@@ -507,6 +514,7 @@ test('checks resource keeps raw API data across polling, ETag, manual sync, and 
   }, { now:() => clock, AbortControllerCtor:AbortController,
     setTimeoutFn:() => 1, clearTimeoutFn:() => {} });
   const store = api.createResourceStore(client, () => clock);
+  store.bindCandidatePr({number:434,request_id:'PTYSD_PANEL_TEST',source_sha:head1,error:null});
   const checkUrl1 = store.bindChecksHead(head1);
   assert.equal(await store.loadResource('checks',checkUrl1,api.constants.CHECKS_POLL_MS),original);
   assert.equal(store.resources.checks.data,original);
@@ -594,8 +602,8 @@ test('one simulated hour follows the 21-request schedule and serializes startup 
     active++; maxActive=Math.max(maxActive,active); requests.push(url); remaining--;
     await Promise.resolve();
     active--;
-    const data=url.includes('/issues/407') ? []
-      : url.endsWith('/pulls/434') ? {head:{sha:head},base:{sha:'b'.repeat(40)}}
+    const data=url.includes('/issues/407') ? [candidatePrJobComment(434,head)]
+      : url.endsWith('/pulls/434') ? {number:434,head:{sha:head},base:{sha:'b'.repeat(40)}}
         : url.endsWith('/commits/main') ? {sha:'b'.repeat(40)}
           : {check_runs:[]};
     return {status:200,ok:true,headers:{get:name => {
@@ -608,13 +616,14 @@ test('one simulated hour follows the 21-request schedule and serializes startup 
   },{now:() => time,AbortControllerCtor:AbortController,setTimeoutFn:() => 1,clearTimeoutFn:() => {}});
   const store=api.createResourceStore(client,() => time);
   const urls={issue:'https://api.github.com/issues/407/comments?per_page=100',
-    pr:'https://api.github.com/pulls/434',main:'https://api.github.com/commits/main'};
+    pr:'https://api.github.com/pulls/434',prFor:number=>`https://api.github.com/pulls/${number}`,
+    main:'https://api.github.com/commits/main'};
   await Promise.all([api.runSyncCycle(store,client,urls),api.runSyncCycle(store,client,urls)]);
   assert.equal(requests.length,4,'overlapping same-page refreshes share each resource request');
   assert.equal(maxActive,1,'startup requests are serialized rather than burst in parallel');
   assert.match(requests[0],/issues\/407/);
-  assert.match(requests[1],/pulls\/434/);
-  assert.match(requests[2],/commits\/main/);
+  assert.match(requests[1],/commits\/main/);
+  assert.match(requests[2],/pulls\/434/);
   assert.match(requests[3],/check-runs/);
   for (let minute=5; minute<60; minute+=5) {
     time=1_000_000+minute*60_000;
@@ -812,9 +821,9 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
   });
   const comments=[{id:42,body:encodeOperatorObservation(snapshot),
     user:{login:'wfvupu1212'},created_at:observedAt,
-    updated_at:new Date(Date.now()-10_000).toISOString()}];
+    updated_at:new Date(Date.now()-10_000).toISOString()},candidatePrJobComment(434, 'a'.repeat(40),43)];
   const sha='a'.repeat(40);
-  const pr={draft:true,merged:false,state:'open',head:{sha},base:{sha}};
+  const pr={number:434,draft:true,merged:false,state:'open',head:{sha},base:{sha}};
   const payload=(url) => url.includes('/issues/407') ? comments
     : url.endsWith('/pulls/434') ? pr
     : url.endsWith('/commits/main') ? {sha}

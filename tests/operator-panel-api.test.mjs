@@ -18,8 +18,17 @@ const TEST_HOST = 'DESKTOP-1B6PD2P';
 const urls = {
   issue: 'https://api.github.com/repos/PT-Original-Point/ptysd-autonomous-factory/issues/407/comments?per_page=100',
   pr: 'https://api.github.com/repos/PT-Original-Point/ptysd-autonomous-factory/pulls/434',
+  prFor: number => `https://api.github.com/repos/PT-Original-Point/ptysd-autonomous-factory/pulls/${number}`,
   main: 'https://api.github.com/repos/PT-Original-Point/ptysd-autonomous-factory/commits/main',
 };
+
+function candidateTaskComment(candidatePr=434,id=41,sourceSha='b'.repeat(40),requestId=`PTYSD_PANEL_TEST_${candidatePr}`) {
+  const job={schema:5,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:TEST_HOST,
+    request_id:requestId,kind:'opencode_edit',source_sha:sourceSha,
+    spec_path:'native-bridge/tasks/scoped-edit.md',spec_sha256:'c'.repeat(64),
+    model:'opencode/spark',variant:'high',write_paths:['src/demo.mjs'],candidate_pr:candidatePr};
+  return {id,body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job),user:{login:'t14210184'}};
+}
 
 function response(status, body, values = {}) {
   const headers = Object.fromEntries(Object.entries(values).map(([key, value]) => [key.toLowerCase(), String(value)]));
@@ -53,9 +62,10 @@ function serialLocks() {
 test('one page stays within the 21-request hourly polling budget', async () => {
   let now = baseTime;
   const calls = [];
+  const jobComments=[candidateTaskComment()];
   const client = panel.createApiClient(async url => {
     calls.push(url);
-    const body = url === urls.issue ? [] : url === urls.pr ? { head: { sha: head } } :
+    const body = url === urls.issue ? jobComments : url === urls.pr ? { number:434,head:{sha:'b'.repeat(40)} } :
       url === urls.main ? { sha: head } : { check_runs: [] };
     return response(200, body, quotaHeaders(now, 1000 - calls.length));
   }, { now: () => now });
@@ -68,7 +78,7 @@ test('one page stays within the 21-request hourly polling budget', async () => {
   assert.equal(calls.filter(url => url === urls.issue).length, 12);
   assert.equal(calls.filter(url => url === urls.pr).length, 4);
   assert.equal(calls.filter(url => url === urls.main).length, 1);
-  assert.equal(calls.filter(url => url.includes(`/commits/${head}/check-runs`)).length, 4);
+  assert.equal(calls.filter(url => url.includes(`/commits/${'b'.repeat(40)}/check-runs`)).length, 4);
 });
 
 test('remaining zero pauses every source and repeated manual-style reads cannot bypass reset', async () => {
@@ -253,7 +263,7 @@ test('three tabs serialize startup reads and reuse same-URL public cache until t
     activeTotal--;
     active.set(url,inProgress-1);
     const count=calls.filter(item => item === url).length;
-    const body=url === urls.issue ? [] : url === urls.pr ? {head:{sha:head}} :
+    const body=url === urls.issue ? [candidateTaskComment()] : url === urls.pr ? {number:434,head:{sha:'b'.repeat(40)}} :
       url === urls.main ? {sha:head} : {check_runs:[]};
     if (url === urls.issue && count > 1)
       return response(304,null,{...quotaHeaders(now,55),ETag:'"issue-shared"'});
@@ -265,7 +275,7 @@ test('three tabs serialize startup reads and reuse same-URL public cache until t
   assert.equal(calls.length,4,'all tabs share one fresh response per GitHub URL');
   assert.equal(maxConcurrent,1,'a shared Web Lock prevents overlapping network requests across tabs');
   assert.ok(clients.every(client=>client.getRateState().coordination === 'SHARED_LOCKED'));
-  for (const store of stores) assert.equal(store.resources.issue.data.length,0);
+  for (const store of stores) assert.equal(store.resources.issue.data.length,1);
 
   now+=5*60*1000+1;
   await Promise.all(stores.map((store,index)=>panel.runSyncCycle(store,clients[index],urls)));
@@ -290,6 +300,7 @@ test('a HEAD change clears the old checks binding and summary', async () => {
   const client = panel.createApiClient(async () => response(200, { check_runs: [] }, quotaHeaders(baseTime, 40)),
     { now: () => baseTime });
   const store = panel.createResourceStore(client, () => baseTime);
+  store.bindCandidatePr({number:434,request_id:'PTYSD_HEAD_TEST',source_sha:head,error:null});
   const firstUrl = store.bindChecksHead(head);
   await store.loadResource('checks', firstUrl, 0);
   assert.ok(store.checksSummaryForHead(head));
@@ -374,8 +385,8 @@ test('legacy read-only OpenCode plans remain historical and never appear as queu
 });
 
 test('candidate PR edit jobs remain visible only when the exact open PR head and base match', () => {
-  assert.equal(panel.constants.MONITORED_PR_NUMBER, 434,
-    'the panel follows the current integrated Draft candidate, not the closed #419');
+  assert.equal(panel.constants.MONITORED_PR_NUMBER, undefined,
+    'the panel must not pin a PR number in source');
   const candidateHead='b'.repeat(40);
   const goalRef={issue:310,comment_id:6188322050,
     marker:'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015',body_sha256:'d'.repeat(64)};
@@ -389,6 +400,11 @@ test('candidate PR edit jobs remain visible only when the exact open PR head and
   const repo={id:1352411536,full_name:'PT-Original-Point/ptysd-autonomous-factory'};
   const pin={number:434,state:'open',base:{ref:'main',sha:head,repo},head:{sha:candidateHead,repo}};
   const comments=[{id:41,body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job),user:{login:'t14210184'}}];
+  const resolved=panel.currentCandidatePrReference(comments);
+  assert.equal(resolved.number,434);
+  assert.equal(resolved.request_id,job.request_id);
+  assert.equal(resolved.source_sha,candidateHead);
+  assert.equal(resolved.error,null);
   const selected=panel.latestTask(comments,head,pin);
   assert.equal(selected.state,'已接單／尚無 STARTED 收據');
   assert.equal(panel.normalizeFormalTask(selected).state,'QUEUED_NOT_STARTED');
@@ -428,4 +444,108 @@ test('candidate PR edit jobs remain visible only when the exact open PR head and
   assert.equal(stillQueued.state,'已接單／尚無 STARTED 收據',
     'a receipt for another PR cannot finish this candidate attempt');
   assert.equal(stillQueued.attempt_id,null);
+});
+
+test('candidate PR lookup follows the latest authorized task reference, not the largest open PR number', () => {
+  const older=candidateTaskComment(999,40,'d'.repeat(40),'PTYSD_PANEL_OLDER_JOB');
+  const latest=candidateTaskComment(434,41,'b'.repeat(40),'PTYSD_PANEL_NEWER_JOB');
+  assert.equal(panel.currentCandidatePrReference([older,latest]).number,434);
+  const conflict=[candidateTaskComment(434,50,'b'.repeat(40),'PTYSD_PANEL_CONFLICT'),
+    candidateTaskComment(436,51,'d'.repeat(40),'PTYSD_PANEL_CONFLICT')];
+  const conflictingReference=panel.currentCandidatePrReference(conflict);
+  assert.equal(conflictingReference.number,null);
+  assert.equal(conflictingReference.request_id,'PTYSD_PANEL_CONFLICT');
+  assert.equal(conflictingReference.source_sha,null);
+  assert.equal(conflictingReference.error,'TASK_ID_CONTENT_CONFLICT');
+  assert.equal(panel.currentCandidatePrReference([]).error,'CURRENT_CANDIDATE_PR_UNKNOWN');
+});
+
+test('PR metadata and CI follow a changed #407 candidate_pr binding and clear the prior SHA', async () => {
+  let now=baseTime;
+  let comments=[candidateTaskComment(434,41,'b'.repeat(40),'PTYSD_PANEL_CHANGE_A')];
+  const calls=[];
+  const client=panel.createApiClient(async url=>{
+    calls.push(url);
+    let body=[];
+    if(url===urls.issue) body=comments;
+    else if(url===urls.main) body={sha:head};
+    else if(url===urls.prFor(434)) body={number:434,state:'open',draft:true,base:{ref:'main',sha:head},head:{sha:'b'.repeat(40)}};
+    else if(url===urls.prFor(436)) body={number:436,state:'open',draft:true,base:{ref:'main',sha:head},head:{sha:'d'.repeat(40)}};
+    else if(url.includes('/check-runs')) body={check_runs:[]};
+    return response(200,body,quotaHeaders(now,500));
+  },{now:()=>now});
+  const store=panel.createResourceStore(client,()=>now);
+  await panel.runSyncCycle(store,client,urls);
+  assert.equal(store.resources.pr.number,434);
+  assert.equal(store.checksSummaryForHead('b'.repeat(40),434).pr_number,434);
+  now+=16*60*1000;
+  comments=[candidateTaskComment(436,42,'d'.repeat(40),'PTYSD_PANEL_CHANGE_B')];
+  await panel.runSyncCycle(store,client,urls);
+  assert.equal(store.resources.pr.number,436);
+  assert.equal(store.resources.pr.data.number,436);
+  assert.equal(store.checksSummaryForHead('b'.repeat(40),434),null,
+    'checks for the former task PR are cleared when the authoritative reference changes');
+  assert.equal(store.resources.checks.url,
+    `https://api.github.com/repos/PT-Original-Point/ptysd-autonomous-factory/commits/${'d'.repeat(40)}/check-runs?per_page=100`);
+  assert.ok(calls.includes(urls.prFor(434)) && calls.includes(urls.prFor(436)));
+});
+
+test('same-PR source pin changes stay UNKNOWN until the shared PR poll interval permits revalidation', async () => {
+  let now=baseTime;
+  const oldSha='b'.repeat(40), nextSha='c'.repeat(40);
+  let comments=[candidateTaskComment(434,41,oldSha,'PTYSD_PANEL_SAME_PR_A')];
+  const calls=[];
+  let prReads=0;
+  let remaining=500;
+  const client=panel.createApiClient(async url=>{
+    calls.push(url);
+    let body=[];
+    if(url===urls.issue) body=comments;
+    else if(url===urls.main) body={sha:head};
+    else if(url===urls.prFor(434)) {
+      prReads++;
+      body={number:434,state:'open',draft:true,base:{ref:'main',sha:head},
+        head:{sha:prReads===1 ? oldSha : nextSha}};
+    } else if(url.includes('/check-runs')) body={check_runs:[]};
+    return response(200,body,quotaHeaders(now,remaining));
+  },{now:()=>now});
+  const store=panel.createResourceStore(client,()=>now);
+
+  await panel.runSyncCycle(store,client,urls);
+  assert.equal(store.resources.pr.data.head.sha,oldSha);
+  assert.ok(store.checksSummaryForHead(oldSha,434));
+
+  comments=[candidateTaskComment(434,42,nextSha,'PTYSD_PANEL_SAME_PR_B')];
+  remaining=5;
+  for (const elapsed of [5,10,15,30,59]) {
+    now=baseTime+elapsed*60*1000;
+    await panel.runSyncCycle(store,client,urls);
+    assert.equal(store.resources.pr.data,null,'the former PR response must not be represented as the new task pin');
+    assert.equal(store.resources.pr.error,'CANDIDATE_PR_REFRESH_WAITING_FOR_POLL_INTERVAL');
+    assert.equal(store.checksSummaryForHead(oldSha,434),null,'old HEAD checks must be unbound immediately');
+    assert.equal(prReads,1,'same-URL cache data is not accepted while the adaptive poll interval is active');
+  }
+
+  now=baseTime+60*60*1000;
+  await panel.runSyncCycle(store,client,urls);
+  assert.equal(prReads,2,'the PR is revalidated when the low-quota adaptive poll interval expires');
+  assert.equal(store.resources.pr.data.head.sha,nextSha);
+  assert.ok(store.checksSummaryForHead(nextSha,434));
+  assert.equal(store.checksSummaryForHead(oldSha,434),null);
+});
+
+test('without a fresh authorized candidate_pr reference the panel does not guess an open PR', async () => {
+  const calls=[];
+  const client=panel.createApiClient(async url=>{
+    calls.push(url);
+    const body=url===urls.issue ? [] : url===urls.main ? {sha:head} : {head:{sha:'b'.repeat(40)}};
+    return response(200,body,quotaHeaders(baseTime,500));
+  },{now:()=>baseTime});
+  const store=panel.createResourceStore(client,()=>baseTime);
+  await panel.runSyncCycle(store,client,urls);
+  assert.equal(store.resources.pr.number,null);
+  assert.equal(store.resources.pr.error,'CURRENT_CANDIDATE_PR_UNKNOWN');
+  assert.equal(store.resources.checks.error,'CURRENT_CANDIDATE_PR_UNKNOWN');
+  assert.equal(calls.some(url=>url.includes('/pulls/')),false);
+  assert.equal(calls.some(url=>url.includes('/check-runs')),false);
 });

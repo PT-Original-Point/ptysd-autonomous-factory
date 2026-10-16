@@ -153,7 +153,7 @@
       <div class="metric"><span class="metric-label">需要 Human 處理</span><span id="metric-human" class="metric-value">未確認</span></div>
       <div class="metric"><span class="metric-label">正式 main HEAD</span><span id="metric-main" class="metric-value">未確認</span></div>
       <div class="metric"><span class="metric-label">已知 Worker 阻擋</span><span id="metric-blocked" class="metric-value">未確認</span></div>
-      <div class="metric"><span class="metric-label">PR #434 精確 HEAD CI</span><span id="metric-ci" class="metric-value">未確認</span></div>
+      <div class="metric"><span class="metric-label">任務所指 PR 精確 HEAD CI</span><span id="metric-ci" class="metric-value">未確認</span></div>
       <div class="metric"><span class="metric-label">最近同步錯誤</span><span id="metric-error" class="metric-value">無</span></div>
     </div>
   </section>
@@ -233,7 +233,7 @@
       <dl class="facts"><dt>精確 HEAD 檢查</dt><dd id="runner-checks">未確認</dd><dt>舊 Runner 檢查</dt><dd id="runner-legacy">未確認</dd><dt>Win11 Runner 服務</dt><dd id="runner-service">未確認</dd><dt>GitHub 登錄</dt><dd id="runner-registration">未確認</dd></dl>
     </article>
     <article class="panel infra-card">
-      <h3>監控頁 PR #434</h3><span id="pr-badge" class="badge neutral">未確認</span>
+      <h3>最近候選任務所指 PR</h3><span id="pr-badge" class="badge neutral">未確認</span>
       <p id="pr-detail" class="infra-summary">來源候選、CI 與 Win11 部署各自獨立判定。</p>
       <dl class="facts"><dt>目前 PR 狀態</dt><dd id="pr-state">未確認</dd><dt>精確 PR HEAD</dt><dd id="pr-head">未確認</dd><dt>PR base／main HEAD</dt><dd id="pr-base">未確認</dd><dt>正式接受／部署</dt><dd id="pr-deployment">未確認</dd></dl>
     </article>
@@ -249,15 +249,15 @@
       <dt>GitHub Issue #407</dt><dd><a href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/issues/407" target="_blank" rel="noopener noreferrer">正式派工、收據與唯一 Win11 觀測留言</a></dd>
       <dt>Issue observation</dt><dd id="snapshot-detail">未確認</dd>
       <dt>Win11 observed_at／expires_at</dt><dd id="freshness-detail">未確認</dd>
-      <dt>PR #434 check runs</dt><dd id="checks-detail">未確認</dd>
+      <dt>任務所指 PR check runs</dt><dd id="checks-detail">未確認</dd>
       <dt>GitHub 公開 API 額度</dt><dd id="rate-detail">未確認</dd>
       <dt>錯誤／過期降級</dt><dd id="error-detail">未確認</dd>
       <dt>Windows Task Scheduler</dt><dd id="task-detail">未確認</dd>
       <dt>OpenCode V2</dt><dd id="opencode-detail">未確認</dd>
     </dl>
     <div class="links">
-      <a href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/pull/434" target="_blank" rel="noopener noreferrer">PR #434 來源與審查</a>
-      <a href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/pull/434/checks" target="_blank" rel="noopener noreferrer">PR #434 CI</a>
+      <a id="pr-source-link" href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/pulls" target="_blank" rel="noopener noreferrer">GitHub PR 清單（目前任務引用未確認）</a>
+      <a id="pr-checks-link" href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/pulls" target="_blank" rel="noopener noreferrer">PR 檢查清單（目前任務引用未確認）</a>
     </div>
     <p class="footnote">靜態唯讀 HTML。只讀 GitHub 公開 API，不含 127.0.0.1:2667、本機服務、資料庫、排程控制、Worker 派工或模型呼叫。跨來源 fetch 受 CORS／GitHub 額度影響；失敗時顯示 UNKNOWN／STALE，不沿用成即時工作狀態。</p>
   </details>
@@ -274,7 +274,6 @@
   const JOB_MARKER = 'PTYSD_NATIVE_JOB_V1\n';
   const RECEIPT_MARKER = 'PTYSD_NATIVE_RECEIPT_V1\n';
   const API = 'https://api.github.com/repos/' + REPO;
-  const MONITORED_PR_NUMBER = 434;
   const ISSUE_POLL_MS = 5 * 60 * 1000;
   const PR_POLL_MS = 15 * 60 * 1000;
   const CHECKS_POLL_MS = 15 * 60 * 1000;
@@ -414,12 +413,36 @@
     }
     return true;
   }
+  function currentCandidatePrReference(comments) {
+    const candidates=[];
+    for (const comment of comments || []) {
+      const job=parseMarked(comment?.body,JOB_MARKER);
+      const id=Number(comment?.id);
+      if (!Number.isSafeInteger(id) || id < 1 || !validJob(job) ||
+          !DISPATCHERS.has(comment?.user?.login || '') || ![5,6].includes(job.schema)) continue;
+      candidates.push({ id, body:comment.body, job });
+    }
+    if (!candidates.length) return { number:null, request_id:null, source_sha:null,
+      error:'CURRENT_CANDIDATE_PR_UNKNOWN' };
+    candidates.sort((a,b) => a.id-b.id);
+    const latest=candidates.at(-1);
+    const sameRequest=candidates.filter(item => item.job.request_id === latest.job.request_id);
+    if (new Set(sameRequest.map(item => item.body)).size > 1)
+      return { number:null, request_id:latest.job.request_id, source_sha:null,
+        error:'TASK_ID_CONTENT_CONFLICT' };
+    const sameCommentId=candidates.filter(item => item.id === latest.id);
+    if (new Set(sameCommentId.map(item => item.job.candidate_pr)).size > 1)
+      return { number:null, request_id:latest.job.request_id, source_sha:null,
+        error:'CANDIDATE_PR_REFERENCE_AMBIGUOUS' };
+    return { number:latest.job.candidate_pr, request_id:latest.job.request_id,
+      source_sha:latest.job.source_sha, error:null };
+  }
   function candidatePinMatches(job, mainSha, pullRequest) {
     const sourceSha = safeSha(job?.source_sha);
     const currentMainSha = safeSha(mainSha);
     const repositoryMatches = repo => object(repo) && repo.id === 1352411536 && repo.full_name === REPO;
-    return [5,6].includes(job?.schema) && job.candidate_pr === MONITORED_PR_NUMBER &&
-      object(pullRequest) && pullRequest.number === MONITORED_PR_NUMBER &&
+    return [5,6].includes(job?.schema) && Number.isSafeInteger(job.candidate_pr) &&
+      object(pullRequest) && pullRequest.number === job.candidate_pr &&
       pullRequest.state === 'open' && pullRequest.base?.ref === 'main' &&
       safeSha(pullRequest.base?.sha) === currentMainSha && sourceSha &&
       safeSha(pullRequest.head?.sha) === sourceSha &&
@@ -798,7 +821,12 @@
         const value=JSON.parse(storage.getItem(key) || 'null');
         if (!value || value.schema !== 1 || value.url !== url ||
             !Number.isFinite(value.validatedAt) || !Object.prototype.hasOwnProperty.call(value,'data')) return null;
-        return {data:value.data,etag:typeof value.etag === 'string' ? value.etag : null,
+        return {data:value.data,limit:Number.isSafeInteger(value.limit) ? value.limit : null,
+          remaining:Number.isSafeInteger(value.remaining) ? value.remaining : null,
+          resetAt:Number.isFinite(value.resetAt) ? value.resetAt : null,
+          retryAfterAt:Number.isFinite(value.retryAfterAt) ? value.retryAfterAt : null,
+          etag:typeof value.etag === 'string' ? value.etag : null,
+          pollIntervalMs:Number.isFinite(value.pollIntervalMs) ? value.pollIntervalMs : null,
           validatedAt:value.validatedAt};
       } catch {
         rate.coordination=locks ? 'BEST_EFFORT_LOCK_ONLY' : 'TAB_LOCAL_ONLY';
@@ -809,7 +837,13 @@
       const key=sharedCacheKey(url);
       if (!storage || !key) return;
       try {
-        const serialized=JSON.stringify({schema:1,url,data:value.data,etag:value.etag || null,
+        const serialized=JSON.stringify({schema:1,url,data:value.data,
+          limit:Number.isSafeInteger(value.limit) ? value.limit : null,
+          remaining:Number.isSafeInteger(value.remaining) ? value.remaining : null,
+          resetAt:Number.isFinite(value.resetAt) ? value.resetAt : null,
+          retryAfterAt:Number.isFinite(value.retryAfterAt) ? value.retryAfterAt : null,
+          etag:value.etag || null,
+          pollIntervalMs:Number.isFinite(value.pollIntervalMs) ? value.pollIntervalMs : null,
           validatedAt:value.validatedAt});
         storage.setItem(key,serialized);
       } catch { rate.coordination=locks ? 'BEST_EFFORT_LOCK_ONLY' : 'TAB_LOCAL_ONLY'; }
@@ -926,7 +960,16 @@
     }
     return {
       requestJson,
-      getMeta(url) { const value=meta.get(url); return value ? {...value} : null; },
+      getMeta(url) {
+        const local=meta.get(url);
+        const shared=readSharedCache(url);
+        const sharedMeta=shared ? {...shared} : null;
+        if (sharedMeta) delete sharedMeta.data;
+        const value=sharedMeta && (!local || sharedMeta.validatedAt > local.validatedAt)
+          ? {...local,...sharedMeta} : local;
+        if (value) { meta.set(url,value); return {...value}; }
+        return null;
+      },
       getRateState() { syncSharedState(); return {...rate}; },
       isPaused() {
         syncSharedState();
@@ -945,7 +988,8 @@
   function createResourceStore(apiClient, now = () => Date.now()) {
     const resources = {
       issue:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null },
-      pr:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null },
+      pr:{ data:null, fetchedAt:0, error:null, retryAt:0, freshAfter:0,
+        pinRevalidationPending:false, generation:0, inFlight:null, number:null, taskRef:null, url:'' },
       main:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null },
       checks:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'' },
     };
@@ -955,8 +999,17 @@
       const currentTime=now();
       const serverPoll=apiClient.getMeta(url)?.pollIntervalMs || 0;
       const effectiveTtl=Math.max(ttl,serverPoll);
-      if (resource.inFlight) return resource.inFlight;
+      if (resource.inFlight) {
+        if (key === 'pr' && resource.pinRevalidationPending && currentTime < (resource.freshAfter || 0))
+          resource.error='CANDIDATE_PR_REFRESH_WAITING_FOR_POLL_INTERVAL';
+        return resource.inFlight;
+      }
       if (resource.data && currentTime-resource.fetchedAt < effectiveTtl) return resource.data;
+      if (currentTime < (resource.freshAfter || 0)) {
+        resource.error='CANDIDATE_PR_REFRESH_WAITING_FOR_POLL_INTERVAL';
+        return resource.data;
+      }
+      resource.freshAfter=0;
       if (currentTime < resource.retryAt) return resource.data;
       if (apiClient.isPaused?.()) {
         const state=apiClient.getRateState();
@@ -964,14 +1017,21 @@
         resource.retryAt=state.pauseUntil ?? Number.POSITIVE_INFINITY;
         return resource.data;
       }
+      const generation=resource.generation || 0;
+      const boundUrl=['pr','checks'].includes(key) ? resource.url : '';
       resource.inFlight=(async () => {
         try {
           const data=await apiClient.requestJson(url,{maxAgeMs:effectiveTtl});
+          if ((key === 'pr' && generation !== resource.generation) ||
+              (boundUrl && resource.url !== boundUrl)) return resource.data;
           resource.data=data; resource.fetchedAt=apiClient.getMeta(url)?.validatedAt || now();
           resource.error=null; resource.retryAt=0;
+          if (key === 'pr') { resource.pinRevalidationPending=false; resource.freshAfter=0; }
           failures.set(key,0);
           return data;
         } catch (error) {
+          if ((key === 'pr' && generation !== resource.generation) ||
+              (boundUrl && resource.url !== boundUrl)) return resource.data;
           resource.error=error?.code || 'GITHUB_READ_FAILED';
           const count=(failures.get(key) || 0)+1; failures.set(key,count);
           const rateState=apiClient.getRateState?.() || {};
@@ -1002,14 +1062,58 @@
       }
       return url;
     }
-    function checksSummaryForHead(head) {
+    function bindCandidatePr(reference) {
+      const number=Number.isSafeInteger(reference?.number) && reference.number > 0
+        ? reference.number : null;
+      const resource=resources.pr;
+      const sourceChanged=number && resource.number === number &&
+        resource.taskRef?.source_sha !== reference.source_sha;
+      const bindingChanged=resource.number !== number || sourceChanged;
+      const nextUrl=number ? API + '/pulls/' + number : '';
+      if (bindingChanged) {
+        resource.number=number;
+        resource.generation++;
+        resource.data=null; resource.fetchedAt=0; resource.error=null; resource.retryAt=0;
+        resource.freshAfter=0;
+        resource.pinRevalidationPending=!!number;
+        resource.url=nextUrl;
+        resources.checks.data=null; resources.checks.fetchedAt=0;
+        resources.checks.error=null; resources.checks.retryAt=0; resources.checks.url='';
+      }
+      resource.taskRef=number ? { request_id:reference.request_id, source_sha:reference.source_sha } : null;
+      if (!number) {
+        resource.freshAfter=0;
+        resource.pinRevalidationPending=false;
+        const error=reference?.error || 'CURRENT_CANDIDATE_PR_UNKNOWN';
+        resource.error=error;
+        resources.checks.error=error;
+        return null;
+      }
+      if (resource.pinRevalidationPending) {
+        const prior=apiClient.getMeta(nextUrl);
+        const minimumInterval=prior
+          ? Math.max(adaptivePollInterval('pr',apiClient),prior.pollIntervalMs || 0) : 0;
+        resource.freshAfter=prior?.validatedAt ? prior.validatedAt+minimumInterval : 0;
+      }
+      if (resource.freshAfter > now()) resource.error='CANDIDATE_PR_REFRESH_WAITING_FOR_POLL_INTERVAL';
+      else if (resource.error === 'CANDIDATE_PR_REFRESH_WAITING_FOR_POLL_INTERVAL' || bindingChanged)
+        resource.error=null;
+      resource.url=nextUrl;
+      return resource.url;
+    }
+    function isFresh(key, maxAgeMs) {
+      const resource=resources[key];
+      const age=now()-(resource?.fetchedAt || 0);
+      return !!resource?.data && !resource.error && resource.fetchedAt > 0 && age >= 0 && age < maxAgeMs;
+    }
+    function checksSummaryForHead(head, prNumber = resources.pr.number) {
       const expectedSha = safeSha(head);
       const resource = resources.checks;
-      if (!expectedSha || resource.error || !resource.data ||
+      if (!Number.isSafeInteger(prNumber) || prNumber < 1 || !expectedSha || resource.error || !resource.data ||
           resource.url !== API + '/commits/' + expectedSha + '/check-runs?per_page=100') return null;
-      return summarizeChecks(resource.data, expectedSha, MONITORED_PR_NUMBER);
+      return summarizeChecks(resource.data, expectedSha, prNumber);
     }
-    return { resources, loadResource, bindChecksHead, checksSummaryForHead };
+    return { resources, loadResource, bindChecksHead, bindCandidatePr, isFresh, checksSummaryForHead };
   }
   function adaptivePollInterval(key, apiClient) {
     const state=apiClient.getRateState?.() || {};
@@ -1025,29 +1129,48 @@
     return ISSUE_POLL_MS;
   }
   async function runSyncCycle(resourceStore, apiClient, urls) {
-    const plan=[
-      ['issue',urls.issue],['pr',urls.pr],['main',urls.main],
-    ];
+    const plan=[['issue',urls.issue],['main',urls.main]];
+    const bindCurrentCandidatePr=() => resourceStore.bindCandidatePr(
+      resourceStore.isFresh('issue',MAX_LIVE_AGE_MS)
+        ? currentCandidatePrReference(resourceStore.resources.issue.data)
+        : { number:null,request_id:null,source_sha:null,error:'ISSUE_TASK_REFERENCE_STALE_OR_UNKNOWN' });
     let recoveryProbeCompleted=false;
     if (apiClient.isRecoveryProbeDue?.()) {
       await resourceStore.loadResource('issue',urls.issue,0);
       if (apiClient.takeRecoveryNotice?.()) recoveryProbeCompleted=true;
-      if (recoveryProbeCompleted || apiClient.isPaused?.())
+      if (recoveryProbeCompleted || apiClient.isPaused?.()) {
+        bindCurrentCandidatePr();
         return {head:safeSha(resourceStore.resources.pr.data?.head?.sha),recoveryProbeCompleted,
           rateState:apiClient.getRateState?.() || null};
+      }
     }
     for (const [key,url] of plan) {
       await resourceStore.loadResource(key,url,adaptivePollInterval(key,apiClient));
       if (apiClient.takeRecoveryNotice?.()) { recoveryProbeCompleted=true; break; }
       if (apiClient.isPaused?.()) break;
     }
+    const prUrl=bindCurrentCandidatePr();
+    if (apiClient.isPaused?.())
+      return { head:safeSha(resourceStore.resources.pr.data?.head?.sha),
+        candidatePrNumber:resourceStore.resources.pr.number,recoveryProbeCompleted,
+        rateState:apiClient.getRateState?.() || null };
+    if (prUrl) {
+      await resourceStore.loadResource('pr',urls.prFor ? urls.prFor(resourceStore.resources.pr.number) : prUrl,
+        adaptivePollInterval('pr',apiClient));
+      if (apiClient.takeRecoveryNotice?.()) recoveryProbeCompleted=true;
+    }
+    if (apiClient.isPaused?.())
+      return { head:safeSha(resourceStore.resources.pr.data?.head?.sha),
+        candidatePrNumber:resourceStore.resources.pr.number,recoveryProbeCompleted,
+        rateState:apiClient.getRateState?.() || null };
     const head=safeSha(resourceStore.resources.pr.data?.head?.sha);
     if (!recoveryProbeCompleted && !apiClient.isPaused?.() && head) {
       const checksUrl=resourceStore.bindChecksHead(head);
       await resourceStore.loadResource('checks',checksUrl,adaptivePollInterval('checks',apiClient));
       if (apiClient.takeRecoveryNotice?.()) recoveryProbeCompleted=true;
     }
-    return { head, recoveryProbeCompleted, rateState:apiClient.getRateState?.() || null };
+    return { head,candidatePrNumber:resourceStore.resources.pr.number,recoveryProbeCompleted,
+      rateState:apiClient.getRateState?.() || null };
   }
   function readTime(value) {
     const stamp = new Date(value || '');
@@ -1160,7 +1283,7 @@
     for (const check of checkSummary?.checks || []) {
       const at = check.completed_at || check.started_at;
       if (Number.isFinite(Date.parse(at || '')))
-        events.push({ at, label:'PR #' + MONITORED_PR_NUMBER + ' 精確 HEAD 檢查 ' + check.name +
+        events.push({ at, label:'PR #' + (checkSummary?.pr_number || '未確認') + ' 精確 HEAD 檢查 ' + check.name +
           '：' + String(check.status) + (check.conclusion ? '／' + check.conclusion : '') + '。' });
     }
     return events.sort((a,b) => Date.parse(b.at)-Date.parse(a.at)).slice(0,8);
@@ -1252,7 +1375,8 @@
       : rateState?.indefinite ? '恢復時間未確認；讀取持續暫停' : '目前可讀取';
     const sources=[
       'Issue #407 ' + sourceStatusLabel(resources.issue,now,ISSUE_POLL_MS),
-      'PR #' + MONITORED_PR_NUMBER + ' ' + sourceStatusLabel(resources.pr,now,PR_POLL_MS),
+      (resources.pr.number ? 'PR #' + resources.pr.number : '任務 PR 未確認') + ' ' +
+        sourceStatusLabel(resources.pr,now,PR_POLL_MS),
       'checks ' + sourceStatusLabel(resources.checks,now,CHECKS_POLL_MS),
       'main ' + sourceStatusLabel(resources.main,now,MAIN_POLL_MS),
     ].join('；');
@@ -1294,7 +1418,7 @@
     const expectedChecksUrl = head
       ? API + '/commits/' + head + '/check-runs?per_page=100' : null;
     const currentChecks = checksFresh === 'FRESH' && !resources.checks.error &&
-      resources.checks.url === expectedChecksUrl
+      resources.checks.url === expectedChecksUrl && checkSummary?.pr_number === resources.pr.number
       ? checkSummary : null;
     const apiErrors = Object.entries(resources).filter(([,r]) => r.error).map(([key,r]) => key + ':' + r.error);
     const overall = document.getElementById('overall');
@@ -1347,7 +1471,8 @@
     const blocked = osFreshness === 'FRESH'
       ? Object.values(records).filter(record => record.status === 'BLOCKED').length : null;
     text('metric-blocked', blocked === null ? '未確認' : String(blocked) + ' 個 Worker 明確受阻');
-    text('metric-human', pr?.draft ? 'Human 審閱 PR #' + MONITORED_PR_NUMBER + ' 草稿' : '依正式 PR 狀態核對');
+    const candidatePrNumber=resources.pr.number;
+    text('metric-human', pr?.draft ? 'Human 審閱 PR #' + candidatePrNumber + ' 草稿' : '依正式 PR 狀態核對');
     text('metric-main', main?.sha ? safeSha(main.sha) || 'SHA 格式錯誤'
       : mainFresh === 'STALE' ? '上次讀回已過期' : '讀回未知');
     text('metric-ci', currentChecks ? ciLabel(currentChecks) : checksFresh === 'STALE'
@@ -1445,7 +1570,9 @@
     text('pr-state',pr
       ? (pr.draft ? 'Draft' : 'Ready for review') + '；' + (pr.merged ? '已合併' : '尚未合併') +
         '；GitHub state ' + String(pr.state)
-      : prFresh === 'STALE' ? 'PR metadata 上次讀回已過期；目前未知' : 'PR metadata 未讀回');
+      : prFresh === 'STALE' ? 'PR metadata 上次讀回已過期；目前未知'
+        : resources.pr.error === 'CURRENT_CANDIDATE_PR_UNKNOWN' ? '目前正式任務沒有唯一 PR 引用'
+          : 'PR metadata 未讀回：' + (resources.pr.error || 'UNKNOWN'));
     text('pr-head',head || (pr ? 'GitHub 回傳的 head SHA 格式錯誤' : '未讀回'));
     text('pr-base',(safeSha(pr?.base?.sha) || 'PR base 未讀回') +
       '；main ' + (safeSha(main?.sha) || (mainFresh === 'STALE' ? '上次讀回已過期' : '未讀回')));
@@ -1456,10 +1583,11 @@
       pr?.merged ? '來源已合併；部署另驗' : pr?.draft ? 'Draft／未合併' : '來源未確認',
       pr?.merged ? 'good' : pr ? 'warn' : 'neutral');
     text('pr-detail',pr && head
-      ? 'PR #' + MONITORED_PR_NUMBER + ' head ' + head + '；資料來自 GitHub Pull Request 與同 SHA check-runs。'
-      : '沒有精確 PR metadata；不使用過期候選 SHA 代替目前值。');
+      ? 'PR #' + candidatePrNumber + '；任務 ' + (resources.pr.taskRef?.request_id || '未確認') +
+        '；head ' + head + '；資料來自 GitHub Pull Request 與同 SHA check-runs。'
+      : '沒有由新鮮、有效的 #407 候選任務引用唯一 PR；目前 PR／CI 顯示 UNKNOWN。');
     text('checks-detail',currentChecks
-      ? currentChecks.checks.map(check => check.name + '=' + check.status +
+      ? 'PR #' + candidatePrNumber + '／HEAD ' + head + '：' + currentChecks.checks.map(check => check.name + '=' + check.status +
           (check.conclusion ? '/' + check.conclusion : '')).join('；')
       : resources.checks.error
         ? '精確 HEAD 檢查未知：' + resources.checks.error
@@ -1472,13 +1600,27 @@
       text('overall-copy','GitHub API 額度暫時耗盡。監控讀取已暫停，Win11 實際工作狀態目前未知。' +
         '保留最後成功讀回資料並標示過期；不把歷史施工狀態延續到現在。');
     renderEvents(classifyRecentEvents(comments, snapshot, currentChecks));
+    const prSourceLink=document.getElementById('pr-source-link');
+    const prChecksLink=document.getElementById('pr-checks-link');
+    const prUrl=candidatePrNumber ? 'https://github.com/' + REPO + '/pull/' + candidatePrNumber
+      : 'https://github.com/' + REPO + '/pulls';
+    if (prSourceLink) {
+      prSourceLink.href=prUrl;
+      prSourceLink.textContent=candidatePrNumber ? 'PR #' + candidatePrNumber + ' 來源與審查'
+        : 'GitHub PR 清單（目前任務引用未確認）';
+    }
+    if (prChecksLink) {
+      prChecksLink.href=candidatePrNumber ? prUrl + '/checks' : prUrl;
+      prChecksLink.textContent=candidatePrNumber ? 'PR #' + candidatePrNumber + ' CI'
+        : 'PR 檢查清單（目前任務引用未確認）';
+    }
   }
   const testApi = {
-    parseSnapshot, findSnapshot, latestTask, summarizeChecks, fieldFreshness, validJob,
+    parseSnapshot, findSnapshot, latestTask, summarizeChecks, fieldFreshness, validJob, currentCandidatePrReference,
     classifyWorker, classifyW1, workerRecord, normalizeFormalTask, workerCardData, classifyRecentEvents,
     freshnessOfSnapshot, createApiClient, createResourceStore,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
-      constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS, MONITORED_PR_NUMBER,
+      constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS,
       MANUAL_SYNC_MIN_MS, LOW_REMAINING_THRESHOLD, MAX_LIVE_AGE_MS },
   };
   if (typeof window !== 'undefined') window.PTYSDOperatorPanel = testApi;
@@ -1521,9 +1663,8 @@
     if (button) { button.disabled = true; button.textContent = '同步中…'; }
     refreshing = (async () => {
       const issueUrl = API + '/issues/407/comments?per_page=100';
-      const prUrl = API + '/pulls/' + MONITORED_PR_NUMBER;
       const mainUrl = API + '/commits/main';
-      await runSyncCycle(resourceStore,apiClient,{issue:issueUrl,pr:prUrl,main:mainUrl});
+      await runSyncCycle(resourceStore,apiClient,{issue:issueUrl,prFor:number => API + '/pulls/' + number,main:mainUrl});
       const head = safeSha(resources.pr.data?.head?.sha);
       if (!head && !resources.pr.data) {
         resources.checks.error = resources.pr.error || 'PR_HEAD_UNKNOWN';

@@ -4,8 +4,11 @@ This folder contains a static, read-only Traditional Chinese page with a
 dark-first layout. Open index.html directly in Edge or Brave; it does not start
 Node, PowerShell, Windows Terminal, a local listener, or a database. It reads
 the single PTYSD_OPERATOR_OBSERVATION_V1 comment and native Issue #407 receipts,
-the live PR #434 metadata, the current main commit, and check-runs attached to
-the exact PR head SHA from the public GitHub API.
+the PR number bound to the latest valid candidate task in Issue #407, the
+current main commit, and check-runs attached to that exact PR head SHA from the
+public GitHub API. It never chooses a PR by number or by being the newest open
+Draft. If the fresh authorized task comments do not identify one candidate PR,
+the PR and CI fields remain UNKNOWN and no PR/check endpoint is requested.
 
 The page checks the publisher account, exact project/repository/Issue identity,
 snapshot schema, source comment ID, time bounds, and expiry. Missing, duplicate, mismatched,
