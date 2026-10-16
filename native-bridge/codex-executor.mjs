@@ -149,6 +149,8 @@ export function takeNextRequest(spoolDir) {
   const files = readdirSync(requests).filter(name => name.endsWith('.json')).sort();
   for (const name of files) {
     const source = join(requests, name);
+    const cancellationPath = `${source}.cancelled`;
+    if (existsSync(cancellationPath)) continue;
     let request;
     try {
       const info = lstatSync(source);
@@ -165,14 +167,22 @@ export function takeNextRequest(spoolDir) {
     const resultPath = executorResultPath(spoolDir, request.request_id, request.attempt_id);
     if (existsSync(resultPath)) continue;
     const claimPath = join(claims, `${request.request_id}-${request.attempt_id}.json`);
+    const claim = { request_id: request.request_id, attempt_id: request.attempt_id,
+      source_sha: request.source_sha, fingerprint: request.fingerprint };
     let fd;
     try {
       fd = openSync(claimPath, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify({ request_id: request.request_id,
-        attempt_id: request.attempt_id, source_sha: request.source_sha,
-        fingerprint: request.fingerprint }));
+      writeFileSync(fd, JSON.stringify(claim));
       fsyncSync(fd);
       closeSync(fd); fd = undefined;
+      // A cancellation can arrive after the directory scan but before claim
+      // creation. Recheck before returning this request to the executor.
+      if (existsSync(cancellationPath)) {
+        try {
+          if (readFileSync(claimPath, 'utf8') === JSON.stringify(claim)) unlinkSync(claimPath);
+        } catch { /* preserve uncertain ownership; never execute the request */ }
+        continue;
+      }
       return { path: source, request, claim_path: claimPath };
     } catch (error) {
       if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve original failure */ } }
@@ -482,6 +492,9 @@ export async function runExecutorOnce(config, deps = {}) {
     const picked = takeNextRequest(config.spool_dir);
     if (!picked) return { state: 'IDLE', model_invoked: false };
     const request = picked.request;
+    if (existsSync(`${picked.path}.cancelled`))
+      return { state: 'CANCELLED', model_invoked: false,
+        request_id: request.request_id, attempt_id: request.attempt_id };
     updateActiveLock(activeLock, 'CLAIMED_NO_MODEL', request);
     const verified = validateCodexExecutorRequest(request);
     const resultPath = executorResultPath(config.spool_dir, request.job.request_id, request.attempt_id);
