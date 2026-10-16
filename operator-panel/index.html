@@ -153,7 +153,7 @@
       <div class="metric"><span class="metric-label">需要 Human 處理</span><span id="metric-human" class="metric-value">未確認</span></div>
       <div class="metric"><span class="metric-label">正式 main HEAD</span><span id="metric-main" class="metric-value">未確認</span></div>
       <div class="metric"><span class="metric-label">已知 Worker 阻擋</span><span id="metric-blocked" class="metric-value">未確認</span></div>
-      <div class="metric"><span class="metric-label">PR #419 精確 HEAD CI</span><span id="metric-ci" class="metric-value">未確認</span></div>
+      <div class="metric"><span class="metric-label">PR #434 精確 HEAD CI</span><span id="metric-ci" class="metric-value">未確認</span></div>
       <div class="metric"><span class="metric-label">最近同步錯誤</span><span id="metric-error" class="metric-value">無</span></div>
     </div>
   </section>
@@ -233,7 +233,7 @@
       <dl class="facts"><dt>精確 HEAD 檢查</dt><dd id="runner-checks">未確認</dd><dt>舊 Runner 檢查</dt><dd id="runner-legacy">未確認</dd><dt>Win11 Runner 服務</dt><dd id="runner-service">未確認</dd><dt>GitHub 登錄</dt><dd id="runner-registration">未確認</dd></dl>
     </article>
     <article class="panel infra-card">
-      <h3>監控頁 PR #419</h3><span id="pr-badge" class="badge neutral">未確認</span>
+      <h3>監控頁 PR #434</h3><span id="pr-badge" class="badge neutral">未確認</span>
       <p id="pr-detail" class="infra-summary">來源候選、CI 與 Win11 部署各自獨立判定。</p>
       <dl class="facts"><dt>目前 PR 狀態</dt><dd id="pr-state">未確認</dd><dt>精確 PR HEAD</dt><dd id="pr-head">未確認</dd><dt>PR base／main HEAD</dt><dd id="pr-base">未確認</dd><dt>正式接受／部署</dt><dd id="pr-deployment">未確認</dd></dl>
     </article>
@@ -249,15 +249,15 @@
       <dt>GitHub Issue #407</dt><dd><a href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/issues/407" target="_blank" rel="noopener noreferrer">正式派工、收據與唯一 Win11 觀測留言</a></dd>
       <dt>Issue observation</dt><dd id="snapshot-detail">未確認</dd>
       <dt>Win11 observed_at／expires_at</dt><dd id="freshness-detail">未確認</dd>
-      <dt>PR #419 check runs</dt><dd id="checks-detail">未確認</dd>
+      <dt>PR #434 check runs</dt><dd id="checks-detail">未確認</dd>
       <dt>GitHub 公開 API 額度</dt><dd id="rate-detail">未確認</dd>
       <dt>錯誤／過期降級</dt><dd id="error-detail">未確認</dd>
       <dt>Windows Task Scheduler</dt><dd id="task-detail">未確認</dd>
       <dt>OpenCode V2</dt><dd id="opencode-detail">未確認</dd>
     </dl>
     <div class="links">
-      <a href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/pull/419" target="_blank" rel="noopener noreferrer">PR #419 來源與審查</a>
-      <a href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/pull/419/checks" target="_blank" rel="noopener noreferrer">PR #419 CI</a>
+      <a href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/pull/434" target="_blank" rel="noopener noreferrer">PR #434 來源與審查</a>
+      <a href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/pull/434/checks" target="_blank" rel="noopener noreferrer">PR #434 CI</a>
     </div>
     <p class="footnote">靜態唯讀 HTML。只讀 GitHub 公開 API，不含 127.0.0.1:2667、本機服務、資料庫、排程控制、Worker 派工或模型呼叫。跨來源 fetch 受 CORS／GitHub 額度影響；失敗時顯示 UNKNOWN／STALE，不沿用成即時工作狀態。</p>
   </details>
@@ -274,6 +274,7 @@
   const JOB_MARKER = 'PTYSD_NATIVE_JOB_V1\n';
   const RECEIPT_MARKER = 'PTYSD_NATIVE_RECEIPT_V1\n';
   const API = 'https://api.github.com/repos/' + REPO;
+  const MONITORED_PR_NUMBER = 434;
   const ISSUE_POLL_MS = 5 * 60 * 1000;
   const PR_POLL_MS = 15 * 60 * 1000;
   const CHECKS_POLL_MS = 15 * 60 * 1000;
@@ -283,7 +284,6 @@
   const RATE_STATE_STORAGE_KEY = 'ptysd-operator-panel-rate-state-v1';
   const API_CACHE_KEY_PREFIX = 'ptysd-operator-public-api-cache-v1:';
   const API_LOCK_NAME = 'ptysd-operator-github-api-v1';
-  const MAX_SHARED_API_CACHE_CHARS = 750_000;
   const RATE_BACKOFF_MIN_MS = 30 * 1000;
   const RATE_BACKOFF_MAX_MS = 15 * 60 * 1000;
   const MAX_LIVE_AGE_MS = 10 * 60 * 1000;
@@ -324,42 +324,88 @@
     const commentId = Number(matches[0].id);
     if (!Number.isSafeInteger(commentId) || parsed.snapshot.source?.comment_id !== commentId)
       return { status:'UNKNOWN', error:'OBSERVATION_COMMENT_ID_MISMATCH' };
-    return { status:parsed.freshness, snapshot:parsed.snapshot, comment:matches[0] };
+    const readbackUpdatedAt = matches[0].updated_at;
+    const readbackTime = Date.parse(readbackUpdatedAt || '');
+    const publishTime = Date.parse(parsed.snapshot.published_at);
+    if (!Number.isFinite(readbackTime))
+      return { status:'UNKNOWN', error:'OBSERVATION_GITHUB_UPDATED_AT_UNKNOWN' };
+    if (Math.floor(readbackTime/1000) < Math.floor(publishTime/1000))
+      return { status:'UNKNOWN', error:'OBSERVATION_GITHUB_UPDATED_AT_MISMATCH' };
+    if (readbackTime > now + 5 * 60 * 1000)
+      return { status:'UNKNOWN', error:'OBSERVATION_GITHUB_UPDATED_AT_FUTURE' };
+    return { status:parsed.freshness, snapshot:parsed.snapshot, comment:matches[0],
+      readbackUpdatedAt };
   }
   function parseMarked(body, marker) {
     if (typeof body !== 'string' || !body.startsWith(marker)) return null;
     try { const value = JSON.parse(body.slice(marker.length)); return object(value) ? value : null; }
     catch { return null; }
   }
+  function validScopedEditPath(file) {
+    if (typeof file !== 'string' || !file || file.startsWith('/') ||
+        /[<>:"\\|?*\[\]{}\u0000-\u001f]/.test(file)) return false;
+    const parts = file.split('/');
+    if (parts.some(part => !part || part === '.' || part === '..')) return false;
+    if (parts.some(part => /[. ]$/.test(part) ||
+        /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(part) ||
+        /^(?:conin\$|conout\$)$/i.test(part))) return false;
+    return true;
+  }
+  function validHumanGoalRef(value) {
+    return object(value) && JSON.stringify(Object.keys(value).sort()) ===
+      JSON.stringify(['body_sha256','comment_id','issue','marker']) && value.issue === 310 &&
+      Number.isSafeInteger(value.comment_id) && value.comment_id > 0 &&
+      value.marker === 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015' &&
+      /^[a-f0-9]{64}$/.test(value.body_sha256 || '');
+  }
   function validJob(job) {
     if (!object(job) || job.project_id !== PROJECT || job.host !== 'DESKTOP-1B6PD2P' ||
         !/^[a-f0-9]{40}$/.test(job.source_sha || '') ||
         !/^[A-Z][A-Z0-9_-]{7,79}$/.test(job.request_id || '')) return false;
     const keys = Object.keys(job).sort();
+    const protectedNativeBridgePaths = new Set([
+      'native-bridge/csg-trusted-pr-verifier.mjs',
+      'native-bridge/csg-trusted-pr-verifier-cli.mjs',
+      'native-bridge/install.ps1',
+      'native-bridge/install-codex-executor.ps1',
+      'native-bridge/hiddenworker.vbs',
+      'native-bridge/hiddencodexexecutor.vbs',
+      'native-bridge/windows-executor.mjs',
+    ]);
     const base = ['schema','project_id','host','request_id','kind','source_sha','spec_path','spec_sha256'].sort();
     const extended = [...base,'model','variant'].sort();
     const scopedEdit = [...extended,'write_paths'].sort();
+    const candidateScopedEdit = [...scopedEdit,'candidate_pr'].sort();
+    const goalBoundCandidateEdit = [...candidateScopedEdit,'goal_ref'].sort();
     if (job.schema === 1) return JSON.stringify(keys) === JSON.stringify(base) &&
       ['ping','native_preflight','native_v2_qualify'].includes(job.kind) &&
       job.spec_path === null && job.spec_sha256 === null;
     const taskFields = /^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(job.spec_path || '') &&
       /^[a-f0-9]{64}$/.test(job.spec_sha256 || '') &&
-      typeof job.model === 'string' && job.model.length <= 160 &&
-      typeof job.variant === 'string' && job.variant.length <= 60;
+      /^[a-z][a-z0-9_-]{1,39}\/[A-Za-z0-9_./:-]{1,150}$/.test(job.model || '') &&
+      !job.model.includes('..') &&
+      /^[a-z][a-z0-9_-]{0,39}$/.test(job.variant || '');
     if (job.schema === 2) return JSON.stringify(keys) === JSON.stringify(extended) &&
       taskFields && job.kind === 'opencode_plan';
-    if (job.schema !== 4 || JSON.stringify(keys) !== JSON.stringify(scopedEdit) ||
+    const scopedEditShape = job.schema === 4 && JSON.stringify(keys) === JSON.stringify(scopedEdit);
+    const candidateEditShape = job.schema === 5 &&
+      JSON.stringify(keys) === JSON.stringify(candidateScopedEdit) &&
+      Number.isSafeInteger(job.candidate_pr) && job.candidate_pr > 0;
+    const goalBoundEditShape = job.schema === 6 &&
+      JSON.stringify(keys) === JSON.stringify(goalBoundCandidateEdit) &&
+      Number.isSafeInteger(job.candidate_pr) && job.candidate_pr > 0 && validHumanGoalRef(job.goal_ref);
+    if ((!scopedEditShape && !candidateEditShape && !goalBoundEditShape) ||
         job.kind !== 'opencode_edit' || !taskFields ||
         !Array.isArray(job.write_paths) || job.write_paths.length < 1)
       return false;
     const paths = new Set();
     for (const file of job.write_paths) {
-      if (typeof file !== 'string' || file.length > 180 ||
-          !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(file)) return false;
+      if (!validScopedEditPath(file)) return false;
       const parts = file.split('/');
       if (parts.some(part => !part || part === '.' || part === '..') ||
           parts.some(part => /^\.(?:git|github|opencode)$/i.test(part)) ||
-          ['governance','runs','native-bridge'].includes(parts[0].toLowerCase()) ||
+          ['governance','runs'].includes(parts[0].toLowerCase()) ||
+          protectedNativeBridgePaths.has(file.toLowerCase()) ||
           parts.some(part => /^\.env(?:\.|$)/i.test(part) || /^opencode\.jsonc?$/i.test(part) ||
             /(?:secret|credential|token|password|auth\.json)/i.test(part))) return false;
       const key = file.toLowerCase();
@@ -368,7 +414,18 @@
     }
     return true;
   }
-  function latestTask(comments, mainSha) {
+  function candidatePinMatches(job, mainSha, pullRequest) {
+    const sourceSha = safeSha(job?.source_sha);
+    const currentMainSha = safeSha(mainSha);
+    const repositoryMatches = repo => object(repo) && repo.id === 1352411536 && repo.full_name === REPO;
+    return [5,6].includes(job?.schema) && job.candidate_pr === MONITORED_PR_NUMBER &&
+      object(pullRequest) && pullRequest.number === MONITORED_PR_NUMBER &&
+      pullRequest.state === 'open' && pullRequest.base?.ref === 'main' &&
+      safeSha(pullRequest.base?.sha) === currentMainSha && sourceSha &&
+      safeSha(pullRequest.head?.sha) === sourceSha &&
+      repositoryMatches(pullRequest.base?.repo) && repositoryMatches(pullRequest.head?.repo);
+  }
+  function latestTask(comments, mainSha, pullRequest = null) {
     const jobs = [], receipts = [];
     for (const comment of comments || []) {
       const job = parseMarked(comment.body, JOB_MARKER);
@@ -388,19 +445,28 @@
     const duplicate = jobs.filter(x => x.job.request_id === latest.job.request_id);
     if (new Set(duplicate.map(x => x.body)).size > 1)
       return { job:latest.job, attempt_id:null, state:'同一任務 ID 內容衝突，停止自動重播', receipt_at:null };
-    const matches = receipts.filter(x => RECEIPT_AUTHORS.has(x.login) &&
+    const candidatePinVerified = latest.job.candidate_pr === undefined ||
+      candidatePinMatches(latest.job, mainSha, pullRequest);
+    const matches = receipts.filter(x => candidatePinVerified && RECEIPT_AUTHORS.has(x.login) &&
       x.id > latest.id && x.receipt.request_id === latest.job.request_id &&
-      x.receipt.source_sha === latest.job.source_sha && x.receipt.kind === latest.job.kind)
+      x.receipt.source_sha === latest.job.source_sha && x.receipt.kind === latest.job.kind &&
+      (x.receipt.candidate_pr ?? null) === (latest.job.candidate_pr ?? null) &&
+      JSON.stringify(x.receipt.goal_ref ?? null) === JSON.stringify(latest.job.goal_ref ?? null))
       .sort((a,b) => Number(a.id)-Number(b.id));
     const attempt = matches.at(-1)?.receipt.attempt_id || null;
     const same = attempt ? matches.filter(x => x.receipt.attempt_id === attempt) : [];
     const terminal = same.at(-1)?.receipt;
     let state = '已接單／尚無 STARTED 收據';
-    if (latest.job.source_sha !== mainSha) state = '來源 SHA 已過期，未重派';
+    if (!candidatePinVerified)
+      state = '候選 PR HEAD/base 未核對，來源未確認';
+    else if (latest.job.candidate_pr === undefined && latest.job.source_sha !== mainSha)
+      state = '來源 SHA 已過期，未重派';
+    else if (latest.job.kind === 'opencode_plan') state = 'LEGACY_READONLY_NOT_DISPATCHED';
     else if (terminal?.state === 'FINISHED') state = '收到 FINISHED；不代表寫碼驗收';
     else if (terminal?.state === 'BLOCKED') state = '工作受阻';
     else if (terminal?.state === 'STARTED') state = '已 STARTED；即時施工尚未證實';
     return { job:latest.job, attempt_id:attempt, state,
+      receipt_state:terminal?.state || null,
       receipt_at:same.at(-1)?.created_at || null };
   }
   function fieldFreshness(at, maxAgeMs, now) {
@@ -466,14 +532,18 @@
     }
     if (task && ['QUEUED_NOT_STARTED','STARTED_UNVERIFIED'].includes(task.state))
       return { status:'PENDING', reason:'有正式派工，但尚無足夠的即時執行證據。' };
+    if (formalTask?.state === 'CANDIDATE_PIN_UNVERIFIED')
+      return { status:'UNKNOWN', reason:'候選 PR HEAD/base 尚未與最新 GitHub PR 讀回核對。' };
     if (formalTask && ['QUEUED_NOT_STARTED','STARTED_UNVERIFIED'].includes(formalTask.state))
-      return { status:'PENDING', reason:'GitHub 有同 main SHA 的正式派工／STARTED 收據；即時施工尚未證實。' };
+      return { status:'PENDING', reason:'GitHub 有已核對來源 SHA 的正式派工／STARTED 收據；即時施工尚未證實。' };
     return { status:'UNKNOWN', reason:'最近觀測沒有證明 W1 正在施工，也沒有完整的即時閒置證明。' };
   }
   function normalizeFormalTask(task) {
     if (!task?.job) return null;
-    const state = task.state === '已接單／尚無 STARTED 收據' ? 'QUEUED_NOT_STARTED'
+    const state = task.state === 'LEGACY_READONLY_NOT_DISPATCHED' ? 'LEGACY_READONLY_NOT_DISPATCHED'
+      : task.state === '已接單／尚無 STARTED 收據' ? 'QUEUED_NOT_STARTED'
       : task.state === '已 STARTED；即時施工尚未證實' ? 'STARTED_UNVERIFIED'
+        : task.state === '候選 PR HEAD/base 未核對，來源未確認' ? 'CANDIDATE_PIN_UNVERIFIED'
         : 'HISTORICAL';
     return { ...task, state };
   }
@@ -741,10 +811,6 @@
       try {
         const serialized=JSON.stringify({schema:1,url,data:value.data,etag:value.etag || null,
           validatedAt:value.validatedAt});
-        if (serialized.length > MAX_SHARED_API_CACHE_CHARS) {
-          rate.coordination=locks ? 'BEST_EFFORT_LOCK_ONLY' : 'TAB_LOCAL_ONLY';
-          return;
-        }
         storage.setItem(key,serialized);
       } catch { rate.coordination=locks ? 'BEST_EFFORT_LOCK_ONLY' : 'TAB_LOCAL_ONLY'; }
     }
@@ -941,7 +1007,7 @@
       const resource = resources.checks;
       if (!expectedSha || resource.error || !resource.data ||
           resource.url !== API + '/commits/' + expectedSha + '/check-runs?per_page=100') return null;
-      return summarizeChecks(resource.data, expectedSha, 419);
+      return summarizeChecks(resource.data, expectedSha, MONITORED_PR_NUMBER);
     }
     return { resources, loadResource, bindChecksHead, checksSummaryForHead };
   }
@@ -1012,10 +1078,12 @@
     const taskKind = record?.task_kind || (id === 'W1'
       ? currentTask?.kind || formalTask?.job?.kind || latestTask?.kind : null);
     const taskState = id === 'W1' ? currentTask?.state || formalTask?.state || latestTask?.state : null;
+    const taskStateLabel = taskState === 'LEGACY_READONLY_NOT_DISPATCHED'
+      ? '歷史唯讀規劃；不會派工' : taskState;
     const activity = record?.activity_observed_at || (id === 'W1' ? oc.activity_observed_at || oc.process_observed_at : null);
     const taskText = taskId
       ? String(taskId) + (taskKind ? '／' + String(taskKind) : '') +
-        (id === 'W1' && taskState ? '；' + String(taskState) : '')
+        (id === 'W1' && taskStateLabel ? '；' + String(taskStateLabel) : '')
       : id === 'W3' ? '未從同一來源讀回有效 request_id'
       : '沒有可核對的正式任務';
     const sessionText = record?.attempt_id
@@ -1065,7 +1133,8 @@
       if (!Number.isFinite(Date.parse(at || ''))) continue;
       const job = parseMarked(comment.body, JOB_MARKER);
       if (validJob(job) && DISPATCHERS.has(comment.user?.login || '')) {
-        jobs.set(job.request_id + ':' + job.source_sha + ':' + job.kind, {
+        jobs.set(job.request_id + ':' + job.source_sha + ':' + job.kind + ':' + (job.candidate_pr ?? '') + ':' +
+          JSON.stringify(job.goal_ref ?? null), {
           id:Number(comment.id), job, created_at:at,
         });
         events.push({ at, label:'正式派工 ' + job.request_id + '／' + job.kind + '；派工不代表已啟動。' });
@@ -1076,7 +1145,8 @@
           receipt.host === 'DESKTOP-1B6PD2P' &&
           /^[a-f0-9]{40}$/.test(receipt.source_sha || '') &&
           /^[a-f0-9-]{36}$/.test(receipt.attempt_id || '')) {
-        const key = receipt.request_id + ':' + receipt.source_sha + ':' + receipt.kind;
+        const key = receipt.request_id + ':' + receipt.source_sha + ':' + receipt.kind + ':' +
+          (receipt.candidate_pr ?? '') + ':' + JSON.stringify(receipt.goal_ref ?? null);
         const jobEntry = jobs.get(key);
         if (jobEntry && Number(comment.id) > jobEntry.id &&
             ['STARTED','FINISHED','BLOCKED'].includes(receipt.state))
@@ -1090,7 +1160,7 @@
     for (const check of checkSummary?.checks || []) {
       const at = check.completed_at || check.started_at;
       if (Number.isFinite(Date.parse(at || '')))
-        events.push({ at, label:'PR #419 精確 HEAD 檢查 ' + check.name +
+        events.push({ at, label:'PR #' + MONITORED_PR_NUMBER + ' 精確 HEAD 檢查 ' + check.name +
           '：' + String(check.status) + (check.conclusion ? '／' + check.conclusion : '') + '。' });
     }
     return events.sort((a,b) => Date.parse(b.at)-Date.parse(a.at)).slice(0,8);
@@ -1182,7 +1252,7 @@
       : rateState?.indefinite ? '恢復時間未確認；讀取持續暫停' : '目前可讀取';
     const sources=[
       'Issue #407 ' + sourceStatusLabel(resources.issue,now,ISSUE_POLL_MS),
-      'PR #419 ' + sourceStatusLabel(resources.pr,now,PR_POLL_MS),
+      'PR #' + MONITORED_PR_NUMBER + ' ' + sourceStatusLabel(resources.pr,now,PR_POLL_MS),
       'checks ' + sourceStatusLabel(resources.checks,now,CHECKS_POLL_MS),
       'main ' + sourceStatusLabel(resources.main,now,MAIN_POLL_MS),
     ].join('；');
@@ -1258,7 +1328,7 @@
     const worker = snapshot?.native_worker || {};
     const oc = snapshot?.opencode_v2 || {};
     const githubTask = issueReadFreshness === 'FRESH' && mainFresh === 'FRESH'
-      ? normalizeFormalTask(latestTask(comments,safeSha(main?.sha))) : null;
+      ? normalizeFormalTask(latestTask(comments,safeSha(main?.sha),prFresh === 'FRESH' ? pr : null)) : null;
     const explicitW1 = workerRecord(snapshot, 'W1');
     const records = {
       W1: explicitW1 ? classifyWorker(explicitW1, osFreshness, now)
@@ -1277,7 +1347,7 @@
     const blocked = osFreshness === 'FRESH'
       ? Object.values(records).filter(record => record.status === 'BLOCKED').length : null;
     text('metric-blocked', blocked === null ? '未確認' : String(blocked) + ' 個 Worker 明確受阻');
-    text('metric-human', pr?.draft ? 'Human 審閱 PR #419 草稿' : '依正式 PR 狀態核對');
+    text('metric-human', pr?.draft ? 'Human 審閱 PR #' + MONITORED_PR_NUMBER + ' 草稿' : '依正式 PR 狀態核對');
     text('metric-main', main?.sha ? safeSha(main.sha) || 'SHA 格式錯誤'
       : mainFresh === 'STALE' ? '上次讀回已過期' : '讀回未知');
     text('metric-ci', currentChecks ? ciLabel(currentChecks) : checksFresh === 'STALE'
@@ -1285,7 +1355,8 @@
     text('metric-error', apiErrors.length ? apiErrors.join('；') : '無近期同步錯誤');
     text('snapshot-detail', snapshot
       ? 'comment #' + (observation.comment?.id || snapshot.source?.comment_id || '未確認') +
-        '；sequence ' + snapshot.sequence + '；snapshot ' + snapshot.snapshot_id
+        '；sequence ' + snapshot.sequence + '；snapshot ' + snapshot.snapshot_id +
+        '；GitHub updated_at ' + readTime(observation.readbackUpdatedAt)
       : 'UNKNOWN：' + (observation.error || issueResource.error || '尚無唯一有效留言'));
     text('freshness-detail', snapshot
       ? 'observed_at ' + readTime(snapshot.observed_at) + '；published_at ' + readTime(snapshot.published_at) +
@@ -1385,7 +1456,7 @@
       pr?.merged ? '來源已合併；部署另驗' : pr?.draft ? 'Draft／未合併' : '來源未確認',
       pr?.merged ? 'good' : pr ? 'warn' : 'neutral');
     text('pr-detail',pr && head
-      ? 'PR #419 head ' + head + '；資料來自 GitHub Pull Request 與同 SHA check-runs。'
+      ? 'PR #' + MONITORED_PR_NUMBER + ' head ' + head + '；資料來自 GitHub Pull Request 與同 SHA check-runs。'
       : '沒有精確 PR metadata；不使用過期候選 SHA 代替目前值。');
     text('checks-detail',currentChecks
       ? currentChecks.checks.map(check => check.name + '=' + check.status +
@@ -1404,10 +1475,10 @@
   }
   const testApi = {
     parseSnapshot, findSnapshot, latestTask, summarizeChecks, fieldFreshness, validJob,
-    classifyWorker, classifyW1, workerRecord, normalizeFormalTask, classifyRecentEvents,
+    classifyWorker, classifyW1, workerRecord, normalizeFormalTask, workerCardData, classifyRecentEvents,
     freshnessOfSnapshot, createApiClient, createResourceStore,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
-    constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS,
+      constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS, MONITORED_PR_NUMBER,
       MANUAL_SYNC_MIN_MS, LOW_REMAINING_THRESHOLD, MAX_LIVE_AGE_MS },
   };
   if (typeof window !== 'undefined') window.PTYSDOperatorPanel = testApi;
@@ -1450,7 +1521,7 @@
     if (button) { button.disabled = true; button.textContent = '同步中…'; }
     refreshing = (async () => {
       const issueUrl = API + '/issues/407/comments?per_page=100';
-      const prUrl = API + '/pulls/419';
+      const prUrl = API + '/pulls/' + MONITORED_PR_NUMBER;
       const mainUrl = API + '/commits/main';
       await runSyncCycle(resourceStore,apiClient,{issue:issueUrl,pr:prUrl,main:mainUrl});
       const head = safeSha(resources.pr.data?.head?.sha);

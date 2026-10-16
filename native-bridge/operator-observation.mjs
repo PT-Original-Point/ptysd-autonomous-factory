@@ -7,6 +7,7 @@ export const OPERATOR_MARKER = 'PTYSD_OPERATOR_OBSERVATION_V1\n';
 export const OPERATOR_REPO = 'PT-Original-Point/ptysd-autonomous-factory';
 export const OPERATOR_PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
 export const OPERATOR_ISSUE = 407;
+const MAX_OPERATOR_COMMENT_BODY_LENGTH = 65_536;
 const FORBIDDEN_KEYS = /^(?:pid|process_id|command|commandline|command_line|argv|path|absolute_path|stdout|stderr|prompt|token|authorization|credential|diff|environment|username|user_name|user_id|email|computer_name|host_name)$/i;
 const SNAPSHOT_ID = /^[a-f0-9-]{36}$/i;
 const SENSITIVE_VALUE = /(?:\b[A-Z]:\\|\\\\[^\\\s]+\\|\bgh[pousr]_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bBearer\s+[A-Za-z0-9._~-]{16,})/i;
@@ -26,7 +27,8 @@ function containsForbiddenKey(value) {
 }
 
 export function parseOperatorObservation(body) {
-  if (typeof body !== 'string' || body.length > 12000 || !body.startsWith(OPERATOR_MARKER))
+  if (typeof body !== 'string' || body.length > MAX_OPERATOR_COMMENT_BODY_LENGTH ||
+      !body.startsWith(OPERATOR_MARKER))
     return null;
   let value;
   try { value = JSON.parse(body.slice(OPERATOR_MARKER.length)); }
@@ -68,12 +70,13 @@ export function findOperatorComment(comments, expectedLogin) {
 }
 
 export async function updateExistingOperatorComment({
-  comments, expectedLogin, body, readComment, patchComment, readComments,
+  comments, expectedLogin, body, buildBody, readComment, patchComment, readComments,
 }) {
   const existing = findOperatorComment(comments, expectedLogin);
   if (existing.status === 'NOT_SEEDED') return { status: 'NOT_SEEDED' };
   if (existing.status !== 'OK') return existing;
-  if (!parseOperatorObservation(body) || typeof readComment !== 'function' ||
+  if ((typeof buildBody !== 'function' && !parseOperatorObservation(body)) ||
+      typeof readComment !== 'function' ||
       typeof patchComment !== 'function' || typeof readComments !== 'function')
     return { status: 'UNKNOWN', error: 'INVALID_OPERATOR_UPDATE_INPUT' };
   const current = await readComment(existing.comment.id);
@@ -81,12 +84,22 @@ export async function updateExistingOperatorComment({
       current?.user?.login !== expectedLogin ||
       current?.body !== existing.comment.body)
     return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_CHANGED_BEFORE_UPDATE' };
-  await patchComment(existing.comment.id, body);
+  const nextBody = typeof buildBody === 'function' ? await buildBody() : body;
+  if (!parseOperatorObservation(nextBody))
+    return { status: 'UNKNOWN', error: 'INVALID_OPERATOR_UPDATE_BODY' };
+  await patchComment(existing.comment.id, nextBody);
   const fresh = findOperatorComment(await readComments(), expectedLogin);
   if (fresh.status !== 'OK' || fresh.comment.id !== existing.comment.id ||
-      fresh.comment.body !== body)
+      fresh.comment.body !== nextBody)
     return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN' };
-  return { status: 'UPDATED', comment_id: existing.comment.id, observation: fresh.observation };
+  const readbackUpdatedAt = fresh.comment.updated_at;
+  const readbackTime = Date.parse(readbackUpdatedAt || '');
+  if (!Number.isFinite(readbackTime) ||
+      readbackTime < Date.parse(fresh.observation.published_at) ||
+      readbackTime > Date.now() + 5 * 60 * 1000)
+    return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_READBACK_TIMESTAMP_UNKNOWN' };
+  return { status: 'UPDATED', comment_id: existing.comment.id, observation: fresh.observation,
+    readback_updated_at: readbackUpdatedAt };
 }
 
 export function observationFreshness(observation, now = Date.now()) {

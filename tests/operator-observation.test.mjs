@@ -26,7 +26,7 @@ const observation = (overrides = {}) => ({
   ...overrides,
 });
 const comment = (value, login = 'trusted-publisher', id = 1) => ({
-  id, body: encodeOperatorObservation(value), user: { login },
+  id, body: encodeOperatorObservation(value), user: { login }, updated_at:value.published_at,
 });
 
 test('operator snapshot requires exact project identity, time bounds, and de-identified keys', () => {
@@ -42,6 +42,29 @@ test('operator snapshot requires exact project identity, time bounds, and de-ide
   assert.throws(() => encodeOperatorObservation(observation({
     expires_at: new Date(now + 16 * 60 * 1000).toISOString(),
   })), /INVALID_OPERATOR_OBSERVATION/);
+});
+
+test('operator snapshot accepts the GitHub-supported body range beyond the old local ceiling', () => {
+  const base = observation({
+    windows: { status: 'FRESH', native_task: { enabled: false }, summary: '' },
+  });
+  const emptyBody = OPERATOR_MARKER + JSON.stringify(base);
+  const padding = 'x'.repeat(65_536 - emptyBody.length);
+  const maximumValue = {
+    ...base,
+    windows: { ...base.windows, summary: padding },
+  };
+  const maximumBody = OPERATOR_MARKER + JSON.stringify(maximumValue);
+  assert.equal(maximumBody.length, 65_536);
+  assert.equal(parseOperatorObservation(maximumBody)?.windows.summary.length, padding.length);
+
+  const oversizedValue = {
+    ...base,
+    windows: { ...base.windows, summary: `${padding}x` },
+  };
+  const oversizedBody = OPERATOR_MARKER + JSON.stringify(oversizedValue);
+  assert.equal(oversizedBody.length, 65_537);
+  assert.equal(parseOperatorObservation(oversizedBody), null);
 });
 
 test('published_at must be at or after observation and strictly before expiry', () => {
@@ -87,11 +110,13 @@ test('publisher updates one pre-seeded comment with read-before-write and exact 
   const result = await updateExistingOperatorComment({
     comments:[original], expectedLogin:'trusted-publisher', body,
     readComment:async id => ({ ...stored, id }),
-    patchComment:async (id, next) => { writes.push({ id, next }); stored={ ...stored, body:next }; },
+    patchComment:async (id, next) => { writes.push({ id, next }); stored={ ...stored,
+      body:next, updated_at:updatedValue.published_at }; },
     readComments:async () => [stored],
   });
   assert.equal(result.status,'UPDATED');
   assert.equal(result.comment_id,1);
+  assert.equal(result.readback_updated_at,updatedValue.published_at);
   assert.equal(writes.length,1);
   assert.equal(writes[0].id,1);
   assert.equal(stored.body,body);
@@ -112,6 +137,49 @@ test('publisher updates one pre-seeded comment with read-before-write and exact 
   });
   assert.equal(changed.status,'UNKNOWN');
   assert.equal(changed.error,'OPERATOR_COMMENT_CHANGED_BEFORE_UPDATE');
+});
+
+test('publisher exposes GitHub updated_at as readback evidence and rejects missing metadata', async () => {
+  const original = { ...comment(observation()), updated_at:new Date(now).toISOString() };
+  const updatedValue = observation({
+    snapshot_id:'11c95b35-bda3-4d54-9f91-431730ed5acd', sequence:2,
+    observed_at:new Date(now+60_000).toISOString(),
+    published_at:new Date(now+61_000).toISOString(),
+    expires_at:new Date(now+6*60_000).toISOString(),
+  });
+  const body = encodeOperatorObservation(updatedValue);
+  const updatedAt = new Date(now+62_000).toISOString();
+  let stored = original;
+  const options = {
+    comments:[original], expectedLogin:'trusted-publisher', body,
+    readComment:async id=>({...stored,id}),
+    patchComment:async (_id,next)=>{stored={...stored,body:next,updated_at:updatedAt};},
+    readComments:async()=>[stored],
+  };
+  const result = await updateExistingOperatorComment(options);
+  assert.equal(result.status,'UPDATED');
+  assert.equal(result.readback_updated_at,updatedAt);
+
+  stored = original;
+  options.patchComment = async (_id,next)=>{stored={...stored,body:next};delete stored.updated_at;};
+  const unknown = await updateExistingOperatorComment(options);
+  assert.equal(unknown.status,'UNKNOWN');
+  assert.equal(unknown.error,'OPERATOR_COMMENT_READBACK_TIMESTAMP_UNKNOWN');
+
+  stored = original;
+  options.patchComment = async (_id,next)=>{stored={...stored,body:next,
+    updated_at:original.updated_at};};
+  const earlier = await updateExistingOperatorComment(options);
+  assert.equal(earlier.status,'UNKNOWN');
+  assert.equal(earlier.error,'OPERATOR_COMMENT_READBACK_TIMESTAMP_UNKNOWN');
+
+  stored = original;
+  options.patchComment = async (_id,next)=>{stored={...stored,body:next,
+    updated_at:'2999-01-01T00:00:00.000Z'};};
+  const future = await updateExistingOperatorComment(options);
+  assert.equal(future.status,'UNKNOWN',
+    'a future GitHub updated_at must not certify a publication the dashboard will reject');
+  assert.equal(future.error,'OPERATOR_COMMENT_READBACK_TIMESTAMP_UNKNOWN');
 });
 
 test('expired observations degrade to STALE and future timestamps to UNKNOWN', () => {
@@ -192,12 +260,21 @@ test('single-page renderer classifies receipts, expiry, and missing status witho
   const api = window.PTYSDOperatorPanel;
   const valid = observation();
   const body = encodeOperatorObservation(valid);
-  assert.equal(api.findSnapshot([{ id:1, body, user: { login: 'wfvupu1212' } }], now).status, 'FRESH');
-  assert.equal(api.findSnapshot([{ id:2, body, user: { login: 'wfvupu1212' } }], now).error,
+  const verifiedComment = { id:1, body, user:{login:'wfvupu1212'},
+    updated_at:new Date(now+2000).toISOString() };
+  const verified = api.findSnapshot([verifiedComment], now);
+  assert.equal(verified.status, 'FRESH');
+  assert.equal(verified.readbackUpdatedAt, verifiedComment.updated_at,
+    'the page must expose GitHub comment updated_at as publication readback evidence');
+  assert.equal(api.findSnapshot([{id:1,body,user:{login:'wfvupu1212'}}],now).error,
+    'OBSERVATION_GITHUB_UPDATED_AT_UNKNOWN');
+  assert.equal(api.findSnapshot([{...verifiedComment,updated_at:new Date(now).toISOString()}],now).error,
+    'OBSERVATION_GITHUB_UPDATED_AT_MISMATCH');
+  assert.equal(api.findSnapshot([{ ...verifiedComment, id:2 }], now).error,
     'OBSERVATION_COMMENT_ID_MISMATCH');
   assert.equal(api.findSnapshot([{ body, user: { login: 't14210184' } }], now).status, 'UNKNOWN');
   assert.equal(api.findSnapshot([{ body }, { body }], now).error, 'DUPLICATE_OBSERVATIONS');
-  assert.equal(api.findSnapshot([{ id:1, body, user: { login: 'wfvupu1212' } }], now + 6 * 60 * 1000).status, 'STALE');
+  assert.equal(api.findSnapshot([verifiedComment], now + 6 * 60 * 1000).status, 'STALE');
 
   const main = 'a'.repeat(40);
   const request = 'PTYSD_NATIVE_PRECHECK_20261013';
@@ -284,6 +361,10 @@ test('dashboard starts dark and worker states require role-bound recent evidence
   assert.equal(api.classifyW1({ process_count:1, process_observed_at:live,
     historical_sessions_count:42, task_binding:'PROVEN', model_execution:'PROVEN',
     activity_observed_at:old, task_id:'W1_TASK_20261013' }, {}, 'FRESH', now).status, 'UNKNOWN');
+  assert.equal(api.classifyW1({ process_count:1, process_observed_at:live,
+    task_binding:'UNPROVEN', model_execution:'PROVEN',
+    activity_observed_at:live, task_id:'OLD_W1_TASK_20261015' }, {}, 'FRESH', now).status, 'UNKNOWN',
+  'a live process and copied historical activity must not become verified current work');
   assert.equal(api.classifyW1({ process_count:0, historical_sessions_count:42,
     historical_sessions_observed_at:old }, { latest_task:{kind:'native_v2_qualify',state:'FINISHED'} },
   'FRESH', now).status, 'UNKNOWN');
@@ -514,7 +595,7 @@ test('one simulated hour follows the 21-request schedule and serializes startup 
     await Promise.resolve();
     active--;
     const data=url.includes('/issues/407') ? []
-      : url.endsWith('/pulls/419') ? {head:{sha:head},base:{sha:'b'.repeat(40)}}
+      : url.endsWith('/pulls/434') ? {head:{sha:head},base:{sha:'b'.repeat(40)}}
         : url.endsWith('/commits/main') ? {sha:'b'.repeat(40)}
           : {check_runs:[]};
     return {status:200,ok:true,headers:{get:name => {
@@ -527,12 +608,12 @@ test('one simulated hour follows the 21-request schedule and serializes startup 
   },{now:() => time,AbortControllerCtor:AbortController,setTimeoutFn:() => 1,clearTimeoutFn:() => {}});
   const store=api.createResourceStore(client,() => time);
   const urls={issue:'https://api.github.com/issues/407/comments?per_page=100',
-    pr:'https://api.github.com/pulls/419',main:'https://api.github.com/commits/main'};
+    pr:'https://api.github.com/pulls/434',main:'https://api.github.com/commits/main'};
   await Promise.all([api.runSyncCycle(store,client,urls),api.runSyncCycle(store,client,urls)]);
   assert.equal(requests.length,4,'overlapping same-page refreshes share each resource request');
   assert.equal(maxActive,1,'startup requests are serialized rather than burst in parallel');
   assert.match(requests[0],/issues\/407/);
-  assert.match(requests[1],/pulls\/419/);
+  assert.match(requests[1],/pulls\/434/);
   assert.match(requests[2],/commits\/main/);
   assert.match(requests[3],/check-runs/);
   for (let minute=5; minute<60; minute+=5) {
@@ -565,7 +646,7 @@ test('shared primary cooldown blocks every source, honors Retry-After, then prob
     now:()=>time,AbortControllerCtor:AbortController,setTimeoutFn:()=>1,clearTimeoutFn:()=>{}});
   const store=api.createResourceStore(client,()=>time);
   const urls={issue:'https://api.github.com/issues/407/comments?per_page=100',
-    pr:'https://api.github.com/pulls/419',main:'https://api.github.com/commits/main'};
+    pr:'https://api.github.com/pulls/434',main:'https://api.github.com/commits/main'};
   await api.runSyncCycle(store,client,urls);
   assert.equal(calls,1,'remaining=0 stops the cycle before PR, main, or checks');
   assert.equal(store.resources.issue.error,'GITHUB_RATE_LIMIT_EXHAUSTED');
@@ -730,11 +811,12 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
       process_observed_at:observedAt,historical_sessions_count:42},
   });
   const comments=[{id:42,body:encodeOperatorObservation(snapshot),
-    user:{login:'wfvupu1212'},created_at:observedAt}];
+    user:{login:'wfvupu1212'},created_at:observedAt,
+    updated_at:new Date(Date.now()-10_000).toISOString()}];
   const sha='a'.repeat(40);
   const pr={draft:true,merged:false,state:'open',head:{sha},base:{sha}};
   const payload=(url) => url.includes('/issues/407') ? comments
-    : url.endsWith('/pulls/419') ? pr
+    : url.endsWith('/pulls/434') ? pr
     : url.endsWith('/commits/main') ? {sha}
     : {check_runs:[
       ...[1,2,3].map(n => ({name:'success-' + n,head_sha:sha,status:'completed',conclusion:'success'})),

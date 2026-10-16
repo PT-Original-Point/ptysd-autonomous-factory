@@ -9,24 +9,10 @@ import { createInterface } from 'node:readline';
 import { uptime } from 'node:os';
 import { dirname, join, relative, resolve, isAbsolute, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { runCapturedProcess } from './captured-process.mjs';
+import { hashFile, readWindowsProcessTree, runCapturedProcess, terminateProcessTree } from './captured-process.mjs';
 import { codexExecutionGate, buildCodexExecArgs, codexSessionFromJsonl,
   codexRunOutcome, executorResultPath, validateCodexExecutorRequest } from './codex-continuation.mjs';
-
-function digestFile(path) {
-  return new Promise((resolveHash, reject) => {
-    const hash = createHash('sha256');
-    const input = createReadStream(path);
-    input.on('data', chunk => hash.update(chunk));
-    input.on('error', reject);
-    input.on('end', () => resolveHash(hash.digest('hex')));
-  });
-}
-
-function nativeText(file, args) {
-  return execFileSync(file, args, { encoding: 'utf8', windowsHide: true, shell: false,
-    timeout: 120000, maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-}
+import { getCurrentWindowsSid, workspacePathIdentity } from './windows-executor.mjs';
 
 function parseArgs(argv) {
   const i = argv.indexOf('--config');
@@ -102,8 +88,30 @@ function acquireActiveLock(spoolDir, deps = {}) {
       if (!previousBoot) {
         const alive = (deps.isProcessAlive || isProcessAlive)(lock.pid);
         if (alive !== false) throw error;
-        if (!['DISPATCHER', 'CLAIMED_NO_MODEL', 'MODEL_FINISHED', 'RESULT_SAVED'].includes(lock.phase))
+        if (lock.phase === 'MODEL_TERMINATION_UNCONFIRMED' || lock.phase === 'MODEL_RUNNING') {
+          if (!Number.isSafeInteger(lock.child_pid) || lock.child_pid < 1)
+            throw new Error('EXECUTOR_PROCESS_TREE_IDENTITY_UNKNOWN');
+          const readback = (deps.readProcessTree || readWindowsProcessTree)(lock.child_pid);
+          if (readback?.state !== 'DEAD' || readback.root_pid !== lock.child_pid ||
+              !Array.isArray(readback.process_ids) || readback.process_ids.length !== 0)
+            throw new Error(readback?.state === 'ALIVE' ?
+              'EXECUTOR_PROCESS_TREE_STILL_ACTIVE' : 'EXECUTOR_PROCESS_TREE_READBACK_UNKNOWN');
+          const fd = openSync(path, 'r+');
+          try {
+            const current = JSON.parse(readFileSync(path, 'utf8'));
+            if (current.pid !== lock.pid || current.child_pid !== lock.child_pid ||
+                current.phase !== lock.phase || current.attempt_id !== lock.attempt_id)
+              throw new Error('EXECUTOR_LOCK_OWNERSHIP_LOST');
+            ftruncateSync(fd, 0);
+            writeFileSync(fd, JSON.stringify({ ...current, process_tree_readback: {
+              state: 'DEAD', root_pid: lock.child_pid, process_ids: [],
+              observed_at: readback.observed_at,
+            } }));
+            fsyncSync(fd);
+          } finally { closeSync(fd); }
+        } else if (!['DISPATCHER', 'CLAIMED_NO_MODEL', 'MODEL_FINISHED', 'RESULT_SAVED'].includes(lock.phase)) {
           throw new Error('EXECUTOR_LOCK_STALE_MODEL_EFFECTS_UNKNOWN');
+        }
       }
       try { archiveActiveLock(path); }
       catch (archiveError) { if (archiveError.code !== 'ENOENT') throw archiveError; }
@@ -112,7 +120,7 @@ function acquireActiveLock(spoolDir, deps = {}) {
   throw new Error('EXECUTOR_LOCK_RECOVERY_RACE');
 }
 
-function updateActiveLock(path, phase, request = null) {
+function updateActiveLock(path, phase, request = null, processInfo = {}) {
   const fd = openSync(path, 'r+');
   try {
     const current = JSON.parse(readFileSync(path, 'utf8'));
@@ -120,7 +128,13 @@ function updateActiveLock(path, phase, request = null) {
       throw new Error('EXECUTOR_LOCK_OWNERSHIP_LOST');
     const next = { ...current, phase,
       request_id: request?.request_id ?? current.request_id,
-      attempt_id: request?.attempt_id ?? current.attempt_id };
+      attempt_id: request?.attempt_id ?? current.attempt_id,
+      child_pid: Number.isSafeInteger(processInfo.child_pid) ? processInfo.child_pid :
+        current.child_pid ?? null,
+      termination_state: typeof processInfo.termination_state === 'string' ? processInfo.termination_state :
+        current.termination_state ?? null,
+      process_tree_state: typeof processInfo.process_tree_state === 'string' ? processInfo.process_tree_state :
+        current.process_tree_state ?? null };
     ftruncateSync(fd, 0);
     writeFileSync(fd, JSON.stringify(next));
     fsyncSync(fd);
@@ -169,12 +183,6 @@ export function takeNextRequest(spoolDir) {
   return null;
 }
 
-function getWindowsSid() {
-  const output = nativeText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value']);
-  return output.trim();
-}
-
 function assertNoGitHubTokenEnvironment() {
   const names = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'];
   if (names.some(name => process.env[name])) throw new Error('GITHUB_TOKEN_ENV_PRESENT');
@@ -182,7 +190,7 @@ function assertNoGitHubTokenEnvironment() {
 
 async function qualifyCodex(config) {
   if (config.codex_executable_sha256) {
-    if ((await digestFile(config.codex_executable)).toLowerCase() !== config.codex_executable_sha256.toLowerCase())
+    if ((await hashFile(config.codex_executable)).sha256.toLowerCase() !== config.codex_executable_sha256.toLowerCase())
       throw new Error('CODEX_EXECUTABLE_HASH_MISMATCH');
   }
   try {
@@ -190,17 +198,6 @@ async function qualifyCodex(config) {
       windowsHide: true, shell: false, timeout: 20000, maxBuffer: 32768,
       stdio: ['ignore', 'pipe', 'pipe'] });
   } catch { throw new Error('CODEX_LOGIN_NOT_READY'); }
-}
-
-function killTree(child) {
-  if (!child.pid) return { error: 'PROCESS_PID_UNAVAILABLE' };
-  try { execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
-    windowsHide: true, shell: false, timeout: 15000, stdio: 'ignore' });
-    return { treeConfirmed: true };
-  } catch {
-    try { return { rootOnly: child.kill() !== false, error: 'TASKKILL_TREE_FAILED' }; }
-    catch { return { error: 'TASKKILL_TREE_FAILED' }; }
-  }
 }
 
 export function buildCodexChildEnvironment(request, evidenceDir, source = process.env) {
@@ -230,13 +227,24 @@ export async function runCodex(request, config, worktree, evidenceDir, deps = {}
     cwd: worktree, env, stdoutPath: outPath, stderrPath: errPath,
     stdinText: validateCodexExecutorRequest(request).spec,
     spawnProcess: deps.spawnProcess || spawn,
-    terminate: deps.terminate || killTree,
+    terminate: deps.terminate || (child => terminateProcessTree(child, {
+      runTaskkill: deps.runTaskkill || execFileSync,
+      readProcessTree: deps.readProcessTree || readWindowsProcessTree,
+      platformName: deps.platformName,
+    })),
+    onSpawn: deps.onSpawn,
   });
-  const sessionId = await findSession(outPath);
+  const executionEvidence = await readCodexExecutionEvidence(outPath);
+  const sessionId = executionEvidence.session_id;
   const evidence = capture.local_evidence;
-  const terminationUnknown = evidence.termination_state === 'ORPHAN_POSSIBLE' ||
-    evidence.termination_state === 'TERMINATION_UNCONFIRMED';
-  const outcome = terminationUnknown ? 'CODEX_PROCESS_TERMINATION_FAILED' :
+  let processTreeState = evidence.process_tree_state;
+  if (processTreeState === 'NOT_CHECKED') {
+    const readback = Number.isSafeInteger(evidence.process_id)
+      ? (deps.readProcessTree || readWindowsProcessTree)(evidence.process_id) : null;
+    processTreeState = readback?.state || 'UNKNOWN';
+  }
+  const processTreeUnconfirmed = !['DEAD', 'NOT_STARTED'].includes(processTreeState);
+  const outcome = processTreeUnconfirmed ? 'CODEX_PROCESS_TERMINATION_FAILED' :
     capture.outcome === 'EVIDENCE_STORAGE_FAILED' ? 'CODEX_EVIDENCE_STORAGE_FAILED' :
       capture.outcome === 'OUTPUT_CAPTURE_FAILED' ? 'CODEX_OUTPUT_CAPTURE_FAILED' :
         capture.outcome === 'OPENCODE_SPAWN_FAILED' ? 'CODEX_SPAWN_FAILED' :
@@ -245,8 +253,20 @@ export async function runCodex(request, config, worktree, evidenceDir, deps = {}
               codexRunOutcome(capture.exit_code, sessionId);
   return { exit_code: capture.exit_code < 0 ? null : capture.exit_code,
     signal: evidence.exit_signal,
-    session_id: sessionId, stdout_path: outPath, stderr_path: errPath,
-    model_invoked: sessionId !== null,
+    session_id: sessionId, session_started: sessionId !== null,
+    provider_usage_evidence: executionEvidence.provider_usage_evidence,
+    model_activity_evidence: executionEvidence.model_activity_evidence,
+    token_usage: executionEvidence.token_usage,
+    tool_execution_evidence: executionEvidence.tool_execution_evidence,
+    tool_execution_count: executionEvidence.tool_execution_count,
+    file_change_tool_evidence: executionEvidence.file_change_tool_evidence,
+    file_change_tool_completed_count: executionEvidence.file_change_tool_completed_count,
+    file_change_tool_failed_count: executionEvidence.file_change_tool_failed_count,
+    file_change_tool_incomplete_count: executionEvidence.file_change_tool_incomplete_count,
+    model_invoked: executionEvidence.provider_usage_evidence === 'CONFIRMED',
+    child_pid: Number.isSafeInteger(evidence.process_id) ? evidence.process_id : null,
+    process_tree_state: processTreeState,
+    stdout_path: outPath, stderr_path: errPath,
     stdout_sha256: evidence.stdout_sha256, stderr_sha256: evidence.stderr_sha256,
     stdout_bytes: evidence.stdout_bytes, stderr_bytes: evidence.stderr_bytes,
     input_error: evidence.stdin_error, capture_error: evidence.capture_error,
@@ -255,29 +275,161 @@ export async function runCodex(request, config, worktree, evidenceDir, deps = {}
     outcome, tests: 'NOT_RUN', pr_url: null };
 }
 
-async function findSession(path) {
+async function readCodexExecutionEvidence(path) {
   const lines = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
+  let sessionId = null;
+  const tokenUsage = { input_tokens: 0, output_tokens: 0,
+    cached_input_tokens: 0, reasoning_output_tokens: 0 };
+  let usageObserved = false;
+  const completedCommandIds = new Set();
+  let completedCommandsWithoutId = 0;
+  const fileChangeStates = new Map();
+  let unidentifiedFileChange = false;
   try {
     for await (const line of lines) {
-      const found = codexSessionFromJsonl(line);
-      if (found) return found;
+      if (!line) continue;
+      let event;
+      try { event = JSON.parse(line); } catch { continue; }
+      if (!sessionId && event?.type === 'thread.started')
+        sessionId = codexSessionFromJsonl(line);
+      if (event?.type === 'turn.completed') {
+        const usage = event.usage ?? event.turn?.usage;
+        if (usage && typeof usage === 'object' && !Array.isArray(usage)) {
+          for (const key of Object.keys(tokenUsage)) {
+            const count = usage[key];
+            if (!Number.isSafeInteger(count) || count < 0) continue;
+            tokenUsage[key] = Math.min(Number.MAX_SAFE_INTEGER, tokenUsage[key] + count);
+            if (count > 0) usageObserved = true;
+          }
+        }
+      }
+      if (event?.type === 'item.completed' && event.item?.type === 'command_execution') {
+        if (typeof event.item.id === 'string' && event.item.id) completedCommandIds.add(event.item.id);
+        else completedCommandsWithoutId++;
+      }
+      if (event?.item?.type === 'file_change' &&
+          ['item.started', 'item.completed'].includes(event.type)) {
+        const itemId = typeof event.item.id === 'string' && event.item.id ? event.item.id : null;
+        if (!itemId) {
+          unidentifiedFileChange = true;
+          continue;
+        }
+        if (event.type === 'item.started') {
+          if (!fileChangeStates.has(itemId)) fileChangeStates.set(itemId, 'IN_PROGRESS');
+        } else if (event.item.status === 'completed') {
+          fileChangeStates.set(itemId, 'COMPLETED');
+        } else if (event.item.status === 'failed') {
+          fileChangeStates.set(itemId, 'FAILED');
+        } else {
+          fileChangeStates.set(itemId, 'UNKNOWN');
+        }
+      }
     }
-    return null;
   } finally { lines.close(); }
+  const fileChangeValues = [...fileChangeStates.values()];
+  const fileChangeToolCount = fileChangeStates.size + Number(unidentifiedFileChange);
+  const toolExecutionCount = completedCommandIds.size + completedCommandsWithoutId + fileChangeToolCount;
+  const fileChangeCompleted = fileChangeValues.filter(value => value === 'COMPLETED').length;
+  const fileChangeFailed = fileChangeValues.filter(value => value === 'FAILED').length;
+  const fileChangeIncomplete = fileChangeValues.filter(value =>
+    value === 'IN_PROGRESS' || value === 'UNKNOWN').length + Number(unidentifiedFileChange);
+  const fileChangeKinds = Number(fileChangeCompleted > 0) + Number(fileChangeFailed > 0) +
+    Number(fileChangeIncomplete > 0);
+  const fileChangeEvidence = fileChangeKinds > 1 ? 'MIXED'
+    : fileChangeCompleted > 0 ? 'COMPLETED'
+      : fileChangeFailed > 0 ? 'FAILED'
+        : fileChangeIncomplete > 0 ? 'INCOMPLETE' : 'UNKNOWN';
+  return { session_id: sessionId,
+    provider_usage_evidence: usageObserved ? 'CONFIRMED' : 'UNKNOWN',
+    model_activity_evidence: tokenUsage.output_tokens > 0 || tokenUsage.reasoning_output_tokens > 0
+      ? 'CONFIRMED' : 'UNKNOWN',
+    token_usage: usageObserved ? tokenUsage : null,
+    tool_execution_evidence: toolExecutionCount > 0 ? 'OBSERVED' : 'UNKNOWN',
+    tool_execution_count: toolExecutionCount,
+    // A CLI file_change event is tool evidence only; Git diff remains separate.
+    file_change_tool_evidence: fileChangeEvidence,
+    file_change_tool_completed_count: fileChangeCompleted,
+    file_change_tool_failed_count: fileChangeFailed,
+    file_change_tool_incomplete_count: fileChangeIncomplete };
 }
 
-export function changedPaths(worktree, sourceSha) {
+function gitPathNames(worktree, args, spawnProcess) {
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawnProcess('git', ['-C', worktree, ...args], {
+        windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch {
+      reject(Object.assign(new Error('GIT_PATH_SCAN_SPAWN_FAILED'), { code: 'GIT_PATH_SCAN_SPAWN_FAILED' }));
+      return;
+    }
+    if (!child?.stdout?.on || !child?.stderr?.on || !child?.once) {
+      reject(Object.assign(new Error('GIT_PATH_SCAN_PROCESS_INVALID'), { code: 'GIT_PATH_SCAN_PROCESS_INVALID' }));
+      return;
+    }
+    const paths = [];
+    let pending = Buffer.alloc(0);
+    let streamError = null;
+    let settled = false;
+    child.stdout.on('data', chunk => {
+      if (streamError) return;
+      try {
+        const bytes = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+        let start = 0;
+        for (let end = bytes.indexOf(0); end !== -1; end = bytes.indexOf(0, start)) {
+          if (end > start) paths.push(bytes.subarray(start, end).toString('utf8'));
+          start = end + 1;
+        }
+        pending = start < bytes.length ? bytes.subarray(start) : Buffer.alloc(0);
+      } catch {
+        streamError = Object.assign(new Error('GIT_PATH_SCAN_OUTPUT_READ_FAILED'), {
+          code: 'GIT_PATH_SCAN_OUTPUT_READ_FAILED',
+        });
+      }
+    });
+    child.stdout.once('error', error => {
+      streamError = Object.assign(new Error('GIT_PATH_SCAN_OUTPUT_READ_FAILED'), {
+        code: error?.code || 'GIT_PATH_SCAN_OUTPUT_READ_FAILED',
+      });
+    });
+    child.stderr.on('data', () => {});
+    child.stderr.once('error', () => {});
+    child.once('error', error => {
+      if (settled) return;
+      settled = true;
+      reject(Object.assign(new Error('GIT_PATH_SCAN_SPAWN_FAILED'), {
+        code: error?.code || 'GIT_PATH_SCAN_SPAWN_FAILED',
+      }));
+    });
+    child.once('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      if (streamError) return reject(streamError);
+      if (code !== 0 || signal !== null)
+        return reject(Object.assign(new Error('GIT_PATH_SCAN_FAILED'), { code: 'GIT_PATH_SCAN_FAILED' }));
+      if (pending.length !== 0)
+        return reject(Object.assign(new Error('GIT_PATH_SCAN_OUTPUT_TRUNCATED'), {
+          code: 'GIT_PATH_SCAN_OUTPUT_TRUNCATED',
+        }));
+      resolve(paths);
+    });
+  });
+}
+
+export async function changedPaths(worktree, sourceSha, { spawnProcess = spawn } = {}) {
   if (!/^[a-f0-9]{40}$/.test(sourceSha || '')) throw new Error('WORKSPACE_SOURCE_SHA_INVALID');
-  const diff = execFileSync('git', ['-C', worktree, 'diff', '--name-only', '-z', '--no-renames', sourceSha, '--'], {
-    encoding: 'buffer', windowsHide: true, shell: false, timeout: 60000, maxBuffer: 16 * 1024 * 1024,
-  });
-  const untracked = execFileSync('git', ['-C', worktree, 'ls-files', '--others', '-z'], {
-    encoding: 'buffer', windowsHide: true, shell: false, timeout: 60000, maxBuffer: 16 * 1024 * 1024,
-  });
+  const diff = await gitPathNames(worktree,
+    ['diff', '--name-only', '-z', '--no-renames', sourceSha, '--'], spawnProcess);
+  const untracked = await gitPathNames(worktree, ['ls-files', '--others', '-z'], spawnProcess);
   return [...new Set([
-    ...diff.toString('utf8').split('\0'),
-    ...untracked.toString('utf8').split('\0'),
-  ].filter(Boolean))].sort();
+    ...diff, ...untracked,
+  ])].sort();
+}
+
+export function outOfScopeCodexPaths(changed, allowedPaths) {
+  const allowed = new Set(allowedPaths.map(workspacePathIdentity));
+  return changed.filter(path => !allowed.has(workspacePathIdentity(path)));
 }
 
 async function diffDigest(worktree, paths) {
@@ -312,15 +464,18 @@ function writeResult(path, result) {
 }
 
 export async function runExecutorOnce(config, deps = {}) {
-  const currentSid = deps.currentSid || getWindowsSid();
   const activeLock = acquireActiveLock(config.spool_dir, deps);
+  let preserveActiveLock = false;
   try {
+    if (!hasQueuedRequestFile(config.spool_dir)) return { state: 'IDLE', model_invoked: false };
+    const currentSid = deps.currentSid || getCurrentWindowsSid();
+    const configGate = validateExecutorConfig(config, currentSid, deps.environment || process.env);
+    if (!configGate.ready) return { state: 'WAITING', reasons: configGate.reasons, model_invoked: false };
     const picked = takeNextRequest(config.spool_dir);
     if (!picked) return { state: 'IDLE', model_invoked: false };
     const request = picked.request;
     updateActiveLock(activeLock, 'CLAIMED_NO_MODEL', request);
     const verified = validateCodexExecutorRequest(request);
-    const configGate = validateExecutorConfig(config, currentSid, deps.environment || process.env);
     const resultPath = executorResultPath(config.spool_dir, request.job.request_id, request.attempt_id);
     const blocked = (code, reasons = []) => ({
       schema: 1, kind: 'codex_plan', request_id: request.job.request_id,
@@ -357,7 +512,7 @@ export async function runExecutorOnce(config, deps = {}) {
       throw new Error('EXECUTOR_BUNDLE_PATH_ESCAPE');
     const bundleInfo = lstatSync(bundlePath);
     if (!bundleInfo.isFile() || bundleInfo.isSymbolicLink()) throw new Error('EXECUTOR_BUNDLE_NOT_REGULAR_FILE');
-    const bundleSha = await digestFile(bundlePath);
+    const bundleSha = (await hashFile(bundlePath)).sha256;
     if (bundleSha !== request.bundle_sha256) throw new Error('EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH');
     const root = resolve(config.workspace_root);
     const worktree = resolve(root, request.attempt_id);
@@ -378,17 +533,54 @@ export async function runExecutorOnce(config, deps = {}) {
     const evidenceDir = join(config.spool_dir, 'evidence');
     mkdirSync(evidenceDir, { recursive: true });
     updateActiveLock(activeLock, 'MODEL_RUNNING', request);
-    const execution = await (deps.runCodex || runCodex)(request, config, worktree, evidenceDir);
-    updateActiveLock(activeLock, 'MODEL_FINISHED', request);
-    const changed = changedPaths(worktree, verified.job.source_sha);
-    const allowed = new Set(verified.job.write_paths);
-    const outOfScope = changed.filter(path => !allowed.has(path.replaceAll('\\', '/')));
+    preserveActiveLock = true;
+    const execution = await (deps.runCodex || runCodex)(request, config, worktree, evidenceDir, {
+      ...(deps.runCodexDependencies || {}),
+      onSpawn: childPid => {
+        if (!Number.isSafeInteger(childPid) || childPid < 1) return false;
+        updateActiveLock(activeLock, 'MODEL_RUNNING', request, { child_pid: childPid });
+        return true;
+      },
+    });
+    const processTreeState = execution.process_tree_state || 'UNKNOWN';
+    const processTreeUnconfirmed = !['DEAD', 'NOT_STARTED'].includes(processTreeState);
+    if (processTreeUnconfirmed) {
+      updateActiveLock(activeLock, 'MODEL_TERMINATION_UNCONFIRMED', request, {
+        child_pid: execution.child_pid,
+        termination_state: execution.termination_state,
+        process_tree_state: processTreeState,
+      });
+    } else {
+      preserveActiveLock = false;
+      updateActiveLock(activeLock, 'MODEL_FINISHED', request, {
+        child_pid: execution.child_pid,
+        termination_state: execution.termination_state,
+        process_tree_state: processTreeState,
+      });
+    }
+    const changed = await changedPaths(worktree, verified.job.source_sha);
+    const outOfScope = outOfScopeCodexPaths(changed, verified.job.write_paths);
     const result = {
       schema: 1, kind: 'codex_plan', request_id: request.job.request_id,
       attempt_id: request.attempt_id, source_sha: request.job.source_sha,
       fingerprint: request.fingerprint, exit_code: execution.exit_code,
       outcome: outOfScope.length ? 'WRITE_SCOPE_VIOLATION' : execution.outcome,
-      session_id: execution.session_id, diff_sha256: await diffDigest(worktree, changed),
+      session_id: execution.session_id, session_started: execution.session_started === true,
+      provider_usage_evidence: execution.provider_usage_evidence || 'UNKNOWN',
+      model_activity_evidence: execution.model_activity_evidence || 'UNKNOWN',
+      token_usage: execution.token_usage ?? null,
+      tool_execution_evidence: execution.tool_execution_evidence || 'UNKNOWN',
+      tool_execution_count: Number.isSafeInteger(execution.tool_execution_count) ? execution.tool_execution_count : 0,
+      file_change_tool_evidence: execution.file_change_tool_evidence || 'UNKNOWN',
+      file_change_tool_completed_count: Number.isSafeInteger(execution.file_change_tool_completed_count)
+        ? execution.file_change_tool_completed_count : 0,
+      file_change_tool_failed_count: Number.isSafeInteger(execution.file_change_tool_failed_count)
+        ? execution.file_change_tool_failed_count : 0,
+      file_change_tool_incomplete_count: Number.isSafeInteger(execution.file_change_tool_incomplete_count)
+        ? execution.file_change_tool_incomplete_count : 0,
+      child_pid: Number.isSafeInteger(execution.child_pid) ? execution.child_pid : null,
+      process_tree_state: processTreeState,
+      diff_sha256: await diffDigest(worktree, changed),
       changed_paths: changed, out_of_scope_paths: outOfScope,
       stdout_sha256: execution.stdout_sha256, stderr_sha256: execution.stderr_sha256,
       stdout_bytes: execution.stdout_bytes, stderr_bytes: execution.stderr_bytes,
@@ -399,14 +591,25 @@ export async function runExecutorOnce(config, deps = {}) {
     };
     result.model_invoked = execution.model_invoked === true;
     writeResult(resultPath, result);
-    updateActiveLock(activeLock, 'RESULT_SAVED', request);
+    if (!preserveActiveLock) updateActiveLock(activeLock, 'RESULT_SAVED', request);
     return { state: 'RESULT_SAVED', model_invoked: result.model_invoked, request_id: result.request_id,
       attempt_id: result.attempt_id, outcome: result.outcome, result_path: resultPath };
   } finally {
     // If the process is terminated externally, this finally block cannot run;
     // the stale lock is deliberately a stop signal, not permission to replay.
-    try { (deps.removeFile || unlinkSync)(activeLock); }
-    catch { /* keep any uncertain lock for explicit operator readback */ }
+    if (!preserveActiveLock) {
+      try { (deps.removeFile || unlinkSync)(activeLock); }
+      catch { /* keep any uncertain lock for explicit operator readback */ }
+    }
+  }
+}
+
+function hasQueuedRequestFile(spoolDir) {
+  try {
+    return readdirSync(join(spoolDir, 'requests')).some(name => name.endsWith('.json'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
   }
 }
 

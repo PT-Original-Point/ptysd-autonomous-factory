@@ -5,7 +5,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, openSync, writeFileSync, fsyncSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join, isAbsolute, win32 } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { getCurrentWindowsSid, validateWindowsTaskAction } from './windows-executor.mjs';
+import { getCurrentWindowsSid, isProtectedNativeBridgePath, isSensitiveWorkspacePathSegment,
+  parseWorkspaceWritePath, validateWindowsTaskAction, workspacePathIdentity } from './windows-executor.mjs';
 
 export const CODEX_JOB_KIND = 'codex_plan';
 export const NATIVE_JOB_MARKER = 'PTYSD_NATIVE_JOB_V1\n';
@@ -18,7 +19,6 @@ const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const REQUEST = /^[A-Z][A-Z0-9_-]{7,79}$/;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$/;
-const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
 const FORBIDDEN_PATHS = new Set(['governance', 'runs', '.codex', '.git']);
 
 function sha256(value) {
@@ -26,18 +26,19 @@ function sha256(value) {
 }
 
 function safeRepoPath(value) {
-  if (typeof value !== 'string' || value.length < 1 || value.length > 180 ||
-      value.includes('\\') || value.startsWith('/') || value.includes(':')) return false;
-  const parts = value.split('/');
-  if (parts.some(part => !part || part === '.' || part === '..')) return false;
+  const parsedPath = parseWorkspaceWritePath(value);
+  if (parsedPath.error) return false;
+  const parts = parsedPath.parts;
   if (FORBIDDEN_PATHS.has(parts[0].toLowerCase())) return false;
+  if (parts.some(isSensitiveWorkspacePathSegment)) return false;
+  if (isProtectedNativeBridgePath(value)) return false;
   if (parts[0].toLowerCase() === '.github' &&
       ['workflows', 'actions'].includes(parts[1]?.toLowerCase())) return false;
   return true;
 }
 
 export function parseCodexJob(body) {
-  if (typeof body !== 'string' || body.length > 6000 || !body.startsWith(NATIVE_JOB_MARKER)) return null;
+  if (typeof body !== 'string' || !body.startsWith(NATIVE_JOB_MARKER)) return null;
   let job;
   try { job = JSON.parse(body.slice(NATIVE_JOB_MARKER.length)); } catch { return null; }
   if (!job || typeof job !== 'object' || Array.isArray(job) || job.schema !== 3 ||
@@ -48,15 +49,23 @@ export function parseCodexJob(body) {
   if (typeof job.spec_path !== 'string' ||
       !/^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(job.spec_path) ||
       typeof job.spec_sha256 !== 'string' || !HASH.test(job.spec_sha256)) return null;
-  if (typeof job.model !== 'string' || !MODEL.test(job.model) || !EFFORTS.has(job.reasoning_effort)) return null;
-  if (!Array.isArray(job.write_paths) || job.write_paths.length < 1 || job.write_paths.length > 32 ||
-      !job.write_paths.every(safeRepoPath) || new Set(job.write_paths).size !== job.write_paths.length) return null;
+  // Effort names are model-advertised strings. Keep only a safe CLI token shape
+  // here; codexExecutionGate separately requires an exact model-specific allowlist.
+  if (typeof job.model !== 'string' || !MODEL.test(job.model) ||
+      typeof job.reasoning_effort !== 'string' ||
+      !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(job.reasoning_effort)) return null;
+  if (!Array.isArray(job.write_paths) || job.write_paths.length < 1 ||
+      !job.write_paths.every(safeRepoPath)) return null;
+  // Windows workspaces are case-insensitive by default: differently-cased
+  // spellings must not grant the same file twice under distinct allowlist keys.
+  const writePathIdentities = job.write_paths.map(path => workspacePathIdentity(path));
+  if (new Set(writePathIdentities).size !== writePathIdentities.length) return null;
   return job;
 }
 
 export function parseCodexReceipt(body) {
   const marker = 'PTYSD_NATIVE_RECEIPT_V1\n';
-  if (typeof body !== 'string' || body.length > 8000 || !body.startsWith(marker)) return null;
+  if (typeof body !== 'string' || !body.startsWith(marker)) return null;
   let receipt;
   try { receipt = JSON.parse(body.slice(marker.length)); } catch { return null; }
   if (!receipt || receipt.schema !== 1 || receipt.project_id !== 'CHATGPT_GLOBAL_SKILL_GOVERNANCE' ||
@@ -114,7 +123,9 @@ export function validateCodexExecutorTaskXml(xml, config) {
   if (!codexExecutorTaskDescriptorReady(config)) throw new Error('CODEX_EXECUTOR_TASK_XML_INVALID');
   const result = validateWindowsTaskAction(xml, {
     taskName: `\\${CODEX_EXECUTOR_TASK}`,
-    userIds: [config.codex_executor_task_user, config.executor_identity_sid],
+    // Task Scheduler's XML readback is the authority for the actual principal.
+    // A configured account-name string alone does not prove which SID will run.
+    userIds: [config.executor_identity_sid],
     command: config.codex_executor_wscript_path,
     argumentsText: codexExecutorTaskArguments(config),
     workingDirectory: config.codex_executor_working_directory,
@@ -122,6 +133,7 @@ export function validateCodexExecutorTaskXml(xml, config) {
   });
   return { ready: true, task_name: CODEX_EXECUTOR_TASK,
     executor_user: config.codex_executor_task_user, run_level: 'LeastPrivilege',
+    executor_sid: result.user_id,
     logon_type: result.logon_type, execution_time_limit: result.execution_time_limit,
     allow_hard_terminate: result.allow_hard_terminate, multiple_instances: result.multiple_instances };
 }
@@ -289,6 +301,23 @@ export function validateCodexExecutorResult(result, expected) {
       (result.diff_sha256 !== null && !HASH.test(result.diff_sha256 || '')) ||
       !HASH.test(result.stdout_sha256 || '') || !HASH.test(result.stderr_sha256 || '') ||
       typeof result.outcome !== 'string' || typeof result.model_invoked !== 'boolean' ||
+      (result.session_started !== undefined && typeof result.session_started !== 'boolean') ||
+      (result.provider_usage_evidence !== undefined && !['CONFIRMED', 'UNKNOWN'].includes(result.provider_usage_evidence)) ||
+      (result.model_activity_evidence !== undefined && !['CONFIRMED', 'UNKNOWN'].includes(result.model_activity_evidence)) ||
+      (result.tool_execution_evidence !== undefined && !['OBSERVED', 'UNKNOWN'].includes(result.tool_execution_evidence)) ||
+      (result.tool_execution_count !== undefined && (!Number.isSafeInteger(result.tool_execution_count) || result.tool_execution_count < 0)) ||
+      (result.file_change_tool_evidence !== undefined &&
+        !['COMPLETED', 'FAILED', 'INCOMPLETE', 'MIXED', 'UNKNOWN'].includes(result.file_change_tool_evidence)) ||
+      (['file_change_tool_completed_count', 'file_change_tool_failed_count',
+        'file_change_tool_incomplete_count'].some(key => result[key] !== undefined &&
+          (!Number.isSafeInteger(result[key]) || result[key] < 0))) ||
+      (result.process_tree_state !== undefined && !['DEAD', 'ALIVE', 'UNKNOWN', 'NOT_STARTED', 'NOT_CHECKED'].includes(result.process_tree_state)) ||
+      (result.child_pid !== undefined && result.child_pid !== null &&
+        (!Number.isSafeInteger(result.child_pid) || result.child_pid < 1)) ||
+      (result.token_usage !== undefined && result.token_usage !== null &&
+        (!result.token_usage || typeof result.token_usage !== 'object' || Array.isArray(result.token_usage) ||
+         !['input_tokens', 'output_tokens', 'cached_input_tokens', 'reasoning_output_tokens'].every(key =>
+           Number.isSafeInteger(result.token_usage[key]) && result.token_usage[key] >= 0))) ||
       !Array.isArray(result.changed_paths) || !result.changed_paths.every(path => typeof path === 'string') ||
       !Array.isArray(result.out_of_scope_paths) || !result.out_of_scope_paths.every(path => typeof path === 'string') ||
       result.pr_url !== null || typeof result.tests !== 'string')

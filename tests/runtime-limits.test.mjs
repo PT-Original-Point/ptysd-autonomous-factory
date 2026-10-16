@@ -2,16 +2,28 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
-import { runCapturedProcess } from '../native-bridge/captured-process.mjs';
-import { buildV2ReadOnlyConfig, buildV2ScopedEditConfig } from '../native-bridge/opencode-v2.mjs';
+import { hashFile, runCapturedProcess } from '../native-bridge/captured-process.mjs';
+import { buildV2ScopedEditConfig } from '../native-bridge/opencode-v2.mjs';
 import { terminalStateForResult } from '../native-bridge/worker.mjs';
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
+
+test('shared evidence file hashing returns exact SHA-256 and byte count', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'ptysd-evidence-hash-'));
+  try {
+    const path = join(home, 'evidence.bin');
+    const bytes = Buffer.from('public synthetic evidence\n');
+    writeFileSync(path, bytes);
+    assert.deepEqual(await hashFile(path), { sha256:sha256(bytes), bytes:bytes.length });
+  } finally {
+    rmSync(home, { recursive:true, force:true });
+  }
+});
 
 test('captured process streams output larger than 2 MiB without terminating and preserves hashes', async () => {
   const home = mkdtempSync(join(tmpdir(), 'ptysd-capture-large-'));
@@ -191,15 +203,12 @@ test('zero child exit cannot turn an evidence-capture failure into a successful 
   }
 });
 
-test('OpenCode agents no longer carry a fixed iteration cap', () => {
-  const readonly = buildV2ReadOnlyConfig().agents['ptysd-readonly'];
+test('OpenCode scoped writer has no fixed iteration cap', () => {
   const home = mkdtempSync(join(tmpdir(), 'ptysd-no-step-cap-'));
   try {
     mkdirSync(join(home, 'src'));
     const writer = buildV2ScopedEditConfig(home, ['src/output.mjs']).agents['ptysd-scoped-write'];
-    assert.equal(Object.hasOwn(readonly, 'steps'), false);
     assert.equal(Object.hasOwn(writer, 'steps'), false);
-    assert.equal(readonly.permissions.find(x => x.action === 'shell')?.effect, 'deny');
     assert.equal(writer.permissions[0].action, '*');
     assert.equal(writer.permissions[0].effect, 'deny');
   } finally {

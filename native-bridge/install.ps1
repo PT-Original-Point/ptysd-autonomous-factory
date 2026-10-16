@@ -29,6 +29,8 @@ $expectedHost = 'DESKTOP-1B6PD2P'
 $homeDir = Join-Path $env:LOCALAPPDATA 'PTYSDNativeBridge'
 $worker = Join-Path $homeDir 'worker.mjs'
 $configPath = Join-Path $homeDir 'config.json'
+$launcher = Join-Path $homeDir 'HiddenWorker.vbs'
+$wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
 
 function Require-Command([string]$Name) {
     $entry = Get-Command $Name -ErrorAction Stop | Select-Object -First 1
@@ -49,6 +51,30 @@ function Inspect-Task {
     if ($null -eq $task) { Write-Output 'NATIVE_TASK=ABSENT'; return }
     Write-Output ('NATIVE_TASK=EXISTS state=' + $task.State + ' logon=' + $task.Principal.LogonType + ' runlevel=' + $task.Principal.RunLevel)
     foreach ($a in @($task.Actions)) { Write-Output ('NATIVE_TASK_ACTION=' + $a.Execute + ' ' + $a.Arguments) }
+}
+function Test-HiddenWorkerLauncher([string]$Path, [string]$NodePath, [string]$WorkerPath,
+    [string]$ConfigFile, [string]$WorkingDirectory) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw 'HIDDEN_WORKER_LAUNCHER_REQUIRED_NO_DIRECT_NODE_TASK'
+    }
+    $expectedLines = @(
+        'Option Explicit',
+        'Dim shell, commandLine, rc',
+        'On Error Resume Next',
+        'Set shell = CreateObject("WScript.Shell")',
+        ('shell.CurrentDirectory = "' + $WorkingDirectory + '"'),
+        'If Err.Number <> 0 Then WScript.Quit 65',
+        ('commandLine = """' + $NodePath + '"" ""' + $WorkerPath + '"" --config ""' + $ConfigFile + '"""'),
+        'rc = shell.Run(commandLine, 0, True)',
+        'If Err.Number <> 0 Then WScript.Quit 9009',
+        'WScript.Quit rc'
+    )
+    $actualLines = [IO.File]::ReadAllLines($Path)
+    if ($actualLines.Count -ne $expectedLines.Count) { throw 'HIDDEN_WORKER_LAUNCHER_MISMATCH' }
+    for ($i = 0; $i -lt $expectedLines.Count; $i++) {
+        if ($actualLines[$i] -cne $expectedLines[$i]) { throw 'HIDDEN_WORKER_LAUNCHER_MISMATCH' }
+    }
+    return $true
 }
 if ($env:COMPUTERNAME.ToUpperInvariant() -ne $expectedHost) { throw 'WRONG_HOST_STOP' }
 if ($Mode -eq 'Audit') {
@@ -73,7 +99,13 @@ if ($Mode -eq 'RunOnce') {
 if ($Mode -eq 'Uninstall') {
     $task = Get-TaskOptional
     if ($null -eq $task) { Write-Output 'ALREADY_ABSENT'; return }
-    if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Arguments -notlike '*PTYSDNativeBridge*worker.mjs*') {
+    $node = Require-Command 'node.exe'
+    Test-HiddenWorkerLauncher -Path $launcher -NodePath $node -WorkerPath $worker `
+        -ConfigFile $configPath -WorkingDirectory $homeDir | Out-Null
+    $actionArgs = '//B //NoLogo "' + $launcher + '"'
+    if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ine $wscript -or
+        $task.Actions[0].Arguments -cne $actionArgs -or
+        $task.Actions[0].WorkingDirectory -ine $homeDir) {
         throw 'TASK_IDENTITY_MISMATCH_DO_NOT_DELETE'
     }
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
@@ -92,6 +124,9 @@ if ($Mode -eq 'Install') {
     if (-not (Test-Path -LiteralPath $full -PathType Container)) { throw 'WORKSPACE_NOT_FOUND' }
     $node = Require-Command 'node.exe'
     $null = Require-Command 'gh.exe'
+    $null = Require-Command 'wscript.exe'
+    Test-HiddenWorkerLauncher -Path $launcher -NodePath $node -WorkerPath $worker `
+        -ConfigFile $configPath -WorkingDirectory $homeDir | Out-Null
     # The first queued job is native ping and does NOT launch OpenCode.
     # Desktop application is not a proof of a working CLI; npm may expose opencode.cmd.
     # Leave model work disabled until a separately verified CLI is available.
@@ -122,8 +157,8 @@ if ($Mode -eq 'Install') {
         workspace = $full; state_dir = $homeDir; dispatchers = @($TrustedDispatcher)
     }
     [IO.File]::WriteAllText($configPath, ($c | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
-    $argsLine = ('"' + $worker + '" --config "' + $configPath + '"')
-    $action = New-ScheduledTaskAction -Execute $node -Argument $argsLine -WorkingDirectory $homeDir
+    $actionArgs = '//B //NoLogo "' + $launcher + '"'
+    $action = New-ScheduledTaskAction -Execute $wscript -Argument $actionArgs -WorkingDirectory $homeDir
     $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
         -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
     $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -StartWhenAvailable
@@ -131,7 +166,9 @@ if ($Mode -eq 'Install') {
     $principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -ErrorAction Stop | Out-Null
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-    if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ne $node) { throw 'TASK_INSTALL_READBACK_MISMATCH' }
+    if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ine $wscript -or
+        $task.Actions[0].Arguments -cne $actionArgs -or
+        $task.Actions[0].WorkingDirectory -ine $homeDir) { throw 'TASK_INSTALL_READBACK_MISMATCH' }
     Write-Output 'NATIVE_BRIDGE_INSTALLED_SOURCE_ONLY_NOT_FIRST_POLL'
     Write-Output ('LOCAL_WORKER_SHA256=' + $srcHash)
     Write-Output 'LOGON_TYPE=Interactive; RUNLEVEL=Limited; BOOT_BEFORE_LOGON=NOT_GUARANTEED'

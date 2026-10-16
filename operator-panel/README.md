@@ -4,7 +4,7 @@ This folder contains a static, read-only Traditional Chinese page with a
 dark-first layout. Open index.html directly in Edge or Brave; it does not start
 Node, PowerShell, Windows Terminal, a local listener, or a database. It reads
 the single PTYSD_OPERATOR_OBSERVATION_V1 comment and native Issue #407 receipts,
-the live PR #419 metadata, the current main commit, and check-runs attached to
+the live PR #434 metadata, the current main commit, and check-runs attached to
 the exact PR head SHA from the public GitHub API.
 
 The page checks the publisher account, exact project/repository/Issue identity,

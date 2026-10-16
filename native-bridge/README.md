@@ -13,22 +13,24 @@ no new process stays resident between polls.
   command line, source code, public issue, or evidence report.
 * The worker accepts only the configured exact project ID, repository, host name,
   Issue title, and an allowlisted dispatch comment author. Job schema is fixed.
-* Every `opencode_plan` job references a restricted `native-bridge/tasks/*.md`
-  file from the **exact current main commit** and carries SHA-256 of its contents.
-  Neither an Issue body nor a free-form comment becomes a shell instruction.
+* New OpenCode coding work uses `opencode_edit` with an immutable main/PR source,
+  a pinned task spec, and exact write paths. Legacy `opencode_plan` jobs remain
+  readable for receipt recovery but are not selected as new work. Neither an
+  Issue body nor a free-form comment becomes a shell instruction.
+  Candidate-edit schema 6 additionally binds the task to a read-back Human GOAL
+  comment by issue, comment ID, marker, trusted author, and exact body SHA-256;
+  executable instructions remain the separately pinned task spec and write paths.
 * `ping` is native, zero-token, and verifies round-trip GitHub comments.
-* `opencode_plan` is **OpenCode V2 ONLY**. A native binary must return version
-  2.x. V1 executables are rejected, regardless of file name. Jobs pin exact
-  `provider/model` plus `variant`; V2 receives `provider/model#variant`.
-  The worker installs only a reviewed V2 project-local `opencode.json` with
-  ordered `permissions` rules, denying edit/shell/subagent/external access.
-  It refuses unknown workspace configuration rather than overriding it.
-  V2 model invocation is **disabled by default** until local
-  `enable_v2_model_runs=true` and an exact `allowed_models` entry are set
-  after version, config and provider authorization qualification. OpenCode
-  exit code 0 alone is **not** accepted verifier or reasoning-strength evidence.
-* Neither job type can request elevated privilege, delete archive/MCP/Runner,
-  modify branch protection, or approve a change to trusted verifier sources.
+* `opencode_edit` is **OpenCode V2 ONLY**. A native binary must return version
+  2.x; V1 executables are rejected. Jobs pin exact `provider/model` plus
+  `variant`, source revision and allowed write paths. The isolated executor
+  installs only the reviewed V2 project-local `opencode.json`; its permissions
+  do not replace OS identity or filesystem isolation. Writes require the
+  separate `enable_v2_edit_runs=true` and an exact `allowed_edit_models` entry.
+  CLI exit code 0 alone is **not** code, test or acceptance evidence. Historical
+  plan receipts remain readable without launching another plan-only model run.
+* A task cannot request elevated privilege, delete archive/MCP/Runner, modify
+  branch protection, or approve a change to trusted verifier sources.
 * Output stays in `%LOCALAPPDATA%\PTYSDNativeBridge`; only machine-readable
   outcome, exit status and local evidence hash are posted publicly. Never post
   raw prompts, stdout/stderr, credential material or private paths.
@@ -54,6 +56,9 @@ Within an actual Win11 OpenCode/Codex session (not in a ChatGPT browser sandbox)
 & .\native-bridge\install.ps1 -Mode RunOnce
 ```
 
+`Install` requires an existing `HiddenWorker.vbs` at the target runtime path and
+validates its exact hidden, wait-for-exit, exit-code-preserving command. It never
+rewrites the launcher or registers `node.exe` directly as a scheduled action.
 The installer refuses to overwrite an unknown existing task. Do not create the
 Task Scheduler task under SYSTEM/Administrator. Its Interactive logon token needs
 the `x` account to remain logged in: running before the first logon after a reboot
