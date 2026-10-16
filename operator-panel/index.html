@@ -1,0 +1,1697 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b111b">
+  <title>PTYSD 工廠狀態</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page:#0b111b; --card:#151e2d; --panel:#1c293b; --line:#304158;
+      --ink:#e8eef7; --muted:#a5b5c9; --green:#35b985; --amber:#e7b75a;
+      --red:#f17878; --link:#79b8ff; --focus:#a7cbff;
+    }
+    * { box-sizing:border-box }
+    html { min-height:100%; background:var(--page); color-scheme:dark }
+    body { margin:0; min-height:100vh; background:var(--page); color:var(--ink);
+      font:15px/1.55 "Segoe UI","Microsoft JhengHei",sans-serif }
+    main { width:min(1440px,100%); margin:0 auto; padding:28px 26px 48px }
+    h1 { font-size:clamp(27px,4vw,38px); line-height:1.15; margin:0 0 8px }
+    h2 { font-size:20px; line-height:1.25; margin:0 0 12px }
+    h3 { font-size:16px; margin:0 0 6px }
+    p { margin:5px 0 }
+    a { color:var(--link); text-underline-offset:3px }
+    a:hover { color:#b3d8ff }
+    button { border:1px solid #58708f; background:#24354b; color:var(--ink);
+      border-radius:9px; padding:10px 15px; font:inherit; font-weight:700; cursor:pointer }
+    button:hover:not(:disabled) { background:#304660 }
+    button:disabled { opacity:.65; cursor:wait }
+    button:focus-visible,a:focus-visible,summary:focus-visible {
+      outline:3px solid var(--focus); outline-offset:3px }
+    .topbar { display:flex; align-items:flex-start; justify-content:space-between;
+      gap:20px; margin-bottom:18px }
+    .eyebrow { color:var(--link); font-size:12px; font-weight:800;
+      letter-spacing:.12em; margin:0 0 8px }
+    .subtitle,.muted { color:var(--muted) }
+    .subtitle { max-width:820px; margin:0 }
+    .top-actions { display:flex; flex-direction:column; align-items:flex-end; gap:7px }
+    .small { font-size:12px; color:var(--muted) }
+    .panel { background:var(--card); border:1px solid var(--line);
+      border-radius:14px; padding:18px; box-shadow:0 8px 24px #0002 }
+    .overview { border-left:5px solid #7890ad; margin:18px 0 20px }
+    .overview.fresh { border-left-color:var(--green) }
+    .overview.stale { border-left-color:var(--amber) }
+    .overview.unknown { border-left-color:var(--red) }
+    .rate-alert { border-left:5px solid var(--amber); margin:0 0 20px }
+    .rate-alert[hidden] { display:none }
+    .rate-alert.limited { border-left-color:var(--red) }
+    .rate-alert h2 { margin:0 0 6px; font-size:18px }
+    .rate-alert p { color:var(--muted); margin:0; overflow-wrap:anywhere }
+    .overview-head { display:flex; justify-content:space-between; gap:20px; align-items:flex-start }
+    .overview h2 { font-size:22px; margin-bottom:5px }
+    .overview-copy { color:var(--muted); margin:0; max-width:900px }
+    .metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px;
+      margin-top:18px }
+    .metric { background:var(--panel); border:1px solid var(--line);
+      border-radius:10px; padding:12px 13px; min-width:0 }
+    .metric-label { display:block; color:var(--muted); font-size:12px; margin-bottom:5px }
+    .metric-value { display:block; font-size:15px; font-weight:700; overflow-wrap:anywhere }
+    .section { margin:24px 0 10px; display:flex; justify-content:space-between;
+      align-items:baseline; gap:12px }
+    .section p { color:var(--muted); font-size:13px }
+    .worker-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px }
+    .worker-card { min-width:0; min-height:390px; display:flex; flex-direction:column }
+    .worker-head { display:flex; justify-content:space-between; align-items:flex-start;
+      gap:10px; margin-bottom:10px }
+    .worker-name { margin:0 }
+    .worker-id { font:700 12px/1.4 ui-monospace,Consolas,monospace; color:var(--link) }
+    .worker-harness { color:var(--muted); font-size:13px }
+    .badge { display:inline-flex; flex-shrink:0; align-items:center; min-height:27px;
+      padding:4px 10px; border:1px solid #51647c; border-radius:999px;
+      background:#263449; color:#d6e0ee; font-size:12px; font-weight:800 }
+    .badge.good { border-color:#247759; background:#123b31; color:#91edc8 }
+    .badge.warn { border-color:#806432; background:#3b301b; color:#f3d68e }
+    .badge.bad { border-color:#874c4c; background:#3e2428; color:#ffb6b6 }
+    .badge.neutral { border-color:#51647c; background:#263449; color:#d6e0ee }
+    .field { margin-top:11px; padding-top:10px; border-top:1px solid #2b394c }
+    .field strong { display:block; color:var(--muted); font-size:12px; font-weight:650;
+      margin-bottom:2px }
+    .field span { display:block; overflow-wrap:anywhere }
+    .worker-foot { margin-top:auto; padding-top:12px }
+    .source-tag { display:inline-block; border:1px solid var(--line); border-radius:6px;
+      padding:3px 7px; color:var(--muted); font-size:11px }
+    .infra-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px }
+    .infra-card { min-width:0 }
+    .infra-summary { color:var(--muted); margin:0 0 10px }
+    .facts { display:grid; grid-template-columns:minmax(150px,220px) minmax(0,1fr);
+      gap:8px 14px; margin:14px 0 0 }
+    .facts dt { color:var(--muted) }
+    .facts dd { margin:0; overflow-wrap:anywhere }
+    .events { padding:0; margin:0; list-style:none }
+    .event { display:grid; grid-template-columns:175px minmax(0,1fr); gap:12px;
+      padding:11px 0; border-bottom:1px solid #2b394c }
+    .event:last-child { border-bottom:0 }
+    .event time { color:var(--muted); font-size:13px }
+    .event p { margin:0; overflow-wrap:anywhere }
+    details { background:var(--card); border:1px solid var(--line);
+      border-radius:14px; padding:16px 18px }
+    summary { cursor:pointer; font-weight:750 }
+    .links { display:flex; flex-wrap:wrap; gap:10px 18px; margin-top:14px }
+    code { font:12px/1.5 ui-monospace,Consolas,monospace; overflow-wrap:anywhere }
+    .footnote { color:var(--muted); font-size:12px; margin-top:14px }
+    @media (max-width:1000px) {
+      main { padding:22px 18px 38px }
+      .worker-grid { grid-template-columns:1fr }
+      .worker-card { min-height:0 }
+    }
+    @media (max-width:700px) {
+      main { padding:18px 13px 30px }
+      .topbar { align-items:center }
+      .top-actions { align-items:flex-end }
+      .metrics { grid-template-columns:repeat(2,minmax(0,1fr)) }
+      .infra-grid { grid-template-columns:1fr }
+      .facts { grid-template-columns:1fr; gap:2px }
+      .facts dd { margin-bottom:9px }
+      .event { grid-template-columns:1fr; gap:2px }
+    }
+    @media (max-width:440px) {
+      .topbar { align-items:flex-start; flex-direction:column }
+      .top-actions { align-items:flex-start; flex-direction:row; flex-wrap:wrap }
+      .metrics { grid-template-columns:1fr 1fr }
+      .panel { padding:15px }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">PTYSD V5.3-R4 · 唯讀工廠監控</p>
+      <h1>工廠狀態中心</h1>
+      <p class="subtitle">以 GitHub Issue #407、PR／CI 與去敏 Win11 觀測交叉核對。安裝、排程、收據或程序存在都不單獨代表 AI 正在施工。</p>
+    </div>
+    <div class="top-actions">
+      <button id="refresh" type="button">立即同步</button>
+      <span id="next-sync" class="small">Issue 每 5 分鐘；PR／CI 每 15 分鐘；main 每 60 分鐘</span>
+    </div>
+  </header>
+
+  <section id="overall" class="panel overview unknown" aria-live="polite">
+    <div class="overview-head">
+      <div>
+        <h2 id="overall-title">正在讀取 GitHub 正式來源…</h2>
+        <p id="overall-copy" class="overview-copy">目前沒有可核對的本機觀測。</p>
+      </div>
+      <span id="github-state" class="badge neutral">未確認</span>
+    </div>
+    <div class="metrics" aria-label="工廠總覽">
+      <div class="metric"><span class="metric-label">Win11 有效觀測</span><span id="metric-observed" class="metric-value">未確認</span></div>
+      <div class="metric"><span class="metric-label">最近 GitHub 讀回</span><span id="metric-synced" class="metric-value">未確認</span></div>
+      <div class="metric"><span class="metric-label">目前證實施工 Worker</span><span id="metric-workers" class="metric-value">未確認</span></div>
+      <div class="metric"><span class="metric-label">需要 Human 處理</span><span id="metric-human" class="metric-value">未確認</span></div>
+      <div class="metric"><span class="metric-label">正式 main HEAD</span><span id="metric-main" class="metric-value">未確認</span></div>
+      <div class="metric"><span class="metric-label">已知 Worker 阻擋</span><span id="metric-blocked" class="metric-value">未確認</span></div>
+      <div class="metric"><span class="metric-label">任務所指 PR 精確 HEAD CI</span><span id="metric-ci" class="metric-value">未確認</span></div>
+      <div class="metric"><span class="metric-label">最近同步錯誤</span><span id="metric-error" class="metric-value">無</span></div>
+    </div>
+  </section>
+
+  <section id="rate-alert" class="panel rate-alert" hidden aria-live="polite">
+    <h2 id="rate-alert-title">GitHub API 狀態</h2>
+    <p id="rate-alert-detail">額度與同步狀態未確認。</p>
+  </section>
+
+  <div class="section">
+    <h2>三個 Worker 車道</h2>
+    <p>施工狀態與 GitHub 交付分開顯示；缺少當前證據時不沿用歷史「施工中」。</p>
+  </div>
+  <section class="worker-grid" aria-label="W1 W2 W3 Worker 狀態">
+    <article class="panel worker-card">
+      <div class="worker-head">
+        <div><span class="worker-id">W1</span><h2 class="worker-name">OpenCode</h2><span class="worker-harness">OpenCode CLI V2</span></div>
+        <span id="w1-badge" class="badge neutral">未確認</span>
+      </div>
+      <div class="field"><strong>正式任務</strong><span id="w1-task">未確認</span></div>
+      <div class="field"><strong>工作階段／執行者</strong><span id="w1-session">未確認</span></div>
+      <div class="field"><strong>最近有證據的活動</strong><span id="w1-activity">未確認</span></div>
+      <div class="field"><strong>進度／已證實步驟</strong><span id="w1-progress">未確認</span></div>
+      <div class="field"><strong>錯誤或阻擋</strong><span id="w1-blocker">未確認</span></div>
+      <div class="field"><strong>程式修改</strong><span id="w1-changes">未確認</span></div>
+      <div class="field"><strong>Commit／PR／CI</strong><span id="w1-delivery">未確認</span></div>
+      <div class="field"><strong>下一步負責人</strong><span id="w1-next">未確認</span></div>
+      <div class="worker-foot"><span id="w1-source" class="source-tag">來源／新鮮度未確認</span></div>
+    </article>
+    <article class="panel worker-card">
+      <div class="worker-head">
+        <div><span class="worker-id">W2</span><h2 class="worker-name">Antigravity</h2><span class="worker-harness">只接受已核准的原生執行證據</span></div>
+        <span id="w2-badge" class="badge neutral">未確認</span>
+      </div>
+      <div class="field"><strong>正式任務</strong><span id="w2-task">未確認</span></div>
+      <div class="field"><strong>工作階段／執行者</strong><span id="w2-session">未確認</span></div>
+      <div class="field"><strong>最近有證據的活動</strong><span id="w2-activity">未確認</span></div>
+      <div class="field"><strong>進度／已證實步驟</strong><span id="w2-progress">未確認</span></div>
+      <div class="field"><strong>錯誤或阻擋</strong><span id="w2-blocker">未確認</span></div>
+      <div class="field"><strong>程式修改</strong><span id="w2-changes">未確認</span></div>
+      <div class="field"><strong>Commit／PR／CI</strong><span id="w2-delivery">未確認</span></div>
+      <div class="field"><strong>下一步負責人</strong><span id="w2-next">未確認</span></div>
+      <div class="worker-foot"><span id="w2-source" class="source-tag">來源／新鮮度未確認</span></div>
+    </article>
+    <article class="panel worker-card">
+      <div class="worker-head">
+        <div><span class="worker-id">W3</span><h2 class="worker-name">ChatGPT Web／Codex Zero Risk</h2><span class="worker-harness">需有效 request_id、Human 轉送及真實工具回傳</span></div>
+        <span id="w3-badge" class="badge neutral">未確認</span>
+      </div>
+      <div class="field"><strong>正式任務</strong><span id="w3-task">未確認</span></div>
+      <div class="field"><strong>工作階段／執行者</strong><span id="w3-session">未確認</span></div>
+      <div class="field"><strong>最近有證據的活動</strong><span id="w3-activity">未確認</span></div>
+      <div class="field"><strong>進度／已證實步驟</strong><span id="w3-progress">未確認</span></div>
+      <div class="field"><strong>錯誤或阻擋</strong><span id="w3-blocker">未確認</span></div>
+      <div class="field"><strong>程式修改</strong><span id="w3-changes">未確認</span></div>
+      <div class="field"><strong>Commit／PR／CI</strong><span id="w3-delivery">未確認</span></div>
+      <div class="field"><strong>下一步負責人</strong><span id="w3-next">未確認</span></div>
+      <div class="worker-foot"><span id="w3-source" class="source-tag">來源／新鮮度未確認</span></div>
+    </article>
+  </section>
+
+  <div class="section"><h2>主控與基礎設施</h2><p>程序與服務狀態不會被推論成模型活動。</p></div>
+  <section class="infra-grid">
+    <article class="panel infra-card">
+      <h3>主控 Codex</h3><span id="codex-badge" class="badge neutral">狀態未確認</span>
+      <p id="codex-detail" class="infra-summary">沒有可被動讀取的 Codex 原生活動來源。</p>
+      <dl class="facts"><dt>任務／工作階段</dt><dd id="codex-task">未確認</dd><dt>活動證據</dt><dd id="codex-evidence">未確認</dd><dt>下一步</dt><dd id="codex-next">未確認</dd></dl>
+    </article>
+    <article class="panel infra-card">
+      <h3>Win11 Native Worker／Task Scheduler</h3><span id="native-badge" class="badge neutral">未確認</span>
+      <p id="native-detail" class="infra-summary">排程就緒不等於 Worker 正在執行任務。</p>
+      <dl class="facts"><dt>正式排程／Action</dt><dd id="native-action">未確認</dd><dt>執行身分／單實例</dt><dd id="native-identity">未確認</dd><dt>最近結果／下一次執行</dt><dd id="native-last">未確認</dd><dt>舊 Monitor／2667</dt><dd id="native-retired">未確認</dd><dt>Worker 發布器</dt><dd id="native-publisher">未確認</dd></dl>
+    </article>
+    <article class="panel infra-card">
+      <h3>GitHub Actions／Runner</h3><span id="runner-badge" class="badge neutral">未確認</span>
+      <p id="runner-detail" class="infra-summary">CI 狀態綁定 PR 精確 HEAD；Runner OS 服務與 GitHub 登錄分開顯示。</p>
+      <dl class="facts"><dt>精確 HEAD 檢查</dt><dd id="runner-checks">未確認</dd><dt>舊 Runner 檢查</dt><dd id="runner-legacy">未確認</dd><dt>Win11 Runner 服務</dt><dd id="runner-service">未確認</dd><dt>GitHub 登錄</dt><dd id="runner-registration">未確認</dd></dl>
+    </article>
+    <article class="panel infra-card">
+      <h3>最近候選任務所指 PR</h3><span id="pr-badge" class="badge neutral">未確認</span>
+      <p id="pr-detail" class="infra-summary">來源候選、CI 與 Win11 部署各自獨立判定。</p>
+      <dl class="facts"><dt>目前 PR 狀態</dt><dd id="pr-state">未確認</dd><dt>精確 PR HEAD</dt><dd id="pr-head">未確認</dd><dt>PR base／main HEAD</dt><dd id="pr-base">未確認</dd><dt>正式接受／部署</dt><dd id="pr-deployment">未確認</dd></dl>
+    </article>
+  </section>
+
+  <div class="section"><h2>最近已驗證事件</h2><p>只列出正式派工、相符收據與精確 HEAD 檢查。</p></div>
+  <section class="panel"><ol id="events" class="events"><li class="muted">尚無已驗證事件。</li></ol></section>
+
+  <div class="section"><h2>技術明細</h2><p>需要時再展開查看來源時間與錯誤碼。</p></div>
+  <details>
+    <summary>來源、時間、SHA、快取與錯誤</summary>
+    <dl class="facts">
+      <dt>GitHub Issue #407</dt><dd><a href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/issues/407" target="_blank" rel="noopener noreferrer">正式派工、收據與唯一 Win11 觀測留言</a></dd>
+      <dt>Issue observation</dt><dd id="snapshot-detail">未確認</dd>
+      <dt>Win11 observed_at／expires_at</dt><dd id="freshness-detail">未確認</dd>
+      <dt>任務所指 PR check runs</dt><dd id="checks-detail">未確認</dd>
+      <dt>GitHub 公開 API 額度</dt><dd id="rate-detail">未確認</dd>
+      <dt>錯誤／過期降級</dt><dd id="error-detail">未確認</dd>
+      <dt>Windows Task Scheduler</dt><dd id="task-detail">未確認</dd>
+      <dt>OpenCode V2</dt><dd id="opencode-detail">未確認</dd>
+    </dl>
+    <div class="links">
+      <a id="pr-source-link" href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/pulls" target="_blank" rel="noopener noreferrer">GitHub PR 清單（目前任務引用未確認）</a>
+      <a id="pr-checks-link" href="https://github.com/PT-Original-Point/ptysd-autonomous-factory/pulls" target="_blank" rel="noopener noreferrer">PR 檢查清單（目前任務引用未確認）</a>
+    </div>
+    <p class="footnote">靜態唯讀 HTML。只讀 GitHub 公開 API，不含 127.0.0.1:2667、本機服務、資料庫、排程控制、Worker 派工或模型呼叫。跨來源 fetch 受 CORS／GitHub 額度影響；失敗時顯示 UNKNOWN／STALE，不沿用成即時工作狀態。</p>
+  </details>
+</main>
+<script>
+(() => {
+  'use strict';
+  const REPO = 'PT-Original-Point/ptysd-autonomous-factory';
+  const PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
+  const EXPECTED_PUBLISHER = 'wfvupu1212';
+  const DISPATCHERS = new Set(['t14210184']);
+  const RECEIPT_AUTHORS = new Set(['t14210184', 'wfvupu1212']);
+  const MARKER = 'PTYSD_OPERATOR_OBSERVATION_V1\n';
+  const JOB_MARKER = 'PTYSD_NATIVE_JOB_V1\n';
+  const RECEIPT_MARKER = 'PTYSD_NATIVE_RECEIPT_V1\n';
+  const API = 'https://api.github.com/repos/' + REPO;
+  const ISSUE_POLL_MS = 5 * 60 * 1000;
+  const PR_POLL_MS = 15 * 60 * 1000;
+  const CHECKS_POLL_MS = 15 * 60 * 1000;
+  const MAIN_POLL_MS = 60 * 60 * 1000;
+  const MANUAL_SYNC_MIN_MS = 60 * 1000;
+  const LOW_REMAINING_THRESHOLD = 10;
+  const RATE_STATE_STORAGE_KEY = 'ptysd-operator-panel-rate-state-v1';
+  const API_CACHE_KEY_PREFIX = 'ptysd-operator-public-api-cache-v1:';
+  const API_LOCK_NAME = 'ptysd-operator-github-api-v1';
+  const RATE_BACKOFF_MIN_MS = 30 * 1000;
+  const RATE_BACKOFF_MAX_MS = 15 * 60 * 1000;
+  const MAX_LIVE_AGE_MS = 10 * 60 * 1000;
+  const STATUS = {
+    UNCONFIGURED:['尚未配置','neutral'], UNKNOWN:['狀態未確認','neutral'],
+    STALE:['資料已過期','warn'], IDLE:['已證實閒置','neutral'],
+    PENDING:['等待接單／證據','warn'], AWAITING_HUMAN:['等待 Human 轉送','warn'],
+    RUNNING_VERIFIED:['已觀測到施工','good'], BLOCKED:['工作遇阻','bad'],
+    DELIVERED:['已上傳 GitHub','good'], CI_PENDING:['等待 CI','warn'],
+    CI_FAILED:['CI 失敗','bad'], ACCEPTED:['已通過驗收','good'],
+  };
+  function object(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+  function parseSnapshot(body, login, now) {
+    if (typeof body !== 'string' || !body.startsWith(MARKER) || login !== EXPECTED_PUBLISHER) return null;
+    let s;
+    try { s = JSON.parse(body.slice(MARKER.length)); } catch { return null; }
+    if (!object(s) || s.schema !== 1 || s.project_id !== PROJECT || s.repo !== REPO ||
+        s.issue !== 407 || s.host_alias !== 'win11-primary' ||
+        typeof s.snapshot_id !== 'string' || !/^[a-f0-9-]{36}$/i.test(s.snapshot_id) ||
+        !Number.isSafeInteger(s.sequence) || s.sequence < 1 ||
+        !Number.isFinite(Date.parse(s.observed_at)) ||
+        !Number.isFinite(Date.parse(s.published_at)) ||
+        !Number.isFinite(Date.parse(s.expires_at)) ||
+        Date.parse(s.expires_at) <= Date.parse(s.observed_at) ||
+        Date.parse(s.expires_at) - Date.parse(s.observed_at) > 15 * 60 * 1000 ||
+        Date.parse(s.published_at) < Date.parse(s.observed_at) - 5 * 60 * 1000) return null;
+    const future = Date.parse(s.observed_at) > now + 5 * 60 * 1000 ||
+      Date.parse(s.published_at) > now + 5 * 60 * 1000;
+    return { snapshot:s, freshness:future ? 'UNKNOWN' : Date.parse(s.expires_at) <= now ? 'STALE' : 'FRESH' };
+  }
+  function findSnapshot(comments, now) {
+    if (!Array.isArray(comments)) return { status:'UNKNOWN', error:'INVALID_GITHUB_RESPONSE' };
+    const matches = comments.filter(c => typeof c?.body === 'string' && c.body.startsWith(MARKER));
+    if (!matches.length) return { status:'UNKNOWN', error:'OBSERVATION_NOT_PUBLISHED' };
+    if (matches.length !== 1) return { status:'UNKNOWN', error:'DUPLICATE_OBSERVATIONS' };
+    const parsed = parseSnapshot(matches[0].body, matches[0].user?.login, now);
+    if (!parsed) return { status:'UNKNOWN', error:'AUTHOR_OR_SCHEMA_MISMATCH' };
+    const commentId = Number(matches[0].id);
+    if (!Number.isSafeInteger(commentId) || parsed.snapshot.source?.comment_id !== commentId)
+      return { status:'UNKNOWN', error:'OBSERVATION_COMMENT_ID_MISMATCH' };
+    const readbackUpdatedAt = matches[0].updated_at;
+    const readbackTime = Date.parse(readbackUpdatedAt || '');
+    const publishTime = Date.parse(parsed.snapshot.published_at);
+    if (!Number.isFinite(readbackTime))
+      return { status:'UNKNOWN', error:'OBSERVATION_GITHUB_UPDATED_AT_UNKNOWN' };
+    if (Math.floor(readbackTime/1000) < Math.floor(publishTime/1000))
+      return { status:'UNKNOWN', error:'OBSERVATION_GITHUB_UPDATED_AT_MISMATCH' };
+    if (readbackTime > now + 5 * 60 * 1000)
+      return { status:'UNKNOWN', error:'OBSERVATION_GITHUB_UPDATED_AT_FUTURE' };
+    return { status:parsed.freshness, snapshot:parsed.snapshot, comment:matches[0],
+      readbackUpdatedAt };
+  }
+  function parseMarked(body, marker) {
+    if (typeof body !== 'string' || !body.startsWith(marker)) return null;
+    try { const value = JSON.parse(body.slice(marker.length)); return object(value) ? value : null; }
+    catch { return null; }
+  }
+  function validScopedEditPath(file) {
+    if (typeof file !== 'string' || !file || file.startsWith('/') ||
+        /[<>:"\\|?*\[\]{}\u0000-\u001f]/.test(file)) return false;
+    const parts = file.split('/');
+    if (parts.some(part => !part || part === '.' || part === '..')) return false;
+    if (parts.some(part => /[. ]$/.test(part) ||
+        /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(part) ||
+        /^(?:conin\$|conout\$)$/i.test(part))) return false;
+    return true;
+  }
+  function validHumanGoalRef(value) {
+    return object(value) && JSON.stringify(Object.keys(value).sort()) ===
+      JSON.stringify(['body_sha256','comment_id','issue','marker']) && value.issue === 310 &&
+      Number.isSafeInteger(value.comment_id) && value.comment_id > 0 &&
+      value.marker === 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015' &&
+      /^[a-f0-9]{64}$/.test(value.body_sha256 || '');
+  }
+  function validJob(job) {
+    if (!object(job) || job.project_id !== PROJECT || job.host !== 'DESKTOP-1B6PD2P' ||
+        !/^[a-f0-9]{40}$/.test(job.source_sha || '') ||
+        !/^[A-Z][A-Z0-9_-]{7,79}$/.test(job.request_id || '')) return false;
+    const keys = Object.keys(job).sort();
+    const protectedNativeBridgePaths = new Set([
+      'native-bridge/csg-trusted-pr-verifier.mjs',
+      'native-bridge/csg-trusted-pr-verifier-cli.mjs',
+      'native-bridge/install.ps1',
+      'native-bridge/install-codex-executor.ps1',
+      'native-bridge/hiddenworker.vbs',
+      'native-bridge/hiddencodexexecutor.vbs',
+      'native-bridge/windows-executor.mjs',
+    ]);
+    const base = ['schema','project_id','host','request_id','kind','source_sha','spec_path','spec_sha256'].sort();
+    const extended = [...base,'model','variant'].sort();
+    const scopedEdit = [...extended,'write_paths'].sort();
+    const candidateScopedEdit = [...scopedEdit,'candidate_pr'].sort();
+    const goalBoundCandidateEdit = [...candidateScopedEdit,'goal_ref'].sort();
+    if (job.schema === 1) return JSON.stringify(keys) === JSON.stringify(base) &&
+      ['ping','native_preflight','native_v2_qualify'].includes(job.kind) &&
+      job.spec_path === null && job.spec_sha256 === null;
+    const taskFields = /^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(job.spec_path || '') &&
+      /^[a-f0-9]{64}$/.test(job.spec_sha256 || '') &&
+      /^[a-z][a-z0-9_-]{1,39}\/[A-Za-z0-9_./:-]{1,150}$/.test(job.model || '') &&
+      !job.model.includes('..') &&
+      /^[a-z][a-z0-9_-]{0,39}$/.test(job.variant || '');
+    if (job.schema === 2) return JSON.stringify(keys) === JSON.stringify(extended) &&
+      taskFields && job.kind === 'opencode_plan';
+    const scopedEditShape = job.schema === 4 && JSON.stringify(keys) === JSON.stringify(scopedEdit);
+    const candidateEditShape = job.schema === 5 &&
+      JSON.stringify(keys) === JSON.stringify(candidateScopedEdit) &&
+      Number.isSafeInteger(job.candidate_pr) && job.candidate_pr > 0;
+    const goalBoundEditShape = job.schema === 6 &&
+      JSON.stringify(keys) === JSON.stringify(goalBoundCandidateEdit) &&
+      Number.isSafeInteger(job.candidate_pr) && job.candidate_pr > 0 && validHumanGoalRef(job.goal_ref);
+    if ((!scopedEditShape && !candidateEditShape && !goalBoundEditShape) ||
+        job.kind !== 'opencode_edit' || !taskFields ||
+        !Array.isArray(job.write_paths) || job.write_paths.length < 1)
+      return false;
+    const paths = new Set();
+    for (const file of job.write_paths) {
+      if (!validScopedEditPath(file)) return false;
+      const parts = file.split('/');
+      if (parts.some(part => !part || part === '.' || part === '..') ||
+          parts.some(part => /^\.(?:git|github|opencode)$/i.test(part)) ||
+          ['governance','runs'].includes(parts[0].toLowerCase()) ||
+          protectedNativeBridgePaths.has(file.toLowerCase()) ||
+          parts.some(part => /^\.env(?:\.|$)/i.test(part) || /^opencode\.jsonc?$/i.test(part) ||
+            /(?:secret|credential|token|password|auth\.json)/i.test(part))) return false;
+      const key = file.toLowerCase();
+      if (paths.has(key)) return false;
+      paths.add(key);
+    }
+    return true;
+  }
+  function currentCandidatePrReference(comments) {
+    const candidates=[];
+    for (const comment of comments || []) {
+      const job=parseMarked(comment?.body,JOB_MARKER);
+      const id=Number(comment?.id);
+      if (!Number.isSafeInteger(id) || id < 1 || !validJob(job) ||
+          !DISPATCHERS.has(comment?.user?.login || '') || ![5,6].includes(job.schema)) continue;
+      candidates.push({ id, body:comment.body, job });
+    }
+    if (!candidates.length) return { number:null, request_id:null, source_sha:null,
+      error:'CURRENT_CANDIDATE_PR_UNKNOWN' };
+    candidates.sort((a,b) => a.id-b.id);
+    const latest=candidates.at(-1);
+    const sameRequest=candidates.filter(item => item.job.request_id === latest.job.request_id);
+    if (new Set(sameRequest.map(item => item.body)).size > 1)
+      return { number:null, request_id:latest.job.request_id, source_sha:null,
+        error:'TASK_ID_CONTENT_CONFLICT' };
+    const sameCommentId=candidates.filter(item => item.id === latest.id);
+    if (new Set(sameCommentId.map(item => item.job.candidate_pr)).size > 1)
+      return { number:null, request_id:latest.job.request_id, source_sha:null,
+        error:'CANDIDATE_PR_REFERENCE_AMBIGUOUS' };
+    return { number:latest.job.candidate_pr, request_id:latest.job.request_id,
+      source_sha:latest.job.source_sha, error:null };
+  }
+  function candidatePinMatches(job, mainSha, pullRequest) {
+    const sourceSha = safeSha(job?.source_sha);
+    const currentMainSha = safeSha(mainSha);
+    const repositoryMatches = repo => object(repo) && repo.id === 1352411536 && repo.full_name === REPO;
+    return [5,6].includes(job?.schema) && Number.isSafeInteger(job.candidate_pr) &&
+      object(pullRequest) && pullRequest.number === job.candidate_pr &&
+      pullRequest.state === 'open' && pullRequest.base?.ref === 'main' &&
+      safeSha(pullRequest.base?.sha) === currentMainSha && sourceSha &&
+      safeSha(pullRequest.head?.sha) === sourceSha &&
+      repositoryMatches(pullRequest.base?.repo) && repositoryMatches(pullRequest.head?.repo);
+  }
+  function latestTask(comments, mainSha, pullRequest = null) {
+    const jobs = [], receipts = [];
+    for (const comment of comments || []) {
+      const job = parseMarked(comment.body, JOB_MARKER);
+      if (validJob(job) && DISPATCHERS.has(comment.user?.login || ''))
+        jobs.push({ id:comment.id, body:comment.body, job, login:comment.user?.login || '' });
+      const receipt = parseMarked(comment.body, RECEIPT_MARKER);
+      if (receipt && receipt.schema === 1 && receipt.project_id === PROJECT &&
+          receipt.host === 'DESKTOP-1B6PD2P' && /^[a-f0-9]{40}$/.test(receipt.source_sha || '') &&
+          /^[a-f0-9-]{36}$/.test(receipt.attempt_id || '') &&
+          /^[A-Z][A-Z0-9_-]{7,79}$/.test(receipt.request_id || '') &&
+          ['STARTED','FINISHED','BLOCKED'].includes(receipt.state))
+        receipts.push({ id:comment.id, receipt, login:comment.user?.login || '', created_at:comment.created_at });
+    }
+    jobs.sort((a,b) => Number(a.id)-Number(b.id));
+    if (!jobs.length) return null;
+    const latest = jobs.at(-1);
+    const duplicate = jobs.filter(x => x.job.request_id === latest.job.request_id);
+    if (new Set(duplicate.map(x => x.body)).size > 1)
+      return { job:latest.job, attempt_id:null, state:'同一任務 ID 內容衝突，停止自動重播', receipt_at:null };
+    const candidatePinVerified = latest.job.candidate_pr === undefined ||
+      candidatePinMatches(latest.job, mainSha, pullRequest);
+    const matches = receipts.filter(x => candidatePinVerified && RECEIPT_AUTHORS.has(x.login) &&
+      x.id > latest.id && x.receipt.request_id === latest.job.request_id &&
+      x.receipt.source_sha === latest.job.source_sha && x.receipt.kind === latest.job.kind &&
+      (x.receipt.candidate_pr ?? null) === (latest.job.candidate_pr ?? null) &&
+      JSON.stringify(x.receipt.goal_ref ?? null) === JSON.stringify(latest.job.goal_ref ?? null))
+      .sort((a,b) => Number(a.id)-Number(b.id));
+    const attempt = matches.at(-1)?.receipt.attempt_id || null;
+    const same = attempt ? matches.filter(x => x.receipt.attempt_id === attempt) : [];
+    const terminal = same.at(-1)?.receipt;
+    let state = '已接單／尚無 STARTED 收據';
+    if (!candidatePinVerified)
+      state = '候選 PR HEAD/base 未核對，來源未確認';
+    else if (latest.job.candidate_pr === undefined && latest.job.source_sha !== mainSha)
+      state = '來源 SHA 已過期，未重派';
+    else if (latest.job.kind === 'opencode_plan') state = 'LEGACY_READONLY_NOT_DISPATCHED';
+    else if (terminal?.state === 'FINISHED') state = '收到 FINISHED；不代表寫碼驗收';
+    else if (terminal?.state === 'BLOCKED') state = '工作受阻';
+    else if (terminal?.state === 'STARTED') state = '已 STARTED；即時施工尚未證實';
+    return { job:latest.job, attempt_id:attempt, state,
+      receipt_state:terminal?.state || null,
+      receipt_at:same.at(-1)?.created_at || null };
+  }
+  function fieldFreshness(at, maxAgeMs, now) {
+    const stamp = Date.parse(at || '');
+    if (!Number.isFinite(stamp) || stamp > now + 5 * 60 * 1000) return 'UNKNOWN';
+    return now - stamp > maxAgeMs ? 'STALE' : 'FRESH';
+  }
+  const DELIVERY_STATES = new Set(['DELIVERED','CI_PENDING','CI_FAILED','ACCEPTED']);
+  const ACTIVE_EVIDENCE = new Set([
+    'OPENCODE_TOOL_ACTIVITY','MODEL_TOOL_ACTIVITY','ANTIGRAVITY_TOOL_ACTIVITY',
+    'ZERO_RISK_TOOL_CALL','CODEX_ZERO_RISK_TOOL_CALL','PROCESS_AND_TOOL_ACTIVITY',
+  ]);
+  function classifyWorker(record, sourceFreshness, now) {
+    if (sourceFreshness === 'STALE') return { status:'STALE', reason:'GitHub／Win11 觀測已過期。' };
+    if (sourceFreshness !== 'FRESH') return { status:'UNKNOWN', reason:'沒有新鮮的 Win11 觀測。' };
+    if (!object(record)) return { status:'UNKNOWN', reason:'同一來源沒有此 Worker 的證據記錄。' };
+    if (record.configured === false) return { status:'UNCONFIGURED', reason:'新鮮來源明確回報尚未配置。' };
+    const state = String(record.status || 'UNKNOWN').toUpperCase();
+    const activityFreshness = fieldFreshness(record.activity_observed_at, MAX_LIVE_AGE_MS, now);
+    if (state === 'RUNNING_VERIFIED') {
+      const bound = typeof record.task_id === 'string' && record.task_id.length > 0 &&
+        typeof record.attempt_id === 'string' && record.attempt_id.length > 0 &&
+        typeof record.task_source === 'string' && record.task_source.length > 0 &&
+        typeof record.evidence_ref === 'string' && record.evidence_ref.length > 0;
+      if (!bound || activityFreshness !== 'FRESH' || !ACTIVE_EVIDENCE.has(record.evidence_kind))
+        return { status:'UNKNOWN', reason:'RUNNING 標記缺少近期同任務工具活動證據。' };
+      return { status:'RUNNING_VERIFIED', reason:'同任務、執行批次及近期工具活動相符。' };
+    }
+    if (state === 'PENDING' || state === 'AWAITING_HUMAN') {
+      if (!record.task_id || !record.task_source)
+        return { status:'UNKNOWN', reason:'沒有可核對的正式 task_id／task_source。' };
+      return { status:state, reason:state === 'PENDING' ? '正式任務尚無執行證據。' : '等待 Human 完成手動轉送。' };
+    }
+    if (state === 'BLOCKED') {
+      if (!record.task_id && !record.blocker_code) return { status:'UNKNOWN', reason:'阻擋狀態沒有任務或錯誤代碼。' };
+      return { status:'BLOCKED', reason:String(record.blocker_code || '正式任務回報受阻。') };
+    }
+    if (state === 'IDLE') {
+      if (activityFreshness !== 'FRESH' ||
+          !record.evidence_ref ||
+          !['NO_ACTIVE_WORK','NO_PENDING_TASKS_AND_NO_ACTIVE_PROCESS'].includes(record.evidence_kind))
+        return { status:'UNKNOWN', reason:'閒置狀態缺少新鮮的無任務／無活動證據。' };
+      return { status:'IDLE', reason:'新鮮來源同時證實沒有待處理任務及活動程序。' };
+    }
+    if (DELIVERY_STATES.has(state))
+      return { status:'UNKNOWN', reason:'交付階段與目前程序活動分開；沒有執行狀態證據。', delivery:state };
+    return { status:'UNKNOWN', reason:'來源沒有受支援的活動狀態。' };
+  }
+  function classifyW1(oc, nativeWorker, freshness, now, formalTask = null) {
+    if (freshness === 'STALE') return { status:'STALE', reason:'W1 的 Win11 快照已過期。' };
+    if (freshness !== 'FRESH') return { status:'UNKNOWN', reason:'W1 的 Win11 快照未知。' };
+    if (!object(oc)) return { status:'UNKNOWN', reason:'沒有 OpenCode V2 觀測。' };
+    const processFresh = fieldFreshness(oc.process_observed_at, MAX_LIVE_AGE_MS, now);
+    const activityAt = oc.activity_observed_at || oc.last_tool_activity_at;
+    const activityFresh = fieldFreshness(activityAt, MAX_LIVE_AGE_MS, now);
+    const task = nativeWorker?.current_task;
+    const taskId = oc.task_id || oc.request_id || task?.request_id;
+    if (processFresh === 'FRESH' && Number.isSafeInteger(oc.process_count) && oc.process_count > 0) {
+      if (oc.task_binding === 'PROVEN' && oc.model_execution === 'PROVEN' &&
+          activityFresh === 'FRESH' && taskId)
+        return { status:'RUNNING_VERIFIED', reason:'OpenCode 程序、正式任務與近期模型活動相符。' };
+      return { status:'UNKNOWN', reason:'有 OpenCode 程序，但模型執行／任務活動未被證實。' };
+    }
+    if (task && ['QUEUED_NOT_STARTED','STARTED_UNVERIFIED'].includes(task.state))
+      return { status:'PENDING', reason:'有正式派工，但尚無足夠的即時執行證據。' };
+    if (formalTask?.state === 'CANDIDATE_PIN_UNVERIFIED')
+      return { status:'UNKNOWN', reason:'候選 PR HEAD/base 尚未與最新 GitHub PR 讀回核對。' };
+    if (formalTask && ['QUEUED_NOT_STARTED','STARTED_UNVERIFIED'].includes(formalTask.state))
+      return { status:'PENDING', reason:'GitHub 有已核對來源 SHA 的正式派工／STARTED 收據；即時施工尚未證實。' };
+    return { status:'UNKNOWN', reason:'最近觀測沒有證明 W1 正在施工，也沒有完整的即時閒置證明。' };
+  }
+  function normalizeFormalTask(task) {
+    if (!task?.job) return null;
+    const state = task.state === 'LEGACY_READONLY_NOT_DISPATCHED' ? 'LEGACY_READONLY_NOT_DISPATCHED'
+      : task.state === '已接單／尚無 STARTED 收據' ? 'QUEUED_NOT_STARTED'
+      : task.state === '已 STARTED；即時施工尚未證實' ? 'STARTED_UNVERIFIED'
+        : task.state === '候選 PR HEAD/base 未核對，來源未確認' ? 'CANDIDATE_PIN_UNVERIFIED'
+        : 'HISTORICAL';
+    return { ...task, state };
+  }
+  function workerRecord(snapshot, id) {
+    const records = Array.isArray(snapshot?.workers) ? snapshot.workers : [];
+    const matches = records.filter(record => record?.worker_id === id);
+    return matches.length === 1 ? matches[0] : null;
+  }
+  function summarizeChecks(data, expectedSha, prNumber) {
+    if (!object(data) || !Array.isArray(data.check_runs) ||
+        !/^[a-f0-9]{40}$/i.test(expectedSha || '') ||
+        !Number.isSafeInteger(prNumber) || prNumber < 1) return null;
+    const checks = data.check_runs.filter(run => run?.head_sha === expectedSha);
+    if (!checks.length) return { status:'UNKNOWN', head_sha:expectedSha, pr_number:prNumber,
+      counts:{total:0,success:0,failure:0,queued:0,pending:0,in_progress:0,skipped:0,cancelled:0,other:0}, checks:[] };
+    const counts = { total:checks.length, success:0, failure:0, queued:0,pending:0,
+      in_progress:0,skipped:0,cancelled:0,other:0 };
+    for (const run of checks) {
+      if (run.status === 'queued') counts.queued++;
+      else if (run.status === 'pending') counts.pending++;
+      else if (run.status === 'in_progress') counts.in_progress++;
+      else if (run.status !== 'completed') counts.other++;
+      else if (run.conclusion === 'success') counts.success++;
+      else if (run.conclusion === 'failure' || run.conclusion === 'timed_out' ||
+          run.conclusion === 'action_required') counts.failure++;
+      else if (run.conclusion === 'cancelled') counts.cancelled++;
+      else if (run.conclusion === 'skipped' || run.conclusion === 'neutral') counts.skipped++;
+      else counts.other++;
+    }
+    const activeStates = [counts.queued > 0,counts.pending > 0,counts.in_progress > 0].filter(Boolean).length;
+    let status = 'COMPLETED_WITH_SKIPS';
+    if (counts.failure) status = 'CI_FAILED';
+    else if (activeStates > 1) status = 'MIXED_ACTIVE';
+    else if (counts.queued) status = 'QUEUED';
+    else if (counts.pending) status = 'PENDING';
+    else if (counts.in_progress) status = 'IN_PROGRESS';
+    else if (counts.other) status = 'UNKNOWN';
+    else if (counts.cancelled) status = 'COMPLETED_WITH_NON_SUCCESS';
+    else if (!counts.skipped && counts.success === counts.total) status = 'CHECKS_SUCCESS';
+    return { status, head_sha:expectedSha, pr_number:prNumber, counts,
+      checks:checks.map(run => ({
+        name:typeof run.name === 'string' ? run.name.slice(0,120) : '未命名檢查',
+        status:run.status, conclusion:run.conclusion || null,
+        started_at:run.started_at || null, completed_at:run.completed_at || null,
+        html_url:typeof run.html_url === 'string' ? run.html_url : null,
+      })) };
+  }
+  function headerValue(headers, name) {
+    try { return headers?.get?.(name) ?? headers?.get?.(name.toLowerCase()) ?? null; }
+    catch { return null; }
+  }
+  function parseRetryAfter(value, now) {
+    if (typeof value !== 'string' || !value.trim()) return null;
+    const trimmed = value.trim();
+    if (/^\d+(?:\.\d+)?$/.test(trimmed)) return now + Math.max(0, Number(trimmed) * 1000);
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? Math.max(now, parsed) : null;
+  }
+  function parseIntegerHeader(value) {
+    return /^\d+$/.test(value || '') ? Number(value) : null;
+  }
+  function classifyRateFailure(status, remaining, message) {
+    const text = String(message || '').toLowerCase();
+    if (remaining === 0 || /api rate limit exceeded|primary rate limit/.test(text))
+      return { code:'GITHUB_RATE_LIMIT_EXHAUSTED', cause:'PRIMARY_LIMIT', shared:true };
+    if (status === 429 || /secondary rate limit|abuse detection|abuse rate limit/.test(text))
+      return { code:'GITHUB_SECONDARY_RATE_LIMIT', cause:'SECONDARY_LIMIT', shared:true };
+    if (status === 403 && /resource not accessible|permission|forbidden|not authorized|access denied/.test(text))
+      return { code:'GITHUB_PERMISSION_DENIED', cause:'PERMISSION_DENIED', shared:false };
+    if (status === 403 || status === 429)
+      return { code:`GITHUB_HTTP_${status}_REASON_UNKNOWN`, cause:'UNKNOWN_HTTP_LIMIT', shared:false };
+    return { code:`GITHUB_HTTP_${status}`, cause:'HTTP_ERROR', shared:false };
+  }
+  function createApiClient(fetchImpl, options = {}) {
+    const cache = new Map(), inFlight = new Map();
+    const AbortControllerCtor = options.AbortControllerCtor || AbortController;
+    const setTimer = options.setTimeoutFn || setTimeout;
+    const clearTimer = options.clearTimeoutFn || clearTimeout;
+    const now = options.now || (() => Date.now());
+    const storage = options.storage || null;
+    const channel = options.channel || null;
+    const locks = typeof options.locks?.request === 'function' ? options.locks : null;
+    const meta = new Map();
+    let requestQueue = Promise.resolve();
+    let secondaryBackoffMs = RATE_BACKOFF_MIN_MS;
+    const rate = {
+      status:'READY', cause:null, remaining:null, limit:null, resetAt:null,
+      retryAfterAt:null, pollIntervalMs:null, pauseUntil:null, indefinite:false,
+      lastError:null, lastResponseAt:null, lastSuccessAt:null, requestCount:0,
+      recoveryProbeUsed:false, recoveryNoticePending:false,
+      coordination:storage && locks ? 'SHARED_LOCKED' : storage || channel || locks ? 'BEST_EFFORT' : 'TAB_LOCAL_ONLY',
+    };
+    function statePayload() {
+      return { schema:1, status:rate.status, cause:rate.cause,
+        remaining:rate.remaining, limit:rate.limit, resetAt:rate.resetAt,
+        retryAfterAt:rate.retryAfterAt, pauseUntil:rate.pauseUntil,
+        indefinite:rate.indefinite, lastError:rate.lastError,
+        lastResponseAt:rate.lastResponseAt };
+    }
+    function mergeSharedState(value) {
+      if (!value || value.schema !== 1) return;
+      if (value.status === 'READY') {
+        if (rate.status !== 'RECOVERING') {
+          rate.status='READY'; rate.cause=null; rate.pauseUntil=null; rate.indefinite=false;
+          rate.recoveryProbeUsed=false;
+        }
+        return;
+      }
+      if (!['RATE_LIMITED','COOLDOWN'].includes(value.status)) return;
+      const externalUntil = Number.isFinite(value.pauseUntil) ? value.pauseUntil : null;
+      const stronger = value.indefinite === true || externalUntil === null ||
+        !rate.pauseUntil || externalUntil > rate.pauseUntil;
+      if (stronger) {
+        rate.status=value.status; rate.cause=value.cause || 'SHARED_COOLDOWN';
+        rate.remaining=Number.isSafeInteger(value.remaining) ? value.remaining : rate.remaining;
+        rate.limit=Number.isSafeInteger(value.limit) ? value.limit : rate.limit;
+        rate.resetAt=Number.isFinite(value.resetAt) ? value.resetAt : rate.resetAt;
+        rate.retryAfterAt=Number.isFinite(value.retryAfterAt) ? value.retryAfterAt : rate.retryAfterAt;
+        rate.pauseUntil=externalUntil; rate.indefinite=value.indefinite === true;
+        rate.lastError=value.lastError || rate.lastError;
+        rate.lastResponseAt=Number.isFinite(value.lastResponseAt) ? value.lastResponseAt : rate.lastResponseAt;
+        rate.recoveryProbeUsed=false;
+      }
+    }
+    function syncSharedState() {
+      if (storage) {
+        try {
+          const raw = storage.getItem(RATE_STATE_STORAGE_KEY);
+          if (raw) mergeSharedState(JSON.parse(raw));
+        } catch {
+          rate.coordination = channel ? 'BEST_EFFORT_BROADCAST_ONLY' : 'TAB_LOCAL_ONLY';
+        }
+      }
+    }
+    function publishSharedState() {
+      const payload = statePayload();
+      if (storage) {
+        try {
+          if (['RATE_LIMITED','COOLDOWN'].includes(rate.status))
+            storage.setItem(RATE_STATE_STORAGE_KEY, JSON.stringify(payload));
+          else storage.removeItem(RATE_STATE_STORAGE_KEY);
+        } catch {
+          rate.coordination = channel ? 'BEST_EFFORT_BROADCAST_ONLY' : 'TAB_LOCAL_ONLY';
+        }
+      }
+      try { channel?.postMessage?.(payload); } catch {
+        rate.coordination = storage ? 'BEST_EFFORT_STORAGE_ONLY' : 'TAB_LOCAL_ONLY';
+      }
+    }
+    function storedRateState() {
+      if (!storage) return;
+      try {
+        const raw = storage.getItem(RATE_STATE_STORAGE_KEY);
+        if (raw) mergeSharedState(JSON.parse(raw));
+      } catch { rate.coordination = channel ? 'BEST_EFFORT_BROADCAST_ONLY' : 'TAB_LOCAL_ONLY'; }
+    }
+    function clearRatePause() {
+      rate.status='READY'; rate.cause=null; rate.pauseUntil=null; rate.indefinite=false;
+      rate.lastError=null; rate.recoveryProbeUsed=false;
+      secondaryBackoffMs=RATE_BACKOFF_MIN_MS;
+      publishSharedState();
+    }
+    function setRatePause({status='RATE_LIMITED',cause,code,retryAfterAt=null,resetAt=null,waitMs=null,indefinite=false,remaining=null,limit=null}) {
+      const candidates=[retryAfterAt,resetAt,Number.isFinite(waitMs) ? now()+waitMs : null]
+        .filter(value => Number.isFinite(value) && value > 0);
+      const pauseUntil=candidates.length ? Math.max(...candidates) : null;
+      rate.status=status; rate.cause=cause; rate.remaining=remaining;
+      rate.limit=limit; rate.resetAt=resetAt; rate.retryAfterAt=retryAfterAt;
+      rate.pauseUntil=pauseUntil; rate.indefinite=indefinite || pauseUntil === null;
+      rate.lastError=code || null; rate.recoveryProbeUsed=false;
+      publishSharedState();
+    }
+    function readRateHeaders(response) {
+      const headers=response.headers;
+      const limit=parseIntegerHeader(headerValue(headers,'X-RateLimit-Limit'));
+      const remaining=parseIntegerHeader(headerValue(headers,'X-RateLimit-Remaining'));
+      const resetSeconds=parseIntegerHeader(headerValue(headers,'X-RateLimit-Reset'));
+      const resetAt=resetSeconds === null ? null : resetSeconds*1000;
+      const retryAfterAt=parseRetryAfter(headerValue(headers,'Retry-After'),now());
+      const pollSeconds=parseIntegerHeader(headerValue(headers,'X-Poll-Interval'));
+      const pollIntervalMs=pollSeconds !== null && pollSeconds > 0 ? pollSeconds*1000 : null;
+      const etag=headerValue(headers,'ETag');
+      const record={limit,remaining,resetAt,retryAfterAt,pollIntervalMs,etag,validatedAt:now()};
+      rate.lastResponseAt=now();
+      if (limit !== null) rate.limit=limit;
+      if (remaining !== null) rate.remaining=remaining;
+      if (resetAt !== null) rate.resetAt=resetAt;
+      if (retryAfterAt !== null) rate.retryAfterAt=retryAfterAt;
+      if (pollIntervalMs !== null) rate.pollIntervalMs=pollIntervalMs;
+      return record;
+    }
+    function errorForRateState() {
+      const code=rate.lastError || 'GITHUB_RATE_LIMIT_EXHAUSTED';
+      return Object.assign(new Error(code), { code, retryAt:rate.pauseUntil, indefinite:rate.indefinite });
+    }
+    function requestAllowed() {
+      syncSharedState();
+      if (rate.status === 'RECOVERING' || rate.recoveryNoticePending)
+        throw Object.assign(new Error('GITHUB_RATE_LIMIT_RECOVERY_PROBE_ONLY'), { code:'GITHUB_RATE_LIMIT_COOLDOWN' });
+      if (['RATE_LIMITED','COOLDOWN'].includes(rate.status)) {
+        if (rate.indefinite || rate.pauseUntil === null || now() < rate.pauseUntil || rate.recoveryProbeUsed)
+          throw errorForRateState();
+        rate.status='RECOVERING'; rate.recoveryProbeUsed=true;
+        return true;
+      }
+      return false;
+    }
+    function applyFailure(descriptor, headers) {
+      const retryAfterAt=headers.retryAfterAt;
+      let resetAt=headers.resetAt;
+      if (descriptor.shared) {
+        let waitMs=null, indefinite=false;
+        if (descriptor.cause === 'SECONDARY_LIMIT' && !retryAfterAt) {
+          // X-RateLimit-Reset is not a secondary-limit retry instruction; keep
+          // the fallback strictly inside the bounded exponential window.
+          resetAt=null;
+          waitMs=secondaryBackoffMs;
+          secondaryBackoffMs=Math.min(secondaryBackoffMs*2,RATE_BACKOFF_MAX_MS);
+        } else if (descriptor.cause === 'SECONDARY_LIMIT') {
+          resetAt=null;
+        } else if (descriptor.cause === 'PRIMARY_LIMIT' && !retryAfterAt && !resetAt) {
+          indefinite=true;
+        }
+        setRatePause({ status:'RATE_LIMITED', cause:descriptor.cause, code:descriptor.code,
+          retryAfterAt, resetAt, waitMs, indefinite, remaining:headers.remaining, limit:headers.limit });
+      } else if (retryAfterAt !== null) {
+        setRatePause({ status:'COOLDOWN', cause:descriptor.cause, code:descriptor.code,
+          retryAfterAt, resetAt:null, remaining:headers.remaining, limit:headers.limit });
+      } else {
+        rate.lastError=descriptor.code;
+      }
+    }
+    function finishRecoveryProbe() {
+      if (rate.status === 'RECOVERING') clearRatePause();
+      rate.recoveryNoticePending=true;
+    }
+    function failRecoveryProbe(error) {
+      if (rate.status !== 'RECOVERING') return;
+      const waitMs=secondaryBackoffMs;
+      secondaryBackoffMs=Math.min(secondaryBackoffMs*2,RATE_BACKOFF_MAX_MS);
+      setRatePause({status:'COOLDOWN',cause:'RECOVERY_PROBE_FAILED',
+        code:error?.code || 'GITHUB_RECOVERY_PROBE_FAILED',waitMs});
+    }
+    function sharedCacheKey(url) {
+      return typeof url === 'string' && url.startsWith(API + '/')
+        ? API_CACHE_KEY_PREFIX + encodeURIComponent(url) : null;
+    }
+    function readSharedCache(url) {
+      const key=sharedCacheKey(url);
+      if (!storage || !key) return null;
+      try {
+        const value=JSON.parse(storage.getItem(key) || 'null');
+        if (!value || value.schema !== 1 || value.url !== url ||
+            !Number.isFinite(value.validatedAt) || !Object.prototype.hasOwnProperty.call(value,'data')) return null;
+        return {data:value.data,limit:Number.isSafeInteger(value.limit) ? value.limit : null,
+          remaining:Number.isSafeInteger(value.remaining) ? value.remaining : null,
+          resetAt:Number.isFinite(value.resetAt) ? value.resetAt : null,
+          retryAfterAt:Number.isFinite(value.retryAfterAt) ? value.retryAfterAt : null,
+          etag:typeof value.etag === 'string' ? value.etag : null,
+          pollIntervalMs:Number.isFinite(value.pollIntervalMs) ? value.pollIntervalMs : null,
+          validatedAt:value.validatedAt};
+      } catch {
+        rate.coordination=locks ? 'BEST_EFFORT_LOCK_ONLY' : 'TAB_LOCAL_ONLY';
+        return null;
+      }
+    }
+    function writeSharedCache(url, value) {
+      const key=sharedCacheKey(url);
+      if (!storage || !key) return;
+      try {
+        const serialized=JSON.stringify({schema:1,url,data:value.data,
+          limit:Number.isSafeInteger(value.limit) ? value.limit : null,
+          remaining:Number.isSafeInteger(value.remaining) ? value.remaining : null,
+          resetAt:Number.isFinite(value.resetAt) ? value.resetAt : null,
+          retryAfterAt:Number.isFinite(value.retryAfterAt) ? value.retryAfterAt : null,
+          etag:value.etag || null,
+          pollIntervalMs:Number.isFinite(value.pollIntervalMs) ? value.pollIntervalMs : null,
+          validatedAt:value.validatedAt});
+        storage.setItem(key,serialized);
+      } catch { rate.coordination=locks ? 'BEST_EFFORT_LOCK_ONLY' : 'TAB_LOCAL_ONLY'; }
+    }
+    async function execute(url, maxAgeMs = 0) {
+      const local=cache.get(url);
+      const shared=readSharedCache(url);
+      let prior=shared && (!local || shared.validatedAt > local.validatedAt) ? shared : local;
+      if (prior) {
+        cache.set(url,prior);
+        meta.set(url,prior);
+        const age=now()-prior.validatedAt;
+        if (maxAgeMs > 0 && age >= 0 && age < maxAgeMs) return prior.data;
+      }
+      const recoveryProbe=requestAllowed();
+      const controller=new AbortControllerCtor();
+      const timeout=setTimer(() => controller.abort(),10000);
+      const headers={Accept:'application/vnd.github+json'};
+      if (prior?.etag) headers['If-None-Match']=prior.etag;
+      rate.requestCount++;
+      try {
+        const response=await fetchImpl(url,{headers,credentials:'omit',signal:controller.signal,cache:'no-cache'});
+        const receivedMeta=readRateHeaders(response);
+        const responseMeta=response.status === 304
+          ? {...prior,...receivedMeta,etag:receivedMeta.etag || prior?.etag || null}
+          : receivedMeta;
+        meta.set(url,responseMeta);
+        if (responseMeta.remaining === 0) {
+          setRatePause({status:'RATE_LIMITED',cause:'PRIMARY_LIMIT',code:'GITHUB_RATE_LIMIT_EXHAUSTED',
+            retryAfterAt:responseMeta.retryAfterAt,resetAt:responseMeta.resetAt,
+            indefinite:responseMeta.retryAfterAt === null && responseMeta.resetAt === null,
+            remaining:0,limit:responseMeta.limit});
+        }
+        if (response.status === 304) {
+          if (!prior) throw Object.assign(new Error('GITHUB_304_WITHOUT_CACHE'),{code:'GITHUB_304_WITHOUT_CACHE'});
+          const refreshed={...prior,...responseMeta,validatedAt:now()};
+          cache.set(url,refreshed);
+          writeSharedCache(url,refreshed);
+          rate.lastSuccessAt=now();
+          if (recoveryProbe && responseMeta.remaining !== 0) finishRecoveryProbe();
+          if (responseMeta.remaining === 0 && !recoveryProbe) rate.lastError='GITHUB_RATE_LIMIT_EXHAUSTED';
+          return prior.data;
+        }
+        if (!response.ok) {
+          let body=null;
+          try { body=await response.json(); } catch {}
+          const descriptor=classifyRateFailure(response.status,responseMeta.remaining,body?.message);
+          const error=Object.assign(new Error(descriptor.code),{
+            code:descriptor.code,cause:descriptor.cause,remaining:responseMeta.remaining,
+            resetAt:responseMeta.resetAt,retryAfterAt:responseMeta.retryAfterAt,
+            pollIntervalMs:responseMeta.pollIntervalMs,
+          });
+          applyFailure(descriptor,responseMeta);
+          if (recoveryProbe && !descriptor.shared) finishRecoveryProbe();
+          throw error;
+        }
+        let data;
+        try { data=await response.json(); }
+        catch { throw Object.assign(new Error('GITHUB_INVALID_JSON'),{code:'GITHUB_INVALID_JSON'}); }
+        const fresh={data,...responseMeta,validatedAt:now()};
+        cache.set(url,fresh);
+        writeSharedCache(url,fresh);
+        rate.lastSuccessAt=now();
+        if (responseMeta.remaining === 0) rate.lastError='GITHUB_RATE_LIMIT_EXHAUSTED';
+        else if (rate.status === 'READY') { rate.lastError=null; secondaryBackoffMs=RATE_BACKOFF_MIN_MS; }
+        if (recoveryProbe && responseMeta.remaining !== 0) finishRecoveryProbe();
+        return data;
+      } catch (error) {
+        let normalized=error;
+        if (!error?.code) {
+          const code=error?.name === 'AbortError' ? 'GITHUB_TIMEOUT' : 'GITHUB_CORS_OR_NETWORK_UNKNOWN';
+          normalized=Object.assign(new Error(code),{code});
+          rate.lastError=code;
+        }
+        if (recoveryProbe) failRecoveryProbe(normalized);
+        throw normalized;
+      } finally { clearTimer(timeout); }
+    }
+    if (channel) {
+      try { channel.addEventListener?.('message',event => mergeSharedState(event.data)); }
+      catch { rate.coordination=storage ? 'BEST_EFFORT_STORAGE_ONLY' : 'TAB_LOCAL_ONLY'; }
+    }
+    if (storage) storedRateState();
+    function requestJson(url, {maxAgeMs = 0} = {}) {
+      if (inFlight.has(url)) return inFlight.get(url);
+      const age=Number.isFinite(maxAgeMs) ? Math.max(0,maxAgeMs) : 0;
+      const request=requestQueue.then(() => {
+        if (!locks) return execute(url,age);
+        let callbackStarted=false;
+        const lockUnavailable=error => {
+          rate.coordination=storage ? 'BEST_EFFORT_STORAGE_ONLY' : 'TAB_LOCAL_ONLY';
+          return Object.assign(new Error('GITHUB_CROSS_TAB_LOCK_UNAVAILABLE'),{
+            code:'GITHUB_CROSS_TAB_LOCK_UNAVAILABLE',cause:error?.name || 'LOCK_FAILED' });
+        };
+        let lockRequest;
+        try {
+          lockRequest=locks.request(API_LOCK_NAME,{mode:'exclusive'},() => {
+            callbackStarted=true;
+            return execute(url,age);
+          });
+        } catch (error) {
+          if (callbackStarted) throw error;
+          throw lockUnavailable(error);
+        }
+        return Promise.resolve(lockRequest).catch(error => {
+          if (callbackStarted) throw error;
+          throw lockUnavailable(error);
+        });
+      });
+      requestQueue=request.catch(() => undefined);
+      inFlight.set(url,request);
+      request.finally(() => inFlight.delete(url)).catch(() => undefined);
+      return request;
+    }
+    return {
+      requestJson,
+      getMeta(url) {
+        const local=meta.get(url);
+        const shared=readSharedCache(url);
+        const sharedMeta=shared ? {...shared} : null;
+        if (sharedMeta) delete sharedMeta.data;
+        const value=sharedMeta && (!local || sharedMeta.validatedAt > local.validatedAt)
+          ? {...local,...sharedMeta} : local;
+        if (value) { meta.set(url,value); return {...value}; }
+        return null;
+      },
+      getRateState() { syncSharedState(); return {...rate}; },
+      isPaused() {
+        syncSharedState();
+        if (rate.status === 'RECOVERING' || rate.recoveryNoticePending) return true;
+        if (!['RATE_LIMITED','COOLDOWN'].includes(rate.status)) return false;
+        return rate.indefinite || rate.pauseUntil === null || now() < rate.pauseUntil || rate.recoveryProbeUsed;
+      },
+      isRecoveryProbeDue() {
+        syncSharedState();
+        return ['RATE_LIMITED','COOLDOWN'].includes(rate.status) && !rate.indefinite &&
+          Number.isFinite(rate.pauseUntil) && now() >= rate.pauseUntil && !rate.recoveryProbeUsed;
+      },
+      takeRecoveryNotice() { const value=rate.recoveryNoticePending; rate.recoveryNoticePending=false; return value; },
+    };
+  }
+  function createResourceStore(apiClient, now = () => Date.now()) {
+    const resources = {
+      issue:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null },
+      pr:{ data:null, fetchedAt:0, error:null, retryAt:0, freshAfter:0,
+        pinRevalidationPending:false, generation:0, inFlight:null, number:null, taskRef:null, url:'' },
+      main:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null },
+      checks:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'' },
+    };
+    const failures=new Map();
+    async function loadResource(key, url, ttl) {
+      const resource=resources[key];
+      const currentTime=now();
+      const serverPoll=apiClient.getMeta(url)?.pollIntervalMs || 0;
+      const effectiveTtl=Math.max(ttl,serverPoll);
+      if (resource.inFlight) {
+        if (key === 'pr' && resource.pinRevalidationPending && currentTime < (resource.freshAfter || 0))
+          resource.error='CANDIDATE_PR_REFRESH_WAITING_FOR_POLL_INTERVAL';
+        return resource.inFlight;
+      }
+      if (resource.data && currentTime-resource.fetchedAt < effectiveTtl) return resource.data;
+      if (currentTime < (resource.freshAfter || 0)) {
+        resource.error='CANDIDATE_PR_REFRESH_WAITING_FOR_POLL_INTERVAL';
+        return resource.data;
+      }
+      resource.freshAfter=0;
+      if (currentTime < resource.retryAt) return resource.data;
+      if (apiClient.isPaused?.()) {
+        const state=apiClient.getRateState();
+        resource.error=state.lastError || 'GITHUB_RATE_LIMIT_COOLDOWN';
+        resource.retryAt=state.pauseUntil ?? Number.POSITIVE_INFINITY;
+        return resource.data;
+      }
+      const generation=resource.generation || 0;
+      const boundUrl=['pr','checks'].includes(key) ? resource.url : '';
+      resource.inFlight=(async () => {
+        try {
+          const data=await apiClient.requestJson(url,{maxAgeMs:effectiveTtl});
+          if ((key === 'pr' && generation !== resource.generation) ||
+              (boundUrl && resource.url !== boundUrl)) return resource.data;
+          resource.data=data; resource.fetchedAt=apiClient.getMeta(url)?.validatedAt || now();
+          resource.error=null; resource.retryAt=0;
+          if (key === 'pr') { resource.pinRevalidationPending=false; resource.freshAfter=0; }
+          failures.set(key,0);
+          return data;
+        } catch (error) {
+          if ((key === 'pr' && generation !== resource.generation) ||
+              (boundUrl && resource.url !== boundUrl)) return resource.data;
+          resource.error=error?.code || 'GITHUB_READ_FAILED';
+          const count=(failures.get(key) || 0)+1; failures.set(key,count);
+          const rateState=apiClient.getRateState?.() || {};
+          const localBase=error?.code === 'GITHUB_PERMISSION_DENIED' ? 15*60*1000 : 30*1000;
+          const localMax=error?.code === 'GITHUB_PERMISSION_DENIED' ? 60*60*1000 : 5*60*1000;
+          const backoff=Math.min(localBase * (2 ** Math.min(count-1,8)),localMax);
+          const serverRetry=Math.max(error?.retryAfterAt || 0,error?.resetAt || 0,rateState.pauseUntil || 0);
+          resource.retryAt=serverRetry > now() ? serverRetry : now()+backoff;
+          return resource.data;
+        } finally { resource.inFlight=null; }
+      })();
+      return resource.inFlight;
+    }
+    function bindChecksHead(head) {
+      const expectedSha = safeSha(head);
+      if (!expectedSha) {
+        resources.checks.error = 'PR_HEAD_UNKNOWN';
+        return null;
+      }
+      const url = API + '/commits/' + expectedSha + '/check-runs?per_page=100';
+      const resource = resources.checks;
+      if (resource.url !== url) {
+        resource.url = url;
+        resource.data = null;
+        resource.fetchedAt = 0;
+        resource.error = null;
+        resource.retryAt = 0;
+      }
+      return url;
+    }
+    function bindCandidatePr(reference) {
+      const number=Number.isSafeInteger(reference?.number) && reference.number > 0
+        ? reference.number : null;
+      const resource=resources.pr;
+      const sourceChanged=number && resource.number === number &&
+        resource.taskRef?.source_sha !== reference.source_sha;
+      const bindingChanged=resource.number !== number || sourceChanged;
+      const nextUrl=number ? API + '/pulls/' + number : '';
+      if (bindingChanged) {
+        resource.number=number;
+        resource.generation++;
+        resource.data=null; resource.fetchedAt=0; resource.error=null; resource.retryAt=0;
+        resource.freshAfter=0;
+        resource.pinRevalidationPending=!!number;
+        resource.url=nextUrl;
+        resources.checks.data=null; resources.checks.fetchedAt=0;
+        resources.checks.error=null; resources.checks.retryAt=0; resources.checks.url='';
+      }
+      resource.taskRef=number ? { request_id:reference.request_id, source_sha:reference.source_sha } : null;
+      if (!number) {
+        resource.freshAfter=0;
+        resource.pinRevalidationPending=false;
+        const error=reference?.error || 'CURRENT_CANDIDATE_PR_UNKNOWN';
+        resource.error=error;
+        resources.checks.error=error;
+        return null;
+      }
+      if (resource.pinRevalidationPending) {
+        const prior=apiClient.getMeta(nextUrl);
+        const minimumInterval=prior
+          ? Math.max(adaptivePollInterval('pr',apiClient),prior.pollIntervalMs || 0) : 0;
+        resource.freshAfter=prior?.validatedAt ? prior.validatedAt+minimumInterval : 0;
+      }
+      if (resource.freshAfter > now()) resource.error='CANDIDATE_PR_REFRESH_WAITING_FOR_POLL_INTERVAL';
+      else if (resource.error === 'CANDIDATE_PR_REFRESH_WAITING_FOR_POLL_INTERVAL' || bindingChanged)
+        resource.error=null;
+      resource.url=nextUrl;
+      return resource.url;
+    }
+    function isFresh(key, maxAgeMs) {
+      const resource=resources[key];
+      const age=now()-(resource?.fetchedAt || 0);
+      return !!resource?.data && !resource.error && resource.fetchedAt > 0 && age >= 0 && age < maxAgeMs;
+    }
+    function checksSummaryForHead(head, prNumber = resources.pr.number) {
+      const expectedSha = safeSha(head);
+      const resource = resources.checks;
+      if (!Number.isSafeInteger(prNumber) || prNumber < 1 || !expectedSha || resource.error || !resource.data ||
+          resource.url !== API + '/commits/' + expectedSha + '/check-runs?per_page=100') return null;
+      return summarizeChecks(resource.data, expectedSha, prNumber);
+    }
+    return { resources, loadResource, bindChecksHead, bindCandidatePr, isFresh, checksSummaryForHead };
+  }
+  function adaptivePollInterval(key, apiClient) {
+    const state=apiClient.getRateState?.() || {};
+    const remaining=state.remaining;
+    if (Number.isSafeInteger(remaining) && remaining <= LOW_REMAINING_THRESHOLD) {
+      if (key === 'pr' || key === 'checks') return Math.max(PR_POLL_MS,CHECKS_POLL_MS,60*60*1000);
+      if (key === 'main') return Math.max(MAIN_POLL_MS,2*60*60*1000);
+    }
+    if (key === 'issue') return ISSUE_POLL_MS;
+    if (key === 'pr') return PR_POLL_MS;
+    if (key === 'checks') return CHECKS_POLL_MS;
+    if (key === 'main') return MAIN_POLL_MS;
+    return ISSUE_POLL_MS;
+  }
+  async function runSyncCycle(resourceStore, apiClient, urls) {
+    const plan=[['issue',urls.issue],['main',urls.main]];
+    const bindCurrentCandidatePr=() => resourceStore.bindCandidatePr(
+      resourceStore.isFresh('issue',MAX_LIVE_AGE_MS)
+        ? currentCandidatePrReference(resourceStore.resources.issue.data)
+        : { number:null,request_id:null,source_sha:null,error:'ISSUE_TASK_REFERENCE_STALE_OR_UNKNOWN' });
+    let recoveryProbeCompleted=false;
+    if (apiClient.isRecoveryProbeDue?.()) {
+      await resourceStore.loadResource('issue',urls.issue,0);
+      if (apiClient.takeRecoveryNotice?.()) recoveryProbeCompleted=true;
+      if (recoveryProbeCompleted || apiClient.isPaused?.()) {
+        bindCurrentCandidatePr();
+        return {head:safeSha(resourceStore.resources.pr.data?.head?.sha),recoveryProbeCompleted,
+          rateState:apiClient.getRateState?.() || null};
+      }
+    }
+    for (const [key,url] of plan) {
+      await resourceStore.loadResource(key,url,adaptivePollInterval(key,apiClient));
+      if (apiClient.takeRecoveryNotice?.()) { recoveryProbeCompleted=true; break; }
+      if (apiClient.isPaused?.()) break;
+    }
+    const prUrl=bindCurrentCandidatePr();
+    if (apiClient.isPaused?.())
+      return { head:safeSha(resourceStore.resources.pr.data?.head?.sha),
+        candidatePrNumber:resourceStore.resources.pr.number,recoveryProbeCompleted,
+        rateState:apiClient.getRateState?.() || null };
+    if (prUrl) {
+      await resourceStore.loadResource('pr',urls.prFor ? urls.prFor(resourceStore.resources.pr.number) : prUrl,
+        adaptivePollInterval('pr',apiClient));
+      if (apiClient.takeRecoveryNotice?.()) recoveryProbeCompleted=true;
+    }
+    if (apiClient.isPaused?.())
+      return { head:safeSha(resourceStore.resources.pr.data?.head?.sha),
+        candidatePrNumber:resourceStore.resources.pr.number,recoveryProbeCompleted,
+        rateState:apiClient.getRateState?.() || null };
+    const head=safeSha(resourceStore.resources.pr.data?.head?.sha);
+    if (!recoveryProbeCompleted && !apiClient.isPaused?.() && head) {
+      const checksUrl=resourceStore.bindChecksHead(head);
+      await resourceStore.loadResource('checks',checksUrl,adaptivePollInterval('checks',apiClient));
+      if (apiClient.takeRecoveryNotice?.()) recoveryProbeCompleted=true;
+    }
+    return { head,candidatePrNumber:resourceStore.resources.pr.number,recoveryProbeCompleted,
+      rateState:apiClient.getRateState?.() || null };
+  }
+  function readTime(value) {
+    const stamp = new Date(value || '');
+    return Number.isFinite(stamp.valueOf())
+      ? stamp.toLocaleString('zh-TW', { timeZone:'Asia/Taipei', hour12:false }) : '未確認';
+  }
+  function safeSha(value) { return /^[a-f0-9]{40}$/i.test(value || '') ? value : null; }
+  function ciLabel(summary) {
+    if (!summary) return 'CI 未確認';
+    if (summary.status === 'QUEUED') return '有檢查排隊等待 Runner';
+    if (summary.status === 'PENDING') return '有檢查等待結果，尚未證明執行中';
+    if (summary.status === 'IN_PROGRESS') return '有檢查正在執行';
+    if (summary.status === 'MIXED_ACTIVE') return 'CI 有排隊、待結果或執行中的混合狀態；逐項檢查明細';
+    if (summary.status === 'CI_FAILED') return '至少一項檢查失敗';
+    if (summary.status === 'COMPLETED_WITH_NON_SUCCESS') return '有檢查已取消；不計為成功';
+    if (summary.status === 'CHECKS_SUCCESS') return '目前讀回的檢查皆成功（不等於正式接受）';
+    if (summary.status === 'COMPLETED_WITH_SKIPS') return '檢查已結束；略過／neutral 不計為成功';
+    return '精確 HEAD 檢查未知';
+  }
+  function workerCardData(id, record, classification, snapshot, formalTask = null) {
+    const prefix = id.toLowerCase();
+    const oc = snapshot?.opencode_v2 || {};
+    const nativeWorker = snapshot?.native_worker || {};
+    const currentTask = id === 'W1' ? nativeWorker.current_task : null;
+    const latestTask = id === 'W1' ? nativeWorker.latest_task : null;
+    const taskId = record?.task_id || (id === 'W1'
+      ? currentTask?.request_id || formalTask?.job?.request_id || latestTask?.request_id : null);
+    const taskKind = record?.task_kind || (id === 'W1'
+      ? currentTask?.kind || formalTask?.job?.kind || latestTask?.kind : null);
+    const taskState = id === 'W1' ? currentTask?.state || formalTask?.state || latestTask?.state : null;
+    const taskStateLabel = taskState === 'LEGACY_READONLY_NOT_DISPATCHED'
+      ? '歷史唯讀規劃；不會派工' : taskState;
+    const activity = record?.activity_observed_at || (id === 'W1' ? oc.activity_observed_at || oc.process_observed_at : null);
+    const taskText = taskId
+      ? String(taskId) + (taskKind ? '／' + String(taskKind) : '') +
+        (id === 'W1' && taskStateLabel ? '；' + String(taskStateLabel) : '')
+      : id === 'W3' ? '未從同一來源讀回有效 request_id'
+      : '沒有可核對的正式任務';
+    const sessionText = record?.attempt_id
+      ? '執行批次 ' + String(record.attempt_id)
+      : id === 'W1'
+        ? 'OpenCode 程序 ' + (Number.isSafeInteger(oc.process_count) ? oc.process_count : '未知') +
+          '；活動 Session 未確認'
+        : '沒有可核對的執行批次';
+    const steps = Array.isArray(record?.verified_steps)
+      ? record.verified_steps.filter(x => typeof x === 'string').slice(0,5).join('、')
+      : '沒有可驗證步驟清單';
+    const blocker = record?.blocker_code || (classification.status === 'BLOCKED'
+      ? classification.reason : id === 'W3'
+        ? '需 Codex 有效 request_id、Human 手動轉送及 Zero Risk 真實工具回傳。'
+        : '未回報受信任阻擋代碼。');
+    const modified = record?.code_changes === 'PROVEN' || record?.files_modified === 'PROVEN'
+      ? '已有同任務檔案修改證據；公開資料不列私人路徑。'
+      : id === 'W1' && oc.code_changes === 'PROVEN'
+        ? 'OpenCode 快照標記 PROVEN；仍需同任務來源與遠端核對。'
+        : '尚未證實有同任務程式修改。';
+    const commit = safeSha(record?.commit_sha || (id === 'W1' ? nativeWorker.remote_commit || oc.remote_commit : null));
+    const pr = Number.isSafeInteger(record?.pr_number) && record.pr_number > 0 ? '#' + record.pr_number : null;
+    const deliveryParts = [];
+    deliveryParts.push(commit ? 'Commit ' + commit : 'Commit 未確認');
+    deliveryParts.push(pr || 'PR 未確認');
+    deliveryParts.push(record?.delivery_status || classification.delivery
+      ? '交付階段 ' + String(record?.delivery_status || classification.delivery)
+      : 'CI 歸屬未確認');
+    return {
+      prefix, classification,
+      task:taskText, session:sessionText, activity:activity ? readTime(activity) : '沒有可核對的近期活動時間',
+      progress:steps,
+      blocker:String(blocker),
+      changes:modified,
+      delivery:deliveryParts.join('；'),
+      next:record?.next_owner || (id === 'W3' ? 'Codex 建 request_id；Human 手動轉送' : '未確認'),
+      source:record ? 'Issue #407 workers 記錄 · ' + classification.status :
+        id === 'W1' ? 'Issue #407 opencode_v2／native_worker · ' + classification.status
+          : 'Issue #407 未提供此角色的當前證據 · UNKNOWN',
+    };
+  }
+  function classifyRecentEvents(comments, snapshot, checkSummary) {
+    const events = [];
+    const jobs = new Map();
+    for (const comment of comments || []) {
+      const at = comment.created_at;
+      if (!Number.isFinite(Date.parse(at || ''))) continue;
+      const job = parseMarked(comment.body, JOB_MARKER);
+      if (validJob(job) && DISPATCHERS.has(comment.user?.login || '')) {
+        jobs.set(job.request_id + ':' + job.source_sha + ':' + job.kind + ':' + (job.candidate_pr ?? '') + ':' +
+          JSON.stringify(job.goal_ref ?? null), {
+          id:Number(comment.id), job, created_at:at,
+        });
+        events.push({ at, label:'正式派工 ' + job.request_id + '／' + job.kind + '；派工不代表已啟動。' });
+      }
+      const receipt = parseMarked(comment.body, RECEIPT_MARKER);
+      if (receipt && RECEIPT_AUTHORS.has(comment.user?.login || '') &&
+          receipt.schema === 1 && receipt.project_id === PROJECT &&
+          receipt.host === 'DESKTOP-1B6PD2P' &&
+          /^[a-f0-9]{40}$/.test(receipt.source_sha || '') &&
+          /^[a-f0-9-]{36}$/.test(receipt.attempt_id || '')) {
+        const key = receipt.request_id + ':' + receipt.source_sha + ':' + receipt.kind + ':' +
+          (receipt.candidate_pr ?? '') + ':' + JSON.stringify(receipt.goal_ref ?? null);
+        const jobEntry = jobs.get(key);
+        if (jobEntry && Number(comment.id) > jobEntry.id &&
+            ['STARTED','FINISHED','BLOCKED'].includes(receipt.state))
+          events.push({ at, label:'正式收據 ' + receipt.request_id + '／' + receipt.state +
+            (receipt.state === 'FINISHED' ? '；不代表寫碼驗收。' : '。') });
+      }
+    }
+    if (snapshot?.observed_at && Number.isFinite(Date.parse(snapshot.observed_at)))
+      events.push({ at:snapshot.observed_at, label:'Win11 去敏觀測 snapshot ' +
+        String(snapshot.sequence) + '；有效期限 ' + readTime(snapshot.expires_at) + '。' });
+    for (const check of checkSummary?.checks || []) {
+      const at = check.completed_at || check.started_at;
+      if (Number.isFinite(Date.parse(at || '')))
+        events.push({ at, label:'PR #' + (checkSummary?.pr_number || '未確認') + ' 精確 HEAD 檢查 ' + check.name +
+          '：' + String(check.status) + (check.conclusion ? '／' + check.conclusion : '') + '。' });
+    }
+    return events.sort((a,b) => Date.parse(b.at)-Date.parse(a.at)).slice(0,8);
+  }
+  function renderEvents(events) {
+    const list = document.getElementById('events');
+    if (!list) return;
+    while (list.firstChild) list.removeChild(list.firstChild);
+    if (!events.length) {
+      const item = document.createElement('li');
+      item.className = 'muted'; item.textContent = '沒有新的已驗證事件。';
+      list.appendChild(item); return;
+    }
+    for (const event of events) {
+      const item = document.createElement('li'); item.className = 'event';
+      const stamp = document.createElement('time'); stamp.dateTime = event.at; stamp.textContent = readTime(event.at);
+      const description = document.createElement('p'); description.textContent = event.label;
+      item.appendChild(stamp); item.appendChild(description); list.appendChild(item);
+    }
+  }
+  function text(id, value) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value == null || value === '' ? '未確認' : String(value);
+  }
+  function badge(id, status, overrideLabel, overrideKind) {
+    const element = document.getElementById(id);
+    if (!element) return;
+    const meta = STATUS[status] || STATUS.UNKNOWN;
+    element.textContent = overrideLabel || meta[0];
+    element.className = 'badge ' + (overrideKind || meta[1]);
+  }
+  function renderWorker(id, data) {
+    badge(id.toLowerCase() + '-badge', data.classification.status);
+    for (const key of ['task','session','activity','progress','blocker','changes','delivery','next','source'])
+      text(id.toLowerCase() + '-' + key, data[key]);
+  }
+  function freshnessOfSnapshot(result, now, issueResource) {
+    if (result.status === 'STALE') return 'STALE';
+    if (issueResource?.error) return 'UNKNOWN';
+    if (!issueResource?.fetchedAt) return 'UNKNOWN';
+    if (now - issueResource.fetchedAt > 3 * ISSUE_POLL_MS) return 'STALE';
+    if (result.status !== 'FRESH') return 'UNKNOWN';
+    const windows = result.snapshot?.windows || {};
+    if (windows.status !== 'FRESH') return 'UNKNOWN';
+    return fieldFreshness(windows.observed_at, MAX_LIVE_AGE_MS, now);
+  }
+  function resourceFreshness(resource, now, maxAge = 15 * 60 * 1000) {
+    if (!resource?.data || !resource.fetchedAt) return 'UNKNOWN';
+    return now - resource.fetchedAt > maxAge ? 'STALE' : 'FRESH';
+  }
+  function sourceStatusLabel(resource, now, ttl) {
+    if (!resource?.data || !resource.fetchedAt) return 'UNKNOWN';
+    if (now-resource.fetchedAt > ttl) return '過期 STALE';
+    if (resource.error) return '歷史';
+    return '最新';
+  }
+  function countdownLabel(until, now) {
+    if (!Number.isFinite(until)) return '未確認';
+    const seconds=Math.max(0,Math.ceil((until-now)/1000));
+    const hours=Math.floor(seconds/3600);
+    const minutes=Math.floor((seconds%3600)/60);
+    const remainder=seconds%60;
+    return [hours,minutes,remainder].map(value => String(value).padStart(2,'0')).join(':');
+  }
+  function renderRateStatus(rateState, resources, now) {
+    const panel=document.getElementById('rate-alert');
+    if (!panel) return;
+    const limited=['RATE_LIMITED','COOLDOWN'].includes(rateState?.status);
+    const lastResourceError=Object.values(resources || {}).find(resource => resource?.error)?.error || null;
+    const low=Number.isSafeInteger(rateState?.remaining) && rateState.remaining <= LOW_REMAINING_THRESHOLD;
+    const coordinationUnavailable=rateState?.coordination !== 'SHARED_LOCKED';
+    const visible=limited || !!rateState?.lastError || !!lastResourceError || low || coordinationUnavailable;
+    panel.hidden=!visible;
+    panel.className='panel rate-alert' + (limited ? ' limited' : '');
+    if (!visible) return;
+    let title='GitHub API 狀態';
+    if (rateState?.status === 'RATE_LIMITED')
+      title='GitHub API 額度暫時耗盡。監控讀取已暫停，Win11 實際工作狀態目前未知。';
+    else if (rateState?.status === 'COOLDOWN') title='GitHub API 讀取冷卻中；所有本頁來源暫停。';
+    else if (rateState?.lastError || lastResourceError) title='GitHub 來源讀取有錯誤；保留歷史資料並標示新鮮度。';
+    else if (coordinationUnavailable) title='跨分頁鎖與公開快取未確認；自動監控輪詢已停用。';
+    else if (low) title='GitHub 回報剩餘額度偏低；已降低 PR／CI／main 查詢頻率。';
+    text('rate-alert-title',title);
+    const successfulAt=Math.max(rateState?.lastSuccessAt || 0,
+      ...Object.values(resources || {}).map(resource => resource?.fetchedAt || 0));
+    const reset=Number.isFinite(rateState?.resetAt) ? readTime(new Date(rateState.resetAt).toISOString()) : '恢復時間未確認';
+    const next=Number.isFinite(rateState?.pauseUntil)
+      ? readTime(new Date(rateState.pauseUntil).toISOString()) + '（' + countdownLabel(rateState.pauseUntil,now) + '）'
+      : rateState?.indefinite ? '恢復時間未確認；讀取持續暫停' : '目前可讀取';
+    const sources=[
+      'Issue #407 ' + sourceStatusLabel(resources.issue,now,ISSUE_POLL_MS),
+      (resources.pr.number ? 'PR #' + resources.pr.number : '任務 PR 未確認') + ' ' +
+        sourceStatusLabel(resources.pr,now,PR_POLL_MS),
+      'checks ' + sourceStatusLabel(resources.checks,now,CHECKS_POLL_MS),
+      'main ' + sourceStatusLabel(resources.main,now,MAIN_POLL_MS),
+    ].join('；');
+    const coordination=coordinationUnavailable
+      ? '跨分頁鎖與公開資料快取未同時確認；啟動讀取後已停用自動輪詢。手動同步仍服從來源期限及 60 秒最小間隔。'
+      : '跨分頁請求以瀏覽器鎖序列化並共用公開資料快取；其他應用的 GitHub 額度仍獨立未知。';
+    const detail='最後成功同步：' + (successfulAt ? readTime(new Date(successfulAt).toISOString()) : '尚無成功讀回') +
+      '；GitHub 最近回報剩餘額度：' + (rateState?.remaining == null ? '未確認' : rateState.remaining) +
+      (rateState?.limit == null ? '' : '／' + rateState.limit) +
+      '；GitHub 額度重設：' + reset +
+      '；下一次允許讀取：' + next +
+      '；最近錯誤：' + (rateState?.lastError || lastResourceError || '無') +
+      '；來源：' + sources +
+      '。' + coordination;
+    text('rate-alert-detail',detail);
+    text('rate-detail',detail);
+    text('next-sync',limited
+      ? '監控讀取暫停；' + (Number.isFinite(rateState.pauseUntil)
+        ? '下一次允許讀取倒數 ' + countdownLabel(rateState.pauseUntil,now)
+        : '恢復時間未確認')
+      : coordinationUnavailable
+        ? '跨分頁鎖與公開快取未確認；已完成啟動讀取，自動輪詢停用；手動同步最短間隔 60 秒'
+      : 'Issue 每 5 分鐘；PR／CI 每 15 分鐘；main 每 60 分鐘' +
+        (rateState?.remaining != null && rateState.remaining <= LOW_REMAINING_THRESHOLD
+          ? '；剩餘額度低，PR／CI／main 已降頻' : ''));
+  }
+  function render(snapshotResult, resources, checkSummary, now, rateState = null) {
+    const issueResource = resources.issue;
+    const comments = Array.isArray(issueResource.data) ? issueResource.data : [];
+    const observation = findSnapshot(comments, now);
+    const issueReadFreshness = resourceFreshness(issueResource, now, 3 * ISSUE_POLL_MS);
+    const osFreshness = freshnessOfSnapshot(observation, now, issueResource);
+    const prFresh = resourceFreshness(resources.pr, now, PR_POLL_MS);
+    const mainFresh = resourceFreshness(resources.main, now, MAIN_POLL_MS);
+    const checksFresh = resourceFreshness(resources.checks, now, CHECKS_POLL_MS);
+    const pr = prFresh === 'FRESH' ? resources.pr.data : null;
+    const main = mainFresh === 'FRESH' ? resources.main.data : null;
+    const head = safeSha(pr?.head?.sha);
+    const expectedChecksUrl = head
+      ? API + '/commits/' + head + '/check-runs?per_page=100' : null;
+    const currentChecks = checksFresh === 'FRESH' && !resources.checks.error &&
+      resources.checks.url === expectedChecksUrl && checkSummary?.pr_number === resources.pr.number
+      ? checkSummary : null;
+    const apiErrors = Object.entries(resources).filter(([,r]) => r.error).map(([key,r]) => key + ':' + r.error);
+    const overall = document.getElementById('overall');
+    if (overall) overall.className = 'panel overview ' +
+      (osFreshness === 'FRESH' ? 'fresh' : osFreshness === 'STALE' ? 'stale' : 'unknown');
+    const githubReadLabel = rateState?.status === 'RATE_LIMITED' ? 'GitHub API 額度耗盡／讀取暫停'
+      : issueResource.error ? 'GitHub 讀取錯誤：' + issueResource.error
+      : issueReadFreshness === 'FRESH' ? 'GitHub Issue 可讀'
+        : issueReadFreshness === 'STALE' ? 'GitHub Issue 讀回已過期' : 'GitHub Issue 未確認';
+    badge('github-state', issueReadFreshness,
+      githubReadLabel, issueResource.error ? 'bad'
+        : issueReadFreshness === 'FRESH' ? 'good' : issueReadFreshness === 'STALE' ? 'warn' : 'neutral');
+    text('overall-title',rateState?.status === 'RATE_LIMITED'
+      ? 'GitHub API 額度暫時耗盡。監控讀取已暫停，Win11 實際工作狀態目前未知。'
+      : osFreshness === 'FRESH' ? 'Win11 現場資料有效；施工仍逐項核證'
+      : osFreshness === 'STALE' ? '資料已過期：目前施工狀態未確認'
+        : '目前無法確認 Win11 工廠狀態');
+    text('overall-copy',rateState?.status === 'RATE_LIMITED'
+      ? '保留最後成功讀回的歷史資料，不延用舊 RUNNING 狀態；額度恢復時間依 GitHub 標頭判定。'
+      : osFreshness === 'FRESH'
+      ? '公開觀測與 GitHub 已讀回；只有符合任務、執行批次及近期活動證據的 Worker 才列為施工中。'
+      : osFreshness === 'STALE'
+        ? '保留最後一次快照的時間與來源；不把歷史程序、派工或收據顯示成目前施工。'
+        : '顯示目前可讀到的 GitHub PR／CI；沒有新鮮 Win11 觀測時，Worker 狀態為 UNKNOWN。');
+    text('metric-observed', observation.snapshot ? readTime(observation.snapshot.windows?.observed_at) +
+      (osFreshness === 'STALE' ? '（STALE）' : osFreshness === 'UNKNOWN' ? '（UNKNOWN）' : '') : '未取得有效觀測');
+    const successfulTimes = Object.values(resources).map(r => r.fetchedAt || 0).filter(Boolean);
+    text('metric-synced', successfulTimes.length ? readTime(Math.max(...successfulTimes)) : '尚未成功讀回');
+    const snapshot = observation.snapshot;
+    const windows = snapshot?.windows || {};
+    const worker = snapshot?.native_worker || {};
+    const oc = snapshot?.opencode_v2 || {};
+    const githubTask = issueReadFreshness === 'FRESH' && mainFresh === 'FRESH'
+      ? normalizeFormalTask(latestTask(comments,safeSha(main?.sha),prFresh === 'FRESH' ? pr : null)) : null;
+    const explicitW1 = workerRecord(snapshot, 'W1');
+    const records = {
+      W1: explicitW1 ? classifyWorker(explicitW1, osFreshness, now)
+        : classifyW1(oc, worker, osFreshness, now, githubTask),
+      W2: classifyWorker(workerRecord(snapshot, 'W2'), osFreshness, now),
+      W3: classifyWorker(workerRecord(snapshot, 'W3'), osFreshness, now),
+    };
+    const cardData = {};
+    for (const id of ['W1','W2','W3'])
+      cardData[id] = workerCardData(id, id === 'W1' ? explicitW1 : workerRecord(snapshot,id),
+        records[id], snapshot, id === 'W1' ? githubTask : null);
+    for (const id of ['W1','W2','W3']) renderWorker(id, cardData[id]);
+    const verifiedCount = osFreshness === 'FRESH'
+      ? Object.values(records).filter(record => record.status === 'RUNNING_VERIFIED').length : null;
+    text('metric-workers', verifiedCount === null ? '未確認（Win11 觀測未知／過期）' : String(verifiedCount) + '／3 有近期施工證據');
+    const blocked = osFreshness === 'FRESH'
+      ? Object.values(records).filter(record => record.status === 'BLOCKED').length : null;
+    text('metric-blocked', blocked === null ? '未確認' : String(blocked) + ' 個 Worker 明確受阻');
+    const candidatePrNumber=resources.pr.number;
+    text('metric-human', pr?.draft ? 'Human 審閱 PR #' + candidatePrNumber + ' 草稿' : '依正式 PR 狀態核對');
+    text('metric-main', main?.sha ? safeSha(main.sha) || 'SHA 格式錯誤'
+      : mainFresh === 'STALE' ? '上次讀回已過期' : '讀回未知');
+    text('metric-ci', currentChecks ? ciLabel(currentChecks) : checksFresh === 'STALE'
+      ? 'CI 讀回已過期' : '精確 HEAD 檢查未知');
+    text('metric-error', apiErrors.length ? apiErrors.join('；') : '無近期同步錯誤');
+    text('snapshot-detail', snapshot
+      ? 'comment #' + (observation.comment?.id || snapshot.source?.comment_id || '未確認') +
+        '；sequence ' + snapshot.sequence + '；snapshot ' + snapshot.snapshot_id +
+        '；GitHub updated_at ' + readTime(observation.readbackUpdatedAt)
+      : 'UNKNOWN：' + (observation.error || issueResource.error || '尚無唯一有效留言'));
+    text('freshness-detail', snapshot
+      ? 'observed_at ' + readTime(snapshot.observed_at) + '；published_at ' + readTime(snapshot.published_at) +
+        '；expires_at ' + readTime(snapshot.expires_at) + '；狀態 ' + observation.status +
+        '／Win11 ' + osFreshness
+      : '未取得可驗證快照');
+    const issueUrl = API + '/issues/407/comments?per_page=100';
+    const rateMeta = apiClient.getMeta(issueUrl);
+    if (rateState) renderRateStatus(rateState,resources,now);
+    if (!rateState) text('rate-detail',rateMeta
+      ? '最近回應剩餘 ' + (rateMeta.remaining == null ? '未暴露額度標頭' : rateMeta.remaining) +
+        '；ETag ' + (rateMeta.etag ? '已支援條件式讀取' : '未回傳') +
+        '；額度重設 ' + (rateMeta.resetAt ? readTime(rateMeta.resetAt) : '未暴露') +
+        '；Issue 最近讀回 ' + (issueResource.fetchedAt ? readTime(issueResource.fetchedAt) : '未成功')
+      : '尚無成功回應；瀏覽器會顯示 GitHub HTTP／CORS／網路錯誤');
+    text('error-detail',apiErrors.length ? apiErrors.join('；') : '目前沒有新錯誤；資料有效期仍逐欄判定。');
+    const task = windows.native_task || {};
+    badge('native-badge',osFreshness,
+      osFreshness === 'FRESH' && task.enabled === true ? '已啟用／Ready；非工作證明' :
+        osFreshness === 'FRESH' && task.enabled === false ? '排程已停用' :
+          osFreshness === 'STALE' ? '排程觀測已過期' : '排程讀回未知',
+      osFreshness === 'FRESH' && task.enabled === true ? 'good' :
+        osFreshness === 'FRESH' && task.enabled === false ? 'warn' :
+          osFreshness === 'STALE' ? 'warn' : 'neutral');
+    text('native-detail',osFreshness === 'FRESH'
+      ? '排程只代表輪詢機制；退出碼 0 不代表模型呼叫或程式交付。' : '最近排程資訊不是目前狀態。');
+    text('native-action',task.registered === false ? 'PTYSD-Native-OpenCode 未註冊'
+      : task.registered === true ? String(task.action_kind || 'Action 未知') + '；' + String(task.state || '狀態未知')
+        : '未確認');
+    text('native-identity',(task.identity_class || '身分未知') + '；單實例 ' +
+      (task.multiple_instances || '未知') + '；週期 ' +
+      (task.trigger_interval_minutes ? task.trigger_interval_minutes + ' 分鐘' : '未知'));
+    text('native-last','最近 ' + readTime(task.last_run) + '；結果 ' + (task.last_result || '未確認'));
+    text('native-retired','Monitor 排程 ' +
+      (windows.legacy_monitor_registered === false ? '未註冊' : windows.legacy_monitor_registered === true ? '仍註冊' : '未知') +
+      '；2667 ' + (windows.listener_2667 === false ? '無 Listener' : windows.listener_2667 === true ? '仍有 Listener' : '未知'));
+    text('native-publisher',snapshot?.native_worker
+      ? '此快照有 Worker 收據資料；正式發布器部署未由靜態頁面確認。'
+      : '未取得 Worker 發布狀態；不推論已部署。');
+    text('task-detail',(task.action_kind || 'Action 未知') + '；' + (task.identity_class || '執行身分未知') +
+      '；IgnoreNew ' + (task.multiple_instances || '未知') + '；' + (task.last_result || '結果未知'));
+    text('opencode-detail',(oc.installed_version || '版本未確認') + '；程序數 ' +
+      (Number.isSafeInteger(oc.process_count) ? oc.process_count : '未知') +
+      '；Session ' + (Number.isSafeInteger(oc.active_session_count) ? oc.active_session_count : 'UNKNOWN') +
+      '；歷史 Session ' + (Number.isSafeInteger(oc.historical_sessions_count)
+        ? oc.historical_sessions_count + ' 筆（' + readTime(oc.historical_sessions_observed_at) + '）'
+        : '筆數未確認') + '；歷史資料不作為目前施工證據。');
+    text('codex-detail','沒有從公開 Issue／PR 取得 Codex 主控的被動原生活動資料；不以本面板 PR 作者推論施工。');
+    badge('codex-badge','UNKNOWN','活動未確認','neutral');
+    text('codex-task','沒有公開且可歸屬的當前 Codex task_id／attempt_id。');
+    text('codex-evidence','本頁讀取與 PR 作者資訊不能證明 Codex 此刻正在工作。');
+    text('codex-next','依正式 PR／Human 審閱流程處理。');
+    const registration = snapshot?.github?.runner_registration;
+    text('runner-registration',osFreshness === 'FRESH' && registration?.status === 'FRESH' &&
+      Number.isSafeInteger(registration.count)
+      ? 'Repository Runner 登錄數 ' + registration.count + '；Organization ' +
+        (snapshot.github.organization_runner_registration || 'UNKNOWN')
+      : 'GitHub Runner 登錄未由本次有效快照確認。');
+    text('runner-service',osFreshness === 'FRESH' && Number.isSafeInteger(windows.runner_service_running)
+      ? windows.runner_service_running + '/' + (windows.runner_service_count ?? '未知') +
+        ' 個 Win11 Runner 服務執行中；不等於 GitHub 已登錄。' : 'Win11 Runner 服務狀態未知／過期。');
+    const counts = currentChecks?.counts;
+    let runnerStatus = 'UNKNOWN', runnerLabel = 'CI 未確認', runnerKind = 'neutral';
+    if (currentChecks?.status === 'CI_FAILED') { runnerStatus='CI_FAILED'; runnerLabel='精確 HEAD 有失敗'; runnerKind='bad'; }
+    else if (currentChecks?.status === 'QUEUED') { runnerStatus='PENDING'; runnerLabel='等待 Runner'; runnerKind='warn'; }
+    else if (currentChecks?.status === 'PENDING') { runnerStatus='PENDING'; runnerLabel='等待檢查結果'; runnerKind='warn'; }
+    else if (currentChecks?.status === 'IN_PROGRESS') { runnerStatus='PENDING'; runnerLabel='檢查執行中'; runnerKind='warn'; }
+    else if (currentChecks?.status === 'MIXED_ACTIVE') { runnerStatus='PENDING'; runnerLabel='CI 多狀態；看逐項明細'; runnerKind='warn'; }
+    else if (currentChecks?.status === 'CHECKS_SUCCESS') { runnerStatus='DELIVERED'; runnerLabel='檢查成功；驗收另核'; runnerKind='good'; }
+    else if (currentChecks?.status === 'COMPLETED_WITH_SKIPS') { runnerStatus='UNKNOWN'; runnerLabel='有略過項；不計 PASS'; }
+    else if (currentChecks?.status === 'COMPLETED_WITH_NON_SUCCESS') { runnerStatus='UNKNOWN'; runnerLabel='有取消項；不計 PASS'; }
+    badge('runner-badge',runnerStatus,runnerLabel,runnerKind);
+    text('runner-checks',currentChecks
+      ? 'HEAD ' + safeSha(currentChecks.head_sha) + '；成功 ' + counts.success +
+        '／失敗 ' + counts.failure + '／queued ' + counts.queued +
+        '／pending ' + counts.pending +
+        '／in_progress ' + counts.in_progress + '／略過或 neutral ' + counts.skipped + '／取消 ' + counts.cancelled +
+        '／其他 ' + counts.other + '；' + ciLabel(currentChecks)
+      : '沒有對應目前 PR HEAD 的新鮮 check-run 讀回。');
+    const legacy = currentChecks?.checks?.find(check => check.name === 'csg-trusted-verifier');
+    text('runner-legacy',legacy
+      ? legacy.status === 'queued' ? 'csg-trusted-verifier：queued，等待 Runner；是否 required 未知。'
+        : 'csg-trusted-verifier：' + legacy.status + (legacy.conclusion ? '/' + legacy.conclusion : '') +
+          '；是否 required 未知。'
+      : '本次精確 HEAD 資料沒有此檢查或 CI 未讀回；required 規則 UNKNOWN。');
+    text('pr-state',pr
+      ? (pr.draft ? 'Draft' : 'Ready for review') + '；' + (pr.merged ? '已合併' : '尚未合併') +
+        '；GitHub state ' + String(pr.state)
+      : prFresh === 'STALE' ? 'PR metadata 上次讀回已過期；目前未知'
+        : resources.pr.error === 'CURRENT_CANDIDATE_PR_UNKNOWN' ? '目前正式任務沒有唯一 PR 引用'
+          : 'PR metadata 未讀回：' + (resources.pr.error || 'UNKNOWN'));
+    text('pr-head',head || (pr ? 'GitHub 回傳的 head SHA 格式錯誤' : '未讀回'));
+    text('pr-base',(safeSha(pr?.base?.sha) || 'PR base 未讀回') +
+      '；main ' + (safeSha(main?.sha) || (mainFresh === 'STALE' ? '上次讀回已過期' : '未讀回')));
+    text('pr-deployment',pr?.merged
+      ? '已進入 main；Win11 Worker 部署仍需獨立來源驗收。'
+      : '未接受／未合併；不可部署候選 Worker。Branch protection API 權限未知。');
+    badge('pr-badge',pr?.merged ? 'ACCEPTED' : pr ? 'PENDING' : 'UNKNOWN',
+      pr?.merged ? '來源已合併；部署另驗' : pr?.draft ? 'Draft／未合併' : '來源未確認',
+      pr?.merged ? 'good' : pr ? 'warn' : 'neutral');
+    text('pr-detail',pr && head
+      ? 'PR #' + candidatePrNumber + '；任務 ' + (resources.pr.taskRef?.request_id || '未確認') +
+        '；head ' + head + '；資料來自 GitHub Pull Request 與同 SHA check-runs。'
+      : '沒有由新鮮、有效的 #407 候選任務引用唯一 PR；目前 PR／CI 顯示 UNKNOWN。');
+    text('checks-detail',currentChecks
+      ? 'PR #' + candidatePrNumber + '／HEAD ' + head + '：' + currentChecks.checks.map(check => check.name + '=' + check.status +
+          (check.conclusion ? '/' + check.conclusion : '')).join('；')
+      : resources.checks.error
+        ? '精確 HEAD 檢查未知：' + resources.checks.error
+        : '未取得精確 head check-runs。');
+    if (apiErrors.length) {
+      text('overall-copy','同步來源錯誤：' + apiErrors.join('；') +
+        '。保留最後成功讀回時間，但逾期資料標為 STALE，不能當作目前施工。');
+    }
+    if (rateState?.status === 'RATE_LIMITED')
+      text('overall-copy','GitHub API 額度暫時耗盡。監控讀取已暫停，Win11 實際工作狀態目前未知。' +
+        '保留最後成功讀回資料並標示過期；不把歷史施工狀態延續到現在。');
+    renderEvents(classifyRecentEvents(comments, snapshot, currentChecks));
+    const prSourceLink=document.getElementById('pr-source-link');
+    const prChecksLink=document.getElementById('pr-checks-link');
+    const prUrl=candidatePrNumber ? 'https://github.com/' + REPO + '/pull/' + candidatePrNumber
+      : 'https://github.com/' + REPO + '/pulls';
+    if (prSourceLink) {
+      prSourceLink.href=prUrl;
+      prSourceLink.textContent=candidatePrNumber ? 'PR #' + candidatePrNumber + ' 來源與審查'
+        : 'GitHub PR 清單（目前任務引用未確認）';
+    }
+    if (prChecksLink) {
+      prChecksLink.href=candidatePrNumber ? prUrl + '/checks' : prUrl;
+      prChecksLink.textContent=candidatePrNumber ? 'PR #' + candidatePrNumber + ' CI'
+        : 'PR 檢查清單（目前任務引用未確認）';
+    }
+  }
+  const testApi = {
+    parseSnapshot, findSnapshot, latestTask, summarizeChecks, fieldFreshness, validJob, currentCandidatePrReference,
+    classifyWorker, classifyW1, workerRecord, normalizeFormalTask, workerCardData, classifyRecentEvents,
+    freshnessOfSnapshot, createApiClient, createResourceStore,
+    ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
+      constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS,
+      MANUAL_SYNC_MIN_MS, LOW_REMAINING_THRESHOLD, MAX_LIVE_AGE_MS },
+  };
+  if (typeof window !== 'undefined') window.PTYSDOperatorPanel = testApi;
+  if (typeof window !== 'undefined' && window.__PTYSD_TEST__) return;
+  let rateStorage=null, rateChannel=null;
+  try { rateStorage=window.localStorage || null; } catch {}
+  try {
+    if (typeof window.BroadcastChannel === 'function')
+      rateChannel=new window.BroadcastChannel('ptysd-operator-panel-rate-v1');
+  } catch {}
+  const apiClient = createApiClient((url, init) => window.fetch(url, init), {
+    AbortControllerCtor:window.AbortController || AbortController,
+    setTimeoutFn:(fn,ms) => window.setTimeout(fn,ms),
+    clearTimeoutFn:id => window.clearTimeout(id),
+    storage:rateStorage, channel:rateChannel, locks:window.navigator?.locks || null,
+  });
+  const resourceStore = createResourceStore(apiClient);
+  const { resources, loadResource } = resourceStore;
+  let refreshing = null;
+  let lastManualSync = 0;
+  let initialReadCompleted = false;
+  let recoveryTimer = null;
+  function scheduleRecoveryProbe() {
+    if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
+    recoveryTimer=null;
+    const state=apiClient.getRateState();
+    if (state.coordination !== 'SHARED_LOCKED' || !['RATE_LIMITED','COOLDOWN'].includes(state.status) || state.indefinite ||
+        !Number.isFinite(state.pauseUntil)) return;
+    const delay=Math.max(0,state.pauseUntil-Date.now());
+    recoveryTimer=window.setTimeout(() => { recoveryTimer=null; refresh(false); },delay);
+  }
+  async function refresh(manual = false) {
+    if (refreshing) return refreshing;
+    const currentRateState=apiClient.getRateState();
+    if (!manual && initialReadCompleted && currentRateState.coordination !== 'SHARED_LOCKED') return;
+    const now = Date.now();
+    if (manual && lastManualSync && now - lastManualSync < MANUAL_SYNC_MIN_MS) return;
+    if (manual) lastManualSync = now;
+    const button = document.getElementById('refresh');
+    if (button) { button.disabled = true; button.textContent = '同步中…'; }
+    refreshing = (async () => {
+      const issueUrl = API + '/issues/407/comments?per_page=100';
+      const mainUrl = API + '/commits/main';
+      await runSyncCycle(resourceStore,apiClient,{issue:issueUrl,prFor:number => API + '/pulls/' + number,main:mainUrl});
+      const head = safeSha(resources.pr.data?.head?.sha);
+      if (!head && !resources.pr.data) {
+        resources.checks.error = resources.pr.error || 'PR_HEAD_UNKNOWN';
+      }
+      const summary = resourceStore.checksSummaryForHead(head);
+      const rateState=apiClient.getRateState();
+      render(findSnapshot(resources.issue.data || [],Date.now()),resources,summary,Date.now(),rateState);
+    })();
+    try { await refreshing; }
+    finally {
+      refreshing = null;
+      initialReadCompleted = true;
+      if (button) { button.disabled = false; button.textContent = '立即同步'; }
+      scheduleRecoveryProbe();
+    }
+  }
+  const button = document.getElementById('refresh');
+  if (button) button.addEventListener('click',() => refresh(true));
+  refresh(false);
+  window.setInterval(() => {
+    if (document.visibilityState === 'visible') refresh(false);
+  }, ISSUE_POLL_MS);
+  window.setInterval(() => renderRateStatus(apiClient.getRateState(),resources,Date.now()),1000);
+  document.addEventListener('visibilitychange',() => {
+    if (document.visibilityState === 'visible') refresh(false);
+  });
+})();
+</script>
+</body>
+</html>
