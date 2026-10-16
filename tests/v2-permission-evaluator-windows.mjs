@@ -3,18 +3,21 @@
 // It is NOT a test of experimental tool.use policy or an OS sandbox.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import net from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { buildV2ScopedEditConfig } from '../native-bridge/opencode-v2.mjs';
 
+const configuredExe = process.env.PTYSD_CI_V2_EXE;
 const prefix = process.env.PTYSD_CI_V2_PREFIX;
-assert.ok(prefix, 'V2_PREFIX_REQUIRED');
-const exe = join(prefix, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe');
+const exe = configuredExe || (prefix && join(prefix, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe'));
+assert.ok(exe, 'V2_EXE_OR_PREFIX_REQUIRED');
+assert.ok(isAbsolute(exe), 'V2_EXE_MUST_BE_ABSOLUTE');
 assert.ok(statSync(exe).isFile(), 'V2_NATIVE_EXE_NOT_FOUND');
 const configDir = mkdtempSync(join(tmpdir(), 'ptysd-v2-permissions-'));
+mkdirSync(join(configDir, 'src'));
 const scopedPolicy = buildV2ScopedEditConfig(configDir, ['src/allowed.mjs']);
 const config = {
   ...scopedPolicy,
