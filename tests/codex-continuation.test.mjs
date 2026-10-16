@@ -163,6 +163,66 @@ test('Codex output persistence failure uses the real hidden tree terminator and 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('Codex output storage failure does not parse unavailable activity evidence', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-unreadable-output-'));
+  try {
+    const spec = '# Synthetic output directory; no external model is started.\n';
+    const bundlePath = join(dir, 'source.bundle');
+    writeFileSync(bundlePath, 'synthetic immutable bundle');
+    const picked = job({ request_id: 'PTYSD_CODEX_UNREADABLE_OUTPUT_20261016',
+      spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-0000-0000-000000000094';
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath,
+      createHash('sha256').update(readFileSync(bundlePath)).digest('hex'));
+    const evidenceDir = join(dir, 'evidence');
+    mkdirSync(evidenceDir);
+    const stdoutPath = join(evidenceDir, `${picked.request_id}-${attemptId}.stdout.jsonl`);
+    mkdirSync(stdoutPath);
+
+    const child = new EventEmitter();
+    child.pid = 54322;
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new PassThrough();
+    let spawnCalls = 0;
+    const spawnProcess = (_command, _args, options) => {
+      spawnCalls++;
+      assert.equal(options.shell, false);
+      assert.equal(options.windowsHide, true);
+      child.stdin.once('finish', () => setImmediate(() => child.emit('close', 0, null)));
+      setImmediate(() => {
+        child.emit('spawn');
+        child.stdout.end('');
+        child.stderr.end('');
+      });
+      return child;
+    };
+
+    const result = await runCodex(request, { codex_executable: 'C:\\OpenCode\\codex.exe' },
+      dir, evidenceDir, {
+        environment: {}, spawnProcess,
+        terminate: () => ({ rootOnly: true, processTreeState: 'ALIVE', error: 'TASKKILL_TREE_FAILED' }),
+        readProcessTree: pid => ({ state: 'ALIVE', root_pid: pid, process_ids: [pid, 65433],
+          observed_at: '2026-10-16T00:00:00.000Z' }),
+      });
+
+    assert.equal(spawnCalls, 1);
+    assert.ok(result.storage_error);
+    assert.equal(result.termination_state, 'ORPHAN_POSSIBLE');
+    assert.equal(result.process_tree_state, 'ALIVE');
+    assert.equal(result.outcome, 'CODEX_PROCESS_TERMINATION_FAILED');
+    assert.equal(result.session_id, null);
+    assert.equal(result.session_started, false);
+    assert.equal(result.provider_usage_evidence, 'UNKNOWN');
+    assert.equal(result.model_activity_evidence, 'UNKNOWN');
+    assert.equal(result.token_usage, null);
+    assert.equal(result.tool_execution_evidence, 'UNKNOWN');
+    assert.equal(result.tool_execution_count, 0);
+    assert.equal(result.file_change_tool_evidence, 'UNKNOWN');
+    assert.equal(result.model_invoked, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 function job(overrides = {}) {
   return {
     schema: 3,

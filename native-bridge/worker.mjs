@@ -11,7 +11,7 @@ import { pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 import { qualifyOpenCodeV2, validateV2Model, validateV2ScopedEditPaths,
   buildV2ScopedEditConfig,
-  buildV2ScopedEditArgs } from './opencode-v2.mjs';
+  buildV2ScopedEditArgs, readOpenCodeV2RunEvidence } from './opencode-v2.mjs';
 import { runV2AuthReadiness, runV2Readiness } from './v2-readiness.mjs';
 import { parseCodexJob, codexExecutionGate, claimCodexAttempt,
   releaseCodexAttempt, makeCodexExecutorRequest, publishCodexExecutorRequest,
@@ -86,11 +86,26 @@ function validGoalReference(value) {
     value.issue === HUMAN_GOAL_ISSUE && Number.isSafeInteger(value.comment_id) && value.comment_id > 0 &&
     value.marker === HUMAN_GOAL_MARKER && HASH.test(value.body_sha256 || '');
 }
-export function verifyGoalReference(job, dispatchers, apiRead = api) {
+export function verifyGoalReference(job, dispatchers, apiRead = api,
+  goalCommentsRead = () => issueCommentsFor(HUMAN_GOAL_ISSUE)) {
   if (job?.schema !== 6 || !validGoalReference(job.goal_ref) ||
-      !Array.isArray(dispatchers) || typeof apiRead !== 'function')
+      !Array.isArray(dispatchers) || typeof apiRead !== 'function' || typeof goalCommentsRead !== 'function')
     return { valid: false, reason: 'GOAL_REFERENCE_SHAPE_INVALID' };
   const reference = job.goal_ref;
+  let goalComments;
+  try { goalComments = goalCommentsRead(); }
+  catch { return { valid: false, reason: 'LATEST_GOAL_READBACK_UNKNOWN' }; }
+  if (!Array.isArray(goalComments))
+    return { valid: false, reason: 'LATEST_GOAL_READBACK_UNKNOWN' };
+  const latestGoal = goalComments.filter(comment =>
+    comment?.issue_url === `https://api.github.com/repos/${REPO}/issues/${HUMAN_GOAL_ISSUE}` &&
+    Number.isSafeInteger(comment.id) && comment.id > 0 &&
+    typeof comment.user?.login === 'string' && dispatchers.includes(comment.user.login) &&
+    typeof comment.body === 'string' && comment.body.includes(HUMAN_GOAL_MARKER))
+    .sort((a, b) => a.id - b.id).at(-1);
+  if (!latestGoal) return { valid: false, reason: 'LATEST_TRUSTED_GOAL_NOT_FOUND' };
+  if (latestGoal.id !== reference.comment_id)
+    return { valid: false, reason: 'GOAL_COMMENT_SUPERSEDED' };
   let comment;
   try { comment = apiRead(`repos/${REPO}/issues/comments/${reference.comment_id}`); }
   catch { return { valid: false, reason: 'GOAL_COMMENT_READBACK_UNKNOWN' }; }
@@ -249,6 +264,34 @@ export function parseReceipt(body) {
           (!Array.isArray(o.changed_paths) || !o.changed_paths.every(path =>
             typeof path === 'string' && o.write_paths.includes(path)))) ||
         (o.diff_sha256 !== undefined && o.diff_sha256 !== null && !HASH.test(o.diff_sha256)))) return null;
+    if (o.kind === 'opencode_edit' &&
+        ((o.session_id !== undefined && o.session_id !== null &&
+          (typeof o.session_id !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(o.session_id))) ||
+         (o.session_started !== undefined && typeof o.session_started !== 'boolean') ||
+         (o.provider_usage_evidence !== undefined && !['CONFIRMED', 'UNKNOWN'].includes(o.provider_usage_evidence)) ||
+         (o.model_activity_evidence !== undefined && !['CONFIRMED', 'UNKNOWN'].includes(o.model_activity_evidence)) ||
+         (o.tool_execution_evidence !== undefined && !['OBSERVED', 'UNKNOWN'].includes(o.tool_execution_evidence)) ||
+         (o.tool_execution_count !== undefined && (!Number.isSafeInteger(o.tool_execution_count) ||
+           o.tool_execution_count < 0)) ||
+         (o.file_change_tool_evidence !== undefined &&
+           !['COMPLETED', 'FAILED', 'INCOMPLETE', 'MIXED', 'UNKNOWN'].includes(o.file_change_tool_evidence)) ||
+         (['file_change_tool_completed_count', 'file_change_tool_failed_count',
+           'file_change_tool_incomplete_count'].some(key => o[key] !== undefined &&
+             (!Number.isSafeInteger(o[key]) || o[key] < 0))) ||
+         (o.token_usage !== undefined && o.token_usage !== null &&
+           (JSON.stringify(Object.keys(o.token_usage).sort()) !== JSON.stringify([
+             'cached_input_tokens', 'input_tokens', 'output_tokens', 'reasoning_output_tokens']) ||
+            Object.values(o.token_usage).some(value => value !== null &&
+              (!Number.isSafeInteger(value) || value < 0)))) ||
+         (['stdout_sha256', 'stderr_sha256'].some(key => o[key] !== undefined && o[key] !== null &&
+           !HASH.test(o[key]))) ||
+         (o.session_started === true && !o.session_id) ||
+         (o.provider_usage_evidence === 'CONFIRMED' && (!o.token_usage ||
+           !Object.values(o.token_usage).some(value => Number.isSafeInteger(value) && value > 0))) ||
+         (o.model_invoked === true && o.provider_usage_evidence !== 'CONFIRMED' &&
+           o.model_activity_evidence !== 'CONFIRMED') ||
+         (o.tool_execution_evidence === 'OBSERVED' && !(o.tool_execution_count > 0)) ||
+         (o.tool_execution_evidence === 'UNKNOWN' && o.tool_execution_count > 0))) return null;
     if (o.kind === 'codex_plan' &&
         ((o.session_started !== undefined && typeof o.session_started !== 'boolean') ||
          (o.provider_usage_evidence !== undefined && !['CONFIRMED', 'UNKNOWN'].includes(o.provider_usage_evidence)) ||
@@ -315,10 +358,11 @@ function gh(args, options = {}) {
     maxBuffer: 8 * 1024 * 1024, windowsHide: true, ...options });
 }
 function api(uri, extras = []) { return JSON.parse(gh(['api', uri, ...extras])); }
-function issueComments(config) {
-  const raw = JSON.parse(gh(['api', `repos/${REPO}/issues/${config.issue}/comments?per_page=100`, '--paginate', '--slurp']));
+function issueCommentsFor(issue) {
+  const raw = JSON.parse(gh(['api', `repos/${REPO}/issues/${issue}/comments?per_page=100`, '--paginate', '--slurp']));
   return raw.flat().filter(c => typeof c?.id === 'number').sort((a, b) => a.id - b.id);
 }
+function issueComments(config) { return issueCommentsFor(config.issue); }
 function latestOperatorJob(comments, config, workerLogin, mainSha, candidatePins = new Set()) {
   const jobs = comments.filter(c => config.dispatchers.includes(c.user?.login))
     .map(c => ({ id: c.id, body: c.body, job: parseJob(c.body) }))
@@ -457,12 +501,8 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
     historical_evidence: historicalEvidence,
   };
   return updateExistingOperatorComment({
-    comments, expectedLogin: workerLogin,
-    buildBody: () => {
-      const publishedAt = dependencies.publishNow ? dependencies.publishNow() : new Date();
-      snapshot.published_at = publishedAt.toISOString();
-      return encodeOperatorObservation(snapshot);
-    },
+    comments, expectedLogin: workerLogin, body: encodeOperatorObservation(snapshot),
+    now: () => new Date(dependencies.now ? dependencies.now() : Date.now()).getTime(),
     readComment: dependencies.readComment ||
       (id => api('repos/' + OPERATOR_REPO + '/issues/comments/' + id)),
     patchComment: (id, nextBody) => {
@@ -776,6 +816,15 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
     } } : {}),
   });
   const local = execution.local_evidence || {};
+  const outputEvidence = local.storage_error || local.capture_error || local.spawn_error
+    ? { valid: false, reason: local.storage_error ? 'OPEN_CODE_JSONL_STORAGE_FAILED' :
+      local.capture_error ? 'OPEN_CODE_JSONL_CAPTURE_INCOMPLETE' : 'OPEN_CODE_JSONL_PROCESS_NOT_STARTED',
+      session_id: null, session_started: false, provider_usage_evidence: 'UNKNOWN',
+      model_activity_evidence: 'UNKNOWN', tool_execution_evidence: 'UNKNOWN',
+      tool_execution_count: 0, file_change_tool_evidence: 'UNKNOWN',
+      file_change_tool_completed_count: 0, file_change_tool_failed_count: 0,
+      file_change_tool_incomplete_count: 0, token_usage: null, model_invoked: null }
+    : await readOpenCodeV2RunEvidence(stdoutPath);
   let treeReadback;
   if (Number.isSafeInteger(local.process_id) && local.process_id > 0) {
     try { treeReadback = await readProcessTree(local.process_id); }
@@ -806,7 +855,22 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
       }
     }
   }
-  return { ...execution, local_evidence: { ...local,
+  return { ...execution,
+    session_id: outputEvidence.session_id,
+    session_started: outputEvidence.session_started,
+    provider_usage_evidence: outputEvidence.provider_usage_evidence,
+    model_activity_evidence: outputEvidence.model_activity_evidence,
+    tool_execution_evidence: outputEvidence.tool_execution_evidence,
+    tool_execution_count: outputEvidence.tool_execution_count,
+    file_change_tool_evidence: outputEvidence.file_change_tool_evidence,
+    file_change_tool_completed_count: outputEvidence.file_change_tool_completed_count,
+    file_change_tool_failed_count: outputEvidence.file_change_tool_failed_count,
+    file_change_tool_incomplete_count: outputEvidence.file_change_tool_incomplete_count,
+    token_usage: outputEvidence.token_usage,
+    ...(outputEvidence.model_invoked === true ? { model_invoked: true } : {}),
+    local_evidence: { ...local,
+    opencode_jsonl_state: outputEvidence.valid ? 'PARSED' : 'UNKNOWN',
+    ...(outputEvidence.reason ? { opencode_jsonl_error: outputEvidence.reason } : {}),
     process_tree_state: treeReadback.state, process_tree_readback: treeReadback } };
 }
 function readSpec(job, apiRead = api) {
@@ -843,7 +907,22 @@ export function receipt(requestId, attemptId, state, job, result = null) {
       stdout_sha256: result?.stdout_sha256 ?? null, stderr_sha256: result?.stderr_sha256 ?? null,
       tests: result?.tests ?? 'NOT_RUN', pr_url: result?.pr_url ?? null } : {}),
     ...([4, 5, 6].includes(job.schema) ? { model: job.model, variant: job.variant, write_paths: job.write_paths,
-      changed_paths: result?.changed_paths ?? null, diff_sha256: result?.diff_sha256 ?? null } : {}),
+      changed_paths: result?.changed_paths ?? null, diff_sha256: result?.diff_sha256 ?? null,
+      session_id: result?.session_id ?? null, session_started: result?.session_started === true,
+      provider_usage_evidence: result?.provider_usage_evidence ?? 'UNKNOWN',
+      model_activity_evidence: result?.model_activity_evidence ?? 'UNKNOWN',
+      tool_execution_evidence: result?.tool_execution_evidence ?? 'UNKNOWN',
+      tool_execution_count: Number.isSafeInteger(result?.tool_execution_count) ? result.tool_execution_count : 0,
+      file_change_tool_evidence: result?.file_change_tool_evidence ?? 'UNKNOWN',
+      file_change_tool_completed_count: Number.isSafeInteger(result?.file_change_tool_completed_count)
+        ? result.file_change_tool_completed_count : 0,
+      file_change_tool_failed_count: Number.isSafeInteger(result?.file_change_tool_failed_count)
+        ? result.file_change_tool_failed_count : 0,
+      file_change_tool_incomplete_count: Number.isSafeInteger(result?.file_change_tool_incomplete_count)
+        ? result.file_change_tool_incomplete_count : 0,
+      token_usage: result?.token_usage ?? null,
+      stdout_sha256: result?.local_evidence?.stdout_sha256 ?? null,
+      stderr_sha256: result?.local_evidence?.stderr_sha256 ?? null } : {}),
     ...([5, 6].includes(job.schema) ? { candidate_pr: job.candidate_pr } : {}),
     ...(job.schema === 6 ? { goal_ref: job.goal_ref } : {}) };
 }
@@ -1194,6 +1273,7 @@ export async function runWorker(configInput, adapters = {}) {
   const config = guardConfig(configInput);
   const apiRead = adapters.apiRead ?? api;
   const commentsRead = adapters.commentsRead ?? issueComments;
+  const goalCommentsRead = adapters.goalCommentsRead ?? (() => issueCommentsFor(HUMAN_GOAL_ISSUE));
   const postReceipt = adapters.writeReceipt ?? writeReceipt;
   const verifyCodexTask = adapters.assertCodexExecutorTaskReady ?? assertCodexExecutorTaskReady;
   const verifyExecutor = adapters.assertExecutorTaskReady ?? assertExecutorTaskReady;
@@ -1563,7 +1643,7 @@ export async function runWorker(configInput, adapters = {}) {
       const latestMain = apiRead(`repos/${REPO}/git/ref/heads/main`).object?.sha;
       const unchangedComment = apiRead(`repos/${REPO}/issues/comments/${next.id}`);
       if (job.schema === 6) {
-        const goalReference = verifyGoalReference(job, config.dispatchers, apiRead);
+        const goalReference = verifyGoalReference(job, config.dispatchers, apiRead, goalCommentsRead);
         if (!goalReference.valid) {
           rmSync(candidateBundlePath(config.executor.manifest_dir, attemptId), { force: true });
           log(`HUMAN_GOAL_REFERENCE_WAITING_${goalReference.reason}_${job.request_id}_NO_START`);
@@ -1652,6 +1732,7 @@ export async function main(options = {}) {
   return runWorker(configInput, {
     apiRead: options.apiRead ?? options.api,
     commentsRead: options.commentsRead ?? options.issueComments,
+    goalCommentsRead: options.goalCommentsRead,
     writeReceipt: options.writeReceipt,
     observationDependencies: options.observationDependencies,
     dispatchCodexJob: options.dispatchCodexJob,

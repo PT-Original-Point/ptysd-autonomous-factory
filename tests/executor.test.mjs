@@ -23,6 +23,8 @@ const TEST_GOAL_BODY = '# V5.3-R4\nPTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_202610
 const TEST_GOAL_REF = { issue: 310, comment_id: 6188322050,
   marker: 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015',
   body_sha256: createHash('sha256').update(TEST_GOAL_BODY).digest('hex') };
+const TEST_GOAL_COMMENT = { id: TEST_GOAL_REF.comment_id, body: TEST_GOAL_BODY,
+  issue_url: `https://api.github.com/repos/${REPO}/issues/310`, user: { login: 'dispatcher' } };
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'ptysd-executor-'));
@@ -359,7 +361,7 @@ test('synthetic no-model OpenCode edit waits for process evidence, then reconcil
       runTask: taskName => { assert.equal(taskName, f.descriptor.task_name); schedulerStarts++; },
     });
     const runPublisher = () => runWorker(config, {
-      apiRead: readApi, commentsRead: () => comments,
+      apiRead: readApi, commentsRead: () => comments, goalCommentsRead: () => [TEST_GOAL_COMMENT],
       writeReceipt: (_cfg, value, login) => comments.push({ id: nextCommentId++,
         body: RECEIPT_MARKER + JSON.stringify(value), user: { login } }),
       qualifyOpenCodeV2: () => ({ ready: true, bin: 'SYNTHETIC_NO_MODEL_EXECUTABLE' }),
@@ -961,7 +963,7 @@ test('Worker integration keeps scoped OpenCode edit pending until process eviden
       throw new Error(`UNEXPECTED_API_READ_${uri}`);
     };
     const adapters = {
-      apiRead, commentsRead: () => comments,
+      apiRead, commentsRead: () => comments, goalCommentsRead: () => [TEST_GOAL_COMMENT],
       writeReceipt: (_config, value, login) => {
         const body = RECEIPT_MARKER + JSON.stringify(value);
         comments.push({ id: nextId++, body, user: { login } });

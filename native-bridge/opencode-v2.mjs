@@ -1,9 +1,10 @@
 // OpenCode V2 CLI qualification and explicitly scoped coding contract.
 // No package installation, authentication, model invocation, or OS mutation here.
 import { execFileSync } from 'node:child_process';
-import { lstatSync, realpathSync, statSync } from 'node:fs';
+import { createReadStream, lstatSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, join, isAbsolute, normalize, resolve, relative } from 'node:path';
 import { homedir, platform } from 'node:os';
+import { createInterface } from 'node:readline';
 import { isProtectedNativeBridgePath, isSensitiveWorkspacePathSegment, parseWorkspaceWritePath,
   workspacePathIdentity } from './windows-executor.mjs';
 
@@ -168,4 +169,169 @@ export function buildV2ScopedEditArgs(job, workspace, spec) {
   return ['run', '--agent', 'ptysd-scoped-write', '--model', `${job.model}#${job.variant}`,
     '--format', 'json', '--title', job.request_id,
     `${spec}\n\nOnly the separately enforced exact file allowlist is mutable. Do not execute shell or request wider permissions.`];
+}
+
+function emptyRunEvidence(valid, reason = null) {
+  return { valid, reason, session_id: null, session_started: false,
+    provider_usage_evidence: 'UNKNOWN', model_activity_evidence: 'UNKNOWN',
+    tool_execution_evidence: 'UNKNOWN', tool_execution_count: 0,
+    file_change_tool_evidence: 'UNKNOWN', file_change_tool_completed_count: 0,
+    file_change_tool_failed_count: 0, file_change_tool_incomplete_count: 0,
+    token_usage: null, model_invoked: null, event_count: 0 };
+}
+
+function tokenField(tokens, ...names) {
+  for (const name of names) {
+    if (!Object.hasOwn(tokens, name)) continue;
+    const value = tokens[name];
+    if (!Number.isSafeInteger(value) || value < 0) return { present: true, valid: false };
+    return { present: true, valid: true, value };
+  }
+  return { present: false, valid: true, value: 0 };
+}
+
+function eventTokens(event) {
+  const tokens = event?.part?.tokens ?? event?.tokens ?? event?.part?.metadata?.tokens;
+  if (tokens === undefined) return { present: false, valid: true };
+  if (!tokens || typeof tokens !== 'object' || Array.isArray(tokens))
+    return { present: true, valid: false };
+  const cache = tokens.cache ?? {};
+  if (!cache || typeof cache !== 'object' || Array.isArray(cache))
+    return { present: true, valid: false };
+  const input = tokenField(tokens, 'input_tokens', 'input');
+  const output = tokenField(tokens, 'output_tokens', 'output');
+  const reasoning = tokenField(tokens, 'reasoning_output_tokens', 'reasoning');
+  let cached = tokenField(cache, 'read', 'cached_input_tokens');
+  if (!cached.present) cached = tokenField(tokens, 'cached_input_tokens');
+  const fields = [input, output, reasoning, cached];
+  if (fields.some(field => !field.valid)) return { present: true, valid: false };
+  const present = fields.some(field => field.present);
+  return { present, valid: true,
+    usage: { input_tokens: input.present ? input.value : null,
+      output_tokens: output.present ? output.value : null,
+      cached_input_tokens: cached.present ? cached.value : null,
+      reasoning_output_tokens: reasoning.present ? reasoning.value : null } };
+}
+
+function toolStatus(event) {
+  const state = event?.part?.state ?? event?.state;
+  const status = typeof state === 'string' ? state : state?.status;
+  if (typeof status !== 'string') return null;
+  const value = status.toLowerCase();
+  if (['completed', 'complete', 'success', 'succeeded'].includes(value)) return 'completed';
+  if (['failed', 'error'].includes(value)) return 'failed';
+  if (['running', 'pending', 'in_progress', 'in-progress'].includes(value)) return 'incomplete';
+  return null;
+}
+
+function toolName(event) {
+  const value = event?.part?.tool ?? event?.part?.name ?? event?.tool;
+  return typeof value === 'string' ? value.toLowerCase() : '';
+}
+
+/**
+ * Read OpenCode V2 `run --format json` output as JSONL and retain only
+ * non-content evidence. A parse or capture failure discards all partial facts.
+ */
+export async function readOpenCodeV2RunEvidence(stdoutPath) {
+  const sessions = new Set();
+  const tools = new Map();
+  const totals = { input_tokens: 0, output_tokens: 0,
+    cached_input_tokens: 0, reasoning_output_tokens: 0 };
+  const tokenComplete = { input_tokens: true, output_tokens: true,
+    cached_input_tokens: true, reasoning_output_tokens: true };
+  let usageObserved = false;
+  let usagePositive = false;
+  let modelTextObserved = false;
+  let eventCount = 0;
+  let lineNumber = 0;
+  let malformed = false;
+  let overflow = false;
+  let streamError = false;
+  try {
+    const lines = createInterface({ input: createReadStream(stdoutPath), crlfDelay: Infinity });
+    for await (const line of lines) {
+      lineNumber++;
+      if (!line.trim()) continue;
+      let event;
+      try { event = JSON.parse(line); }
+      catch { malformed = true; break; }
+      if (!event || typeof event !== 'object' || Array.isArray(event)) {
+        malformed = true; break;
+      }
+      eventCount++;
+      const session = event.sessionID ?? event.session_id ?? event.session?.id;
+      if (session !== undefined) {
+        if (typeof session !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(session)) {
+          malformed = true; break;
+        }
+        sessions.add(session);
+      }
+
+      const usage = event.type === 'step_finish' || event.type === 'step-finish'
+        ? eventTokens(event) : { present: false, valid: true };
+      if (!usage.valid) { malformed = true; break; }
+      if (usage.present) {
+        usageObserved = true;
+        for (const key of Object.keys(totals)) {
+          const value = usage.usage[key];
+          if (value === null) { tokenComplete[key] = false; continue; }
+          const next = totals[key] + value;
+          if (!Number.isSafeInteger(next)) { overflow = true; break; }
+          totals[key] = next;
+          if (value > 0) usagePositive = true;
+        }
+        if (overflow) break;
+        if ((usage.usage.output_tokens ?? 0) > 0 || (usage.usage.reasoning_output_tokens ?? 0) > 0)
+          modelTextObserved = true;
+      }
+
+      if (event.type === 'text' && event.part?.type === 'text' &&
+          typeof event.part.text === 'string' && event.part.text.length > 0)
+        modelTextObserved = true;
+
+      if (event.type === 'tool_use' || event.part?.type === 'tool') {
+        const status = toolStatus(event);
+        if (status) {
+          const id = event.part?.callID ?? event.part?.call_id ?? event.part?.id ?? event.callID ?? event.id;
+          const key = typeof id === 'string' && id.length > 0
+            ? `call:${id}` : `line:${lineNumber}`;
+          tools.set(key, { status, name: toolName(event) });
+        }
+      }
+    }
+  } catch {
+    streamError = true;
+  }
+
+  if (streamError) return emptyRunEvidence(false, 'OPEN_CODE_JSONL_UNAVAILABLE');
+  if (malformed) return emptyRunEvidence(false, 'OPEN_CODE_JSONL_INVALID');
+  if (overflow) return emptyRunEvidence(false, 'OPEN_CODE_JSONL_TOKEN_USAGE_OVERFLOW');
+  if (eventCount === 0) return emptyRunEvidence(false, 'OPEN_CODE_JSONL_EMPTY');
+  if (sessions.size > 1) return emptyRunEvidence(false, 'OPEN_CODE_JSONL_MULTIPLE_SESSIONS');
+
+  const changedTools = [...tools.values()].filter(tool =>
+    ['edit', 'write', 'patch', 'apply_patch', 'multiedit'].includes(tool.name));
+  const changedCounts = { completed: 0, failed: 0, incomplete: 0 };
+  for (const tool of changedTools) {
+    if (Object.hasOwn(changedCounts, tool.status)) changedCounts[tool.status]++;
+  }
+  let fileEvidence = 'UNKNOWN';
+  if (changedCounts.completed && (changedCounts.failed || changedCounts.incomplete)) fileEvidence = 'MIXED';
+  else if (changedCounts.completed) fileEvidence = 'COMPLETED';
+  else if (changedCounts.failed) fileEvidence = 'FAILED';
+  else if (changedCounts.incomplete) fileEvidence = 'INCOMPLETE';
+  const providerUsage = usageObserved && usagePositive;
+  const modelActivity = modelTextObserved;
+  return { valid: true, reason: null, session_id: sessions.values().next().value ?? null,
+    session_started: sessions.size === 1, provider_usage_evidence: providerUsage ? 'CONFIRMED' : 'UNKNOWN',
+    model_activity_evidence: modelActivity ? 'CONFIRMED' : 'UNKNOWN',
+    tool_execution_evidence: tools.size ? 'OBSERVED' : 'UNKNOWN', tool_execution_count: tools.size,
+    file_change_tool_evidence: fileEvidence,
+    file_change_tool_completed_count: changedCounts.completed,
+    file_change_tool_failed_count: changedCounts.failed,
+    file_change_tool_incomplete_count: changedCounts.incomplete,
+    token_usage: usageObserved && usagePositive ? Object.fromEntries(Object.keys(totals).map(key =>
+      [key, tokenComplete[key] ? totals[key] : null])) : null,
+    model_invoked: providerUsage || modelActivity ? true : null, event_count: eventCount };
 }

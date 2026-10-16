@@ -26,7 +26,8 @@ const observation = (overrides = {}) => ({
   ...overrides,
 });
 const comment = (value, login = 'trusted-publisher', id = 1) => ({
-  id, body: encodeOperatorObservation(value), user: { login }, updated_at:value.published_at,
+  id, body: encodeOperatorObservation(value), user: { login },
+  updated_at:value.published_at ?? value.observed_at,
 });
 const candidatePrJobComment = (candidatePr=434, sourceSha='a'.repeat(40), id=10) => {
   const job={schema:5,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
@@ -91,6 +92,16 @@ test('published_at must be at or after observation and strictly before expiry', 
     'publication equal to observation is valid');
 });
 
+test('new observation bodies omit publication time while legacy published_at remains readable', () => {
+  const current = observation();
+  delete current.published_at;
+  const parsed = parseOperatorObservation(OPERATOR_MARKER + JSON.stringify(current));
+  assert.ok(parsed, 'the public comment updated_at is the publication-time authority');
+  assert.equal(Object.hasOwn(parsed, 'published_at'), false);
+  assert.ok(parseOperatorObservation(encodeOperatorObservation(observation())),
+    'previous snapshots with a legacy published_at remain readable');
+});
+
 test('one trusted observation comment is updated; missing, duplicate, or foreign author fails closed', () => {
   assert.equal(findOperatorComment([], 'trusted-publisher').status, 'NOT_SEEDED');
   assert.equal(findOperatorComment([comment(observation())], 'trusted-publisher').status, 'OK');
@@ -123,7 +134,7 @@ test('publisher updates one pre-seeded comment with read-before-write and exact 
   });
   assert.equal(result.status,'UPDATED');
   assert.equal(result.comment_id,1);
-  assert.equal(result.readback_updated_at,updatedValue.published_at);
+  assert.equal(result.github_updated_at,updatedValue.published_at);
   assert.equal(writes.length,1);
   assert.equal(writes[0].id,1);
   assert.equal(stored.body,body);
@@ -165,7 +176,7 @@ test('publisher exposes GitHub updated_at as readback evidence and rejects missi
   };
   const result = await updateExistingOperatorComment(options);
   assert.equal(result.status,'UPDATED');
-  assert.equal(result.readback_updated_at,updatedAt);
+  assert.equal(result.github_updated_at,updatedAt);
 
   stored = original;
   options.patchComment = async (_id,next)=>{stored={...stored,body:next};delete stored.updated_at;};
@@ -187,6 +198,83 @@ test('publisher exposes GitHub updated_at as readback evidence and rejects missi
   assert.equal(future.status,'UNKNOWN',
     'a future GitHub updated_at must not certify a publication the dashboard will reject');
   assert.equal(future.error,'OPERATOR_COMMENT_READBACK_TIMESTAMP_UNKNOWN');
+});
+
+test('publisher rejects non-monotonic sequence or observation before writing', async () => {
+  const original = comment(observation());
+  const cases = [
+    { name: 'sequence skips a value', sequence: 3, observedAt: now + 60_000,
+      error: 'OPERATOR_SEQUENCE_NOT_MONOTONIC' },
+    { name: 'observation time is unchanged', sequence: 2, observedAt: now,
+      error: 'OPERATOR_OBSERVATION_TIME_NOT_ADVANCED' },
+    { name: 'observation time moves backwards', sequence: 2, observedAt: now - 1_000,
+      error: 'OPERATOR_OBSERVATION_TIME_NOT_ADVANCED' },
+  ];
+
+  for (const item of cases) {
+    let writes = 0;
+    const published = observation({
+      snapshot_id: '11c95b35-bda3-4d54-9f91-431730ed5acd',
+      sequence: item.sequence,
+      observed_at: new Date(item.observedAt).toISOString(),
+      published_at: new Date(item.observedAt + 1_000).toISOString(),
+      expires_at: new Date(item.observedAt + 5 * 60_000).toISOString(),
+    });
+    const result = await updateExistingOperatorComment({
+      comments: [original], expectedLogin: 'trusted-publisher', body: encodeOperatorObservation(published),
+      readComment: async id => ({ ...original, id }),
+      patchComment: async () => { writes++; },
+      readComments: async () => [original],
+    });
+    assert.equal(result.status, 'UNKNOWN', item.name);
+    assert.equal(result.error, item.error, item.name);
+    assert.equal(writes, 0, `${item.name}: invalid snapshot must be rejected before PATCH`);
+  }
+});
+
+test('publisher requires GitHub updated_at to advance beyond the previous comment', async () => {
+  const original = { ...comment(observation()), updated_at: new Date(now + 120_000).toISOString() };
+  const published = observation({
+    snapshot_id: '11c95b35-bda3-4d54-9f91-431730ed5acd',
+    sequence: 2,
+    observed_at: new Date(now + 60_000).toISOString(),
+    published_at: new Date(now + 61_000).toISOString(),
+    expires_at: new Date(now + 6 * 60_000).toISOString(),
+  });
+  const body = encodeOperatorObservation(published);
+  let stored = original;
+  const result = await updateExistingOperatorComment({
+    comments: [original], expectedLogin: 'trusted-publisher', body,
+    readComment: async id => ({ ...stored, id }),
+    patchComment: async (_id, next) => { stored = { ...stored, body: next }; },
+    readComments: async () => [stored],
+  });
+  assert.equal(result.status, 'UNKNOWN');
+  assert.equal(result.error, 'OPERATOR_COMMENT_READBACK_TIMESTAMP_UNKNOWN');
+});
+
+test('publisher returns GitHub updated_at for a snapshot without a client-authored publication time', async () => {
+  const original = comment(observation());
+  const published = observation({
+    snapshot_id: '11c95b35-bda3-4d54-9f91-431730ed5acd',
+    sequence: 2,
+    observed_at: new Date(now + 60_000).toISOString(),
+    expires_at: new Date(now + 6 * 60_000).toISOString(),
+  });
+  delete published.published_at;
+  const body = OPERATOR_MARKER + JSON.stringify(published);
+  const updatedAt = new Date(now + 62_000).toISOString();
+  let stored = original;
+  const result = await updateExistingOperatorComment({
+    comments: [original], expectedLogin: 'trusted-publisher', body,
+    readComment: async id => ({ ...stored, id }),
+    patchComment: async (_id, next) => { stored = { ...stored, body: next, updated_at: updatedAt }; },
+    readComments: async () => [stored],
+    now: () => now + 63_000,
+  });
+  assert.equal(result.status, 'UPDATED');
+  assert.equal(result.github_updated_at, updatedAt);
+  assert.equal(Object.hasOwn(result.observation, 'published_at'), false);
 });
 
 test('expired observations degrade to STALE and future timestamps to UNKNOWN', () => {
@@ -243,8 +331,10 @@ test('Windows collector is read-only, hides its PowerShell child, and publishes 
   assert.equal(live.opencode_process_count, 0);
   assert.equal(live.runner_service_running, 1);
   assert.equal(Object.hasOwn(live, 'command_line'), false);
-  assert.match(readFileSync(new URL('../native-bridge/operator-observation.mjs', import.meta.url), 'utf8'),
-    /wscript\.exe[\s\S]+HiddenWorker\\\.vbs/);
+  const collectorSource = readFileSync(new URL('../native-bridge/operator-observation.mjs', import.meta.url), 'utf8');
+  assert.match(collectorSource, /wscript\.exe[\s\S]+HiddenWorker\\\.vbs/);
+  assert.match(collectorSource, /Name='opencode2\.exe' OR Name='opencode-cli\.exe' OR Name='opencode\.exe'/,
+    'process inventory must include the installed OpenCode V2 CLI executable name');
 });
 
 test('failed Windows collection exposes a bounded error code, not command output', () => {
@@ -806,7 +896,6 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
   const observedAt = new Date(Date.now()-30_000).toISOString();
   const snapshot = observation({
     observed_at:observedAt,
-    published_at:new Date(Date.now()-20_000).toISOString(),
     expires_at:new Date(Date.now()+5*60_000).toISOString(),
     source:{main_sha:'a'.repeat(40),comment_id:42},
     windows:{status:'FRESH',observed_at:observedAt,tasks_total:225,
@@ -819,6 +908,7 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
     opencode_v2:{installed_version:'opencode v2.0.27',process_count:0,
       process_observed_at:observedAt,historical_sessions_count:42},
   });
+  delete snapshot.published_at;
   const comments=[{id:42,body:encodeOperatorObservation(snapshot),
     user:{login:'wfvupu1212'},created_at:observedAt,
     updated_at:new Date(Date.now()-10_000).toISOString()},candidatePrJobComment(434, 'a'.repeat(40),43)];
@@ -858,6 +948,7 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
   assert.match(elements.get('runner-checks').textContent,/成功 3／失敗 0／queued 0／pending 1/);
   assert.match(elements.get('runner-checks').textContent,/略過或 neutral 1/);
   assert.match(elements.get('pr-state').textContent,/Draft/);
+  assert.match(elements.get('freshness-detail').textContent,/GitHub updated_at/);
   assert.match(elements.get('opencode-detail').textContent,/42/);
   assert.match(elements.get('rate-alert-title').textContent,/跨分頁鎖與公開快取未確認/);
   assert.equal(browserCalls,4,'startup reads the four sources once in dependency order');

@@ -304,13 +304,15 @@
         typeof s.snapshot_id !== 'string' || !/^[a-f0-9-]{36}$/i.test(s.snapshot_id) ||
         !Number.isSafeInteger(s.sequence) || s.sequence < 1 ||
         !Number.isFinite(Date.parse(s.observed_at)) ||
-        !Number.isFinite(Date.parse(s.published_at)) ||
+        (s.published_at !== undefined && !Number.isFinite(Date.parse(s.published_at))) ||
         !Number.isFinite(Date.parse(s.expires_at)) ||
         Date.parse(s.expires_at) <= Date.parse(s.observed_at) ||
         Date.parse(s.expires_at) - Date.parse(s.observed_at) > 15 * 60 * 1000 ||
-        Date.parse(s.published_at) < Date.parse(s.observed_at) - 5 * 60 * 1000) return null;
+        (s.published_at !== undefined &&
+          (Date.parse(s.published_at) < Date.parse(s.observed_at) - 5 * 60 * 1000 ||
+           Date.parse(s.published_at) >= Date.parse(s.expires_at)))) return null;
     const future = Date.parse(s.observed_at) > now + 5 * 60 * 1000 ||
-      Date.parse(s.published_at) > now + 5 * 60 * 1000;
+      (s.published_at !== undefined && Date.parse(s.published_at) > now + 5 * 60 * 1000);
     return { snapshot:s, freshness:future ? 'UNKNOWN' : Date.parse(s.expires_at) <= now ? 'STALE' : 'FRESH' };
   }
   function findSnapshot(comments, now) {
@@ -325,10 +327,13 @@
       return { status:'UNKNOWN', error:'OBSERVATION_COMMENT_ID_MISMATCH' };
     const readbackUpdatedAt = matches[0].updated_at;
     const readbackTime = Date.parse(readbackUpdatedAt || '');
-    const publishTime = Date.parse(parsed.snapshot.published_at);
+    const publishTime = parsed.snapshot.published_at === undefined
+      ? null : Date.parse(parsed.snapshot.published_at);
     if (!Number.isFinite(readbackTime))
       return { status:'UNKNOWN', error:'OBSERVATION_GITHUB_UPDATED_AT_UNKNOWN' };
-    if (Math.floor(readbackTime/1000) < Math.floor(publishTime/1000))
+    if (readbackTime < Date.parse(parsed.snapshot.observed_at) - 5 * 60 * 1000)
+      return { status:'UNKNOWN', error:'OBSERVATION_GITHUB_UPDATED_AT_BEFORE_OBSERVATION' };
+    if (publishTime !== null && Math.floor(readbackTime/1000) < Math.floor(publishTime/1000))
       return { status:'UNKNOWN', error:'OBSERVATION_GITHUB_UPDATED_AT_MISMATCH' };
     if (readbackTime > now + 5 * 60 * 1000)
       return { status:'UNKNOWN', error:'OBSERVATION_GITHUB_UPDATED_AT_FUTURE' };
@@ -1484,7 +1489,8 @@
         '；GitHub updated_at ' + readTime(observation.readbackUpdatedAt)
       : 'UNKNOWN：' + (observation.error || issueResource.error || '尚無唯一有效留言'));
     text('freshness-detail', snapshot
-      ? 'observed_at ' + readTime(snapshot.observed_at) + '；published_at ' + readTime(snapshot.published_at) +
+      ? 'observed_at ' + readTime(snapshot.observed_at) + '；GitHub updated_at ' +
+        readTime(observation.readbackUpdatedAt) +
         '；expires_at ' + readTime(snapshot.expires_at) + '；狀態 ' + observation.status +
         '／Win11 ' + osFreshness
       : '未取得可驗證快照');

@@ -64,7 +64,11 @@ const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: TEST_HOST,
   request_id: 'PTYSD_NATIVE_PING_20261012', kind: 'ping', source_sha: commit,
   spec_path: null, spec_sha256: null, ...opts });
 const encoded = o => JOB_MARKER + JSON.stringify(o);
-const com = (id, body, login = 't14210184') => ({ id, body, user: { login } });
+const com = (id, body, login = 't14210184') => {
+  const observation = parseOperatorObservation(body);
+  return { id, body, user: { login }, ...(observation
+    ? { updated_at: observation.published_at ?? observation.observed_at } : {}) };
+};
 const h = x => createHash('sha256').update(x).digest('hex');
 const TEST_GOAL_BODY = '# V5.3-R4\nPTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015\nAuthorized synthetic test scope.';
 const TEST_GOAL_REF = { issue: 310, comment_id: 6188322050,
@@ -149,7 +153,6 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
   };
   const observationDependencies = {
     now: () => new Date(store.now),
-    publishNow: () => new Date(store.now + 1000),
     collectWindowsObservation: () => ({ status: 'FRESH', observed_at: new Date(store.now).toISOString(),
       tasks_total: 2, legacy_monitor_registered: false, listener_2667: false,
       opencode_process_count: processCount, runner_service_count: 0, runner_service_running: false,
@@ -257,8 +260,10 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
     assert.equal(observations[0].user.login, 'trusted-publisher');
     let value = parseOperatorObservation(observations[0].body);
     assert.equal(value.sequence, 18);
-    assert.equal(value.published_at, new Date(successful.store.now + 1000).toISOString(),
-      'published_at must come from the publication clock, after host observation');
+    assert.equal(Object.hasOwn(value, 'published_at'), false,
+      'new snapshots use GitHub comment updated_at instead of a client-authored timestamp');
+    assert.equal(observations[0].updated_at, new Date(successful.store.now + 2000).toISOString(),
+      'publication time comes from the GitHub comment readback');
     assert.ok(successful.logs.includes('OPERATOR_OBSERVATION_UPDATED'));
     assert.deepEqual(successful.receiptWrites.map(x => x.state), ['STARTED', 'FINISHED']);
     assert.equal(successful.store.patches, 1);
@@ -607,6 +612,7 @@ test('authorized OpenCode edit jobs are handed to the existing isolated executor
         throw new Error(`UNEXPECTED_EDIT_ROUTE_API:${endpoint}`);
       },
       commentsRead:()=>comments,
+      goalCommentsRead:()=>[TEST_GOAL_COMMENT],
       writeReceipt(_config,data,login) { comments.push(com(nextId++,RECEIPT_MARKER+JSON.stringify(data),login)); },
       qualifyOpenCodeV2:()=>({ready:true}),
       createCandidateSourceBundle:({job:bundleJob,executor:bundleExecutor,attemptId})=>{
@@ -718,6 +724,8 @@ test('OpenCode PR-pinned dispatch refuses STARTED if the trusted job comment cha
         throw new Error(`UNEXPECTED_CANDIDATE_PIN_API:${endpoint}`);
       },
       commentsRead:()=>comments,
+      goalCommentsRead:()=>[{id:goalRef.comment_id,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
+        user:{login:'dispatcher'},body:goalBody}],
       writeReceipt(_config,data,login) { comments.push(com(nextId++,RECEIPT_MARKER+JSON.stringify(data),login)); },
       qualifyOpenCodeV2:()=>({ready:true}),
       assertExecutorTaskReady:()=>({ready:true}),
@@ -765,16 +773,22 @@ test('source-bound OpenCode job requires a read-back of the exact trusted Human 
   const comment={id:goalRef.comment_id,
     issue_url:`https://api.github.com/repos/${REPO}/issues/${goalRef.issue}`,
     user:{login:'dispatcher'},body:goalBody};
-  const read=value=>verifyGoalReference(job,['dispatcher'],uri=>{
+  const read=(value, goals=[comment])=>verifyGoalReference(job,['dispatcher'],uri=>{
     assert.equal(uri,`repos/${REPO}/issues/comments/${goalRef.comment_id}`);
     return value;
-  });
+  },()=>goals);
   assert.deepEqual(read(comment),{valid:true,reason:null});
+  assert.equal(read(comment,[comment,{...comment,id:goalRef.comment_id+1,body:goalBody+' revised'}]).reason,
+    'GOAL_COMMENT_SUPERSEDED');
+  assert.equal(verifyGoalReference(job,['dispatcher'],()=>comment,()=>{throw new Error('network unavailable');}).reason,
+    'LATEST_GOAL_READBACK_UNKNOWN');
+  assert.equal(verifyGoalReference(job,['dispatcher'],()=>comment,()=>null).reason,
+    'LATEST_GOAL_READBACK_UNKNOWN');
   assert.equal(read({...comment,user:{login:'outsider'}}).reason,'GOAL_COMMENT_IDENTITY_MISMATCH');
   assert.equal(read({...comment,issue_url:`https://api.github.com/repos/${REPO}/issues/311`}).reason,
     'GOAL_COMMENT_IDENTITY_MISMATCH');
   assert.equal(read({...comment,body:goalBody+' changed'}).reason,'GOAL_COMMENT_CONTENT_MISMATCH');
-  assert.equal(verifyGoalReference(job,['dispatcher'],()=>{throw new Error('network unavailable');}).reason,
+  assert.equal(verifyGoalReference(job,['dispatcher'],()=>{throw new Error('network unavailable');},()=>[comment]).reason,
     'GOAL_COMMENT_READBACK_UNKNOWN');
 });
 
@@ -786,6 +800,8 @@ test('candidate OpenCode edit waits for unavailable Human GOAL readback without 
     const goalBody='# V5.3-R4\nPTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015\nAuthorized context.';
     const goalRef={issue:310,comment_id:6188322050,
       marker:'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015',body_sha256:h(goalBody)};
+    const goalComment={id:goalRef.comment_id,body:goalBody,
+      issue_url:`https://api.github.com/repos/${REPO}/issues/310`,user:{login:'dispatcher'}};
     const mainSha='a'.repeat(40),candidateSha='d'.repeat(40),prNumber=434;
     const spec='Edit only README.md.';
     const job={...mkjob({host:hostname().toUpperCase(),request_id:'PTYSD_GOAL_READBACK_WAIT_20261016',
@@ -820,6 +836,7 @@ test('candidate OpenCode edit waits for unavailable Human GOAL readback without 
         throw new Error(`UNEXPECTED_GOAL_MISMATCH_API:${endpoint}`);
       },
       commentsRead:()=>comments,
+      goalCommentsRead:()=>[goalComment],
       writeReceipt:(_config,data,login)=>{
         receiptWrites.push(data);
         comments.push(com(comments.length+1,RECEIPT_MARKER+JSON.stringify(data),login));
@@ -843,6 +860,76 @@ test('candidate OpenCode edit waits for unavailable Human GOAL readback without 
     ]);
     assert.equal(receiptWrites.some(item=>item.request_id===job.request_id),false,
       'a GOAL readback mismatch never starts or terminally consumes the edit request');
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('candidate OpenCode edit is not dispatched after its bound Human GOAL is superseded', async () => {
+  const root=mkdtempSync(join(homedir(),'.ptysd-opencode-goal-superseded-'));
+  try {
+    const workspace=join(root,'workspace'),stateDir=join(root,'state');
+    mkdirSync(workspace);mkdirSync(stateDir);
+    const oldBody='# V5.3-R4\nPTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015\nOld authorized scope.';
+    const latestBody='# V5.3-R4\nPTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015\nUpdated authorized scope.';
+    const goalRef={issue:310,comment_id:6188322050,
+      marker:'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015',body_sha256:h(oldBody)};
+    const oldGoal={id:goalRef.comment_id,body:oldBody,
+      issue_url:`https://api.github.com/repos/${REPO}/issues/310`,user:{login:'dispatcher'}};
+    const latestGoal={...oldGoal,id:goalRef.comment_id+1,body:latestBody};
+    const mainSha='a'.repeat(40),candidateSha='d'.repeat(40),prNumber=434;
+    const spec='Edit only README.md.';
+    const job={...mkjob({host:hostname().toUpperCase(),request_id:'PTYSD_GOAL_SUPERSEDED_20261017',
+      kind:'opencode_edit',source_sha:candidateSha,spec_path:'native-bridge/tasks/scoped-edit.md',
+      spec_sha256:h(spec)}),schema:6,model:'opencode/spark',variant:'high',
+      write_paths:['README.md'],candidate_pr:prNumber,goal_ref:goalRef};
+    const ping=mkjob({host:hostname().toUpperCase(),request_id:'PTYSD_PING_AFTER_GOAL_SUPERSEDED_20261017'});
+    const pr={number:prNumber,state:'open',base:{ref:'main',sha:mainSha,
+      repo:{id:REPO_ID,full_name:REPO}},head:{sha:candidateSha,
+      repo:{id:REPO_ID,full_name:REPO}}};
+    const comments=[com(1,encoded(job),'dispatcher'),com(2,encoded(ping),'dispatcher')];
+    const executor={task_name:'\\PTYSD\\OpenCodeExecutor',user_sid:'S-1-5-21-100-200-300-1001',
+      publisher_sid:'S-1-5-21-100-200-300-1002',node_bin:'C:\\Node\\node.exe',
+      script_path:'C:\\PTYSD\\executor.mjs',config_path:'C:\\PTYSD\\executor.json',
+      manifest_dir:join(root,'manifests'),results_dir:join(root,'results'),working_directory:root};
+    let dispatches=0,bundleBuilds=0,goalReferenceReads=0;const receiptWrites=[],logs=[];
+    const result=await executeWorker({repo:REPO,project_id:PROJECT,host:hostname().toUpperCase(),issue:101,
+      workspace,state_dir:stateDir,dispatchers:['dispatcher'],enable_v2_edit_runs:true,
+      allowed_edit_models:{'opencode/spark':['high']},executor},{
+      apiRead(endpoint){
+        if(endpoint==='user')return {login:'worker'};
+        if(endpoint.endsWith('/issues/101'))return {title:ISSUE_TITLE,state:'open'};
+        if(endpoint.includes('/git/ref/heads/main'))return {object:{sha:mainSha}};
+        if(endpoint.endsWith(`/pulls/${prNumber}`))return pr;
+        if(endpoint.includes('/contents/'))return {encoding:'base64',content:Buffer.from(spec).toString('base64')};
+        if(endpoint.endsWith(`/issues/comments/${goalRef.comment_id}`)){goalReferenceReads++;return oldGoal;}
+        const match=endpoint.match(/\/issues\/comments\/(\d+)$/);
+        if(match)return comments.find(item=>item.id===Number(match[1]));
+        throw new Error(`UNEXPECTED_GOAL_MISMATCH_API:${endpoint}`);
+      },
+      commentsRead:()=>comments,
+      goalCommentsRead:()=>[oldGoal,latestGoal],
+      writeReceipt:(_config,data,login)=>{
+        receiptWrites.push(data);
+        comments.push(com(comments.length+1,RECEIPT_MARKER+JSON.stringify(data),login));
+      },
+      qualifyOpenCodeV2:()=>({ready:true}),
+      assertExecutorTaskReady:()=>({ready:true}),
+      inspectOpenCodeExecutorAttempt:(_descriptor,expected={})=>expected.job?{state:'STARTED'}:{state:'EMPTY'},
+      createCandidateSourceBundle:()=>{bundleBuilds++;return {source_sha:candidateSha,sha256:'f'.repeat(64)};},
+      dispatchToExecutor:()=>{dispatches++;return {outcome:'EXECUTOR_TASK_DISPATCHED_NOT_ACCEPTANCE'};},
+      runPlan:()=>{throw new Error('MODEL_MUST_NOT_RUN_IN_DISPATCHER');},
+      log:value=>logs.push(value),
+    });
+    assert.equal(result.state,'FINISHED','a superseded model job must not starve independent ping work');
+    assert.equal(result.request_id,ping.request_id);
+    assert.ok(logs.some(line=>line.includes(`HUMAN_GOAL_REFERENCE_WAITING_GOAL_COMMENT_SUPERSEDED_${job.request_id}_NO_START`)));
+    assert.equal(goalReferenceReads,0,'a stale GOAL reference is rejected before exact-comment dispatch readback');
+    assert.equal(bundleBuilds,1,'the temporary source bundle is removed after the final GOAL check fails');
+    assert.equal(dispatches,0);
+    assert.deepEqual(receiptWrites.map(item=>[item.request_id,item.state]),[
+      [ping.request_id,'STARTED'],[ping.request_id,'FINISHED'],
+    ]);
+    assert.equal(receiptWrites.some(item=>item.request_id===job.request_id),false,
+      'a superseded GOAL never starts or terminally consumes the old edit request');
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
@@ -1125,8 +1212,13 @@ test('OpenCode records a fresh OS process-tree readback after the CLI root exits
       currentSid:()=>executorRuntime.user_sid,
       qualifyOpenCodeV2:()=>({ready:true,bin:'C:\\OpenCode\\opencode-cli.exe'}),
       readV2AuthReadiness:()=>({status:'SAVED_ACCOUNT_RECORDS_PRESENT',saved_account_count:1}),
-      runCapturedProcess:async()=>({outcome:'OPENCODE_V2_EXIT_0_UNTRUSTED',exit_code:0,
-        local_evidence:{process_id:7331,process_tree_state:'NOT_CHECKED',termination_state:'NOT_REQUESTED'}}),
+      runCapturedProcess:async(_bin,_args,options)=>{
+        writeFileSync(options.stdoutPath,`${JSON.stringify({type:'text',sessionID:'ses_abcdefgh12345678',
+          part:{type:'text',text:'must be ignored after capture error'}})}\n`);
+        return {outcome:'OPENCODE_V2_EXIT_0_UNTRUSTED',exit_code:0,
+          local_evidence:{process_id:7331,process_tree_state:'NOT_CHECKED',termination_state:'NOT_REQUESTED',
+            capture_error:'OUTPUT_PIPE_UNAVAILABLE'}};
+      },
       readProcessTree:pid=>{readbackPid=pid;return {state:'DEAD',root_pid:pid,process_ids:[],
         observed_at:'2026-10-16T00:00:00.000Z',error:null};},
     });
@@ -1134,7 +1226,12 @@ test('OpenCode records a fresh OS process-tree readback after the CLI root exits
     assert.equal(result.local_evidence.process_tree_state,'DEAD');
     assert.equal(result.local_evidence.process_tree_readback.error,null);
     assert.equal(result.model_invoked,undefined,
-      'a synthetic process close is not proof of provider model activity');
+      'unknown or corrupt CLI output is not proof that the model was or was not called');
+    assert.equal(result.session_id,null,
+      'captured bytes are discarded when the output capture reports an error');
+    assert.equal(result.provider_usage_evidence,'UNKNOWN');
+    assert.equal(result.local_evidence.opencode_jsonl_state,'UNKNOWN');
+    assert.equal(JSON.stringify(result).includes('must be ignored after capture error'),false);
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
@@ -1233,6 +1330,7 @@ test('OpenCode edit stays WAITING without edit authorization, lets ping run, and
       workspace,state_dir:stateDir,dispatchers:['dispatcher'],enable_v2_edit_runs:true,
       allowed_edit_models:{'opencode/spark':['low']}},{
       apiRead,commentsRead:()=>comments,
+      goalCommentsRead:()=>[TEST_GOAL_COMMENT],
       writeReceipt:(_config,data,login)=>{
         waitingWrites.push(data); comments.push(com(nextId++,RECEIPT_MARKER+JSON.stringify(data),login));
       },
@@ -1266,6 +1364,7 @@ test('OpenCode edit stays WAITING without edit authorization, lets ping run, and
       workspace,state_dir:stateDir,dispatchers:['dispatcher'],enable_v2_edit_runs:true,
       allowed_edit_models:{'opencode/spark':['high']},executor},{
       apiRead,commentsRead:()=>comments,
+      goalCommentsRead:()=>[TEST_GOAL_COMMENT],
       writeReceipt:(_config,data,login)=>{
         resumedWrites.push(data); comments.push(com(nextId++,RECEIPT_MARKER+JSON.stringify(data),login));
       },
@@ -1842,8 +1941,17 @@ test('OpenCode V2 edit execution requires separate executor identity and uses on
       readV2AuthReadiness:()=>({status:'SAVED_ACCOUNT_RECORDS_PRESENT',saved_account_count:1}),
       runCapturedProcess:async(bin,args,options)=>{captured={bin,args,options};
         assert.equal(options.onSpawn(9876),true,'spawn is recorded before the executor proceeds');
+        const sessionID='ses_1234567890abcdef';
+        writeFileSync(options.stdoutPath,[
+          {type:'step_start',sessionID},
+          {type:'text',sessionID,part:{type:'text',text:'synthetic model output'}},
+          {type:'tool_use',sessionID,part:{type:'tool',tool:'edit',callID:'edit-1',state:{status:'completed'}}},
+          {type:'step_finish',sessionID,part:{type:'step-finish',tokens:{input:9,output:2,reasoning:0,cache:{read:1,write:0}}}},
+        ].map(event=>JSON.stringify(event)).join('\n')+'\n');
         return {outcome:'OPENCODE_EDIT_CLI_EXIT_0_UNVERIFIED',exit_code:0,
-          evidence_sha256:'d'.repeat(64),evidence_bytes:19};},
+          evidence_sha256:'d'.repeat(64),evidence_bytes:19,
+          local_evidence:{stdout_sha256:'a'.repeat(64),stderr_sha256:'b'.repeat(64),
+            storage_error:null,capture_error:null}};},
       onProcessSpawn:(pid,identity)=>{persistedProcessIdentity={pid,identity};return true;},
       runTaskkill:()=>{taskkillCalls++;const error=new Error('synthetic tree kill failure');error.code='EACCES';throw error;},
       readProcessTree:pid=>{treeReadbacks++;return {state:'ALIVE',root_pid:pid,process_ids:[pid,9877],
@@ -1857,6 +1965,30 @@ test('OpenCode V2 edit execution requires separate executor identity and uses on
       }
     }
     assert.equal(result.outcome,'OPENCODE_EDIT_CLI_EXIT_0_UNVERIFIED');
+    assert.equal(result.session_id,'ses_1234567890abcdef');
+    assert.equal(result.session_started,true);
+    assert.equal(result.provider_usage_evidence,'CONFIRMED');
+    assert.equal(result.model_activity_evidence,'CONFIRMED');
+    assert.equal(result.tool_execution_evidence,'OBSERVED');
+    assert.equal(result.tool_execution_count,1);
+    assert.equal(result.file_change_tool_evidence,'COMPLETED');
+    assert.deepEqual(result.token_usage,{input_tokens:9,output_tokens:2,
+      cached_input_tokens:1,reasoning_output_tokens:0});
+    assert.equal(result.local_evidence.opencode_jsonl_state,'PARSED');
+    assert.equal(JSON.stringify(result).includes('synthetic model output'),false,
+      'model text is never copied into structured result evidence');
+    const published=receipt(job.request_id,'00000000-0000-4000-8000-000000000008',
+      'FINISHED',job,result);
+    assert.equal(published.session_id,result.session_id);
+    assert.equal(published.provider_usage_evidence,'CONFIRMED');
+    assert.equal(published.stdout_sha256,'a'.repeat(64));
+    assert.ok(parseReceipt(RECEIPT_MARKER+JSON.stringify(published)),
+      'the public receipt validates the parsed, non-content execution evidence');
+    assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify({...published,
+      provider_usage_evidence:'UNKNOWN',model_activity_evidence:'UNKNOWN',token_usage:null})),null,
+    'a receipt cannot claim model invocation without usage or model activity evidence');
+    assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify({...published,session_id:null})),null,
+      'a receipt cannot claim a started session without its session ID');
     assert.equal(captured.args[captured.args.indexOf('--agent')+1],'ptysd-scoped-write');
     assert.equal(captured.args.includes('ptysd-readonly'),false);
     assert.equal(captured.args[captured.args.indexOf('--model')+1],'opencode/spark#high');

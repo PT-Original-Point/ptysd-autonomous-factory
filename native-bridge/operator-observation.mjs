@@ -38,12 +38,14 @@ export function parseOperatorObservation(body) {
       value.issue !== OPERATOR_ISSUE || value.host_alias !== 'win11-primary' ||
       !SNAPSHOT_ID.test(value.snapshot_id || '') ||
       !Number.isSafeInteger(value.sequence) || value.sequence < 1 ||
-      !validTime(value.observed_at) || !validTime(value.published_at) ||
+      !validTime(value.observed_at) ||
+      (value.published_at !== undefined && !validTime(value.published_at)) ||
       !validTime(value.expires_at) || containsForbiddenKey(value)) return null;
   const observed = Date.parse(value.observed_at);
-  const published = Date.parse(value.published_at);
   const expires = Date.parse(value.expires_at);
-  if (published < observed || published >= expires ||
+  const legacyPublished = value.published_at === undefined ? null : Date.parse(value.published_at);
+  if ((legacyPublished !== null &&
+       (legacyPublished < observed || legacyPublished >= expires)) ||
       expires <= observed || expires - observed > 15 * 60 * 1000) return null;
   return value;
 }
@@ -71,6 +73,7 @@ export function findOperatorComment(comments, expectedLogin) {
 
 export async function updateExistingOperatorComment({
   comments, expectedLogin, body, buildBody, readComment, patchComment, readComments,
+  now = Date.now,
 }) {
   const existing = findOperatorComment(comments, expectedLogin);
   if (existing.status === 'NOT_SEEDED') return { status: 'NOT_SEEDED' };
@@ -84,9 +87,18 @@ export async function updateExistingOperatorComment({
       current?.user?.login !== expectedLogin ||
       current?.body !== existing.comment.body)
     return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_CHANGED_BEFORE_UPDATE' };
+  const currentObservation = parseOperatorObservation(current.body);
+  const currentUpdatedTime = Date.parse(current.updated_at || '');
+  if (!currentObservation || !Number.isFinite(currentUpdatedTime))
+    return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_CURRENT_TIMESTAMP_UNKNOWN' };
   const nextBody = typeof buildBody === 'function' ? await buildBody() : body;
-  if (!parseOperatorObservation(nextBody))
+  const nextObservation = parseOperatorObservation(nextBody);
+  if (!nextObservation)
     return { status: 'UNKNOWN', error: 'INVALID_OPERATOR_UPDATE_BODY' };
+  if (nextObservation.sequence !== currentObservation.sequence + 1)
+    return { status: 'UNKNOWN', error: 'OPERATOR_SEQUENCE_NOT_MONOTONIC' };
+  if (Date.parse(nextObservation.observed_at) <= Date.parse(currentObservation.observed_at))
+    return { status: 'UNKNOWN', error: 'OPERATOR_OBSERVATION_TIME_NOT_ADVANCED' };
   await patchComment(existing.comment.id, nextBody);
   const fresh = findOperatorComment(await readComments(), expectedLogin);
   if (fresh.status !== 'OK' || fresh.comment.id !== existing.comment.id ||
@@ -94,12 +106,20 @@ export async function updateExistingOperatorComment({
     return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN' };
   const readbackUpdatedAt = fresh.comment.updated_at;
   const readbackTime = Date.parse(readbackUpdatedAt || '');
+  const observedTime = Date.parse(fresh.observation.observed_at);
+  const expiresTime = Date.parse(fresh.observation.expires_at);
+  const currentTime = typeof now === 'function' ? Number(now()) : Number.NaN;
+  const legacyPublishedTime = fresh.observation.published_at === undefined
+    ? null : Date.parse(fresh.observation.published_at);
   if (!Number.isFinite(readbackTime) ||
-      readbackTime < Date.parse(fresh.observation.published_at) ||
-      readbackTime > Date.now() + 5 * 60 * 1000)
+      readbackTime <= currentUpdatedTime ||
+      (legacyPublishedTime !== null && readbackTime < legacyPublishedTime) ||
+      readbackTime < observedTime - 5 * 60 * 1000 ||
+      readbackTime >= expiresTime ||
+      !Number.isFinite(currentTime) || readbackTime > currentTime + 5 * 60 * 1000)
     return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_READBACK_TIMESTAMP_UNKNOWN' };
   return { status: 'UPDATED', comment_id: existing.comment.id, observation: fresh.observation,
-    readback_updated_at: readbackUpdatedAt };
+    github_updated_at: readbackUpdatedAt };
 }
 
 export function observationFreshness(observation, now = Date.now()) {
@@ -124,7 +144,7 @@ try { $listener = (@(Get-NetTCPConnection -State Listen -LocalPort 2667 -ErrorAc
 }
 $opencodeCount = $null
 try {
-  $opencodeCount = @(Get-CimInstance Win32_Process -Filter "Name='opencode-cli.exe' OR Name='opencode.exe'" -ErrorAction Stop).Count
+  $opencodeCount = @(Get-CimInstance Win32_Process -Filter "Name='opencode2.exe' OR Name='opencode-cli.exe' OR Name='opencode.exe'" -ErrorAction Stop).Count
 } catch {}
 $runnerServiceCount = $null
 $runnerServiceRunning = $null

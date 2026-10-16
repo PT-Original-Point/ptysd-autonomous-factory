@@ -234,9 +234,17 @@ export async function runCodex(request, config, worktree, evidenceDir, deps = {}
     })),
     onSpawn: deps.onSpawn,
   });
-  const executionEvidence = await readCodexExecutionEvidence(outPath);
-  const sessionId = executionEvidence.session_id;
   const evidence = capture.local_evidence;
+  // A partial or unavailable capture cannot support provider, session, or
+  // tool-activity claims. In particular, do not turn a storage failure into
+  // an exception by attempting to read the same unavailable output path.
+  const executionEvidence = evidence.storage_error || evidence.capture_error
+    ? { session_id: null, provider_usage_evidence: 'UNKNOWN', model_activity_evidence: 'UNKNOWN',
+      token_usage: null, tool_execution_evidence: 'UNKNOWN', tool_execution_count: 0,
+      file_change_tool_evidence: 'UNKNOWN', file_change_tool_completed_count: 0,
+      file_change_tool_failed_count: 0, file_change_tool_incomplete_count: 0 }
+    : await readCodexExecutionEvidence(outPath);
+  const sessionId = executionEvidence.session_id;
   let processTreeState = evidence.process_tree_state;
   if (processTreeState === 'NOT_CHECKED') {
     const readback = Number.isSafeInteger(evidence.process_id)

@@ -4,7 +4,109 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync, symlinkSync } from 'node:fs';
 import { platform, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { discoverV2Executables, qualifyOpenCodeV2, parseOpenCodeV2Version, validateV2Model, buildV2ScopedEditConfig, buildV2ScopedEditArgs } from '../native-bridge/opencode-v2.mjs';
+import { discoverV2Executables, qualifyOpenCodeV2, parseOpenCodeV2Version, validateV2Model, buildV2ScopedEditConfig, buildV2ScopedEditArgs, readOpenCodeV2RunEvidence } from '../native-bridge/opencode-v2.mjs';
+
+test('OpenCode V2 JSONL evidence separates session, model usage, tool execution and file edits without retaining text', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc2-jsonl-evidence-'));
+  const output = join(dir, 'stdout.jsonl');
+  const sessionID = 'ses_1234567890abcdef';
+  try {
+    const events = [
+      { type:'step_start', sessionID },
+      { type:'text', sessionID, part:{ type:'text', text:'private model content must not enter the receipt' } },
+      { type:'tool_use', sessionID, part:{ type:'tool', tool:'edit', callID:'call-1', state:{ status:'running' } } },
+      { type:'tool_use', sessionID, part:{ type:'tool', tool:'edit', callID:'call-1', state:{ status:'completed' } } },
+      { type:'step_finish', sessionID, part:{ type:'step-finish', tokens:{
+        input:11, output:3, reasoning:1, cache:{ read:2, write:0 } } } },
+    ];
+    writeFileSync(output, `${events.map(event => JSON.stringify(event)).join('\n')}\n`);
+    const evidence = await readOpenCodeV2RunEvidence(output);
+    assert.equal(evidence.valid, true);
+    assert.equal(evidence.session_id, sessionID);
+    assert.equal(evidence.session_started, true);
+    assert.equal(evidence.provider_usage_evidence, 'CONFIRMED');
+    assert.equal(evidence.model_activity_evidence, 'CONFIRMED');
+    assert.equal(evidence.tool_execution_evidence, 'OBSERVED');
+    assert.equal(evidence.tool_execution_count, 1, 'running and completion updates for one call count once');
+    assert.equal(evidence.file_change_tool_evidence, 'COMPLETED');
+    assert.equal(evidence.file_change_tool_completed_count, 1);
+    assert.deepEqual(evidence.token_usage, {
+      input_tokens:11, output_tokens:3, cached_input_tokens:2, reasoning_output_tokens:1,
+    });
+    assert.equal(evidence.model_invoked, true);
+    assert.equal(JSON.stringify(evidence).includes('private model content'), false);
+  } finally { rmSync(dir, { recursive:true, force:true }); }
+});
+
+test('OpenCode session evidence alone never claims model activity, usage or tool execution', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc2-jsonl-session-only-'));
+  const output = join(dir, 'stdout.jsonl');
+  try {
+    writeFileSync(output, `${JSON.stringify({ type:'step_start', sessionID:'ses_abcdefgh12345678' })}\n`);
+    const evidence = await readOpenCodeV2RunEvidence(output);
+    assert.equal(evidence.valid, true);
+    assert.equal(evidence.session_started, true);
+    assert.equal(evidence.provider_usage_evidence, 'UNKNOWN');
+    assert.equal(evidence.model_activity_evidence, 'UNKNOWN');
+    assert.equal(evidence.tool_execution_evidence, 'UNKNOWN');
+    assert.equal(evidence.model_invoked, null,
+      'absence of activity evidence is unknown, not proof that the model was not called');
+  } finally { rmSync(dir, { recursive:true, force:true }); }
+});
+
+test('OpenCode partial token records preserve unknown dimensions instead of inventing zero usage', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc2-jsonl-partial-usage-'));
+  const output = join(dir, 'stdout.jsonl');
+  try {
+    writeFileSync(output, `${JSON.stringify({ type:'step_finish', sessionID:'ses_abcdefgh12345678',
+      part:{ type:'step-finish', tokens:{ output:5 } } })}\n`);
+    const evidence = await readOpenCodeV2RunEvidence(output);
+    assert.equal(evidence.valid, true);
+    assert.equal(evidence.provider_usage_evidence, 'CONFIRMED');
+    assert.deepEqual(evidence.token_usage, {
+      input_tokens:null, output_tokens:5, cached_input_tokens:null, reasoning_output_tokens:null,
+    });
+  } finally { rmSync(dir, { recursive:true, force:true }); }
+});
+
+test('OpenCode usage is counted only from step-finish events, avoiding repeated metadata totals', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc2-jsonl-usage-events-'));
+  const output = join(dir, 'stdout.jsonl');
+  try {
+    writeFileSync(output, [
+      { type:'session.updated', sessionID:'ses_abcdefgh12345678', tokens:{ input:99, output:20 } },
+      { type:'step_finish', sessionID:'ses_abcdefgh12345678',
+        part:{ type:'step-finish', tokens:{ input:2, output:1, reasoning:0, cache:{ read:0 } } } },
+    ].map(event => JSON.stringify(event)).join('\n'));
+    const evidence = await readOpenCodeV2RunEvidence(output);
+    assert.equal(evidence.provider_usage_evidence, 'CONFIRMED');
+    assert.deepEqual(evidence.token_usage, {
+      input_tokens:2, output_tokens:1, cached_input_tokens:0, reasoning_output_tokens:0,
+    });
+  } finally { rmSync(dir, { recursive:true, force:true }); }
+});
+
+test('OpenCode JSONL evidence fails closed for absent, empty, malformed or mixed-session output', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc2-jsonl-invalid-'));
+  const output = join(dir, 'stdout.jsonl');
+  try {
+    const missing = await readOpenCodeV2RunEvidence(join(dir, 'missing.jsonl'));
+    assert.equal(missing.valid, false);
+    assert.equal(missing.reason, 'OPEN_CODE_JSONL_UNAVAILABLE');
+    writeFileSync(output, ' \n');
+    assert.equal((await readOpenCodeV2RunEvidence(output)).reason, 'OPEN_CODE_JSONL_EMPTY');
+    writeFileSync(output, '{"type":"step_start","sessionID":"ses_abcdefgh12345678"}\n{bad json\n');
+    const corrupt = await readOpenCodeV2RunEvidence(output);
+    assert.equal(corrupt.valid, false);
+    assert.equal(corrupt.reason, 'OPEN_CODE_JSONL_INVALID');
+    assert.equal(corrupt.session_id, null, 'partial evidence is discarded after corruption');
+    writeFileSync(output, [
+      { type:'step_start', sessionID:'ses_abcdefgh12345678' },
+      { type:'step_start', sessionID:'ses_87654321abcdefgh' },
+    ].map(event => JSON.stringify(event)).join('\n'));
+    assert.equal((await readOpenCodeV2RunEvidence(output)).reason, 'OPEN_CODE_JSONL_MULTIPLE_SESSIONS');
+  } finally { rmSync(dir, { recursive:true, force:true }); }
+});
 
 test('V2-only version recognition rejects V1, nonversion and contaminated output', () => {
   for (const s of ['2.0.27', 'v2.0.27', 'opencode v2.0.27', 'opencode2 2.0.27', '2.3.0-beta.2']) assert.ok(parseOpenCodeV2Version(s));
