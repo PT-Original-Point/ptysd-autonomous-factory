@@ -20,6 +20,7 @@ import { buildExecutorTaskXml, candidateBundlePath, candidateWorkspacePath, exec
   from '../native-bridge/windows-executor.mjs';
 import { executePendingManifest } from '../native-bridge/executor.mjs';
 import { takeNextRequest } from '../native-bridge/codex-executor.mjs';
+import { validateCodexExecutorRequest } from '../native-bridge/codex-continuation.mjs';
 
 test('native task installer preserves the hidden waiting launcher and exit-code path', () => {
   const installer = readFileSync(new URL('../native-bridge/install.ps1', import.meta.url), 'utf8');
@@ -184,6 +185,7 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
   const codexDispatchCalls = { count: 0 };
   const run = () => runWorker({
     config, api, issueComments: () => store.comments,
+    goalCommentsRead: () => [],
     observationDependencies,
     runPlan: async () => {
       modelCalls.count++;
@@ -2370,7 +2372,7 @@ test('Worker routes an authorized Codex job through the isolated executor adapte
     };
     const calls = { bundle: 0, start: 0, trigger: 0, inline: 0 };
     const result = await executeWorker(config, {
-      apiRead, commentsRead: () => comments,
+      apiRead, commentsRead: () => comments, goalCommentsRead: () => [],
       assertCodexExecutorTaskReady: () => ({ ready: true }),
       writeReceipt: () => { throw new Error('GENERIC_RECEIPT_PATH_MUST_NOT_RUN'); },
       runPlan: () => { calls.inline++; throw new Error('MODEL_MUST_NOT_RUN_INLINE'); },
@@ -2407,6 +2409,7 @@ test('Worker routes an authorized Codex job through the isolated executor adapte
     comments.push(pendingComment);
     const lockLogs = [];
     const guarded = await executeWorker(config, {
+      goalCommentsRead: () => [],
       apiRead: uri => {
         if (uri === 'user') return { login: 'worker' };
         if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
@@ -2892,7 +2895,8 @@ test('Issue #310 wrong-author, wrong-issue, or edited task readback never dispat
     const f = makeIssue310TaskFixture({ taskCommentOverrides: overrides });
     try {
       const result = await executeWorker(f.config, f.adapters);
-      assert.equal(result.state, 'NO_DELTA');
+      assert.equal(result.state, 'WAITING');
+      assert.equal(result.reason, 'HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED');
       assert.equal(f.dispatches.length, 0);
       assert.equal(f.writes.length, 0);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
@@ -2917,10 +2921,95 @@ test('Issue #310 prose is not an executable task', async () => {
     body: 'Please run this task now and modify the repository.' } });
   try {
     const result = await executeWorker(f.config, f.adapters);
-    assert.equal(result.state, 'NO_DELTA');
+    assert.equal(result.state, 'WAITING');
+    assert.equal(result.reason, 'HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED');
     assert.equal(f.dispatches.length, 0);
     assert.equal(f.writes.length, 0);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('Human #310 Goal reaches the existing bounded Codex spool through the normal Worker entry point', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-human-goal-dispatch-'));
+  try {
+    const workspace = join(root, 'workspace'), stateDir = join(root, 'state');
+    const codexSpool = join(root, 'codex-spool');
+    mkdirSync(workspace); mkdirSync(stateDir); mkdirSync(codexSpool);
+    const host = hostname().toUpperCase(), mainSha = 'c'.repeat(40);
+    const directiveBody = [
+      '# Current Human direction',
+      'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015',
+      'Inspect the accepted source and make one bounded correction.',
+    ].join('\n');
+    const directive = { id: 6188322050, body: directiveBody,
+      issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
+      user: { login: 'dispatcher' } };
+    const spec = '# Source-only task\nWork only in the exact allowlisted paths.\n';
+    const receiptComments = [], started = [], counters = { bundles: 0, triggers: 0, inline: 0 };
+    const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
+      workspace, state_dir: stateDir, codex_spool: codexSpool, dispatchers: ['dispatcher'],
+      human_goal_codex_policy: { enabled: true, model: 'gpt-6.1-sol',
+        reasoning_effort: 'medium', write_paths: ['README.md'] },
+      github_transport_verified: true, codex_cli_qualified: true, codex_login_verified: true,
+      enable_codex_model_runs: true, codex_usage_authorized: true,
+      codex_sandbox_boundary: 'VERIFIED_WORKSPACE_ONLY',
+      publisher_identity_sid: 'S-1-5-21-1000', executor_identity_sid: 'S-1-5-21-2000',
+      codex_executor_task: 'PTYSD-Codex-Executor',
+      codex_executor_task_user: `${TEST_HOST}\\PTYSDCODEXEXEC`,
+      codex_executor_wscript_path: 'C:\\Windows\\System32\\wscript.exe',
+      codex_executor_launcher_path: 'C:\\ProgramData\\PTYSDNativeBridge\\HiddenCodexExecutor.vbs',
+      codex_executor_node_path: 'C:\\Program Files\\nodejs\\node.exe',
+      codex_executor_script_path: 'C:\\ProgramData\\PTYSDNativeBridge\\codex-executor.mjs',
+      codex_executor_config_path: 'C:\\ProgramData\\PTYSDNativeBridge\\executor-config.json',
+      codex_executor_working_directory: 'C:\\ProgramData\\PTYSDNativeBridge\\CodexSpool',
+      allowed_codex_models: { 'gpt-6.1-sol': ['medium'] } };
+    const apiRead = endpoint => {
+      if (endpoint === 'user') return { login: 'worker' };
+      if (endpoint === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
+      if (endpoint === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: mainSha } };
+      if (endpoint === `repos/${REPO}/issues/comments/${directive.id}`) return directive;
+      if (endpoint === `repos/${REPO}/contents/native-bridge/tasks/human-goal-source-only.md?ref=${mainSha}`)
+        return { encoding: 'base64', content: Buffer.from(spec).toString('base64') };
+      throw new Error(`UNEXPECTED_HUMAN_GOAL_API:${endpoint}`);
+    };
+    const adapters = {
+      apiRead, commentsRead: () => receiptComments, goalCommentsRead: () => [directive],
+      assertCodexExecutorTaskReady: () => ({ ready: true }),
+      codexDispatchOptions: {
+        createBundle: async path => { counters.bundles++; writeFileSync(path, 'synthetic source bundle'); },
+        publishStarted: async data => {
+          started.push(data);
+          receiptComments.push(com(42001, RECEIPT_MARKER + JSON.stringify(data), 'worker'));
+          return true;
+        },
+        trigger: () => { counters.triggers++; },
+      },
+      runPlan: () => { counters.inline++; throw new Error('CODEX_MUST_NOT_RUN_IN_DISPATCHER'); },
+      log: () => {},
+    };
+    const result = await executeWorker(config, adapters);
+    assert.equal(result.state, 'CODEX_EXECUTOR_REQUESTED');
+    assert.equal(counters.bundles, 1);
+    assert.equal(counters.triggers, 1, 'the injected callback records the executor trigger without starting a model');
+    assert.equal(counters.inline, 0);
+    assert.equal(started.length, 1, 'one STARTED receipt is written to the existing #407 receipt channel');
+    assert.equal(started[0].state, 'STARTED');
+    assert.notEqual(started[0].model_invoked, true,
+      'a dispatch receipt must not claim model execution before the executor runs');
+    assert.deepEqual(started[0].task_source_ref, { issue: 310, comment_id: directive.id,
+      author: 'dispatcher', body_sha256: h(directive.body) });
+    const requestPath = join(codexSpool, 'requests', `${result.request_id}-${result.attempt_id}.json`);
+    const request = validateCodexExecutorRequest(JSON.parse(readFileSync(requestPath, 'utf8')));
+    assert.equal(request.goalContext.body, directive.body);
+    assert.equal(request.job.source_sha, mainSha);
+    assert.deepEqual(request.job.write_paths, ['README.md']);
+    const terminal = receipt(result.request_id, result.attempt_id, 'BLOCKED', request.job,
+      { outcome: 'SYNTHETIC_EXECUTOR_NOT_STARTED' }, started[0].task_source_ref);
+    receiptComments.push(com(42002, RECEIPT_MARKER + JSON.stringify(terminal), 'worker'));
+    const again = await executeWorker(config, adapters);
+    assert.equal(again.state, 'NO_DELTA');
+    assert.equal(counters.triggers, 1, 'a terminal #407 receipt prevents duplicate executor dispatch');
+    assert.equal(started.length, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('Issue #310 mutation after executor start publishes no STARTED receipt and cannot replay', async () => {

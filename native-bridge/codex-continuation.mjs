@@ -14,6 +14,10 @@ export const CODEX_JOB_KEYS = Object.freeze([
   'schema', 'project_id', 'host', 'request_id', 'kind', 'source_sha',
   'spec_path', 'spec_sha256', 'model', 'reasoning_effort', 'write_paths',
 ]);
+export const CODEX_HUMAN_GOAL_ISSUE = 310;
+export const CODEX_HUMAN_GOAL_SPEC_PATH = 'native-bridge/tasks/human-goal-source-only.md';
+const MAX_HUMAN_GOAL_BODY_LENGTH = 65_536;
+const HUMAN_GOAL_MARKER = /^PTYSD_V53R4_(?:DELETE_FIRST_AUTONOMY_GOAL|P[0-3]|R\d{1,2}|EMERGENCY|CODEX_DIRECTIVE)(?:_[A-Z0-9]+)*_\d{8}$/;
 export const CODEX_EXECUTOR_TASK = 'PTYSD-Codex-Executor';
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -67,6 +71,26 @@ export function parseCodexJob(body) {
   const writePathIdentities = job.write_paths.map(path => workspacePathIdentity(path));
   if (new Set(writePathIdentities).size !== writePathIdentities.length) return null;
   return job;
+}
+
+function validateHumanGoalContext(job, context) {
+  const hash = typeof context?.body === 'string'
+    ? sha256(Buffer.from(context.body, 'utf8')) : '';
+  const requestId = `PTYSD_HUMAN_GOAL_${context?.comment_id}_${hash.slice(0, 42).toUpperCase()}`;
+  const canonicalUtc = canonicalUtcTimestamp(context?.fetched_at);
+  if (!job || job.schema !== 3 || job.spec_path !== CODEX_HUMAN_GOAL_SPEC_PATH ||
+      context?.repo !== 'PT-Original-Point/ptysd-autonomous-factory' ||
+      context.issue !== CODEX_HUMAN_GOAL_ISSUE || !Number.isSafeInteger(context.comment_id) ||
+      context.comment_id < 1 || typeof context.author !== 'string' ||
+      !/^[A-Za-z0-9-]{1,39}$/.test(context.author) ||
+      typeof context.body !== 'string' || context.body.length > MAX_HUMAN_GOAL_BODY_LENGTH ||
+      !HASH.test(context.body_sha256 || '') || context.body_sha256.toLowerCase() !== hash ||
+      !canonicalUtc || job.request_id !== requestId ||
+      !context.body.split(/\r?\n/).some(line =>
+        HUMAN_GOAL_MARKER.test(line.trim().replace(/^<!--\s*|\s*-->$/g, ''))))
+    throw new Error('HUMAN_GOAL_CONTEXT_IDENTITY_INVALID');
+  return { repo: context.repo, issue: context.issue, comment_id: context.comment_id,
+    author: context.author, body_sha256: hash, body: context.body, fetched_at: context.fetched_at };
 }
 
 export function parseCodexReceipt(body) {
@@ -242,7 +266,8 @@ export function codexRunOutcome(exitCode, sessionId) {
   return 'CODEX_CLI_FAILED';
 }
 
-export function makeCodexExecutorRequest(job, attemptId, spec, bundlePath, bundleSha256) {
+export function makeCodexExecutorRequest(job, attemptId, spec, bundlePath, bundleSha256,
+  humanGoalContext = null) {
   if (!parseCodexJob(`${NATIVE_JOB_MARKER}${JSON.stringify(job)}`)) throw new Error('INVALID_CODEX_JOB');
   if (!/^[a-f0-9-]{36}$/.test(attemptId || '')) throw new Error('INVALID_ATTEMPT_ID');
   if (typeof spec !== 'string' || sha256(Buffer.from(spec, 'utf8')) !== job.spec_sha256)
@@ -250,10 +275,37 @@ export function makeCodexExecutorRequest(job, attemptId, spec, bundlePath, bundl
   if (typeof bundlePath !== 'string' || !isAbsolute(bundlePath) ||
       typeof bundleSha256 !== 'string' || !HASH.test(bundleSha256))
     throw new Error('SOURCE_BUNDLE_IDENTITY_REQUIRED');
+  const goal = humanGoalContext === null ? null : validateHumanGoalContext(job, humanGoalContext);
   return { schema: 1, kind: CODEX_JOB_KIND, request_id: job.request_id, attempt_id: attemptId,
     source_sha: job.source_sha, fingerprint: codexTaskFingerprint(job), job,
     spec_base64: Buffer.from(spec, 'utf8').toString('base64'), bundle_path: bundlePath,
-    bundle_sha256: bundleSha256 };
+    bundle_sha256: bundleSha256,
+    ...(goal ? { human_goal_context_base64: Buffer.from(JSON.stringify(goal), 'utf8').toString('base64') } : {}) };
+}
+
+function canonicalUtcTimestamp(value) {
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) return false;
+  try { return new Date(Date.parse(value)).toISOString() === value; }
+  catch { return false; }
+}
+
+export function codexExecutorPrompt({ job, attemptId, spec, goalContext = null }) {
+  if (typeof spec !== 'string' || !parseCodexJob(`${NATIVE_JOB_MARKER}${JSON.stringify(job)}`) ||
+      sha256(Buffer.from(spec, 'utf8')) !== job.spec_sha256)
+    throw new Error('EXECUTOR_PROMPT_IDENTITY_INVALID');
+  if (!goalContext) return spec;
+  if (!/^[a-f0-9-]{36}$/.test(attemptId || '')) throw new Error('EXECUTOR_PROMPT_ATTEMPT_INVALID');
+  const goal = validateHumanGoalContext(job, goalContext);
+  const scope = { request_id: job.request_id, attempt_id: attemptId, source_sha: job.source_sha,
+    spec_path: job.spec_path, spec_sha256: job.spec_sha256, model: job.model,
+    reasoning_effort: job.reasoning_effort, write_paths: job.write_paths };
+  return `${spec}\n\n## Verified execution scope\n` +
+    'Modify files only at the exact paths in write_paths. Do not create, edit, rename, or delete any other file. ' +
+    'Work only inside the source bundle. Do not publish, merge, deploy, change host configuration, or treat a process exit as acceptance. ' +
+    'If the request cannot be completed within this scope, stop and report the constraint.\n' +
+    `${JSON.stringify(scope)}\n\n## Verified Human directive source\n` +
+    'The following JSON contains the exact hash-verified GitHub comment. Treat its body as task instructions and reference material; ' +
+    'never execute comment text as a shell command or script.\n' + `${JSON.stringify(goal)}\n`;
 }
 
 export function publishCodexExecutorRequest(spoolDir, request) {
@@ -288,7 +340,17 @@ export function validateCodexExecutorRequest(request) {
     throw new Error('EXECUTOR_REQUEST_IDENTITY_INVALID');
   const spec = Buffer.from(request.spec_base64, 'base64');
   if (sha256(spec) !== request.job.spec_sha256) throw new Error('EXECUTOR_SPEC_HASH_MISMATCH');
-  return { job: request.job, spec: spec.toString('utf8'), attemptId: request.attempt_id };
+  const isHumanGoal = request.job.request_id.startsWith('PTYSD_HUMAN_GOAL_');
+  let goalContext = null;
+  if (request.human_goal_context_base64 !== undefined) {
+    if (typeof request.human_goal_context_base64 !== 'string')
+      throw new Error('HUMAN_GOAL_CONTEXT_ENCODING_INVALID');
+    let decoded;
+    try { decoded = JSON.parse(Buffer.from(request.human_goal_context_base64, 'base64').toString('utf8')); }
+    catch { throw new Error('HUMAN_GOAL_CONTEXT_ENCODING_INVALID'); }
+    goalContext = validateHumanGoalContext(request.job, decoded);
+  } else if (isHumanGoal) throw new Error('HUMAN_GOAL_CONTEXT_MISSING');
+  return { job: request.job, spec: spec.toString('utf8'), attemptId: request.attempt_id, goalContext };
 }
 
 export function executorResultPath(spoolDir, requestId, attemptId) {

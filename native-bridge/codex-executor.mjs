@@ -11,7 +11,7 @@ import { dirname, join, relative, resolve, isAbsolute, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hashFile, readWindowsProcessTree, runCapturedProcess, terminateProcessTree } from './captured-process.mjs';
 import { codexExecutionGate, buildCodexExecArgs, codexSessionFromJsonl,
-  codexRunOutcome, executorResultPath, validateCodexExecutorRequest } from './codex-continuation.mjs';
+  codexRunOutcome, codexExecutorPrompt, executorResultPath, validateCodexExecutorRequest } from './codex-continuation.mjs';
 import { getCurrentWindowsSid, workspacePathIdentity } from './windows-executor.mjs';
 
 function parseArgs(argv) {
@@ -235,7 +235,7 @@ export async function runCodex(request, config, worktree, evidenceDir, deps = {}
   const { env } = buildCodexChildEnvironment(request, evidenceDir, deps.environment || process.env);
   const capture = await runCapturedProcess(config.codex_executable, args, {
     cwd: worktree, env, stdoutPath: outPath, stderrPath: errPath,
-    stdinText: validateCodexExecutorRequest(request).spec,
+    stdinText: codexExecutorPrompt(validateCodexExecutorRequest(request)),
     spawnProcess: deps.spawnProcess || spawn,
     terminate: deps.terminate || (child => terminateProcessTree(child, {
       runTaskkill: deps.runTaskkill || execFileSync,

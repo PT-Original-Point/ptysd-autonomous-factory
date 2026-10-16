@@ -17,7 +17,7 @@ import { parseCodexJob, codexExecutionGate, claimCodexAttempt,
   releaseCodexAttempt, makeCodexExecutorRequest, publishCodexExecutorRequest,
   executorResultPath as codexExecutorResultPath,
   validateCodexExecutorRequest, validateCodexExecutorResult,
-  assertCodexExecutorTaskReady } from './codex-continuation.mjs';
+  assertCodexExecutorTaskReady, CODEX_HUMAN_GOAL_SPEC_PATH } from './codex-continuation.mjs';
 import {
   OPERATOR_REPO, OPERATOR_PROJECT, OPERATOR_ISSUE,
   collectWindowsObservation, encodeOperatorObservation, findOperatorComment,
@@ -45,6 +45,8 @@ const V5_KEYS = [...V4_KEYS, 'candidate_pr'];
 const V6_KEYS = [...V5_KEYS, 'goal_ref'];
 const HUMAN_GOAL_ISSUE = 310;
 const HUMAN_GOAL_MARKER = 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015';
+const HUMAN_DIRECTIVE_MARKER = /^PTYSD_V53R4_(?:DELETE_FIRST_AUTONOMY_GOAL|P[0-3]|R\d{1,2}|EMERGENCY|CODEX_DIRECTIVE)(?:_[A-Z0-9]+)*_\d{8}$/;
+const MAX_HUMAN_GOAL_BODY_LENGTH = 65_536;
 const RECEIPT_STATES = new Set(['STARTED', 'FINISHED', 'BLOCKED']);
 const terminalStates = new Set(['FINISHED', 'BLOCKED']);
 // OpenCode reads its own saved provider account from the executor user's profile.
@@ -147,10 +149,99 @@ function sameTaskSourceRef(left, right) {
     a.comment_id === b.comment_id && a.author === b.author && a.body_sha256 === b.body_sha256;
 }
 function selectedSourceCommentMatches(selection, comment) {
+  if (selection?.human_goal_source === true) {
+    const source = selection.task_source_ref;
+    if (!taskSourceRefMatchesComment(source, comment)) return false;
+    const expectedRequest = source && `PTYSD_HUMAN_GOAL_${source.comment_id}_${source.body_sha256.slice(0, 42).toUpperCase()}`;
+    return selection.id === source.comment_id &&
+      selection.job?.request_id === expectedRequest;
+  }
   if (comment?.body !== selection?.originalBody) return false;
   const source = selection?.task_source_ref ?? null;
   if (source === null) return true;
   return taskSourceRefMatchesComment(source, comment);
+}
+
+function humanDirectiveMarker(body) {
+  if (typeof body !== 'string' || body.length > MAX_HUMAN_GOAL_BODY_LENGTH) return null;
+  for (const line of body.split(/\r?\n/)) {
+    const marker = line.trim().replace(/^<!--\s*|\s*-->$/g, '');
+    if (HUMAN_DIRECTIVE_MARKER.test(marker)) return marker;
+  }
+  return null;
+}
+
+function latestTrustedHumanDirective(comments, dispatchers) {
+  return comments.filter(comment => comment?.issue_url ===
+      `https://api.github.com/repos/${REPO}/issues/${HUMAN_GOAL_ISSUE}` &&
+    Number.isSafeInteger(comment.id) && comment.id > 0 &&
+    typeof comment.user?.login === 'string' && dispatchers.includes(comment.user.login) &&
+    humanDirectiveMarker(comment.body) !== null)
+    .sort((a, b) => a.id - b.id).at(-1) ?? null;
+}
+
+function humanDirectiveRequestId(comment) {
+  if (!Number.isSafeInteger(comment?.id) || comment.id < 1 ||
+      typeof comment.body !== 'string' || !humanDirectiveMarker(comment.body)) return null;
+  const bodySha = digest(Buffer.from(comment.body, 'utf8'));
+  return `PTYSD_HUMAN_GOAL_${comment.id}_${bodySha.slice(0, 42).toUpperCase()}`;
+}
+
+function humanGoalPriorReceiptStatus(comments, workerLogin, comment, host) {
+  const currentRequestId = humanDirectiveRequestId(comment);
+  if (!currentRequestId) return 'UNKNOWN';
+  const legacyRequestId = `PTYSD_HUMAN_GOAL_${comment.id}`;
+  const prior = [];
+  let malformed = false;
+  for (const entry of comments) {
+    if (entry.user?.login !== workerLogin || typeof entry.body !== 'string') continue;
+    const parsed = parseReceipt(entry.body);
+    if (parsed?.request_id === currentRequestId) return 'SAME_REQUEST';
+    if (parsed?.request_id === legacyRequestId || parsed?.request_id?.startsWith(`${legacyRequestId}_`)) {
+      prior.push({ id: entry.id, receipt: parsed });
+    } else if (!parsed && entry.body.startsWith(RECEIPT_MARKER)) {
+      try {
+        const raw = JSON.parse(entry.body.slice(RECEIPT_MARKER.length));
+        if (raw?.request_id === legacyRequestId || raw?.request_id?.startsWith(`${legacyRequestId}_`))
+          malformed = true;
+      } catch {
+        if (entry.body.slice(RECEIPT_MARKER.length).includes(legacyRequestId)) malformed = true;
+      }
+    }
+  }
+  if (malformed) return 'UNKNOWN';
+  if (!prior.length) return 'NONE';
+  const attempts = new Map();
+  for (const { id, receipt: value } of prior) {
+    if (!Number.isSafeInteger(id) || id < 1 || value.kind !== 'codex_plan' ||
+        value.host.toUpperCase() !== host.toUpperCase() ||
+        (value.task_source_ref !== undefined &&
+          (value.task_source_ref.issue !== HUMAN_GOAL_ISSUE ||
+           value.task_source_ref.comment_id !== comment.id))) return 'UNKNOWN';
+    if (!attempts.has(value.attempt_id)) attempts.set(value.attempt_id, []);
+    attempts.get(value.attempt_id).push({ id, receipt: value });
+  }
+  for (const entries of attempts.values()) {
+    entries.sort((a, b) => a.id - b.id);
+    if (!terminalStates.has(entries.at(-1).receipt.state)) return 'UNKNOWN';
+  }
+  return 'PRIOR_TERMINAL';
+}
+
+function humanGoalCodexPolicyReady(policy) {
+  return policy?.enabled === true && typeof policy.model === 'string' &&
+    typeof policy.reasoning_effort === 'string' && Array.isArray(policy.write_paths) &&
+    policy.write_paths.length > 0;
+}
+
+function humanDirectiveCodexJob(comment, host, sourceSha, spec, policy) {
+  const requestId = humanDirectiveRequestId(comment);
+  if (!requestId || !comment.user?.login || !humanGoalCodexPolicyReady(policy)) return null;
+  const job = { schema: 3, project_id: PROJECT, host, request_id: requestId,
+    kind: 'codex_plan', source_sha: sourceSha, spec_path: CODEX_HUMAN_GOAL_SPEC_PATH,
+    spec_sha256: digest(Buffer.from(spec, 'utf8')), model: policy.model,
+    reasoning_effort: policy.reasoning_effort, write_paths: policy.write_paths };
+  return parseCodexJob(`PTYSD_NATIVE_JOB_V1\n${JSON.stringify(job)}`) ? job : null;
 }
 export function parseJob(body) {
   const codexJob = parseCodexJob(body);
@@ -374,7 +465,7 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     const j = sourceRef !== null && !validTaskSourceRef(sourceRef) ? null : parseJob(c.body);
     if (j && dispatchers.includes(login) && j.host.toUpperCase() === host.toUpperCase()) {
       if (!jobs.has(j.request_id)) jobs.set(j.request_id, { job: j, content: c.body, id: c.id,
-        task_source_ref: sourceRef, duplicate: false });
+        task_source_ref: sourceRef, human_goal_source: c.human_goal_source === true, duplicate: false });
       else if (jobs.get(j.request_id).content !== c.body ||
           !sameTaskSourceRef(jobs.get(j.request_id).task_source_ref, sourceRef))
         jobs.get(j.request_id).duplicate = true;
@@ -405,7 +496,8 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     if ((pinKey !== null && !candidatePins.has(pinKey)) ||
         (liveMainSha !== null && v.job.source_sha !== liveMainSha &&
           (pinKey === null || !candidatePins.has(pinKey)))) continue;
-    return { job: v.job, id: v.id, originalBody: v.content, task_source_ref: v.task_source_ref };
+    return { job: v.job, id: v.id, originalBody: v.content, task_source_ref: v.task_source_ref,
+      ...(v.human_goal_source === true ? { human_goal_source: true } : {}) };
   }
   return null;
 }
@@ -951,10 +1043,14 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
     ...(outputEvidence.reason ? { opencode_jsonl_error: outputEvidence.reason } : {}),
     process_tree_state: treeReadback.state, process_tree_readback: treeReadback } };
 }
-function readSpec(job, apiRead = api) {
-  const b = apiRead(`repos/${REPO}/contents/${job.spec_path}?ref=${job.source_sha}`);
+function readSpecBytes(specPath, sourceSha, apiRead = api) {
+  const b = apiRead(`repos/${REPO}/contents/${specPath}?ref=${sourceSha}`);
   if (b.encoding !== 'base64' || typeof b.content !== 'string') throw new Error('SPEC_UNREADABLE');
   const bytes = Buffer.from(b.content.replace(/\s+/g, ''), 'base64');
+  return bytes;
+}
+function readSpec(job, apiRead = api) {
+  const bytes = readSpecBytes(job.spec_path, job.source_sha, apiRead);
   if (digest(bytes) !== job.spec_sha256) throw new Error('SPEC_HASH_MISMATCH');
   return bytes.toString('utf8');
 }
@@ -1179,6 +1275,7 @@ export async function reconcileCodexExecutorResult(started, config, workerLogin,
   }
 }
 export async function dispatchCodexJob({ config, job, spec, workerLogin, taskSourceRef = null,
+  humanGoalContext = null,
   verifyTaskSource = null,
   attemptId = randomUUID(),
   createBundle = async (bundlePath, sourceSha) => {
@@ -1208,7 +1305,8 @@ export async function dispatchCodexJob({ config, job, spec, workerLogin, taskSou
   const bundlePath = join(bundleDir, `${job.request_id}-${attemptId}.bundle`);
   await createBundle(bundlePath, job.source_sha);
   const bundleSha = digest(readFileSync(bundlePath));
-  const request = makeCodexExecutorRequest(job, attemptId, spec, bundlePath, bundleSha);
+  const request = makeCodexExecutorRequest(job, attemptId, spec, bundlePath, bundleSha,
+    humanGoalContext);
   const beforeClaim = await sourceReadback();
   if (beforeClaim !== 'MATCH') {
     cleanupBundle(bundlePath);
@@ -1449,10 +1547,13 @@ export async function runWorker(configInput, adapters = {}) {
   if (issue.title !== ISSUE_TITLE || issue.state !== 'open' || issue.pull_request) throw new Error('ISSUE_IDENTITY_MISMATCH');
   const receiptComments = commentsRead(config);
   let humanTaskComments = [];
+  let humanGoalComments = null;
+  let humanGoalWaitingReason = null;
   if (config.issue === OPERATOR_ISSUE) {
     try {
       const sourceComments = goalCommentsRead();
       if (!Array.isArray(sourceComments)) throw new Error('HUMAN_TASK_COMMENT_LIST_INVALID');
+      humanGoalComments = sourceComments;
       humanTaskComments = sourceComments.flatMap(comment => {
         const taskSourceRef = taskSourceRefForComment(comment, config.dispatchers);
         const job = parseJob(comment?.body);
@@ -1464,6 +1565,7 @@ export async function runWorker(configInput, adapters = {}) {
     } catch {
       // A #310 discovery outage parks only that source. Existing #407 jobs and
       // receipts remain available to this native poll.
+      humanGoalWaitingReason = 'HUMAN_GOAL_SOURCE_READ_UNKNOWN';
       log('HUMAN_TASK_DISCOVERY_READ_UNKNOWN');
     }
   }
@@ -1674,6 +1776,50 @@ export async function runWorker(configInput, adapters = {}) {
   }
   const head = apiRead(`repos/${REPO}/git/ref/heads/main`).object?.sha;
   if (!SHA.test(head || '')) throw new Error('MAIN_HEAD_UNREADABLE');
+  const latestDirective = latestTrustedHumanDirective(humanGoalComments || [], config.dispatchers);
+  if (latestDirective) {
+    const priorState = humanGoalPriorReceiptStatus(receiptComments, me, latestDirective, config.host);
+    const directiveSource = taskSourceRefForComment(latestDirective, config.dispatchers);
+    const alreadyStructured = comments.some(comment => {
+      if (!config.dispatchers.includes(comment.user?.login)) return false;
+      if (comment.id === latestDirective.id &&
+          comment.issue_url === `https://api.github.com/repos/${REPO}/issues/${HUMAN_GOAL_ISSUE}`) return true;
+      const existingJob = parseJob(comment.body);
+      return existingJob?.schema === 6 && existingJob.goal_ref?.comment_id === latestDirective.id &&
+        existingJob.goal_ref?.body_sha256 === directiveSource?.body_sha256;
+    });
+    if (alreadyStructured) {
+      log(`HUMAN_GOAL_ALREADY_STRUCTURED_${latestDirective.id}_NO_DUPLICATE`);
+    } else if (priorState === 'SAME_REQUEST') {
+      log(`HUMAN_GOAL_ALREADY_RECEIVED_${latestDirective.id}_NO_REPLAY`);
+    } else if (priorState === 'UNKNOWN') {
+      humanGoalWaitingReason = 'HUMAN_GOAL_PRIOR_EFFECT_UNKNOWN';
+      log(`HUMAN_GOAL_PRIOR_EFFECT_UNKNOWN_${latestDirective.id}_NO_REPLAY`);
+    } else if (!humanGoalCodexPolicyReady(config.human_goal_codex_policy)) {
+      humanGoalWaitingReason = 'HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED';
+      log(`HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED_${latestDirective.id}_NO_MODEL`);
+    } else {
+      try {
+        const goalSpec = readSpecBytes(CODEX_HUMAN_GOAL_SPEC_PATH, head, apiRead).toString('utf8');
+        const job = humanDirectiveCodexJob(latestDirective, config.host, head, goalSpec,
+          config.human_goal_codex_policy);
+        const taskSourceRef = taskSourceRefForComment(latestDirective, config.dispatchers);
+        if (!job || !taskSourceRef) {
+          humanGoalWaitingReason = 'HUMAN_GOAL_CODEX_POLICY_INVALID';
+          log(`HUMAN_GOAL_CODEX_POLICY_INVALID_${latestDirective.id}_NO_MODEL`);
+        } else {
+          comments.push({ id: latestDirective.id, body: JOB_MARKER + JSON.stringify(job),
+            user: latestDirective.user, issue_url: latestDirective.issue_url,
+            task_source_ref: taskSourceRef, human_goal_source: true });
+          comments.sort((a, b) => a.id - b.id);
+          log(`HUMAN_GOAL_DISCOVERED_${latestDirective.id}_${taskSourceRef.body_sha256}`);
+        }
+      } catch {
+        humanGoalWaitingReason = 'HUMAN_GOAL_SPEC_READ_UNKNOWN';
+        log(`HUMAN_GOAL_SPEC_READ_UNKNOWN_${latestDirective.id}_NO_DISPATCH`);
+      }
+    }
+  }
   const latestRequestId = comments.filter(c => config.dispatchers.includes(c.user?.login))
     .map(c => ({ id: c.id, job: parseJob(c.body) }))
     .filter(value => value.job && value.job.host.toUpperCase() === config.host.toUpperCase())
@@ -1700,11 +1846,14 @@ export async function runWorker(configInput, adapters = {}) {
   if (next?.job.kind === 'codex_plan') {
     const gate = codexExecutionGate(next.job, config);
     if (!gate.allowed) {
+      if (next.human_goal_source === true)
+        humanGoalWaitingReason = `CODEX_EXECUTION_GATE_${gate.reasons.join('_')}`;
       log(`CODEX_LANE_WAITING_AUTH_${gate.reasons.join(',')}`);
       blockedKinds.add('codex_plan');
       next = selectNext(comments, config.dispatchers, me, config.host, head, [...blockedKinds], candidatePins);
     } else if (!config.codex_spool ||
         existsSync(join(config.codex_spool, 'locks', 'executor.active'))) {
+      if (next.human_goal_source === true) humanGoalWaitingReason = 'CODEX_EXECUTOR_SPOOL_OR_OWNER_NOT_READY';
       log('CODEX_EXECUTOR_SPOOL_OR_OWNER_NOT_READY');
       blockedKinds.add('codex_plan');
       next = selectNext(comments, config.dispatchers, me, config.host, head, [...blockedKinds], candidatePins);
@@ -1716,6 +1865,7 @@ export async function runWorker(configInput, adapters = {}) {
       catch (error) {
         const code = String(error?.code || error?.message || 'TASK_READBACK_UNKNOWN')
           .replace(/[^A-Z0-9_]/gi, '_').slice(0, 72).toUpperCase();
+        if (next.human_goal_source === true) humanGoalWaitingReason = `CODEX_EXECUTOR_TASK_READBACK_${code}`;
         log(`CODEX_EXECUTOR_TASK_READBACK_FAILED_${code}`);
         blockedKinds.add('codex_plan');
         next = selectNext(comments, config.dispatchers, me, config.host, head, [...blockedKinds], candidatePins);
@@ -1767,6 +1917,10 @@ export async function runWorker(configInput, adapters = {}) {
     if (waitingOpenCodeEdit) {
       log(`OPENCODE_EDIT_WAITING_${waitingOpenCodeEdit.reason}_${waitingOpenCodeEdit.request_id}_NO_MODEL_CALL`);
       return { state: 'WAITING', kind: 'opencode_edit', ...waitingOpenCodeEdit, model_invoked: false };
+    }
+    if (humanGoalWaitingReason) {
+      log(`HUMAN_GOAL_WAITING_${humanGoalWaitingReason}_NO_MODEL_CALL`);
+      return { state: 'WAITING', kind: 'codex_plan', reason: humanGoalWaitingReason, model_invoked: false };
     }
     log('NO_DELTA_NO_LLM'); return { state: 'NO_DELTA' };
   }
@@ -1876,10 +2030,34 @@ export async function runWorker(configInput, adapters = {}) {
     }
   }
   if (job.kind === 'codex_plan') {
+    let humanGoalContext = null;
+    if (next.human_goal_source === true) {
+      try {
+        const latest = latestTrustedHumanDirective(goalCommentsRead(), config.dispatchers);
+        if (!latest || latest.id !== next.task_source_ref?.comment_id)
+          return { state: 'STALE_HUMAN_GOAL', request_id: job.request_id, model_invoked: false };
+        const current = apiRead(`repos/${REPO}/issues/comments/${next.task_source_ref.comment_id}`);
+        if (!humanDirectiveMarker(current?.body) || !selectedSourceCommentMatches(next, current))
+          return { state: 'STALE_HUMAN_GOAL', request_id: job.request_id, model_invoked: false };
+        humanGoalContext = { repo: REPO, issue: HUMAN_GOAL_ISSUE, comment_id: current.id,
+          author: current.user.login, body_sha256: next.task_source_ref.body_sha256,
+          body: current.body, fetched_at: new Date().toISOString() };
+      } catch {
+        log(`HUMAN_GOAL_FINAL_READBACK_UNKNOWN_${next.id}_NO_DISPATCH`);
+        return { state: 'WAITING_HUMAN_GOAL_READBACK', request_id: job.request_id, model_invoked: false };
+      }
+    }
     const dispatched = await dispatchCodex({ config, job, spec, workerLogin: me, attemptId,
+      humanGoalContext,
       taskSourceRef: next.task_source_ref ?? null,
-      verifyTaskSource: next.task_source_ref ? () => selectedSourceCommentMatches(next,
-        apiRead(`repos/${REPO}/issues/comments/${next.task_source_ref.comment_id}`)) : null });
+      verifyTaskSource: next.task_source_ref ? () => {
+        if (next.human_goal_source === true) {
+          const latest = latestTrustedHumanDirective(goalCommentsRead(), config.dispatchers);
+          if (!latest || latest.id !== next.task_source_ref.comment_id) return false;
+        }
+        return selectedSourceCommentMatches(next,
+          apiRead(`repos/${REPO}/issues/comments/${next.task_source_ref.comment_id}`));
+      } : null });
     log(`${dispatched.state}_${job.request_id}_${attemptId}`);
     return { state: dispatched.state, request_id: job.request_id, attempt_id: attemptId,
       outcome: dispatched.reason ?? 'CODEX_EXECUTOR_DISPATCH_ACK_NOT_ACCEPTANCE' };

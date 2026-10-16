@@ -14,6 +14,7 @@ import {
   releaseCodexAttempt,
   buildCodexExecArgs, codexSessionFromJsonl, codexRunOutcome,
   makeCodexExecutorRequest, publishCodexExecutorRequest, validateCodexExecutorRequest,
+  codexExecutorPrompt,
   executorResultPath, validateCodexExecutorResult,
 } from '../native-bridge/codex-continuation.mjs';
 import { buildCodexChildEnvironment, changedPaths, outOfScopeCodexPaths, runCodex, runExecutorOnce, takeNextRequest,
@@ -679,6 +680,43 @@ test('executor request binds the exact task bytes and immutable source bundle wi
       spec_base64: Buffer.from('changed task').toString('base64') }), /EXECUTOR_SPEC_HASH_MISMATCH/);
     assert.throws(() => validateCodexExecutorRequest({ ...request, fingerprint: '0'.repeat(64) }),
       /EXECUTOR_REQUEST_IDENTITY_INVALID/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Human #310 Goal context is content-bound into the existing Codex executor request and prompt', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-human-goal-'));
+  try {
+    const directive = 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015\nPlease inspect the source and make a bounded fix.\n';
+    const bodySha = createHash('sha256').update(directive, 'utf8').digest('hex');
+    const commentId = 6188322050;
+    const requestId = `PTYSD_HUMAN_GOAL_${commentId}_${bodySha.slice(0, 42).toUpperCase()}`;
+    const spec = '# Bounded source-only task\nUse only the allowlisted write path.\n';
+    const picked = job({ request_id: requestId, spec_path: 'native-bridge/tasks/human-goal-source-only.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'), write_paths: ['README.md'] });
+    const attemptId = '00000000-0000-4000-8000-000000000051';
+    const bundle = join(dir, 'source.bundle');
+    writeFileSync(bundle, 'immutable source bundle');
+    const bundleSha = createHash('sha256').update(readFileSync(bundle)).digest('hex');
+    const context = { repo: 'PT-Original-Point/ptysd-autonomous-factory', issue: 310,
+      comment_id: commentId, author, body_sha256: bodySha, body: directive,
+      fetched_at: '2026-10-17T00:00:00.000Z' };
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundle, bundleSha, context);
+    const decoded = validateCodexExecutorRequest(request);
+    assert.deepEqual(decoded.goalContext, context);
+    const prompt = codexExecutorPrompt(decoded);
+    assert.match(prompt, /Modify files only at the exact paths in write_paths/);
+    assert.match(prompt, /"write_paths":\["README.md"\]/);
+    assert.match(prompt, /"body_sha256":"[a-f0-9]{64}"/);
+    assert.match(prompt, /PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015/);
+    assert.throws(() => validateCodexExecutorRequest({ ...request, human_goal_context_base64: undefined }),
+      /HUMAN_GOAL_CONTEXT_MISSING/);
+    assert.throws(() => makeCodexExecutorRequest(picked, attemptId, spec, bundle, bundleSha,
+      { ...context, body: `${directive}changed` }), /HUMAN_GOAL_CONTEXT_IDENTITY_INVALID/);
+    assert.throws(() => makeCodexExecutorRequest(picked, attemptId, spec, bundle, bundleSha,
+      { ...context, body: directive.replace('DELETE_FIRST_AUTONOMY_GOAL', 'UNTRUSTED') }),
+    /HUMAN_GOAL_CONTEXT_IDENTITY_INVALID/);
+    assert.throws(() => codexExecutorPrompt({ ...decoded, attemptId: undefined }),
+      /EXECUTOR_PROMPT_ATTEMPT_INVALID/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
