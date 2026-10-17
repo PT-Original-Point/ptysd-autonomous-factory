@@ -811,10 +811,10 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
     const workspace=join(root,'workspace'), stateDir=join(root,'state'), codexSpool=join(root,'spool');
     mkdirSync(workspace); mkdirSync(stateDir); mkdirSync(codexSpool);
     const host=hostname().toUpperCase();
-    const marker='PTYSD_V53R4_CODEX_DIRECTIVE_TOKEN_FIRST_20261017';
-    const prior={id:6233118477,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
+    const marker='PTYSD_V53R4_W1_W2_CLI_ONLY_SYNC_FIRST_ROUTING_20261017';
+    const prior={id:6232811908,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
       user:{login:'t14210184'},body:'<!-- PTYSD_V53R4_DUAL_AUDIT_RECONCILIATION_R2_20261017 -->\nEarlier audit guidance.'};
-    const directive={id:6233162641,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
+    const directive={id:6233118477,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
       user:{login:'t14210184'},body:`# P0\n${marker}\nBind this exact latest source and perform one bounded source-only unit.`};
     const untrusted={id:6233162642,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
       user:{login:'untrusted'},body:`${marker}\nDo not accept this author.`};
