@@ -23,6 +23,46 @@ export function summarizeV2AuthJson(stdout) {
   return { status: count > 0 ? 'SAVED_ACCOUNT_RECORDS_PRESENT' : 'NO_SAVED_ACCOUNT_RECORDS',
     saved_account_count: Math.min(count, 10000) };
 }
+
+// Return only a coarse provider-readiness result. OpenCode auth JSON may carry
+// credentials, so neither account records nor raw command output leave here.
+export function summarizeV2AuthProviderJson(stdout, expectedProvider) {
+  if (typeof expectedProvider !== 'string' || !/^[a-z][a-z0-9_-]{0,39}$/i.test(expectedProvider) ||
+      typeof stdout !== 'string' || Buffer.byteLength(stdout) > MAX_AUTH_BYTES)
+    return { status: 'AUTH_PROVIDER_METADATA_UNKNOWN' };
+  let data;
+  try { data = JSON.parse(stdout.trim()); }
+  catch { return { status: 'AUTH_PROVIDER_METADATA_UNKNOWN' }; }
+  const records = Array.isArray(data) ? data :
+    Array.isArray(data?.accounts) ? data.accounts :
+      Array.isArray(data?.integrations) ? data.integrations : null;
+  if (!records) return { status: 'AUTH_PROVIDER_METADATA_UNKNOWN' };
+  if (records.length === 0) return { status: 'AUTH_PROVIDER_RECORD_ABSENT' };
+  const providers = records.map(record => record && typeof record === 'object' ?
+    record.provider ?? record.providerID ?? record.provider_id : null)
+    .filter(value => typeof value === 'string' && /^[a-z][a-z0-9_-]{0,39}$/i.test(value));
+  if (!providers.length) return { status: 'AUTH_PROVIDER_METADATA_UNKNOWN' };
+  return { status: providers.some(value => value.toLowerCase() === expectedProvider.toLowerCase()) ?
+    'AUTH_PROVIDER_RECORD_PRESENT' : 'AUTH_PROVIDER_RECORD_ABSENT' };
+}
+
+export function readV2ProviderAuth(bin, provider, directory, runner = execFileSync, baseEnv = process.env) {
+  if (typeof bin !== 'string' || !bin || typeof directory !== 'string' || !directory)
+    return { status: 'AUTH_PROVIDER_COMMAND_UNAVAILABLE' };
+  const env = { ...baseEnv, OPENCODE_DISABLE_AUTOUPDATE: 'true' };
+  for (const key of ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG_CONTENT',
+    'OPENCODE_PERMISSION', 'OPENCODE_AUTO_SHARE']) delete env[key];
+  try {
+    const stdout = runner(bin, ['auth', 'list', '--format', 'json'], {
+      cwd: directory, encoding: 'utf8', timeout: 12000, maxBuffer: MAX_AUTH_BYTES,
+      windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return summarizeV2AuthProviderJson(stdout, provider);
+  } catch {
+    return { status: 'AUTH_PROVIDER_COMMAND_UNAVAILABLE' };
+  }
+}
+
 export function summarizeV2Models(stdout) {
   if (typeof stdout !== 'string' || Buffer.byteLength(stdout) > MAX_MODELS_BYTES)
     return { status: 'MODEL_LIST_OVERSIZED_OR_INVALID', catalog_count: null,
