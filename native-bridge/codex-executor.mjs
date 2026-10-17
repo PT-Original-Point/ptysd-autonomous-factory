@@ -342,18 +342,53 @@ async function readCodexExecutionEvidence(path) {
     file_change_tool_incomplete_count: fileChangeIncomplete };
 }
 
-export function changedPaths(worktree, sourceSha) {
+async function readNulSeparatedPaths(args, spawnProcess) {
+  const child = spawnProcess('git', args, {
+    windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const paths = new Set();
+  let pending = Buffer.alloc(0);
+  const completion = new Promise((resolveExit, rejectExit) => {
+    child.once('error', rejectExit);
+    child.once('close', (code, signal) => resolveExit({ code, signal }));
+  });
+  const consume = chunk => {
+    const bytes = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+    let start = 0;
+    while (true) {
+      const separator = bytes.indexOf(0, start);
+      if (separator < 0) break;
+      if (separator > start) paths.add(bytes.subarray(start, separator).toString('utf8'));
+      start = separator + 1;
+    }
+    pending = start < bytes.length ? Buffer.from(bytes.subarray(start)) : Buffer.alloc(0);
+  };
+
+  try {
+    for await (const chunk of child.stdout) consume(chunk);
+    const exit = await completion;
+    if (exit.code !== 0)
+      throw Object.assign(new Error(`GIT_PATH_ENUMERATION_FAILED_${exit.code ?? exit.signal ?? 'UNKNOWN'}`),
+        { code: 'GIT_PATH_ENUMERATION_FAILED' });
+    if (pending.length) throw new Error('GIT_PATH_ENUMERATION_UNTERMINATED_PATH');
+    return paths;
+  } catch (error) {
+    try { child.kill(); } catch {}
+    await completion.catch(() => {});
+    throw error;
+  }
+}
+
+export async function changedPaths(worktree, sourceSha, { spawnProcess = spawn } = {}) {
   if (!/^[a-f0-9]{40}$/.test(sourceSha || '')) throw new Error('WORKSPACE_SOURCE_SHA_INVALID');
-  const diff = execFileSync('git', ['-C', worktree, 'diff', '--name-only', '-z', '--no-renames', sourceSha, '--'], {
-    encoding: 'buffer', windowsHide: true, shell: false, timeout: 60000, maxBuffer: 16 * 1024 * 1024,
-  });
-  const untracked = execFileSync('git', ['-C', worktree, 'ls-files', '--others', '-z'], {
-    encoding: 'buffer', windowsHide: true, shell: false, timeout: 60000, maxBuffer: 16 * 1024 * 1024,
-  });
+  const diff = await readNulSeparatedPaths(
+    ['-C', worktree, 'diff', '--name-only', '-z', '--no-renames', sourceSha, '--'], spawnProcess);
+  const untracked = await readNulSeparatedPaths(
+    ['-C', worktree, 'ls-files', '--others', '-z'], spawnProcess);
   return [...new Set([
-    ...diff.toString('utf8').split('\0'),
-    ...untracked.toString('utf8').split('\0'),
-  ].filter(Boolean))].sort();
+    ...diff,
+    ...untracked,
+  ])].sort();
 }
 
 async function diffDigest(worktree, paths) {
@@ -464,7 +499,7 @@ export async function runExecutorOnce(config, deps = {}) {
       updateActiveLock(activeLock, 'MODEL_FINISHED', request);
       preserveActiveLock = false;
     }
-    const changed = changedPaths(worktree, verified.job.source_sha);
+    const changed = await changedPaths(worktree, verified.job.source_sha);
     const allowed = new Set(verified.job.write_paths);
     const outOfScope = changed.filter(path => !allowed.has(path.replaceAll('\\', '/')));
     const result = {

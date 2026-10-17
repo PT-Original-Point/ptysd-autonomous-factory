@@ -126,7 +126,7 @@ test('Codex dispatch task must match live identity, privilege, launch action and
   }), /CODEX_EXECUTOR_PUBLISHER_SID_MISMATCH/);
 });
 
-test('executor scope inventory includes committed changes from source and ignored untracked files', () => {
+test('executor scope inventory includes committed changes from source and ignored untracked files', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pty-codex-changed-paths-'));
   const git = (...args) => execFileSync('git', ['-C', dir, ...args], {
     encoding: 'utf8', windowsHide: true, shell: false,
@@ -147,10 +147,101 @@ test('executor scope inventory includes committed changes from source and ignore
     git('commit', '-q', '-m', 'candidate committed output');
     writeFileSync(join(dir, 'private.generated'), 'ignored but still present\n');
 
-    assert.deepEqual(changedPaths(dir, sourceSha), [
+    assert.deepEqual(await changedPaths(dir, sourceSha), [
       'committed-out-of-scope.mjs', 'private.generated',
     ]);
-    assert.throws(() => changedPaths(dir, 'not-a-source-sha'), /WORKSPACE_SOURCE_SHA_INVALID/);
+    await assert.rejects(changedPaths(dir, 'not-a-source-sha'), /WORKSPACE_SOURCE_SHA_INVALID/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Codex changed-path inventory streams output beyond 16 MiB without truncation', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-large-path-stream-'));
+  const git = (...args) => execFileSync('git', ['-C', dir, ...args], {
+    encoding: 'utf8', windowsHide: true, shell: false,
+  }).trim();
+  try {
+    git('init', '-q');
+    git('config', 'user.name', 'PTYSD test');
+    git('config', 'user.email', 'ptysd-test@example.invalid');
+    writeFileSync(join(dir, 'base.txt'), 'baseline\n');
+    git('add', 'base.txt');
+    git('commit', '-q', '-m', 'baseline');
+    const sourceSha = git('rev-parse', 'HEAD');
+    const repeatedPath = Buffer.from('README.md\0'.repeat(8192));
+    const splitAt = 65_537;
+    const repeatCount = Math.ceil((16 * 1024 * 1024 + 1) / repeatedPath.length);
+    let commandCount = 0;
+    const spawnProcess = (command, args, options) => {
+      assert.equal(command, 'git');
+      assert.equal(options.shell, false);
+      assert.equal(options.windowsHide, true);
+      assert.equal(Object.hasOwn(options, 'maxBuffer'), false);
+      const child = new EventEmitter();
+      child.stdout = new PassThrough({ highWaterMark: 128 * 1024 });
+      child.stderr = new PassThrough();
+      child.stderr.resume();
+      child.kill = () => true;
+      const isDiff = args.includes('diff');
+      commandCount++;
+      setImmediate(() => {
+        void (async () => {
+          const stdoutEnded = new Promise(resolve => child.stdout.once('end', resolve));
+          const stderrEnded = new Promise(resolve => child.stderr.once('end', resolve));
+          if (isDiff) {
+            for (let index = 0; index < repeatCount; index++) {
+              for (const chunk of [repeatedPath.subarray(0, splitAt), repeatedPath.subarray(splitAt)]) {
+                if (!child.stdout.write(chunk))
+                  await new Promise(resolve => child.stdout.once('drain', resolve));
+              }
+            }
+          } else child.stdout.write(Buffer.from('untracked.generated\0'));
+          child.stdout.end();
+          child.stderr.end();
+          await Promise.all([stdoutEnded, stderrEnded]);
+          child.emit('close', 0, null);
+        })().catch(error => child.emit('error', error));
+      });
+      return child;
+    };
+
+    assert.deepEqual(await changedPaths(dir, sourceSha, { spawnProcess }),
+      ['README.md', 'untracked.generated']);
+    assert.equal(commandCount, 2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Codex changed-path inventory rejects a failed Git stream instead of returning partial paths', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-failed-path-stream-'));
+  const git = (...args) => execFileSync('git', ['-C', dir, ...args], {
+    encoding: 'utf8', windowsHide: true, shell: false,
+  }).trim();
+  try {
+    git('init', '-q');
+    git('config', 'user.name', 'PTYSD test');
+    git('config', 'user.email', 'ptysd-test@example.invalid');
+    writeFileSync(join(dir, 'base.txt'), 'baseline\n');
+    git('add', 'base.txt');
+    git('commit', '-q', '-m', 'baseline');
+    const sourceSha = git('rev-parse', 'HEAD');
+    let commandCount = 0;
+    const spawnProcess = (command, args, options) => {
+      assert.equal(command, 'git');
+      assert.equal(options.shell, false);
+      assert.equal(options.windowsHide, true);
+      commandCount++;
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.kill = () => false;
+      setImmediate(() => {
+        child.stdout.end(Buffer.from('partial.txt\0'));
+        child.emit('close', 7, null);
+      });
+      return child;
+    };
+
+    await assert.rejects(changedPaths(dir, sourceSha, { spawnProcess }),
+      /GIT_PATH_ENUMERATION_FAILED_7/);
+    assert.equal(commandCount, 1, 'a failed diff must not launch the untracked-file read');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
