@@ -12,6 +12,12 @@ test('auth JSON excludes provider identities, keys and account details', () => {
   assert.equal(summarizeV2AuthJson('not-json').status,'AUTH_JSON_UNREADABLE');
   assert.equal(summarizeV2AuthJson('{"provider":"a"}').status,'AUTH_JSON_SCHEMA_UNKNOWN');
 });
+
+test('auth metadata reports exact account count above the former 10000 cap', () => {
+  const summary = summarizeV2AuthJson(JSON.stringify(Array(10001).fill(null)));
+  assert.deepEqual(summary, { status: 'SAVED_ACCOUNT_RECORDS_PRESENT', saved_account_count: 10001 });
+});
+
 test('model catalog reports count/hash only; not available-to-use or actually free', () => {
   const summary = summarizeV2Models('opencode/muse-spark-1.3-free\r\nopenrouter/anthropic/a\nnot a model\nopencode/muse-spark-1.3-free\n');
   assert.equal(summary.catalog_count,2);

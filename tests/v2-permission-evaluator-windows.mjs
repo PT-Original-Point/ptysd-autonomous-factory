@@ -3,7 +3,7 @@
 // It is NOT a test of experimental tool.use policy or an OS sandbox.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -15,6 +15,7 @@ assert.ok(prefix, 'V2_PREFIX_REQUIRED');
 const exe = join(prefix, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe');
 assert.ok(statSync(exe).isFile(), 'V2_NATIVE_EXE_NOT_FOUND');
 const configDir = mkdtempSync(join(tmpdir(), 'ptysd-v2-permissions-'));
+mkdirSync(join(configDir, 'src'));
 const scopedPolicy = buildV2ScopedEditConfig(configDir, ['src/allowed.mjs']);
 const config = {
   ...scopedPolicy,
