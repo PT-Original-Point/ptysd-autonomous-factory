@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { summarizeV2AuthJson, summarizeV2Models, runV2Readiness } from '../native-bridge/v2-readiness.mjs';
+import { summarizeV2AuthJson, summarizeV2AuthProviderJson, summarizeV2Models,
+  runV2Readiness } from '../native-bridge/v2-readiness.mjs';
 
 test('auth JSON excludes provider identities, keys and account details', () => {
   const secret = 'S3cr3t-DO-NOT-LEAK';
@@ -11,6 +12,17 @@ test('auth JSON excludes provider identities, keys and account details', () => {
   assert.deepEqual(summarizeV2AuthJson('[]'), { status: 'NO_SAVED_ACCOUNT_RECORDS', saved_account_count: 0 });
   assert.equal(summarizeV2AuthJson('not-json').status,'AUTH_JSON_UNREADABLE');
   assert.equal(summarizeV2AuthJson('{"provider":"a"}').status,'AUTH_JSON_SCHEMA_UNKNOWN');
+});
+test('provider auth treats an empty supported list as known absence, not unknown metadata', () => {
+  for (const raw of ['[]', '{"accounts":[]}', '{"integrations":[]}'])
+    assert.deepEqual(summarizeV2AuthProviderJson(raw, 'opencode'),
+      { status: 'AUTH_PROVIDER_RECORD_ABSENT' });
+  assert.deepEqual(summarizeV2AuthProviderJson('[{"provider":"opencode"}]', 'opencode'),
+    { status: 'AUTH_PROVIDER_RECORD_PRESENT' });
+  assert.deepEqual(summarizeV2AuthProviderJson('[{"provider":"openai"}]', 'opencode'),
+    { status: 'AUTH_PROVIDER_RECORD_ABSENT' });
+  assert.deepEqual(summarizeV2AuthProviderJson('[{"token":"PRIVATE"}]', 'opencode'),
+    { status: 'AUTH_PROVIDER_METADATA_UNKNOWN' });
 });
 test('model catalog reports count/hash only; not available-to-use or actually free', () => {
   const summary = summarizeV2Models('opencode/muse-spark-1.3-free\r\nopenrouter/anthropic/a\nnot a model\nopencode/muse-spark-1.3-free\n');

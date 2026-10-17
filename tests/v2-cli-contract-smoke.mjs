@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { runV2Readiness } from '../native-bridge/v2-readiness.mjs';
+import { safeErrorCode } from '../native-bridge/safe-error-code.mjs';
 
 const prefix = process.env.PTYSD_CI_V2_PREFIX;
 assert.ok(prefix, 'CI_PREFIX_REQUIRED');
@@ -19,6 +20,8 @@ const run = (args, timeout = 12000) => execFileSync(exe, args, {
   encoding: 'utf8', timeout, maxBuffer: 512 * 1024, windowsHide: true,
   stdio: ['ignore', 'pipe', 'pipe'],
 }).replace(/\x1B\[[0-9;]*m/g, '').trim();
+const diagnosticCode = error => typeof error?.status === 'number'
+  ? String(error.status) : safeErrorCode(error, 'UNKNOWN');
 const version = run(['--version']);
 assert.match(version, /^(?:opencode\s+)?v?2\.0\.27$/);
 console.log('OPEN_CODE_V2_VERSION_AND_PACKAGE_PASS');
@@ -40,8 +43,7 @@ for (const [name, args] of probes) {
       console.log(name + ':OK');
     }
   } catch (e) {
-    const errorCode = typeof e?.status === 'number' ? e.status : (e?.code ?? 'UNKNOWN');
-    console.log(name + ':FAILED_' + String(errorCode).replace(/[^0-9A-Z_]/gi, '').slice(0,32));
+    console.log(name + ':FAILED_' + diagnosticCode(e));
     if (name !== 'auth-list-json') throw new Error(name + '_REQUIRED_FAILED');
   }
 }
@@ -56,8 +58,7 @@ for (const [name, args] of optionalProbes) {
     // Never log raw provider credentials, model ownership or config content.
     console.log(name + ':EXIT_0_BYTES_' + Buffer.byteLength(stdout, 'utf8'));
   } catch (e) {
-    const errorCode = typeof e?.status === 'number' ? e.status : (e?.code ?? 'UNKNOWN');
-    console.log(name + ':BLOCKED_' + String(errorCode).replace(/[^0-9A-Z_]/gi, '').slice(0,32));
+    console.log(name + ':BLOCKED_' + diagnosticCode(e));
   }
 }
 const metadata = runV2Readiness(exe, process.cwd());
