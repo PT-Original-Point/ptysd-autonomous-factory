@@ -13,8 +13,8 @@ no new process stays resident between polls.
   command line, source code, public issue, or evidence report.
 * The worker accepts only the configured exact project ID, repository, host name,
   Issue title, and an allowlisted dispatch comment author. Job schema is fixed.
-* Every `opencode_plan` job references a restricted `native-bridge/tasks/*.md`
-  file from the **exact current main commit** and carries SHA-256 of its contents.
+* Every OpenCode task references a restricted `native-bridge/tasks/*.md` file
+  from the **exact current main commit** and carries SHA-256 of its contents.
   Neither an Issue body nor a free-form comment becomes a shell instruction.
 * `ping` is native, zero-token, and verifies round-trip GitHub comments.
 * `opencode_plan` is **OpenCode V2 ONLY**. A native binary must return version
@@ -27,6 +27,11 @@ no new process stays resident between polls.
   `enable_v2_model_runs=true` and an exact `allowed_models` entry are set
   after version, config and provider authorization qualification. OpenCode
   exit code 0 alone is **not** accepted verifier or reasoning-strength evidence.
+* `opencode_edit` uses a separate exact-path schema and the existing disposable
+  Executor workspace. OpenCode V2 receives only the task's explicit edit paths;
+  the executor records the resulting Git diff and SHA-256. A captured diff is
+  `UNVERIFIED` until Codex inspects it and runs the required tests. CLI exit 0
+  and `FINISHED` describe only that attempt, never code acceptance.
 * Neither job type can request elevated privilege, delete archive/MCP/Runner,
   modify branch protection, or approve a change to trusted verifier sources.
 * Output stays in `%LOCALAPPDATA%\PTYSDNativeBridge`; only machine-readable
@@ -77,10 +82,27 @@ PTYSD_NATIVE_JOB_V1
 Receipts are new comments starting with `PTYSD_NATIVE_RECEIPT_V1`. No other source
 is authorized to change accepted tasks, production approvals, or canonical refs.
 
+Candidate builds also accept a schema-6 structured edit job posted by a trusted
+dispatcher on Issue #310. The same exact job marker, latest-GOAL binding, source
+PR/head checks, claim, and executor path apply; arbitrary GOAL prose is never
+converted to a command. All receipts and retry/deduplication readbacks remain on
+Issue #407.
+
+Candidate PR edit jobs use schema 6 and add `goal_comment_id` plus the SHA-256 of
+the exact comment body. The Worker reads that comment from Issue #310, verifies
+the trusted author, issue identity, and V5.3-R4 GOAL marker, and requires it to
+be the latest trusted V5.3-R4 GOAL comment at both selection and final dispatch
+readback. A newer trusted GOAL makes older queued candidate jobs stale. The
+task itself remains the exact
+`spec_path`/`spec_sha256`, edit-path list, and open same-repository PR head in the
+job. GOAL prose is provenance only and is never interpreted as shell or task
+instructions. Older schema-5 candidate jobs remain readable for history but
+are not dispatched without this byte-pinned GOAL reference.
+
 ## Evidence / disabled scopes
 
-* Protected: `PTYSD-Factory-Monitor` and 2667 listener; WinRM;
-  `.codex-chatgpt-web`; unrelated projects; immutable `governance/**`/`runs/**`.
+* Retired: legacy `PTYSD-Factory-Monitor` / `127.0.0.1:2667`. Win11 readback on 2026-10-15 found no registered monitor task or listener; do not reinstall it.
+* Protected: WinRM; `.codex-chatgpt-web`; unrelated projects; immutable `governance/**`/`runs/**`.
 * Separate human-gated lanes: exact elevated v47 delete, 22 legacy task
   classifications, Factory MCP/HostGuard/JEA/secrets, self-hosted Runner #405.
 * `main` source merge, a `ping` result or an OpenCode plan result is **not** a
