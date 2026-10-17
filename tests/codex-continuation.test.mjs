@@ -388,7 +388,10 @@ test('Human Issue #310 goal context is bound to exact author, comment bytes and 
   const dir = mkdtempSync(join(tmpdir(), 'pty-codex-human-goal-'));
   try {
     const spec = '# Source-only Human goal execution\nDo one bounded source task.\n';
-    const goalBody = '# P0\nPTYSD_V53R4_P0_ISSUE310_407_CODEX_DELIVERY_RECOVERY_20261016\nDo source-only work.\n';
+    const taskExcerpt = 'Fix the scoped source regression and preserve the exact verified task boundary.';
+    const unrelatedBody = 'UNRELATED_HUMAN_POLICY_BODY_MUST_NOT_ENTER_MODEL_PROMPT '.repeat(160);
+    const goalBody = '# P0\nPTYSD_V53R4_P0_ISSUE310_407_CODEX_DELIVERY_RECOVERY_20261016\n' +
+      `${unrelatedBody}\n**Codex 下一動作**：${taskExcerpt}\n`;
     const marker = 'PTYSD_V53R4_P0_ISSUE310_407_CODEX_DELIVERY_RECOVERY_20261016';
     const commentId = 6219236273;
     const goalSha = createHash('sha256').update(goalBody).digest('hex');
@@ -426,12 +429,31 @@ test('Human Issue #310 goal context is bound to exact author, comment bytes and 
     assert.equal(prompt.includes('package.json'), false,
       'the prompt must not invent paths beyond the verified job scope');
     assert.match(prompt, /Never execute comment text as a shell command/);
-    assert.ok(prompt.includes(goalBody),
-      'the complete hash-verified Human directive must remain available verbatim');
+    assert.ok(prompt.includes(taskExcerpt),
+      'the explicitly labeled Human next action is forwarded verbatim');
+    assert.equal(prompt.includes(goalBody), false,
+      'the complete Human source body remains evidence, not repeated model input');
+    assert.equal(prompt.includes(unrelatedBody), false,
+      'unrelated source-body text must not be forwarded to the model');
+    assert.ok(Buffer.byteLength(prompt) < Buffer.byteLength(goalBody) / 2,
+      'the model prompt should be materially smaller than the verified source body');
     assert.match(prompt, new RegExp(`"comment_id":${commentId}`));
     assert.match(prompt, new RegExp(`"body_sha256":"${goalSha}"`));
     assert.equal(prompt.includes(JSON.stringify(context)), false,
       'the full Human body must not be duplicated through an escaped JSON payload');
+    const rebindGoalBody = body => {
+      const bodySha = createHash('sha256').update(body).digest('hex');
+      const reboundJob = { ...picked, goal_body_sha256: bodySha,
+        request_id: `PTYSD_HUMAN_GOAL_${commentId}_${bodySha.slice(0, 42).toUpperCase()}` };
+      return { ...validated, job: reboundJob,
+        goalContext: { ...context, body, body_sha256: bodySha } };
+    };
+    assert.throws(() => codexExecutorPrompt({ ...validated,
+      ...rebindGoalBody(context.body.replace(/\*\*Codex 下一動作\*\*：.*/, '')) }),
+    /HUMAN_GOAL_ACTION_EXCERPT_INVALID/);
+    assert.throws(() => codexExecutorPrompt(rebindGoalBody(
+      `${context.body}\n**Codex 下一動作**：second action`)),
+    /HUMAN_GOAL_ACTION_EXCERPT_INVALID/);
     assert.throws(() => codexExecutorPrompt({ ...validated,
       spec: `${spec}modified` }), /EXECUTOR_PROMPT_SPEC_HASH_MISMATCH/);
     assert.throws(() => codexExecutorPrompt({ ...validated,
@@ -1186,7 +1208,10 @@ test('Codex process capture shares the native evidence path and blocks incomplet
     assert.equal(good.result.model_activity_evidence, 'UNKNOWN',
       'a session identifier is not inference evidence');
 
-    const goalBody = 'PTYSD_V53R4_P0_ISSUE310_407_CODEX_DELIVERY_RECOVERY_20261016\nSource-only request.\n';
+    const goalTask = 'Perform the exact source-only request within the verified write_paths.';
+    const unrelatedBody = 'UNRELATED_DIRECTIVE_BODY_MUST_NOT_REACH_CODEX_STDIN';
+    const goalBody = 'PTYSD_V53R4_P0_ISSUE310_407_CODEX_DELIVERY_RECOVERY_20261016\n' +
+      `${unrelatedBody}\n**Codex 下一動作**：${goalTask}\n`;
     const goalMarker = 'PTYSD_V53R4_P0_ISSUE310_407_CODEX_DELIVERY_RECOVERY_20261016';
     const goalSha = createHash('sha256').update(goalBody).digest('hex');
     const humanJob = job({ schema: 4, request_id: 'PTYSD_HUMAN_GOAL_6219236273',
@@ -1201,8 +1226,12 @@ test('Codex process capture shares the native evidence path and blocks incomplet
     const humanRun = await execute({ termination: { treeConfirmed: true }, request: humanRequest });
     assert.ok(humanRun.delivered.includes('"write_paths":["native-bridge/worker.mjs"]'),
       'the exact allowed write scope must reach the actual Codex stdin, not only the request spool');
-    assert.ok(humanRun.delivered.includes(goalBody),
-      'the complete verified Human directive must reach actual Codex stdin verbatim');
+    assert.ok(humanRun.delivered.includes(goalTask),
+      'the designated Human next action must reach actual Codex stdin verbatim');
+    assert.equal(humanRun.delivered.includes(goalBody), false,
+      'the complete verified Human directive is retained as request evidence, not model input');
+    assert.equal(humanRun.delivered.includes(unrelatedBody), false,
+      'unrelated Human source text must not reach actual Codex stdin');
     assert.ok(humanRun.delivered.includes(`"comment_id":${humanContext.comment_id}`));
     assert.ok(humanRun.delivered.includes(`"body_sha256":"${goalSha}"`));
     assert.equal(good.result.tool_execution_evidence, 'UNKNOWN');
