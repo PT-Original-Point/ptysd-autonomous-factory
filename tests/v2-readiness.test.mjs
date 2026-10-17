@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { summarizeV2AuthJson, summarizeV2Models, runV2Readiness } from '../native-bridge/v2-readiness.mjs';
+import { summarizeV2AuthJson, summarizeV2AuthProviderJson, summarizeV2Models,
+  readV2ProviderAuth, runV2Readiness } from '../native-bridge/v2-readiness.mjs';
 
 test('auth JSON excludes provider identities, keys and account details', () => {
   const secret = 'S3cr3t-DO-NOT-LEAK';
@@ -12,6 +13,46 @@ test('auth JSON excludes provider identities, keys and account details', () => {
   assert.equal(summarizeV2AuthJson('not-json').status,'AUTH_JSON_UNREADABLE');
   assert.equal(summarizeV2AuthJson('{"provider":"a"}').status,'AUTH_JSON_SCHEMA_UNKNOWN');
 });
+
+test('auth metadata reports exact account count above the former 10000 cap', () => {
+  const summary = summarizeV2AuthJson(JSON.stringify(Array(10001).fill(null)));
+  assert.deepEqual(summary, { status: 'SAVED_ACCOUNT_RECORDS_PRESENT', saved_account_count: 10001 });
+});
+
+test('valid empty provider record collections mean no saved provider record', () => {
+  for (const json of ['[]', '{"accounts":[]}', '{"integrations":[]}']) {
+    assert.deepEqual(summarizeV2AuthProviderJson(json, 'openai'),
+      { status: 'AUTH_PROVIDER_RECORD_ABSENT' });
+  }
+});
+
+test('unrecognized non-empty provider records remain unknown', () => {
+  for (const json of ['[{}]', '[{"provider":null}]', '{"accounts":[{"name":"account"}]}']) {
+    assert.deepEqual(summarizeV2AuthProviderJson(json, 'openai'),
+      { status: 'AUTH_PROVIDER_METADATA_UNKNOWN' });
+  }
+});
+
+test('provider records distinguish a matching provider from a different provider', () => {
+  assert.deepEqual(summarizeV2AuthProviderJson('[{"provider":"OpenAI"}]', 'openai'),
+    { status: 'AUTH_PROVIDER_RECORD_PRESENT' });
+  assert.deepEqual(summarizeV2AuthProviderJson('[{"provider":"anthropic"}]', 'openai'),
+    { status: 'AUTH_PROVIDER_RECORD_ABSENT' });
+});
+
+test('provider auth command preserves coarse status without exposing returned data', () => {
+  let called = false;
+  const result = readV2ProviderAuth('opencode', 'openai', 'C:\\workspace',
+    (_bin, args, options) => {
+      called = true;
+      assert.deepEqual(args, ['auth', 'list', '--format', 'json']);
+      assert.equal(options.cwd, 'C:\\workspace');
+      return '[]';
+    }, {});
+  assert.equal(called, true);
+  assert.deepEqual(result, { status: 'AUTH_PROVIDER_RECORD_ABSENT' });
+});
+
 test('model catalog reports count/hash only; not available-to-use or actually free', () => {
   const summary = summarizeV2Models('opencode/muse-spark-1.3-free\r\nopenrouter/anthropic/a\nnot a model\nopencode/muse-spark-1.3-free\n');
   assert.equal(summary.catalog_count,2);
