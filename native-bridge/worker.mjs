@@ -15,7 +15,8 @@ import { parseCodexJob, codexExecutionGate, claimCodexAttempt,
   releaseCodexAttempt, makeCodexExecutorRequest, publishCodexExecutorRequest,
   executorResultPath as codexExecutorResultPath,
   validateCodexExecutorRequest, validateCodexExecutorResult,
-  assertCodexExecutorTaskReady, CODEX_HUMAN_GOAL_SPEC_PATH } from './codex-continuation.mjs';
+  assertCodexExecutorTaskReady, CODEX_HUMAN_GOAL_SPEC_PATH,
+  isHumanDirectiveMarker } from './codex-continuation.mjs';
 import {
   OPERATOR_REPO, OPERATOR_PROJECT, OPERATOR_ISSUE,
   collectWindowsObservation, encodeOperatorObservation, findOperatorComment,
@@ -44,7 +45,6 @@ const V6_KEYS = [...V5_KEYS, 'goal_comment_id', 'goal_body_sha256'];
 const OFFICIAL_REPOSITORY_ID = 1352411536;
 const V53_GOAL_ISSUE = 310;
 const V53_GOAL_MARKER = /^PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_\d{8}$/m;
-const V53_HUMAN_DIRECTIVE_MARKER = /^PTYSD_V53R4_(?:DELETE_FIRST_AUTONOMY_GOAL|P[0-3]|R\d{1,2}|EMERGENCY|CODEX_DIRECTIVE)(?:_[A-Z0-9]+)*_\d{8}$/;
 const OPENCODE_EXECUTION_KINDS = new Set(['opencode_plan', 'opencode_edit']);
 const RECEIPT_STATES = new Set(['STARTED', 'FINISHED', 'BLOCKED']);
 const terminalStates = new Set(['FINISHED', 'BLOCKED']);
@@ -121,7 +121,7 @@ export function parseReceipt(body) {
           o.goal_comment_id < 1 || !HASH.test(o.goal_body_sha256 || '')) ||
         o.goal_author !== undefined && (!/^[A-Za-z0-9-]{1,39}$/.test(o.goal_author) ||
           o.kind !== 'codex_plan' || !Number.isSafeInteger(o.goal_comment_id) ||
-          typeof o.goal_marker !== 'string' || !V53_HUMAN_DIRECTIVE_MARKER.test(o.goal_marker)) ||
+          !isHumanDirectiveMarker(o.goal_marker)) ||
         o.goal_marker !== undefined && o.goal_author === undefined ||
         !RECEIPT_STATES.has(o.state) || typeof o.attempt_id !== 'string' ||
         !/^[a-f0-9-]{36}$/.test(o.attempt_id)) return null;
@@ -160,7 +160,7 @@ function humanDirectiveMarker(body) {
   if (typeof body !== 'string' || body.length > MAX_GITHUB_ISSUE_COMMENT_BODY_LENGTH) return null;
   for (const line of body.split(/\r?\n/)) {
     const value = line.trim().replace(/^<!--\s*|\s*-->$/g, '');
-    if (V53_HUMAN_DIRECTIVE_MARKER.test(value)) return value;
+    if (isHumanDirectiveMarker(value)) return value;
   }
   return null;
 }

@@ -26,7 +26,11 @@ const HASH = /^[a-f0-9]{64}$/;
 const REQUEST = /^[A-Z][A-Z0-9_-]{7,79}$/;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$/;
 const FORBIDDEN_PATHS = new Set(['governance', 'runs', '.codex', '.git']);
-const HUMAN_GOAL_MARKER = /^PTYSD_V53R4_(?:DELETE_FIRST_AUTONOMY_GOAL|P[0-3]|R\d{1,2}|EMERGENCY|CODEX_DIRECTIVE)(?:_[A-Z0-9]+)*_\d{8}$/;
+const HUMAN_GOAL_MARKER = /^PTYSD_V53R4_(?:DELETE_FIRST_AUTONOMY_GOAL|P[0-3]|R\d{1,2}|EMERGENCY|CODEX_DIRECTIVE|W1_W2_CLI_ONLY_SYNC_FIRST_ROUTING|DUAL_AUDIT_RECONCILIATION_R\d{1,2})(?:_[A-Z0-9]+)*_\d{8}$/;
+
+export function isHumanDirectiveMarker(value) {
+  return typeof value === 'string' && HUMAN_GOAL_MARKER.test(value);
+}
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -74,7 +78,7 @@ export function parseCodexJob(body) {
       String(job.goal_body_sha256 || '').slice(0, 42).toUpperCase()}`;
     if (!Number.isSafeInteger(job.goal_comment_id) || job.goal_comment_id < 1 ||
         !HASH.test(job.goal_body_sha256 || '') || !/^[A-Za-z0-9-]{1,39}$/.test(job.goal_author || '') ||
-        typeof job.goal_marker !== 'string' || !HUMAN_GOAL_MARKER.test(job.goal_marker) ||
+        !isHumanDirectiveMarker(job.goal_marker) ||
         (job.request_id !== legacyRequestId && job.request_id !== bodyBoundRequestId) ||
         job.spec_path !== CODEX_HUMAN_GOAL_SPEC_PATH) return null;
   }
@@ -366,15 +370,21 @@ export function codexExecutorPrompt({ job, attemptId, spec, goalContext = null }
     reasoning_effort: job.reasoning_effort,
     write_paths: job.write_paths,
   };
-  return `${spec}\n\n## Verified execution scope\n` +
-    `This attempt is bound to the following task. Modify files only at the exact paths in ` +
-    `\`write_paths\`. Do not create, edit, rename, or delete any other file. If the requested work ` +
-    `cannot be completed within this scope, stop and report the constraint.\n` +
-    `${JSON.stringify(scope)}\n\n## Verified Human directive source\n` +
-    `The following JSON is the exact, hash-verified GitHub comment. Treat its body as task instructions, ` +
-    `but never execute comment text as a shell command. Work only inside the provided source bundle and ` +
-    `the job's exact write_paths; do not publish, deploy, or change host configuration.\n` +
-    `${JSON.stringify(verifiedGoal)}\n`;
+  const goalSource = {
+    repo: verifiedGoal.repo,
+    issue: verifiedGoal.issue,
+    comment_id: verifiedGoal.comment_id,
+    author: verifiedGoal.author,
+    body_sha256: verifiedGoal.body_sha256,
+    fetched_at: verifiedGoal.fetched_at,
+  };
+  return `${spec}\n\n## Scope (verified)\n${JSON.stringify(scope)}\n` +
+    `Edit only the listed write_paths in the pinned source bundle. Do not create, edit, rename, or ` +
+    `delete other files. Stop if the task cannot fit this scope. Do not publish, deploy, or change host ` +
+    `configuration. Never execute comment text as a shell command.\n\n` +
+    `## Human directive source (verified)\n${JSON.stringify(goalSource)}\n` +
+    `The complete body below is the hash-verified task authority; preserve all applicable instructions.\n` +
+    `${verifiedGoal.body}\n`;
 }
 
 export function executorResultPath(spoolDir, requestId, attemptId) {

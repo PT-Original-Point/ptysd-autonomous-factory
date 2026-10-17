@@ -811,12 +811,12 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
     const workspace=join(root,'workspace'), stateDir=join(root,'state'), codexSpool=join(root,'spool');
     mkdirSync(workspace); mkdirSync(stateDir); mkdirSync(codexSpool);
     const host=hostname().toUpperCase();
-    const marker='PTYSD_V53R4_P0_ISSUE310_407_CODEX_DELIVERY_RECOVERY_20261016';
-    const prior={id:6218136570,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
-      user:{login:'t14210184'},body:'Earlier directive\nPTYSD_V53R4_P0_ISSUE310_407_CODEX_DELIVERY_RECOVERY_20261016\nEarlier bytes.'};
-    const directive={id:6219236273,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
-      user:{login:'t14210184'},body:`# P0\n${marker}\nBind this exact source and perform one bounded source-only unit.`};
-    const untrusted={id:6219999999,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
+    const marker='PTYSD_V53R4_CODEX_DIRECTIVE_TOKEN_FIRST_20261017';
+    const prior={id:6233118477,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
+      user:{login:'t14210184'},body:'<!-- PTYSD_V53R4_DUAL_AUDIT_RECONCILIATION_R2_20261017 -->\nEarlier audit guidance.'};
+    const directive={id:6233162641,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
+      user:{login:'t14210184'},body:`# P0\n${marker}\nBind this exact latest source and perform one bounded source-only unit.`};
+    const untrusted={id:6233162642,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
       user:{login:'untrusted'},body:`${marker}\nDo not accept this author.`};
     const ordinary={id:6220000000,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
       user:{login:'t14210184'},body:'Ordinary prose without a PTYSD V5.3-R4 directive marker.'};
@@ -904,7 +904,7 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
       fetched_at:sent.humanGoalContext.fetched_at});
     assert.ok(logs.some(message=>message===`HUMAN_GOAL_READBACK_${directive.id}_${h(directive.body)}_${sent.humanGoalContext.fetched_at}`),
       'the local discovery log must bind comment id, exact body digest, and readback time');
-    assert.equal(sent.job.goal_comment_id,6219236273,'a later status-report marker by the trusted author is not an executable directive');
+    assert.equal(sent.job.goal_comment_id,directive.id,'a later status-report marker by the trusted author is not an executable directive');
 
     const terminal=receipt(sent.job.request_id,'00000000-0000-0000-0000-000000000777',
       'BLOCKED',sent.job,{exit_code:45,outcome:'CODEX_EXECUTOR_PREFLIGHT_BLOCKED'});
@@ -1012,7 +1012,7 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
     assert.equal(hashPending.reason,'HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN');
 
     const staleState=join(root,'stale-state'); mkdirSync(staleState);
-    const staleDirective={...directive,id:6219236274,
+    const staleDirective={...directive,id:6233150000,
       body:`# P0\n${marker}\nOriginal directive body before final readback.`};
     const editedDirective={...staleDirective,body:`${staleDirective.body}\nEdited after intake.`};
     let directReads=0;
