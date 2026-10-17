@@ -12,7 +12,7 @@ import {
   assertExecutorTaskReady, buildExecutorTaskXml, claimPendingManifest,
   candidateBundlePath, candidateWorkspacePath, cleanupExecutorAttempt,
   createExecutorSourceBundle, dispatchToExecutor, executorResultPath, makeExecutorManifest,
-  triggerPendingExecutorAttempt,
+  getCurrentWindowsSid, triggerPendingExecutorAttempt,
   executorTaskArguments, validateExecutorTaskXml,
 } from '../native-bridge/windows-executor.mjs';
 
@@ -20,6 +20,27 @@ const PUBLISHER_SID = 'S-1-5-21-101-202-303-1001';
 const EXECUTOR_SID = 'S-1-5-21-101-202-303-1002';
 const ATTEMPT = '00000000-0000-4000-8000-000000000001';
 const ATTEMPT_EDIT = '00000000-0000-4000-8000-000000000002';
+
+test('shared Windows SID read uses the hidden system whoami executable and validates its output', () => {
+  const calls = [];
+  const sid = getCurrentWindowsSid({ platformName: 'win32', systemRoot: 'C:\\Windows',
+    execFile(executable, args, options) {
+      calls.push({ executable, args, options });
+      return '"USER","SID"\r\n"DESKTOP\\PTYSD-EXECUTOR","S-1-5-21-101-202-303-1002"\r\n';
+    } });
+  assert.equal(sid, 'S-1-5-21-101-202-303-1002');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].executable, 'C:\\Windows\\System32\\whoami.exe');
+  assert.deepEqual(calls[0].args, ['/user', '/fo', 'csv', '/nh']);
+  assert.equal(calls[0].options.windowsHide, true);
+  assert.equal(calls[0].options.shell, false);
+  assert.equal(calls[0].options.timeout, 5000);
+  assert.throws(() => getCurrentWindowsSid({ platformName: 'win32', systemRoot: 'C:\\Windows',
+    execFile: () => 'no SID here' }), { code: 'EXECUTOR_WINDOWS_IDENTITY_UNAVAILABLE' });
+  assert.throws(() => getCurrentWindowsSid({ platformName: 'linux', systemRoot: 'C:\\Windows',
+    execFile: () => { throw new Error('MUST_NOT_RUN'); } }),
+  { code: 'EXECUTOR_WINDOWS_IDENTITY_UNAVAILABLE' });
+});
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'ptysd-executor-'));

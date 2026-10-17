@@ -152,11 +152,13 @@ export function validateExecutorTaskXml(xml, descriptor) {
     multiple_instances: result.multiple_instances };
 }
 
-export function getCurrentWindowsSid({ execFile = execFileSync, systemRoot = process.env.SystemRoot } = {}) {
-  if (process.platform !== 'win32' || !systemRoot) fail('EXECUTOR_WINDOWS_IDENTITY_UNAVAILABLE');
+export function getCurrentWindowsSid({ execFile = execFileSync, systemRoot = process.env.SystemRoot,
+  platformName = process.platform } = {}) {
+  if (platformName !== 'win32' || !systemRoot) fail('EXECUTOR_WINDOWS_IDENTITY_UNAVAILABLE');
   const whoami = win32.join(systemRoot, 'System32', 'whoami.exe');
   const output = execFile(whoami, ['/user', '/fo', 'csv', '/nh'], {
-    encoding: 'utf8', windowsHide: true, timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8', windowsHide: true, shell: false, timeout: 5000,
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   const match = output.match(/S-1-(?:\d+-)+\d+/i);
   if (!match || !SID.test(match[0])) fail('EXECUTOR_WINDOWS_IDENTITY_UNAVAILABLE');

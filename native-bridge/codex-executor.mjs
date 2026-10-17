@@ -11,6 +11,7 @@ import { dirname, join, relative, resolve, isAbsolute, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readWindowsProcessTree, runCapturedProcess, terminateProcessTree }
   from './captured-process.mjs';
+import { getCurrentWindowsSid } from './windows-executor.mjs';
 import { codexExecutionGate, buildCodexExecArgs, codexSessionFromJsonl,
   codexRunOutcome, codexExecutorPrompt, executorResultPath,
   validateCodexExecutorRequest } from './codex-continuation.mjs';
@@ -23,11 +24,6 @@ function digestFile(path) {
     input.on('error', reject);
     input.on('end', () => resolveHash(hash.digest('hex')));
   });
-}
-
-function nativeText(file, args) {
-  return execFileSync(file, args, { encoding: 'utf8', windowsHide: true, shell: false,
-    timeout: 120000, maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 function parseArgs(argv) {
@@ -179,12 +175,6 @@ export function takeNextRequest(spoolDir) {
     }
   }
   return null;
-}
-
-function getWindowsSid() {
-  const output = nativeText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value']);
-  return output.trim();
 }
 
 function assertNoGitHubTokenEnvironment() {
@@ -403,7 +393,7 @@ export async function runExecutorOnce(config, deps = {}) {
   try {
     const picked = takeNextRequest(config.spool_dir);
     if (!picked) return { state: 'IDLE', model_invoked: false };
-    const currentSid = deps.currentSid ?? (deps.readCurrentSid || getWindowsSid)();
+    const currentSid = deps.currentSid ?? (deps.readCurrentSid || getCurrentWindowsSid)();
     const request = picked.request;
     updateActiveLock(activeLock, 'CLAIMED_NO_MODEL', request);
     const verified = validateCodexExecutorRequest(request);
