@@ -376,7 +376,8 @@ test('executor accepts a scoped OpenCode edit manifest and materializes only its
   } finally { f.dispose(); }
 });
 
-test('executor persists a recoverable Antigravity preflight wait for the exact pinned source attempt', async () => {
+test('executor persists a recoverable Antigravity preflight wait for the exact pinned source attempt', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler executor lifecycle is Windows-only');
   const f=fixture();
   try {
     const source=sourceRepository(f.root);
