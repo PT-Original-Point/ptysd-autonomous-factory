@@ -376,6 +376,48 @@ test('executor accepts a scoped OpenCode edit manifest and materializes only its
   } finally { f.dispose(); }
 });
 
+test('executor persists a recoverable Antigravity preflight wait for the exact pinned source attempt', async () => {
+  const f=fixture();
+  try {
+    const source=sourceRepository(f.root);
+    const spec='Synthetic W2 preflight; no model invocation is permitted.';
+    const job={schema:6,project_id:PROJECT,host:hostname().toUpperCase(),
+      request_id:'PTYSD_ANTIGRAVITY_EXECUTOR_WAIT_20261018',kind:'antigravity_edit',
+      source_sha:source.sourceSha,spec_path:'native-bridge/tasks/w2-review.md',
+      spec_sha256:createHash('sha256').update(spec).digest('hex'),
+      model:'gemini-3.8-flash-high',variant:'high',edit_paths:['README.md'],source_pr:448,
+      goal_comment_id:6188322050,goal_body_sha256:'c'.repeat(64)};
+    const bundle=createExecutorSourceBundle({workspace:source.workspace,descriptor:f.descriptor,
+      job,attemptId:ATTEMPT_EDIT,filesystemPath:localPathMap(f)});
+    writeFileSync(join(f.manifestDir,`${ATTEMPT_EDIT}.pending.json`),JSON.stringify(
+      makeExecutorManifest(job,spec,ATTEMPT_EDIT,bundle.sha256)),{flag:'wx'});
+    let executeCalls=0;
+    const result=await executePendingManifest({manifestDir:f.manifestDir,
+      currentSid:()=>EXECUTOR_SID,filesystemPath:localPathMap(f),
+      config:{project_id:PROJECT,repo:REPO,host:hostname().toUpperCase(),
+        executor_runtime:{user_sid:EXECUTOR_SID,publisher_sid:PUBLISHER_SID,
+          manifest_dir:f.manifestDir,results_dir:f.resultsDir},
+        workspace:source.workspace,state_dir:f.resultsDir},
+      execute:async(_spec,executionConfig,receivedJob)=>{
+        executeCalls++;
+        assert.equal(receivedJob.kind,'antigravity_edit');
+        assert.notEqual(executionConfig.workspace,source.workspace);
+        assert.equal(execFileSync('git',['-C',executionConfig.workspace,'rev-parse','HEAD'],{
+          encoding:'utf8',windowsHide:true,shell:false}).trim(),source.sourceSha);
+        return {outcome:'ANTIGRAVITY_CREDIT_FALLBACK_SETTING_UNKNOWN',exit_code:48,
+          eligibility_state:'WAITING',model_invoked:false,evidence_sha256:null,evidence_bytes:0};
+      }});
+    assert.equal(executeCalls,1);
+    assert.equal(result.terminal_state,'WAITING');
+    const saved=JSON.parse(readFileSync(executorResultPath(f.resultsDir,job.request_id,ATTEMPT_EDIT),'utf8'));
+    assert.equal(saved.terminal.kind,'antigravity_edit');
+    assert.equal(saved.terminal.model,'gemini-3.8-flash-high');
+    assert.equal(saved.terminal.model_invoked,false);
+    assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(saved.terminal)).state,'WAITING');
+    cleanupExecutorAttempt({...f.descriptor,manifest_dir:f.manifestDir,results_dir:f.resultsDir},ATTEMPT_EDIT);
+  } finally { f.dispose(); }
+});
+
 test('executor refuses a source bundle hash mismatch without invoking OpenCode', async t => {
   if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
   const f = fixture();

@@ -10,7 +10,9 @@ import { basename, join, resolve, relative, isAbsolute, delimiter } from 'node:p
 import { pathToFileURL } from 'node:url';
 import { qualifyOpenCodeV2, validateV2Model, buildV2ReadOnlyConfig, buildV2ReadOnlyArgs,
   buildV2ScopedEditConfig, buildV2ScopedEditArgs, readOpenCodeV2RunEvidence } from './opencode-v2.mjs';
-import { readV2ProviderAuth, runV2Readiness } from './v2-readiness.mjs';
+import { ANTIGRAVITY_V2_MODEL, antigravityV2ReadinessExecutionFailure,
+  readAntigravityV2RunEvidence, readV2ProviderAuth,
+  runV2Readiness, runAntigravityV2Readiness } from './v2-readiness.mjs';
 import { parseCodexJob, codexExecutionGate, claimCodexAttempt,
   releaseCodexAttempt, makeCodexExecutorRequest, publishCodexExecutorRequest,
   executorResultPath as codexExecutorResultPath,
@@ -47,12 +49,21 @@ const V53_GOAL_ISSUE = 310;
 const V53_GOAL_MARKER = /^PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_\d{8}$/m;
 const V53_HUMAN_DIRECTIVE_MARKER = /^PTYSD_V53R4_(?:DELETE_FIRST_AUTONOMY_GOAL|P[0-3]|R\d{1,2}|EMERGENCY|CODEX_DIRECTIVE|DUAL_AUDIT|W1_W2_CLI_ONLY)(?:_[A-Z0-9]+)*_\d{8}$/;
 const OPENCODE_EXECUTION_KINDS = new Set(['opencode_plan', 'opencode_edit']);
-const RECOVERABLE_OPENCODE_PREFLIGHT_OUTCOMES = new Set([
+const ANTIGRAVITY_EXECUTION_KINDS = new Set(['antigravity_edit']);
+const MODEL_EXECUTION_KINDS = new Set([...OPENCODE_EXECUTION_KINDS, ...ANTIGRAVITY_EXECUTION_KINDS]);
+const EDIT_EXECUTION_KINDS = new Set(['opencode_edit', 'antigravity_edit']);
+const RECOVERABLE_MODEL_PREFLIGHT_OUTCOMES = new Set([
   'V2_MODEL_EXECUTION_NOT_YET_APPROVED', 'MODEL_NOT_EXPLICITLY_ALLOWED',
   'OPENCODE_V2_CLI_NOT_QUALIFIED', 'OPENCODE_V2_AUTH_NOT_READY',
   'OPENCODE_V2_AUTH_METADATA_UNKNOWN', 'V2_WORKSPACE_CONFIG_CONFLICT',
   'V2_WORKSPACE_CONFIG_UNKNOWN', 'V2_WORKSPACE_CONFIG_READBACK_FAILED',
+  'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED', 'ANTIGRAVITY_EXECUTION_ATTESTATION_UNKNOWN',
+  'ANTIGRAVITY_EXECUTION_ATTESTATION_STALE', 'ANTIGRAVITY_QUOTA_EMPTY',
+  'ANTIGRAVITY_CREDIT_OVERAGE_NOT_DISABLED', 'ANTIGRAVITY_CLI_NOT_QUALIFIED',
+  'ANTIGRAVITY_CREDIT_FALLBACK_SETTING_UNKNOWN', 'ANTIGRAVITY_AGGREGATE_QUOTA_UNKNOWN',
+  'ANTIGRAVITY_AUTH_NOT_VERIFIED',
 ]);
+const ANTIGRAVITY_AUTHORIZATION_MAX_AGE_MS = 5 * 60 * 1000;
 const RECEIPT_STATES = new Set(['STARTED', 'WAITING', 'FINISHED', 'BLOCKED']);
 const terminalStates = new Set(['FINISHED', 'BLOCKED']);
 const resolvedAttemptStates = new Set(['WAITING', ...terminalStates]);
@@ -65,10 +76,13 @@ export function terminalStateForResult(result) {
   if (/(?:^|_)(?:FAILED|ERROR)(?:_|$)/.test(result.outcome)) return 'BLOCKED';
   return 'FINISHED';
 }
-export function isRecoverableOpenCodePreflightWait(result, job) {
-  return OPENCODE_EXECUTION_KINDS.has(job?.kind) &&
+export function isRecoverableModelPreflightWait(result, job) {
+  return MODEL_EXECUTION_KINDS.has(job?.kind) &&
     result?.eligibility_state === 'WAITING' && result?.model_invoked === false &&
-    RECOVERABLE_OPENCODE_PREFLIGHT_OUTCOMES.has(result?.outcome);
+    RECOVERABLE_MODEL_PREFLIGHT_OUTCOMES.has(result?.outcome);
+}
+export function isRecoverableOpenCodePreflightWait(result, job) {
+  return isRecoverableModelPreflightWait(result, job);
 }
 function validEditPaths(paths) {
   if (!Array.isArray(paths) || paths.length < 1) return false;
@@ -88,6 +102,18 @@ function validEditPaths(paths) {
   return true;
 }
 function isOpenCodeExecutionKind(kind) { return OPENCODE_EXECUTION_KINDS.has(kind); }
+function isModelExecutionKind(kind) { return MODEL_EXECUTION_KINDS.has(kind); }
+function isEditExecutionKind(kind) { return EDIT_EXECUTION_KINDS.has(kind); }
+function validJobModel(job) {
+  return job?.kind === 'antigravity_edit'
+    ? job.schema === 6 && job.model === ANTIGRAVITY_V2_MODEL && job.variant === 'high'
+    : validateV2Model(job?.model, job?.variant);
+}
+function validConfiguredModel(model, variant) {
+  return model === ANTIGRAVITY_V2_MODEL
+    ? variant === 'high'
+    : validateV2Model(model, variant);
+}
 export function parseJob(body) {
   const codexJob = parseCodexJob(body);
   if (codexJob) return codexJob;
@@ -108,14 +134,17 @@ export function parseJob(body) {
   // V1 opencode_plan without these fields is deliberately retired (no live V1 plan job).
   if (obj.schema === 2 && obj.kind !== 'opencode_plan' ||
       obj.schema === 4 && (obj.kind !== 'opencode_edit' || !validEditPaths(obj.edit_paths)) ||
-      [5, 6].includes(obj.schema) && (obj.kind !== 'opencode_edit' || !validEditPaths(obj.edit_paths) ||
+      obj.schema === 5 && (obj.kind !== 'opencode_edit' || !validEditPaths(obj.edit_paths) ||
+        !Number.isSafeInteger(obj.source_pr) || obj.source_pr < 1) ||
+      obj.schema === 6 && (!EDIT_EXECUTION_KINDS.has(obj.kind) || !validEditPaths(obj.edit_paths) ||
         !Number.isSafeInteger(obj.source_pr) || obj.source_pr < 1) ||
       obj.schema === 6 && (!Number.isSafeInteger(obj.goal_comment_id) || obj.goal_comment_id < 1 ||
         !HASH.test(obj.goal_body_sha256 || '')) ||
       ![2, 4, 5, 6].includes(obj.schema)) return null;
+  if (obj.kind === 'antigravity_edit' && obj.schema !== 6) return null;
   if (typeof obj.spec_path !== 'string' || !/^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(obj.spec_path)) return null;
   if (typeof obj.spec_sha256 !== 'string' || !HASH.test(obj.spec_sha256)) return null;
-  if (!validateV2Model(obj.model, obj.variant)) return null;
+  if (!validJobModel(obj)) return null;
   return obj;
 }
 export function parseReceipt(body) {
@@ -126,10 +155,15 @@ export function parseReceipt(body) {
     if (o?.schema !== 1 || o.project_id !== PROJECT ||
         typeof o.host !== 'string' || !/^[A-Z0-9-]{3,64}$/.test(o.host) ||
         !SHA.test(o.source_sha) || typeof o.kind !== 'string' ||
-        !['ping', 'native_preflight', 'native_v2_qualify', 'opencode_plan', 'opencode_edit', 'codex_plan'].includes(o.kind) ||
-        (o.state === 'WAITING' && (!OPENCODE_EXECUTION_KINDS.has(o.kind) ||
+        !['ping', 'native_preflight', 'native_v2_qualify', 'opencode_plan', 'opencode_edit',
+          'antigravity_edit', 'codex_plan'].includes(o.kind) ||
+        o.permission_mode_evidence !== undefined &&
+          (o.kind !== 'antigravity_edit' ||
+            !['UNKNOWN', 'ACCEPT_EDITS_CONFIRMED', 'REQUEST_REVIEW_CONFIRMED']
+              .includes(o.permission_mode_evidence)) ||
+        (o.state === 'WAITING' && (!MODEL_EXECUTION_KINDS.has(o.kind) ||
           o.eligibility_state !== 'WAITING' || o.model_invoked !== false ||
-          !RECOVERABLE_OPENCODE_PREFLIGHT_OUTCOMES.has(o.outcome))) ||
+          !RECOVERABLE_MODEL_PREFLIGHT_OUTCOMES.has(o.outcome))) ||
         typeof o.request_id !== 'string' || !REQUEST.test(o.request_id) ||
          o.source_pr !== undefined && (!Number.isSafeInteger(o.source_pr) || o.source_pr < 1) ||
         (o.goal_comment_id === undefined) !== (o.goal_body_sha256 === undefined) ||
@@ -698,7 +732,7 @@ export function guardConfig(c) {
       throw new Error('MODEL_ALLOWLIST_INVALID');
     for (const [model, variants] of Object.entries(c.allowed_models)) {
       if (!Array.isArray(variants) || !variants.length ||
-          !variants.every(v => validateV2Model(model, v))) throw new Error('MODEL_ALLOWLIST_INVALID');
+      !variants.every(v => validConfiguredModel(model, v))) throw new Error('MODEL_ALLOWLIST_INVALID');
     }
   }
   if (c.unauthenticated_free_models !== undefined) {
@@ -710,6 +744,8 @@ export function guardConfig(c) {
   }
   if (c.enable_v2_model_runs !== undefined && typeof c.enable_v2_model_runs !== 'boolean')
     throw new Error('V2_MODEL_ENABLE_FLAG_INVALID');
+  if (c.enable_antigravity_model_runs !== undefined && typeof c.enable_antigravity_model_runs !== 'boolean')
+    throw new Error('ANTIGRAVITY_MODEL_ENABLE_FLAG_INVALID');
   if (c.executor !== undefined) validateExecutorDescriptor(c.executor);
   mkdirSync(c.state_dir, { recursive: true });
   return c;
@@ -730,17 +766,53 @@ function localEvidence(config, requestId, value) {
   return { evidence_sha256: digest(bytes), evidence_bytes: bytes.length };
 }
 export function checkModelAuthorization(job, config) {
-  if (!((job.schema === 2 && job.kind === 'opencode_plan') ||
-      ([4, 5, 6].includes(job.schema) && job.kind === 'opencode_edit' && validEditPaths(job.edit_paths) &&
-        ([5, 6].includes(job.schema) ? Number.isSafeInteger(job.source_pr) && job.source_pr > 0 : true) &&
-        (job.schema !== 6 || Number.isSafeInteger(job.goal_comment_id) && job.goal_comment_id > 0 &&
-          HASH.test(job.goal_body_sha256 || ''))))) return false;
+  const validOpenCodeJob = job?.schema === 2 && job.kind === 'opencode_plan' ||
+    [4, 5, 6].includes(job?.schema) && job.kind === 'opencode_edit' && validEditPaths(job.edit_paths) &&
+      ([5, 6].includes(job.schema) ? Number.isSafeInteger(job.source_pr) && job.source_pr > 0 : true) &&
+      (job.schema !== 6 || Number.isSafeInteger(job.goal_comment_id) && job.goal_comment_id > 0 &&
+        HASH.test(job.goal_body_sha256 || ''));
+  const validAntigravityJob = job?.schema === 6 && job.kind === 'antigravity_edit' &&
+    validEditPaths(job.edit_paths) && Number.isSafeInteger(job.source_pr) && job.source_pr > 0 &&
+    Number.isSafeInteger(job.goal_comment_id) && job.goal_comment_id > 0 &&
+    HASH.test(job.goal_body_sha256 || '') && validJobModel(job);
+  if (!validOpenCodeJob && !validAntigravityJob) return false;
   const variants = config.allowed_models?.[job.model];
   return Array.isArray(variants) && variants.includes(job.variant);
 }
+export function antigravityExecutionAuthorization(job, config, now = Date.now()) {
+  if (job?.kind !== 'antigravity_edit' || job.schema !== 6 || !validJobModel(job))
+    return 'ANTIGRAVITY_JOB_IDENTITY_INVALID';
+  if (config.enable_antigravity_model_runs !== true)
+    return 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED';
+  const attestation = config.antigravity_execution_attestation;
+  if (!attestation || attestation.model !== ANTIGRAVITY_V2_MODEL ||
+      attestation.authenticated !== true || attestation.entitlement !== 'VERIFIED' ||
+      attestation.cost !== 'NO_ADDITIONAL_CHARGE' ||
+      !Number.isFinite(attestation.quota_remaining_percent) ||
+      attestation.quota_remaining_percent > 100)
+    return 'ANTIGRAVITY_EXECUTION_ATTESTATION_UNKNOWN';
+  if (attestation.use_g1_credits !== false)
+    return attestation.use_g1_credits === true ? 'ANTIGRAVITY_CREDIT_OVERAGE_NOT_DISABLED' :
+      'ANTIGRAVITY_EXECUTION_ATTESTATION_UNKNOWN';
+  if (!Number.isFinite(attestation.quota_remaining_percent) || attestation.quota_remaining_percent <= 0)
+    return 'ANTIGRAVITY_QUOTA_EMPTY';
+  const observedAt = Date.parse(attestation.observed_at);
+  if (!Number.isFinite(observedAt) || observedAt > now + 30_000 ||
+      now - observedAt > ANTIGRAVITY_AUTHORIZATION_MAX_AGE_MS)
+    return 'ANTIGRAVITY_EXECUTION_ATTESTATION_STALE';
+  return null;
+}
+// A `-free` suffix is not price or privacy evidence. Keep this set limited to
+// exact OpenCode model IDs whose current official model/privacy documentation
+// supports the unauthenticated free lane; never infer new entries from a suffix.
+const UNAUTHENTICATED_FREE_MODEL_IDS = new Set([
+  'opencode/deepseek-v4.1-flash-free',
+  'opencode/longcat-2.5-preview-free',
+  'opencode/space-bunny-free',
+]);
 function isUnauthenticatedFreeModelId(model) {
-  return typeof model === 'string' && model.startsWith('opencode/') &&
-    model.toLowerCase().endsWith('-free') && validateV2Model(model, null);
+  return typeof model === 'string' && validateV2Model(model, null) &&
+    UNAUTHENTICATED_FREE_MODEL_IDS.has(model);
 }
 function permitsUnauthenticatedFreeModel(job, config) {
   return job?.variant === null && isUnauthenticatedFreeModelId(job?.model) &&
@@ -798,7 +870,7 @@ async function assertEditWorkspaceReady(config, job, attemptId) {
   if (status.output.length !== 0) throw new Error('EDIT_WORKSPACE_NOT_CLEAN');
 }
 export async function captureScopedEditDiff({ workspace, state_dir, job, attempt_id }) {
-  if (!workspace || !state_dir || !job || job.kind !== 'opencode_edit' ||
+  if (!workspace || !state_dir || !job || !isEditExecutionKind(job.kind) ||
       !validEditPaths(job.edit_paths) || !/^[a-f0-9-]{36}$/i.test(attempt_id || ''))
     throw new Error('EDIT_DIFF_CAPTURE_INPUT_INVALID');
   const head = await captureGitStdout(workspace, state_dir, job.request_id,
@@ -832,8 +904,134 @@ export async function captureScopedEditDiff({ workspace, state_dir, job, attempt
     allowed_paths: job.edit_paths, scope_valid: scopeValid,
   };
 }
-function nativePreflight(config, job) {
-  const cli = qualifyOpenCodeV2();
+async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {}) {
+  const wait = outcome => ({ outcome, exit_code: 48, evidence_sha256: null, evidence_bytes: 0,
+    eligibility_state: 'WAITING', model_invoked: false });
+  const authorizationFailure = antigravityExecutionAuthorization(job, config,
+    typeof dependencies.now === 'function' ? dependencies.now() : Date.now());
+  if (authorizationFailure) return wait(authorizationFailure);
+  if (!checkModelAuthorization(job, config)) return wait('MODEL_NOT_EXPLICITLY_ALLOWED');
+
+  const baseEnv = dependencies.baseEnv ?? process.env;
+  const localAppData = dependencies.localAppData ?? baseEnv.LOCALAPPDATA;
+  const cliPath = typeof localAppData === 'string' && isAbsolute(localAppData)
+    ? join(localAppData, 'agy', 'bin', 'agy.exe') : '';
+  const readiness = (dependencies.runAntigravityV2Readiness ?? runAntigravityV2Readiness)(
+    cliPath, config.workspace, dependencies.runAntigravityMetadata, baseEnv,
+    dependencies.verifyAntigravitySignature);
+  const readinessFailure = antigravityV2ReadinessExecutionFailure(readiness);
+  if (readinessFailure) return wait(readinessFailure);
+
+  try { await assertEditWorkspaceReady(config, job, attemptId); }
+  catch (error) {
+    return { outcome: `ANTIGRAVITY_EDIT_SOURCE_${safeErrorCode(error, 'UNKNOWN')}`,
+      exit_code: 46, evidence_sha256: null, evidence_bytes: 0,
+      eligibility_state: 'BLOCKED', model_invoked: false, coding_state: 'NOT_STARTED' };
+  }
+
+  const prompt = `${spec}\n\nOnly edit these exact repository-relative paths: ${job.edit_paths.join(', ')}. ` +
+    'Do not run shell commands, access the network, inspect credentials, or edit any other path. ' +
+    'If a required permission or file is unavailable, report the blocker without requesting broader access.';
+  // Stream-json mode exclusively consumes user prompts from stdin; passing the
+  // --print alias here can consume the next option as a positional prompt.
+  const args = ['--input-format', 'stream-json', '--output-format', 'stream-json',
+    '--model', ANTIGRAVITY_V2_MODEL, '--effort', 'high',
+    // This selects the documented agent execution mode. The stream's
+    // permission_mode is a separate headless tool-policy value and may be
+    // request-review. Keep the sandbox and validate every captured path.
+    '--mode=accept-edits', '--sandbox',
+    '--disable-slash-commands'];
+  const outputStem = `output-${job.request_id}-${attemptId}`;
+  const stdoutPath = join(config.state_dir, `${outputStem}.stdout.bin`);
+  const stderrPath = join(config.state_dir, `${outputStem}.stderr.bin`);
+  const processResult = await (dependencies.runCapturedProcess ?? runCapturedProcess)(cliPath, args, {
+    cwd: config.workspace, env: buildOpenCodeChildEnv(baseEnv, { credentialless: true }),
+    stdinText: `${JSON.stringify({ event: 'user', message: { content: prompt } })}\n`,
+    stdoutPath, stderrPath, terminate: dependencies.terminateProcessTree ?? terminateProcessTree,
+  });
+  const capturedStdout = processResult.local_evidence?.stdout_file;
+  const capturedHash = processResult.local_evidence?.stdout_sha256;
+  const runEvidence = await (dependencies.readAntigravityV2RunEvidence ?? readAntigravityV2RunEvidence)(
+    typeof capturedStdout === 'string' && basename(capturedStdout) === capturedStdout
+      ? join(config.state_dir, capturedStdout) : '',
+    typeof capturedHash === 'string' ? capturedHash : '', config.workspace);
+  const evidencedResult = {
+    ...processResult,
+    session_id: runEvidence.session_id, session_started: runEvidence.session_started,
+    permission_mode_evidence: runEvidence.permission_mode_evidence,
+    model_invoked: runEvidence.model_invoked,
+    provider_usage_evidence: runEvidence.provider_usage_evidence,
+    model_activity_evidence: runEvidence.model_activity_evidence,
+    token_usage: runEvidence.token_usage,
+    tool_execution_evidence: runEvidence.tool_execution_evidence,
+    tool_execution_count: runEvidence.tool_execution_count,
+    file_change_tool_evidence: runEvidence.file_change_tool_evidence,
+    file_change_tool_completed_count: runEvidence.file_change_tool_completed_count,
+    file_change_tool_failed_count: runEvidence.file_change_tool_failed_count,
+    file_change_tool_incomplete_count: runEvidence.file_change_tool_incomplete_count,
+    local_evidence: { ...processResult.local_evidence,
+      antigravity_run: { valid: runEvidence.valid, reason: runEvidence.reason,
+        permission_mode_evidence: runEvidence.permission_mode_evidence,
+        event_count: runEvidence.event_count, stdout_bytes: runEvidence.stdout_bytes ?? 0 } },
+  };
+  if (evidencedResult.local_evidence?.termination_state &&
+      ['ORPHAN_POSSIBLE', 'TERMINATION_UNCONFIRMED', 'TERMINATION_REQUESTED']
+        .includes(evidencedResult.local_evidence.termination_state))
+    return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROCESS_TERMINATION_UNCONFIRMED',
+      exit_code: -1, coding_state: 'UNKNOWN_PROCESS_MAY_STILL_WRITE' };
+  if (!runEvidence.valid)
+    return { ...evidencedResult, outcome: `ANTIGRAVITY_STREAM_EVIDENCE_${runEvidence.reason || 'UNKNOWN'}`,
+      exit_code: -1, coding_state: 'UNKNOWN', model_invoked: runEvidence.model_invoked };
+  if (runEvidence.model_invoked !== true)
+    return { ...evidencedResult, outcome: 'ANTIGRAVITY_NO_POSITIVE_MODEL_USAGE_EVIDENCE',
+      exit_code: -1, coding_state: 'UNVERIFIED' };
+
+  let diff;
+  try { diff = await captureScopedEditDiff({ workspace: config.workspace,
+    state_dir: config.state_dir, job, attempt_id: attemptId }); }
+  catch (error) {
+    return { ...evidencedResult, outcome: `ANTIGRAVITY_EDIT_DIFF_CAPTURE_FAILED_${safeErrorCode(error)}`,
+      exit_code: -1, coding_state: 'UNKNOWN',
+      local_evidence: { ...evidencedResult.local_evidence, edit_diff_error: 'CAPTURE_FAILED' } };
+  }
+  const localEvidence = { ...evidencedResult.local_evidence, edit_diff: diff };
+  if (!diff.scope_valid)
+    return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_SCOPE_VIOLATION', exit_code: 46,
+      coding_state: 'REJECTED_SCOPE', scope_valid: false, diff_sha256: diff.sha256,
+      diff_bytes: diff.bytes, ...diff, local_evidence: localEvidence };
+  if (localEvidence.storage_error || localEvidence.capture_error || localEvidence.spawn_error ||
+      localEvidence.process_error || localEvidence.stdin_error)
+    return { ...evidencedResult, outcome: diff.changed_files.length
+      ? 'ANTIGRAVITY_EDIT_EVIDENCE_CAPTURE_FAILED_DIFF_PRESERVED'
+      : 'ANTIGRAVITY_EDIT_EVIDENCE_CAPTURE_FAILED_NO_DIFF',
+    exit_code: -1, coding_state: diff.changed_files.length ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNKNOWN',
+    scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
+    ...diff, local_evidence: localEvidence };
+  if (!diff.changed_files.length || diff.bytes === 0)
+    return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_NO_DIFF', cli_exit_code: evidencedResult.exit_code,
+      exit_code: 47, coding_state: 'NO_DIFF', scope_valid: true,
+      diff_sha256: diff.sha256, diff_bytes: diff.bytes, ...diff, local_evidence: localEvidence };
+  if (evidencedResult.exit_code !== 0 || runEvidence.cli_status !== 'SUCCESS' ||
+      runEvidence.file_change_tool_failed_count || runEvidence.file_change_tool_incomplete_count)
+    return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROCESS_FAILED_DIFF_PRESERVED',
+      cli_exit_code: evidencedResult.exit_code, exit_code: -1, coding_state: 'DIFF_CAPTURED_UNVERIFIED',
+      scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
+      ...diff, local_evidence: localEvidence };
+  return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED',
+    coding_state: 'DIFF_CAPTURED_UNVERIFIED', scope_valid: true,
+    diff_sha256: diff.sha256, diff_bytes: diff.bytes, ...diff, local_evidence: localEvidence };
+}
+
+export function nativePreflight(config, job, dependencies = {}) {
+  const qualify = dependencies.qualifyOpenCodeV2 ?? qualifyOpenCodeV2;
+  const readiness = dependencies.runAntigravityV2Readiness ?? runAntigravityV2Readiness;
+  const cli = qualify();
+  const localAppData = typeof dependencies.localAppData === 'string'
+    ? dependencies.localAppData : process.env.LOCALAPPDATA;
+  const antigravityBin = typeof localAppData === 'string' && isAbsolute(localAppData)
+    ? join(localAppData, 'agy', 'bin', 'agy.exe') : '';
+  const antigravity = readiness(antigravityBin, config.workspace, undefined,
+    dependencies.baseEnv ?? process.env);
   const facts = {
     schema: 1, project_id: PROJECT, host: config.host, request_id: job.request_id,
     kind: 'native_preflight', source_sha: job.source_sha,
@@ -843,6 +1041,7 @@ function nativePreflight(config, job) {
     model_allowlist_entries: Object.keys(config.allowed_models || {}).length,
     v2_model_execution_enabled: config.enable_v2_model_runs === true,
     cli_version: cli.version ?? 'NOT_FOUND_OR_WRONG_MAJOR', model_auth: 'NOT_TESTED',
+    antigravity_v2: antigravity,
     elevated: 'NOT_CHECKED', old_windows_services: 'NOT_CHECKED',
   };
   return { outcome: cli.ready ? 'OPENCODE_V2_VERSION_CONFIRMED_NO_MODEL_AUTH' : 'OPENCODE_V2_CLI_NOT_QUALIFIED',
@@ -868,6 +1067,8 @@ function nativeV2Qualify(config, job) {
     exit_code: bad ? 47 : 0, ...evidence };
 }
 export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
+  if (job?.kind === 'antigravity_edit')
+    return runAntigravityEdit(spec, config, job, attemptId, dependencies);
   const qualify = dependencies.qualifyOpenCodeV2 ?? qualifyOpenCodeV2;
   const readProviderAuth = dependencies.readV2ProviderAuth ?? readV2ProviderAuth;
   const runCaptured = dependencies.runCapturedProcess ?? runCapturedProcess;
@@ -1101,9 +1302,11 @@ export function receipt(requestId, attemptId, state, job, result = null) {
       file_change_tool_failed_count: result?.file_change_tool_failed_count ?? 0,
       file_change_tool_incomplete_count: result?.file_change_tool_incomplete_count ?? 0,
       tests: result?.tests ?? 'NOT_RUN', pr_url: result?.pr_url ?? null } : {}),
-    ...(isOpenCodeExecutionKind(job.kind) ? { model: job.model, variant: job.variant,
+    ...(isModelExecutionKind(job.kind) ? { model: job.model, variant: job.variant,
       session_id: result?.session_id ?? null, session_started: result?.session_started ?? null,
       model_invoked: state === 'WAITING' ? false : result?.model_invoked ?? null,
+      ...(job.kind === 'antigravity_edit' ? {
+        permission_mode_evidence: result?.permission_mode_evidence ?? 'UNKNOWN' } : {}),
       provider_usage_evidence: result?.provider_usage_evidence ?? 'UNKNOWN',
       model_activity_evidence: result?.model_activity_evidence ?? 'UNKNOWN',
       token_usage: result?.token_usage ?? null,
@@ -1301,7 +1504,7 @@ export async function verifyCapturedEvidence(resultDir, result) {
   const outputCaptureFailed = Boolean(local &&
     (local.storage_error || local.capture_error || local.spawn_error || local.process_error || local.stdin_error) &&
     terminal?.state === 'BLOCKED' && /(?:FAILED|ERROR)/.test(terminal?.outcome || ''));
-  if (outputCaptureFailed && (terminal.kind !== 'opencode_edit' || terminal.diff_sha256 == null)) return true;
+  if (outputCaptureFailed && (!isEditExecutionKind(terminal.kind) || terminal.diff_sha256 == null)) return true;
   if (!outputCaptureFailed) {
     const names = [local?.stdout_file, local?.stderr_file];
     if (!local || names.some(name => typeof name !== 'string' || basename(name) !== name ||
@@ -1328,7 +1531,7 @@ export async function verifyCapturedEvidence(resultDir, result) {
         stdout.bytes + Buffer.byteLength('\n--- STDERR ---\n') + stderr.bytes !== terminal.evidence_bytes)
       throw new Error('CAPTURED_EVIDENCE_COMBINED_HASH_MISMATCH');
   }
-  if (terminal.kind === 'opencode_edit' && terminal.diff_sha256 !== null) {
+  if (isEditExecutionKind(terminal.kind) && terminal.diff_sha256 !== null) {
     const diff = local.edit_diff;
     if (!diff || typeof diff.file !== 'string' || basename(diff.file) !== diff.file ||
         !/^[A-Za-z0-9._-]{1,180}$/.test(diff.file) ||
@@ -1434,13 +1637,13 @@ export async function runWorker(configInput, adapters = {}) {
       else log(`CODEX_EXECUTOR_RESULT_${recovery.reason}_${s.request_id}_UNKNOWN_NO_REPLAY`);
       continue;
     }
-    const resultDir = isOpenCodeExecutionKind(s.kind) && config.executor ?
+    const resultDir = isModelExecutionKind(s.kind) && config.executor ?
       resolveExecutorResultsDir(config.executor) : config.state_dir;
-    const path = isOpenCodeExecutionKind(s.kind) && config.executor ?
+    const path = isModelExecutionKind(s.kind) && config.executor ?
       resolveExecutorResultPath(resultDir, s.request_id, s.attempt_id) :
       join(resultDir, `result-${s.request_id}-${s.attempt_id}.json`);
     if (hasResolution) {
-      if (isOpenCodeExecutionKind(s.kind) && config.executor) {
+      if (isModelExecutionKind(s.kind) && config.executor) {
         if (existsSync(path)) {
           let result;
           try { result = JSON.parse(readFileSync(path, 'utf8')); }
@@ -1480,34 +1683,34 @@ export async function runWorker(configInput, adapters = {}) {
             result.terminal?.source_sha !== s.source_sha || result.terminal?.kind !== s.kind ||
             !parseReceipt(RECEIPT_MARKER + JSON.stringify(result.terminal)))
           throw new Error('LOCAL_RECEIPT_IDENTITY_MISMATCH');
-        if (isOpenCodeExecutionKind(s.kind)) await verifyCapturedEvidence(resultDir, result);
+        if (isModelExecutionKind(s.kind)) await verifyCapturedEvidence(resultDir, result);
       } catch (error) {
-        if (isOpenCodeExecutionKind(s.kind)) blockedKinds.add(s.kind);
+        if (isModelExecutionKind(s.kind)) blockedKinds.add(s.kind);
         log(`LOCAL_RESULT_RECONCILIATION_UNKNOWN_${s.request_id}_${safeErrorCode(error)}_NO_REPLAY`);
         continue;
       }
-      if (isOpenCodeExecutionKind(s.kind) && executorProcessTerminationUnconfirmed(result)) {
+      if (isModelExecutionKind(s.kind) && executorProcessTerminationUnconfirmed(result)) {
         blockedKinds.add(s.kind);
         log(`EXECUTOR_PROCESS_TERMINATION_UNRESOLVED_${s.request_id}`);
         continue;
       }
       try { postReceipt(config, result.terminal, me); }
       catch (error) {
-        if (isOpenCodeExecutionKind(s.kind)) blockedKinds.add(s.kind);
+        if (isModelExecutionKind(s.kind)) blockedKinds.add(s.kind);
         log(`LOCAL_RESULT_RECEIPT_PUBLISH_UNKNOWN_${s.request_id}_` +
           `${safeErrorCode(error)}_NO_REPLAY`);
         continue;
       }
-      if (isOpenCodeExecutionKind(s.kind) && config.executor) {
+      if (isModelExecutionKind(s.kind) && config.executor) {
         try { cleanupExecutorAttempt(config.executor, s.attempt_id); } catch { /* exact result and receipt remain durable */ }
       }
       log(`RECOVERED_EXECUTOR_RESULT_${result.terminal.state}_${s.request_id}`);
       blockedKinds.add(s.kind);
       continue;
     }
-    if (isOpenCodeExecutionKind(s.kind)) {
+    if (isModelExecutionKind(s.kind)) {
       blockedKinds.add(s.kind);
-      if (s.kind === 'opencode_edit' && config.executor) {
+      if (isEditExecutionKind(s.kind) && config.executor) {
         const sources = comments.filter(comment => config.dispatchers.includes(comment.user?.login))
           .map(comment => ({ comment, job: parseJob(comment.body) }))
           .filter(item => item.job?.request_id === s.request_id && item.job.kind === s.kind &&
@@ -1652,11 +1855,23 @@ export async function runWorker(configInput, adapters = {}) {
           log(`CODEX_LOCAL_CLAIM_UNRECONCILED_${selected.unresolvedRequestId}_NO_REPLAY`);
         continue;
       }
-    } else if (isOpenCodeExecutionKind(next.job.kind)) {
+    } else if (isModelExecutionKind(next.job.kind)) {
       let reason = null;
-      if (config.enable_v2_model_runs !== true) reason = 'MODEL_RUNS_NOT_ENABLED';
-      else if (!checkModelAuthorization(next.job, config)) reason = 'MODEL_NOT_EXPLICITLY_ALLOWED';
-      else if (next.job.kind === 'opencode_edit') {
+      if (next.job.kind === 'antigravity_edit') {
+        reason = antigravityExecutionAuthorization(next.job, config);
+        if (!reason) {
+          const baseEnv = adapters.baseEnv ?? process.env;
+          const localAppData = adapters.localAppData ?? baseEnv.LOCALAPPDATA;
+          const cliPath = typeof localAppData === 'string' && isAbsolute(localAppData)
+            ? join(localAppData, 'agy', 'bin', 'agy.exe') : '';
+          const readiness = (adapters.runAntigravityV2Readiness ?? runAntigravityV2Readiness)(
+            cliPath, config.workspace, adapters.runAntigravityMetadata, baseEnv,
+            adapters.verifyAntigravitySignature);
+          reason = antigravityV2ReadinessExecutionFailure(readiness);
+        }
+      } else if (config.enable_v2_model_runs !== true) reason = 'MODEL_RUNS_NOT_ENABLED';
+      if (!reason && !checkModelAuthorization(next.job, config)) reason = 'MODEL_NOT_EXPLICITLY_ALLOWED';
+      else if (!reason && next.job.kind === 'opencode_edit') {
         try { buildV2ScopedEditConfig(config.workspace, next.job.edit_paths); }
         catch (error) {
           reason = `EDIT_SCOPE_${safeErrorCode(error, 'INVALID')}`;
@@ -1685,8 +1900,9 @@ export async function runWorker(configInput, adapters = {}) {
         }
       }
       if (reason) {
-        waitingEligibility ??= `OPENCODE_${reason}`;
-        log(`OPENCODE_LANE_WAITING_ELIGIBILITY_${reason}`);
+        const modelLane = next.job.kind === 'antigravity_edit' ? 'ANTIGRAVITY' : 'OPENCODE';
+        waitingEligibility ??= modelLane === 'ANTIGRAVITY' ? reason : `OPENCODE_${reason}`;
+        log(`${modelLane}_LANE_WAITING_ELIGIBILITY_${reason}`);
         // Eligibility is effect-free and request-specific. Skip only this exact
         // request so an unrelated edit in the same lane can still run this tick.
         skippedRequestIds.add(next.job.request_id);
@@ -1734,7 +1950,7 @@ export async function runWorker(configInput, adapters = {}) {
     throw new Error('DISPATCH_COMMENT_CHANGED');
   }
   let spec = null;
-  if (isOpenCodeExecutionKind(job.kind) || job.kind === 'codex_plan')
+  if (isModelExecutionKind(job.kind) || job.kind === 'codex_plan')
     spec = job.kind === 'codex_plan' && job.schema === 4
       ? humanGoalTask?.spec ?? readSpec(job, apiRead) : readSpec(job, apiRead);
   if (job.source_pr !== undefined) {
@@ -1812,7 +2028,7 @@ export async function runWorker(configInput, adapters = {}) {
       author: job.goal_author, body_sha256: job.goal_body_sha256, fetched_at: fetchedAt,
       body: currentDirective.body };
   }
-  const executorDispatch = isOpenCodeExecutionKind(job.kind);
+  const executorDispatch = isModelExecutionKind(job.kind);
   const attemptId = preparedSourceBundle?.attempt_id ?? randomUUID();
   if (job.kind === 'codex_plan') {
     const dispatched = await dispatchCodex({ config, job, spec, workerLogin: me, attemptId,
@@ -1834,7 +2050,10 @@ export async function runWorker(configInput, adapters = {}) {
   }
   let result;
   if (job.kind === 'ping') result = { outcome: 'BRIDGE_PING_OK_NOT_OS_ACCEPTANCE', exit_code: 0, evidence_sha256: null, evidence_bytes: 0 };
-  else if (job.kind === 'native_preflight') result = nativePreflight(config, job);
+  else if (job.kind === 'native_preflight') result = nativePreflight(config, job,
+  { runAntigravityV2Readiness: adapters.runAntigravityV2Readiness,
+    qualifyOpenCodeV2: adapters.qualifyOpenCodeV2,
+    localAppData: adapters.localAppData, baseEnv: adapters.baseEnv });
   else if (job.kind === 'native_v2_qualify') result = nativeV2Qualify(config, job);
   else result = { outcome: 'UNSUPPORTED_DISPATCH_JOB_KIND', exit_code: 1,
     evidence_sha256: null, evidence_bytes: 0 };

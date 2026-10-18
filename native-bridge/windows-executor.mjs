@@ -262,7 +262,7 @@ export function createPinnedSourceBundle({ workspace, bundlePath, sourceSha, att
 export function createExecutorSourceBundle({ workspace, descriptor, job, attemptId,
   filesystemPath = value => value, execFile = execFileSync } = {}) {
   validateExecutorDescriptor(descriptor);
-  if (!['opencode_plan', 'opencode_edit'].includes(job?.kind) || !SHA.test(job?.source_sha || '') ||
+  if (!['opencode_plan', 'opencode_edit', 'antigravity_edit'].includes(job?.kind) || !SHA.test(job?.source_sha || '') ||
       !ATTEMPT.test(attemptId || '') || typeof workspace !== 'string' || !workspace)
     fail('EXECUTOR_SOURCE_BUNDLE_IDENTITY_INVALID');
   const manifestDir = filesystemPath(descriptor.manifest_dir);
@@ -298,7 +298,7 @@ export function makeExecutorManifest(job, spec, attemptId, sourceBundleSha256 = 
     fail('EXECUTOR_MANIFEST_INPUT_INVALID');
   if (sourceBundleSha256 !== null && !HASH.test(sourceBundleSha256 || ''))
     fail('EXECUTOR_SOURCE_BUNDLE_HASH_INVALID');
-  if (sourceBundleSha256 !== null && !['opencode_plan', 'opencode_edit'].includes(job?.kind))
+  if (sourceBundleSha256 !== null && !['opencode_plan', 'opencode_edit', 'antigravity_edit'].includes(job?.kind))
     fail('EXECUTOR_SOURCE_BUNDLE_JOB_KIND_INVALID');
   return { schema: 1, kind: 'PTYSD_NATIVE_EXECUTOR_MANIFEST_V1',
     request_id: job.request_id, attempt_id: attemptId, source_sha: job.source_sha,
@@ -354,7 +354,7 @@ export function triggerPendingExecutorAttempt(descriptor, attemptId, {
 } = {}) {
   validateExecutorDescriptor(descriptor);
   if (!ATTEMPT.test(attemptId || '') || !expectedJob || typeof expectedJob !== 'object' ||
-      Array.isArray(expectedJob) || expectedJob.kind !== 'opencode_edit')
+      Array.isArray(expectedJob) || !['opencode_edit', 'antigravity_edit'].includes(expectedJob.kind))
     fail('EXECUTOR_EXPECTED_PENDING_ATTEMPT_IDENTITY_INVALID');
   const actualPublisherSid = currentSid().toUpperCase();
   if (actualPublisherSid !== descriptor.publisher_sid.toUpperCase() ||

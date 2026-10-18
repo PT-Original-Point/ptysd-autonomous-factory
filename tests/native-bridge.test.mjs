@@ -10,10 +10,11 @@ import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
   runWorker as runWorkerImplementation, main as runWorker, writeReceipt, ISSUE_TITLE, guardConfig,
   runPlan as executeOpenCodeTask, verifyCapturedEvidence,
   codexTerminalReceipt, selectNextWithCodexClaim, readPinnedCandidateSources,
-  publishOperatorObservation, buildOpenCodeChildEnv } from '../native-bridge/worker.mjs';
+  publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight } from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
 import { makeCodexExecutorRequest } from '../native-bridge/codex-continuation.mjs';
+import { ANTIGRAVITY_V2_MODEL } from '../native-bridge/v2-readiness.mjs';
 
 const commit = 'a'.repeat(40); const hash = 'b'.repeat(64);
 const humanGoalBody = `PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015\nCandidate task linkage fixture; this text is provenance only.`;
@@ -347,6 +348,27 @@ test('strict exact job contract rejects injection, cross-project, unknown keys a
   assert.deepEqual(parseJob(encoded(editJob)), editJob,
     'the trusted task schema carries the exact writable file set');
   assert.ok(checkModelAuthorization(editJob,{allowed_models:{'opencode/spark':['high']}}));
+  const antigravityJob=withHumanGoal({...editJob,schema:6,kind:'antigravity_edit',
+    model:ANTIGRAVITY_V2_MODEL,variant:'high',source_pr:448});
+  assert.deepEqual(parseJob(encoded(antigravityJob)),antigravityJob,
+    'W2 accepts only the exact schema-6 pinned model and Human-bound candidate task');
+  assert.ok(checkModelAuthorization(antigravityJob,
+    {allowed_models:{[ANTIGRAVITY_V2_MODEL]:['high']}}));
+  assert.equal(parseJob(encoded({...antigravityJob,model:'gemini-3.8-flash-medium'})),null);
+  assert.equal(parseJob(encoded({...antigravityJob,variant:'medium'})),null);
+  const w2Request='PTYSD_ANTIGRAVITY_WAIT_REEVALUATE_20261018';
+  const waitingJob={...antigravityJob,request_id:w2Request};
+  const w2Attempt='22222222-2222-4222-8222-222222222222';
+  const w2Started=receipt(w2Request,w2Attempt,'STARTED',waitingJob);
+  const w2Waiting=receipt(w2Request,w2Attempt,'WAITING',waitingJob,{
+    outcome:'ANTIGRAVITY_EXECUTION_ATTESTATION_UNKNOWN',exit_code:48,model_invoked:false});
+  const w2Comments=[com(410,encoded(waitingJob)),com(411,RECEIPT_MARKER+JSON.stringify(w2Started),'worker'),
+    com(412,RECEIPT_MARKER+JSON.stringify(w2Waiting),'worker')];
+  assert.equal(parseReceipt(w2Comments[2].body)?.state,'WAITING');
+  assert.equal(selectNext(w2Comments,['t14210184'],'worker',waitingJob.host,null,[],
+    new Map([[waitingJob.source_pr,waitingJob.source_sha]]))?.id,410,
+    'a no-model W2 authorization wait leaves the same task eligible for later reevaluation');
+  assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify({...w2Waiting,outcome:'UNKNOWN_WAIT'})),null);
   assert.equal(parseJob(encoded({...editJob,edit_paths:['../secrets.txt']})),null);
   assert.equal(parseJob(encoded({...editJob,edit_paths:['src/worker.mjs','src/worker.mjs']})),null);
   assert.equal(parseJob(encoded({...editJob,edit_paths:['.github/workflows/ci.yml']})),null);
@@ -645,6 +667,117 @@ test('Issue #310 structured candidate task dispatches through the existing Execu
     assert.equal(modelCalls,0);
     assert.equal(posted.length,1,'an existing #407 STARTED receipt must not be reposted');
   } finally { rmSync(root,{recursive:true,force:true}); }
+});
+
+test('trusted W2 waits without authorization, keeps ping moving, then dispatches the same candidate through the existing Executor', async () => {
+  const root=mkdtempSync(join(homedir(),'.ptysd-antigravity-dispatch-test-'));
+  try {
+    const workspace=join(root,'workspace'),stateDir=join(root,'state');
+    mkdirSync(join(workspace,'src'),{recursive:true}); mkdirSync(stateDir);
+    const host=hostname().toUpperCase(),spec='Edit only src/worker.mjs in the isolated candidate workspace.';
+    const job=withHumanGoal({schema:6,project_id:PROJECT,host,
+      request_id:'PTYSD_ANTIGRAVITY_DISPATCH_20261018',kind:'antigravity_edit',source_sha:commit,
+      spec_path:'native-bridge/tasks/w2-edit.md',spec_sha256:h(spec),model:ANTIGRAVITY_V2_MODEL,
+      variant:'high',edit_paths:['src/worker.mjs'],source_pr:448});
+    const jobComment={...com(410,encoded(job),'t14210184'),
+      issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+    const pingJob=mkjob({host,request_id:'PTYSD_PING_DURING_W2_WAIT_20261018'});
+    const pingComment={...com(411,encoded(pingJob),'t14210184'),
+      issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+    const comments=[jobComment,pingComment];
+    const attestation={model:ANTIGRAVITY_V2_MODEL,authenticated:true,entitlement:'VERIFIED',
+      cost:'NO_ADDITIONAL_CHARGE',quota_remaining_percent:91,observed_at:new Date().toISOString(),
+      use_g1_credits:false};
+    const executor={task_name:'\\PTYSD\\OpenCodeExecutor',user_sid:'S-1-5-21-100-200-300-1001',
+      publisher_sid:'S-1-5-21-100-200-300-1002',wscript_path:'C:\\Windows\\System32\\wscript.exe',
+      launcher_path:'C:\\PTYSD\\HiddenCodexExecutor.vbs',node_bin:'C:\\Node\\node.exe',
+      script_path:'C:\\PTYSD\\executor.mjs',config_path:'C:\\PTYSD\\executor.json',
+      manifest_dir:join(root,'manifests'),results_dir:join(root,'results'),
+      working_directory:root,source_bundle_per_attempt:true};
+    const config={repo:REPO,project_id:PROJECT,host,issue:407,workspace,state_dir:stateDir,
+      dispatchers:['t14210184'],executor,enable_antigravity_model_runs:false};
+    let bundles=0,dispatches=0,inlineRuns=0,prReads=0,readinessCalls=0,nextReceiptId=420;
+    let readinessCreditSetting='SETTINGS_FILE_MISSING';
+    const posted=[],logs=[];
+    const adapters={
+      goalCommentsRead:()=>[humanGoalComment(),...comments],
+      apiRead(uri){
+        if(uri==='user')return {login:'worker'};
+        if(uri===`repos/${REPO}/issues/407`)return {title:ISSUE_TITLE,state:'open'};
+        if(uri===`repos/${REPO}/git/ref/heads/main`)return {object:{sha:commit}};
+        if(uri===`repos/${REPO}/issues/comments/6188322050`)return humanGoalComment();
+        if(uri===`repos/${REPO}/pulls/448`){prReads++;return {number:448,state:'open',
+          base:{ref:'main',repo:{id:1352411536,full_name:REPO}},
+          head:{sha:commit,repo:{id:1352411536,full_name:REPO}}};}
+        const commentMatch=uri.match(new RegExp(`^repos/${REPO.replaceAll('/','\\/')}/issues/comments/(\\d+)$`));
+        if(commentMatch)return comments.find(item=>item.id===Number(commentMatch[1]));
+        if(uri.startsWith(`repos/${REPO}/contents/`))
+          return {encoding:'base64',content:Buffer.from(spec).toString('base64')};
+        throw new Error(`UNEXPECTED_W2_TEST_API_${uri}`);
+      },
+      commentsRead:()=>comments,assertExecutorTaskReady:()=>({ready:true}),
+      localAppData:root,
+      runAntigravityV2Readiness(bin,cwd){
+        readinessCalls++;
+        assert.equal(bin,join(root,'agy','bin','agy.exe'));
+        assert.equal(cwd,workspace);
+        return {status:'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH',
+          model:ANTIGRAVITY_V2_MODEL,signature_verified:true,issues:[],
+          credit_fallback_setting:readinessCreditSetting,authentication_checked:true,
+          authentication_evidence:'AUTHENTICATED',
+          gemini_aggregate_quota:{status:'GEMINI_AGGREGATE_QUOTA_READ',
+            source:'GEMINI_MODELS_AGGREGATE',weekly_remaining_percent:95,five_hour_remaining_percent:99}};
+      },
+      createExecutorSourceBundle({job:sourceJob,attemptId}){
+        bundles++; assert.equal(sourceJob.kind,'antigravity_edit');
+        assert.equal(sourceJob.model,ANTIGRAVITY_V2_MODEL); assert.equal(sourceJob.variant,'high');
+        return {attempt_id:attemptId,source_sha:sourceJob.source_sha,sha256:'d'.repeat(64)};
+      },
+      dispatchToExecutor(_descriptor,manifest){
+        dispatches++; assert.equal(manifest.job.kind,'antigravity_edit');
+        assert.equal(manifest.job.source_pr,448); assert.equal(manifest.source_bundle_sha256,'d'.repeat(64));
+        return {outcome:'SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION'};
+      },
+      writeReceipt(receiptConfig,data){
+        assert.equal(receiptConfig.issue,407); posted.push(data);
+        comments.push(com(nextReceiptId++,RECEIPT_MARKER+JSON.stringify(data),'worker'));
+      },
+      runPlan(){inlineRuns++;throw new Error('W2_MODEL_MUST_RUN_ONLY_IN_EXECUTOR');},
+      observationDependencies:{collectWindowsObservation:()=>({status:'UNKNOWN'})},
+      log:value=>logs.push(value),
+    };
+    const first=await executeWorker(config,adapters);
+    assert.equal(first.state,'FINISHED');
+    assert.equal(first.request_id,pingJob.request_id,
+      'a W2 task waiting for authorization cannot starve an independent ping');
+    assert.equal(posted.filter(item=>item.request_id===job.request_id).length,0,
+      'do not publish STARTED while W2 execution authorization is absent');
+    assert.equal(bundles,0); assert.equal(dispatches,0); assert.equal(inlineRuns,0);
+
+    const second=await executeWorker(config,adapters);
+    assert.equal(second.state,'WAITING_ELIGIBILITY');
+    assert.equal(second.reason,'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED');
+    assert.equal(posted.filter(item=>item.request_id===job.request_id).length,0,
+      'the same unstarted W2 request remains eligible for reevaluation');
+
+    Object.assign(config,{enable_antigravity_model_runs:true,
+      antigravity_execution_attestation:attestation,allowed_models:{[ANTIGRAVITY_V2_MODEL]:['high']}});
+    readinessCreditSetting='CREDIT_FALLBACK_DISABLED';
+    const authorizedPrReadsBefore=prReads;
+    const result=await executeWorker(config,adapters);
+    assert.equal(result.state,'DISPATCHED');
+    assert.equal(result.request_id,job.request_id);
+    assert.equal(bundles,1); assert.equal(dispatches,1); assert.equal(inlineRuns,0);
+    assert.equal(prReads-authorizedPrReadsBefore,2,
+      'the authorized attempt verifies its pinned candidate before dispatch and at final readback');
+    assert.equal(readinessCalls,1,
+      'W2 dispatch requires the explicitly disabled G1 setting from current settings');
+    const w2Receipts=posted.filter(item=>item.request_id===job.request_id);
+    assert.equal(w2Receipts.length,1); assert.equal(w2Receipts[0].state,'STARTED');
+    assert.equal(w2Receipts[0].kind,'antigravity_edit');
+    assert.equal(w2Receipts[0].model,ANTIGRAVITY_V2_MODEL);
+    assert.ok(logs.filter(value=>value.includes('ANTIGRAVITY_LANE_WAITING_ELIGIBILITY_ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED')).length>=2);
+  } finally {rmSync(root,{recursive:true,force:true});}
 });
 
 test('candidate PR head drift at final readback prevents STARTED and Executor dispatch', async () => {
@@ -1203,6 +1336,176 @@ test('OpenCode V2 edit intake captures exact scoped diff without treating exit z
   } finally { rmSync(home,{recursive:true,force:true}); }
 });
 
+test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage authorization and preserves an unverified scoped diff', async () => {
+  const home=mkdtempSync(join(homedir(),'.ptysd-antigravity-edit-test-'));
+  try {
+    const workspace=join(home,'workspace'),stateDir=join(home,'state'),localAppData=join(home,'localappdata');
+    mkdirSync(join(workspace,'src'),{recursive:true}); mkdirSync(stateDir); mkdirSync(localAppData);
+    const git=(...args)=>{
+      const result=spawnSync('git',['-C',workspace,...args],{encoding:'utf8',windowsHide:true});
+      assert.equal(result.status,0,result.stderr); return result.stdout.trim();
+    };
+    git('init','--quiet'); git('config','user.name','PTYSD test'); git('config','user.email','test@example.invalid');
+    writeFileSync(join(workspace,'src','worker.mjs'),'export const state = "base";\n');
+    git('add','src/worker.mjs'); git('commit','--quiet','-m','test source');
+    const sourceSha=git('rev-parse','HEAD');
+    const now=Date.now();
+    const attestation={model:ANTIGRAVITY_V2_MODEL,authenticated:true,entitlement:'VERIFIED',
+      cost:'NO_ADDITIONAL_CHARGE',quota_remaining_percent:95,observed_at:new Date(now).toISOString(),
+      use_g1_credits:false};
+    const config={workspace,state_dir:stateDir,enable_antigravity_model_runs:true,
+      allowed_models:{[ANTIGRAVITY_V2_MODEL]:['high']},antigravity_execution_attestation:attestation};
+    const job=withHumanGoal({schema:6,project_id:PROJECT,host:hostname().toUpperCase(),
+      request_id:'PTYSD_ANTIGRAVITY_EDIT_SYNTHETIC_20261018',kind:'antigravity_edit',source_sha:sourceSha,
+      spec_path:'native-bridge/tasks/review.md',spec_sha256:hash,model:ANTIGRAVITY_V2_MODEL,
+      variant:'high',edit_paths:['src/worker.mjs'],source_pr:448});
+
+    let readinessCalls=0,modelLaunches=0;
+    const blocked=await executeOpenCodeTask('Synthetic; no inference.',{...config,
+      antigravity_execution_attestation:undefined},job,randomUUID(),{
+      runAntigravityV2Readiness(){readinessCalls++;throw new Error('READINESS_MUST_NOT_RUN');},
+      runCapturedProcess(){modelLaunches++;throw new Error('MODEL_MUST_NOT_RUN');},
+    });
+    assert.equal(blocked.outcome,'ANTIGRAVITY_EXECUTION_ATTESTATION_UNKNOWN');
+    assert.equal(blocked.eligibility_state,'WAITING');
+    assert.equal(blocked.model_invoked,false);
+    assert.equal(readinessCalls,0); assert.equal(modelLaunches,0);
+
+    const disabled=await executeOpenCodeTask('Synthetic; no inference.',{...config,
+      enable_antigravity_model_runs:false},job,randomUUID(),{
+      runAntigravityV2Readiness(){readinessCalls++;throw new Error('READINESS_MUST_NOT_RUN');},
+      runCapturedProcess(){modelLaunches++;throw new Error('MODEL_MUST_NOT_RUN');},
+    });
+    assert.equal(disabled.outcome,'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED');
+    assert.equal(modelLaunches,0);
+
+    const emptyQuota=await executeOpenCodeTask('Synthetic; no inference.',{...config,
+      antigravity_execution_attestation:{...attestation,quota_remaining_percent:0}},job,randomUUID(),
+      {now:()=>now,runCapturedProcess(){modelLaunches++;}});
+    assert.equal(emptyQuota.outcome,'ANTIGRAVITY_QUOTA_EMPTY');
+    assert.equal(modelLaunches,0);
+
+    const readiness={status:'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH',signature_verified:true,
+      model:ANTIGRAVITY_V2_MODEL,authentication_checked:true,authentication_evidence:'AUTHENTICATED',
+      gemini_aggregate_quota:{status:'GEMINI_AGGREGATE_QUOTA_READ',
+        source:'GEMINI_MODELS_AGGREGATE',weekly_remaining_percent:95,five_hour_remaining_percent:99},
+      credit_fallback_setting:'CREDIT_FALLBACK_DISABLED',issues:[]};
+    const overage=await executeOpenCodeTask('Synthetic; no inference.',config,job,randomUUID(),{
+      now:()=>now,localAppData,
+      runAntigravityV2Readiness:()=>({...readiness,credit_fallback_setting:'CREDIT_FALLBACK_ENABLED'}),
+      runCapturedProcess(){modelLaunches++;},
+    });
+    assert.equal(overage.outcome,'ANTIGRAVITY_CREDIT_OVERAGE_NOT_DISABLED');
+    assert.equal(modelLaunches,0);
+
+    const stale=await executeOpenCodeTask('Synthetic; no inference.',{...config,
+      antigravity_execution_attestation:{...attestation,observed_at:new Date(now-6*60_000).toISOString()}},
+    job,randomUUID(),{now:()=>now,runCapturedProcess(){modelLaunches++;}});
+    assert.equal(stale.outcome,'ANTIGRAVITY_EXECUTION_ATTESTATION_STALE');
+    assert.equal(modelLaunches,0);
+
+    const conversation='conv_antigravity_20261018';
+    const env={PATH:process.env.PATH,USERPROFILE:home,LOCALAPPDATA:localAppData,
+      GEMINI_API_KEY:'synthetic-key-must-not-reach-child',GITHUB_TOKEN:'synthetic-publisher-token'};
+    const unconfirmed=await executeOpenCodeTask('Synthetic; process termination is unknown.',config,job,
+      randomUUID(),{
+        now:()=>now,baseEnv:env,localAppData,
+        runAntigravityV2Readiness:()=>readiness,
+        readAntigravityV2RunEvidence:()=>({valid:true,reason:null,session_id:'conv_unconfirmed_20261018',
+          session_started:true,cli_status:'SUCCESS',model_invoked:true,provider_usage_evidence:'OBSERVED',
+          model_activity_evidence:'OBSERVED',token_usage:{input_tokens:1,output_tokens:1,
+            thinking_tokens:0,cache_read_tokens:0,total_tokens:2},tool_execution_evidence:'UNKNOWN',
+          tool_execution_count:0,file_change_tool_evidence:'UNKNOWN',
+          file_change_tool_completed_count:0,file_change_tool_failed_count:0,
+          file_change_tool_incomplete_count:0,event_count:2,stdout_bytes:10}),
+        runCapturedProcess(_bin,_args,options){
+          return {outcome:'CAPTURE_TERMINATION_UNCONFIRMED',exit_code:-1,evidence_sha256:null,
+            evidence_bytes:0,local_evidence:{stdout_file:basename(options.stdoutPath),
+              stdout_sha256:'0'.repeat(64),stdout_bytes:0,stderr_file:basename(options.stderrPath),
+              stderr_sha256:'0'.repeat(64),stderr_bytes:0,
+              termination_state:'TERMINATION_UNCONFIRMED'}};
+        },
+      });
+    assert.equal(unconfirmed.outcome,'ANTIGRAVITY_EDIT_PROCESS_TERMINATION_UNCONFIRMED');
+    assert.equal(unconfirmed.coding_state,'UNKNOWN_PROCESS_MAY_STILL_WRITE');
+    assert.equal(unconfirmed.exit_code,-1);
+    assert.equal(terminalStateForResult(unconfirmed),'BLOCKED');
+    assert.equal(readdirSync(stateDir).some(name=>name.startsWith('edit-diff-')),false,
+      'do not capture or publish a final diff while the model process tree may still be writing');
+
+    const result=await executeOpenCodeTask('Change the state value.',config,job,randomUUID(),{
+      now:()=>now,baseEnv:env,localAppData,
+      runAntigravityV2Readiness(bin,cwd){
+        readinessCalls++;
+        assert.equal(bin,join(localAppData,'agy','bin','agy.exe'));
+        assert.equal(cwd,workspace);
+        return readiness;
+      },
+      async runCapturedProcess(bin,args,options){
+        modelLaunches++;
+        assert.equal(bin,join(localAppData,'agy','bin','agy.exe'));
+        assert.deepEqual(args.slice(0,4),['--input-format','stream-json','--output-format','stream-json']);
+        assert.equal(args.includes('--print'),false,
+          'stream-json mode reads the prompt from stdin and must not pass the print alias');
+        assert.equal(args.includes('--prompt'),false);
+        assert.equal(args.includes('--print-timeout'),false);
+        assert.equal(args[args.indexOf('--model')+1],ANTIGRAVITY_V2_MODEL);
+        assert.equal(args[args.indexOf('--effort')+1],'high');
+        assert.equal(args.includes('--mode=accept-edits'),true,
+          'headless coding must not wait for interactive diff approval');
+        assert.equal(args.includes('--sandbox'),true);
+        assert.equal(args.includes('--dangerously-skip-permissions'),false,
+          'accept-edits must keep the exact sandbox and permission allowlist');
+        assert.equal(options.env.GEMINI_API_KEY,undefined);
+        assert.equal(options.env.GITHUB_TOKEN,undefined);
+        assert.equal(options.env.USERPROFILE,home);
+        assert.equal(JSON.parse(options.stdinText).event,'user');
+        writeFileSync(join(workspace,'src','worker.mjs'),'export const state = "changed";\n');
+        const events=[
+          {event:'init',conversation_id:conversation,init:{model:ANTIGRAVITY_V2_MODEL,cwd:workspace,
+            permission_mode:'request-review'}},
+          {event:'step_update',step_update:{conversation_id:conversation,step_index:0,state:'DONE',
+            step_type:'tool',tool_name:'write_to_file',tool_info:{}}},
+          {event:'result',result:{conversation_id:conversation,status:'SUCCESS',response:'private response text',
+            usage:{input_tokens:90,output_tokens:20,thinking_tokens:4,cache_read_tokens:0,total_tokens:114}}},
+        ];
+        const out=Buffer.from(events.map(event=>JSON.stringify(event)).join('\n')+'\n');
+        const err=Buffer.alloc(0); writeFileSync(options.stdoutPath,out,{flag:'wx'});
+        writeFileSync(options.stderrPath,err,{flag:'wx'});
+        const combined=createHash('sha256').update(out).update(Buffer.from('\n--- STDERR ---\n')).update(err).digest('hex');
+        return {outcome:'SYNTHETIC_PROCESS_EXITED',exit_code:0,evidence_sha256:combined,
+          evidence_bytes:out.length+Buffer.byteLength('\n--- STDERR ---\n'),local_evidence:{
+            stdout_file:basename(options.stdoutPath),stdout_sha256:createHash('sha256').update(out).digest('hex'),
+            stdout_bytes:out.length,stderr_file:basename(options.stderrPath),
+            stderr_sha256:createHash('sha256').update(err).digest('hex'),stderr_bytes:0,
+            termination_state:'NOT_REQUESTED'}};
+      },
+    });
+    assert.equal(readinessCalls,1); assert.equal(modelLaunches,1);
+    assert.equal(result.outcome,'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED');
+    assert.equal(result.coding_state,'DIFF_CAPTURED_UNVERIFIED');
+    assert.equal(result.model_invoked,true);
+    assert.equal(result.session_id,conversation);
+    assert.equal(result.permission_mode_evidence,'REQUEST_REVIEW_CONFIRMED');
+    assert.equal(result.local_evidence.antigravity_run.permission_mode_evidence,'REQUEST_REVIEW_CONFIRMED');
+    assert.deepEqual(result.changed_files,['src/worker.mjs']);
+    assert.equal(result.file_change_tool_completed_count,1);
+    assert.equal(JSON.stringify(result).includes('private response text'),false);
+    const finalReceipt=receipt(job.request_id,randomUUID(),'FINISHED',job,result);
+    assert.equal(finalReceipt.model,ANTIGRAVITY_V2_MODEL);
+    assert.equal(finalReceipt.variant,'high');
+    assert.equal(finalReceipt.permission_mode_evidence,'REQUEST_REVIEW_CONFIRMED');
+    assert.equal(finalReceipt.coding_state,'DIFF_CAPTURED_UNVERIFIED');
+    assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(finalReceipt)).session_id,conversation);
+    assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(finalReceipt)).permission_mode_evidence,
+      'REQUEST_REVIEW_CONFIRMED');
+    assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify({ ...finalReceipt,
+      permission_mode_evidence: 'UNSUPPORTED' })), null,
+    'a receipt cannot claim an unsupported Antigravity permission mode');
+    assert.equal(await verifyCapturedEvidence(stateDir,{terminal:finalReceipt,local_evidence:result.local_evidence}),true);
+  } finally { rmSync(home,{recursive:true,force:true}); }
+});
+
 test('OpenCode missing provider auth is recoverable WAITING and never launches the model', async () => {
   const root=mkdtempSync(join(homedir(),'.ptysd-v2-auth-wait-'));
   try {
@@ -1239,8 +1542,23 @@ test('exact unauthenticated free-model opt-in reaches the OpenCode V2 adapter', 
   let launches=0;
   try {
     assert.equal(guardConfig(base).unauthenticated_free_models[0],model);
+    const otherVerifiedFreeModel='opencode/longcat-2.5-preview-free';
+    assert.equal(guardConfig({...base,
+      allowed_models:{...base.allowed_models,[otherVerifiedFreeModel]:[null]},
+      unauthenticated_free_models:[otherVerifiedFreeModel]})
+      .unauthenticated_free_models[0],otherVerifiedFreeModel);
     assert.throws(()=>guardConfig({...base,unauthenticated_free_models:['opencode/paid-model']}),
       /UNAUTHENTICATED_FREE_MODEL_ALLOWLIST_INVALID/);
+    const unreviewed='opencode/not-reviewed-free';
+    assert.throws(()=>guardConfig({...base,
+      allowed_models:{[unreviewed]:[null]},unauthenticated_free_models:[unreviewed]}),
+    /UNAUTHENTICATED_FREE_MODEL_ALLOWLIST_INVALID/,
+    'an arbitrary -free suffix must not bypass the exact model/privacy allowlist');
+    const caseMismatch='opencode/DeepSeek-v4.1-flash-free';
+    assert.throws(()=>guardConfig({...base,
+      allowed_models:{[caseMismatch]:[null]},unauthenticated_free_models:[caseMismatch]}),
+    /UNAUTHENTICATED_FREE_MODEL_ALLOWLIST_INVALID/,
+    'only the exact reviewed model ID is allowed');
     assert.throws(()=>guardConfig({...base,allowed_models:{[model]:['high']}}),
       /UNAUTHENTICATED_FREE_MODEL_ALLOWLIST_INVALID/);
 
@@ -1600,7 +1918,8 @@ const fs=require('fs');const a=process.argv.slice(2);const p=process.env.MOCK_GH
     const config=join(home,'config.json');
     writeFileSync(config,JSON.stringify({repo:REPO,project_id:PROJECT,host:hostname().toUpperCase(),issue:101,workspace:work,state_dir:state,dispatchers:['t14210184']}));
     const runner=resolve('native-bridge/worker.mjs');
-    const env={...process.env,PATH:`${bin}:${process.env.PATH}`,MOCK_GH_STATE:mock};
+    const env={...process.env,PATH:`${bin}:${process.env.PATH}`,MOCK_GH_STATE:mock,
+      LOCALAPPDATA:join(home,'LOCALAPPDATA')};
     const res=spawnSync(process.execPath,[runner,'--config',config],{cwd:resolve('.'),env,encoding:'utf8',timeout:15000});
     assert.equal(res.status,0,res.stderr);
     assert.match(res.stdout,/FINISHED_PTYSD_NATIVE_PROBE_20261012/);
@@ -2393,4 +2712,40 @@ test('Codex terminal receipt keeps exit-zero execution explicitly unverified', (
   assert.equal(Object.hasOwn(terminal, 'accepted'), false);
   const incomplete = codexTerminalReceipt(started, { ...result, outcome: 'EVIDENCE_STORAGE_FAILED' });
   assert.equal(incomplete.state, 'BLOCKED');
+});
+
+test('native preflight records Antigravity readiness without claiming model entitlement or activity', () => {
+  const root=mkdtempSync(join(homedir(),'.ptysd-antigravity-preflight-'));
+  try {
+    const workspace=join(root,'workspace'),state=join(root,'state');
+    mkdirSync(workspace);mkdirSync(state);
+    let observed=null;
+    const result=nativePreflight({host:hostname().toUpperCase(),workspace,state_dir:state,
+      allowed_models:{},enable_v2_model_runs:false},
+    mkjob({kind:'native_preflight',host:hostname().toUpperCase(),
+      request_id:'PTYSD_ANTIGRAVITY_PREFLIGHT_20261018'}),{
+      qualifyOpenCodeV2:()=>({ready:true,candidates_checked:1,version:'2.0.32'}),
+      localAppData:join(root,'LOCALAPPDATA'),
+      baseEnv:{PATH:'clean'},
+      runAntigravityV2Readiness:(bin,directory,_runner,env)=>{
+        observed={bin,directory,hasPublisherCredential:Object.keys(env).some(key=>/GITHUB_TOKEN|API_KEY/i.test(key))};
+        return {status:'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH',
+          model:'gemini-3.8-flash-high',signature_verified:true,authentication_checked:false,
+          credit_fallback_setting:'SETTING_ABSENT',entitlement:'UNKNOWN',cost:'UNKNOWN',
+          write_scope:'UNKNOWN',inference_executed:false};
+      },
+    });
+    assert.equal(result.outcome,'OPENCODE_V2_VERSION_CONFIRMED_NO_MODEL_AUTH');
+    assert.equal(observed.directory,workspace);
+    assert.match(observed.bin,/LOCALAPPDATA[\\/]agy[\\/]bin[\\/]agy\.exe$/i);
+    assert.equal(observed.hasPublisherCredential,false);
+    const file=readdirSync(state).find(name=>name.startsWith('native-evidence-'));
+    const facts=JSON.parse(readFileSync(join(state,file),'utf8'));
+    assert.equal(facts.antigravity_v2.model,'gemini-3.8-flash-high');
+    assert.equal(facts.antigravity_v2.credit_fallback_setting,'SETTING_ABSENT');
+    assert.equal(facts.antigravity_v2.entitlement,'UNKNOWN');
+    assert.equal(facts.antigravity_v2.cost,'UNKNOWN');
+    assert.equal(facts.antigravity_v2.inference_executed,false);
+    assert.equal(JSON.stringify(facts).includes(root),false);
+  } finally {rmSync(root,{recursive:true,force:true});}
 });

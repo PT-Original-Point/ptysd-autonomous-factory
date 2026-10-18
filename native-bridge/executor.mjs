@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { guardConfig, isRecoverableOpenCodePreflightWait, JOB_MARKER, parseJob,
+import { guardConfig, isRecoverableModelPreflightWait, JOB_MARKER, parseJob,
   receipt, runPlan, terminalStateForResult } from './worker.mjs';
 import { safeErrorCode } from './safe-error-code.mjs';
 import { assertPhysicalDirectory, candidateBundlePath, candidateWorkspacePath,
@@ -31,7 +31,7 @@ function removeCandidateWorkspace(resultsDir, attemptId) {
 }
 
 function materializeCandidateWorkspace(manifestDir, resultsDir, manifest, job) {
-  if (!['opencode_plan', 'opencode_edit'].includes(job?.kind) ||
+  if (!['opencode_plan', 'opencode_edit', 'antigravity_edit'].includes(job?.kind) ||
       !HASH.test(manifest.source_bundle_sha256 || ''))
     fail('CANDIDATE_SOURCE_BUNDLE_IDENTITY_INVALID');
   const bundleDir = resolve(manifestDir, 'candidate-bundles');
@@ -110,7 +110,7 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
   const runningBytes = readFileSync(runningPath);
   const manifest = JSON.parse(runningBytes.toString('utf8'));
   const parsedJob = parseJob(JOB_MARKER + JSON.stringify(manifest.job));
-  if (!parsedJob || !['opencode_plan', 'opencode_edit'].includes(parsedJob.kind) || manifest.schema !== 1 ||
+  if (!parsedJob || !['opencode_plan', 'opencode_edit', 'antigravity_edit'].includes(parsedJob.kind) || manifest.schema !== 1 ||
       manifest.kind !== 'PTYSD_NATIVE_EXECUTOR_MANIFEST_V1' ||
       parsedJob.project_id !== config.project_id || parsedJob.host.toUpperCase() !== config.host.toUpperCase() ||
       manifest.request_id !== parsedJob.request_id || manifest.source_sha !== parsedJob.source_sha ||
@@ -144,7 +144,7 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
         exit_code: -1, evidence_sha256: null, evidence_bytes: 0 };
     }
   }
-  if (isRecoverableOpenCodePreflightWait(result, parsedJob)) {
+  if (isRecoverableModelPreflightWait(result, parsedJob)) {
     const waiting = receipt(parsedJob.request_id, manifest.attempt_id, 'WAITING', parsedJob, result);
     atomicJson(target, { request_id: parsedJob.request_id, attempt_id: manifest.attempt_id,
       terminal: waiting, local_evidence: result.local_evidence ?? null });

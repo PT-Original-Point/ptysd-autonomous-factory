@@ -384,17 +384,30 @@ test('failed tree termination after evidence failure is preserved as possible or
 test('zero child exit cannot turn an evidence-capture failure into a successful terminal state', async () => {
   const home = mkdtempSync(join(tmpdir(), 'ptysd-capture-zero-exit-'));
   try {
-    const missing = join(home, 'missing', 'stdout.bin');
     let terminationRequests = 0;
-    const result = await runCapturedProcess(process.execPath,
-      ['-e', 'process.exit(0)'], {
-        cwd: home, env: process.env,
-        stdoutPath: missing, stderrPath: join(home, 'stderr.bin'),
-        // Keep the child alive so this test deterministically exercises the
-        // zero-exit classification even when stream-open failure races spawn.
-        terminate: () => { terminationRequests += 1; return { requested: true }; },
-      });
-    assert.equal(terminationRequests, 1);
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.pid = 1234;
+    child.exitCode = null;
+    child.signalCode = null;
+    const result = await runCapturedProcess('synthetic-executable', [], {
+      cwd: home, env: process.env,
+      stdoutPath: join(home, 'missing', 'stdout.bin'),
+      stderrPath: join(home, 'stderr.bin'),
+      spawnProcess: () => {
+        queueMicrotask(() => child.emit('spawn'));
+        return child;
+      },
+      terminate: () => {
+        terminationRequests += 1;
+        child.stdout.end();
+        child.stderr.end();
+        child.emit('close', 0, null);
+        return { requested: true };
+      },
+    });
+    assert.equal(terminationRequests, 1, 'exactly one termination request is issued');
     assert.equal(result.exit_code, 0);
     assert.equal(result.outcome, 'EVIDENCE_STORAGE_FAILED');
     assert.equal(result.outcome.endsWith('_FAILED'), true);
