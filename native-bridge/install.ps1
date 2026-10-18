@@ -29,6 +29,19 @@ $expectedHost = 'DESKTOP-1B6PD2P'
 $homeDir = Join-Path $env:LOCALAPPDATA 'PTYSDNativeBridge'
 $worker = Join-Path $homeDir 'worker.mjs'
 $configPath = Join-Path $homeDir 'config.json'
+$hiddenWorker = Join-Path $homeDir 'HiddenWorker.vbs'
+$hiddenWorkerSha256 = 'BEB20341D759C4F6380A62197AB0FAD79B2F0D0B52798BFBF734346A05B82A89'
+$wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+$runtimeFiles = @(
+    'worker.mjs',
+    'opencode-v2.mjs',
+    'v2-readiness.mjs',
+    'codex-continuation.mjs',
+    'operator-observation.mjs',
+    'captured-process.mjs',
+    'safe-error-code.mjs',
+    'windows-executor.mjs'
+)
 
 function Require-Command([string]$Name) {
     $entry = Get-Command $Name -ErrorAction Stop | Select-Object -First 1
@@ -90,7 +103,6 @@ if ($Mode -eq 'Install') {
     $root = [IO.Path]::GetFullPath($env:USERPROFILE + [IO.Path]::DirectorySeparatorChar)
     if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw 'WORKSPACE_MUST_BE_UNDER_USER_HOME' }
     if (-not (Test-Path -LiteralPath $full -PathType Container)) { throw 'WORKSPACE_NOT_FOUND' }
-    $node = Require-Command 'node.exe'
     $null = Require-Command 'gh.exe'
     # The first queued job is native ping and does NOT launch OpenCode.
     # Desktop application is not a proof of a working CLI; npm may expose opencode.cmd.
@@ -110,20 +122,44 @@ if ($Mode -eq 'Install') {
         Write-Output 'OPENCODE_PLAN_NOT_YET_LIVE_VERIFIED'
     }
     if (-not (Test-GhAuthenticated 'gh.exe')) { throw 'GH_AUTH_NOT_READY_HUMAN_OAUTH_GATE' }
-    if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'worker.mjs') -PathType Leaf)) { throw 'SOURCE_WORKER_NOT_FOUND' }
+    foreach ($runtimeFile in $runtimeFiles) {
+        $sourcePath = Join-Path $PSScriptRoot $runtimeFile
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            throw ('SOURCE_RUNTIME_MODULE_NOT_FOUND:' + $runtimeFile)
+        }
+    }
+    if (-not (Test-Path -LiteralPath $hiddenWorker -PathType Leaf) -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $hiddenWorker).Hash -ne $hiddenWorkerSha256) {
+        throw 'HIDDEN_WORKER_WRAPPER_MISSING_OR_UNVERIFIED'
+    }
+    $wrapperText = [IO.File]::ReadAllText($hiddenWorker)
+    $nodeMatch = [regex]::Match($wrapperText, '(?m)^\s*commandLine\s*=\s*"""([^"\r\n]+)"{2}')
+    if (-not $nodeMatch.Success) { throw 'HIDDEN_WORKER_NODE_COMMAND_UNREADABLE' }
+    $node = $nodeMatch.Groups[1].Value
+    if (-not [IO.Path]::IsPathRooted($node) -or -not (Test-Path -LiteralPath $node -PathType Leaf)) {
+        throw 'HIDDEN_WORKER_NODE_EXECUTABLE_MISSING'
+    }
+    if (-not (Test-Path -LiteralPath $wscript -PathType Leaf)) { throw 'WINDOWS_SCRIPT_HOST_NOT_FOUND' }
     New-Item -ItemType Directory -Force -Path $homeDir | Out-Null
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'worker.mjs') -Destination $worker -ErrorAction Stop
-    $srcHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'worker.mjs')).Hash
-    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $worker).Hash -ne $srcHash) { throw 'WORKER_COPY_HASH_MISMATCH' }
-    & $node --check $worker
-    if ($LASTEXITCODE -ne 0) { throw 'NODE_SYNTAX_INVALID' }
+    $workerHash = $null
+    foreach ($runtimeFile in $runtimeFiles) {
+        $sourcePath = Join-Path $PSScriptRoot $runtimeFile
+        $targetPath = Join-Path $homeDir $runtimeFile
+        Copy-Item -LiteralPath $sourcePath -Destination $targetPath -ErrorAction Stop
+        $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourcePath).Hash
+        $targetHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $targetPath).Hash
+        if ($targetHash -ne $sourceHash) { throw ('RUNTIME_MODULE_COPY_HASH_MISMATCH:' + $runtimeFile) }
+        & $node --check $targetPath
+        if ($LASTEXITCODE -ne 0) { throw ('NODE_SYNTAX_INVALID:' + $runtimeFile) }
+        if ($runtimeFile -eq 'worker.mjs') { $workerHash = $sourceHash }
+    }
     $c = [ordered]@{
         project_id = $project; repo = $repo; host = $expectedHost; issue = $IssueNumber
         workspace = $full; state_dir = $homeDir; dispatchers = @($TrustedDispatcher)
     }
     [IO.File]::WriteAllText($configPath, ($c | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
-    $argsLine = ('"' + $worker + '" --config "' + $configPath + '"')
-    $action = New-ScheduledTaskAction -Execute $node -Argument $argsLine -WorkingDirectory $homeDir
+    $argsLine = '//B //NoLogo "' + $hiddenWorker + '"'
+    $action = New-ScheduledTaskAction -Execute $wscript -Argument $argsLine -WorkingDirectory $homeDir
     $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
         -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
     $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -StartWhenAvailable
@@ -131,9 +167,12 @@ if ($Mode -eq 'Install') {
     $principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -ErrorAction Stop | Out-Null
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-    if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ne $node) { throw 'TASK_INSTALL_READBACK_MISMATCH' }
+    if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ne $wscript -or
+        $task.Actions[0].Arguments -ne $argsLine -or $task.Actions[0].WorkingDirectory -ne $homeDir) {
+        throw 'TASK_INSTALL_READBACK_MISMATCH'
+    }
     Write-Output 'NATIVE_BRIDGE_INSTALLED_SOURCE_ONLY_NOT_FIRST_POLL'
-    Write-Output ('LOCAL_WORKER_SHA256=' + $srcHash)
+    Write-Output ('LOCAL_WORKER_SHA256=' + $workerHash)
     Write-Output 'LOGON_TYPE=Interactive; RUNLEVEL=Limited; BOOT_BEFORE_LOGON=NOT_GUARANTEED'
     Write-Output 'NEXT: Run -Mode RunOnce for exact GitHub STARTED/FINISHED receipt readback'
     return
