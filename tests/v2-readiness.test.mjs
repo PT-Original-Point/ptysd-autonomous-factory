@@ -793,6 +793,44 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('incomplete Antigravity streams preserve per-response usage without claiming a terminal result', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-partial-usage-'));
+  const stdoutPath = join(directory, 'stdout.jsonl');
+  const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  const events = [
+    { event: 'init', conversation_id: session,
+      init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 1,
+      state: 'ACTIVE', step_type: 'agent_response', usage: { input_tokens: 100,
+        output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 10, total_tokens: 100 } } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 1,
+      state: 'DONE', step_type: 'agent_response', text_delta: 'PRIVATE_PARTIAL_RESPONSE',
+      usage: { input_tokens: 10, output_tokens: 3, thinking_tokens: 1,
+        cache_read_tokens: 2, total_tokens: 13 } } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 3,
+      state: 'DONE', step_type: 'agent_response', usage: { input_tokens: 5,
+        output_tokens: 2, thinking_tokens: 0, cache_read_tokens: 7, total_tokens: 7 } } },
+  ];
+  try {
+    const bytes = Buffer.from(events.map(event => JSON.stringify(event)).join('\n') + '\n');
+    writeFileSync(stdoutPath, bytes);
+    const result = await readAntigravityV2RunEvidence(stdoutPath, null, cwd);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'ANTIGRAVITY_JSONL_INCOMPLETE');
+    assert.equal(result.session_id, session);
+    assert.equal(result.model_invoked, true);
+    assert.equal(result.provider_usage_evidence, 'OBSERVED');
+    assert.equal(result.model_activity_evidence, 'OBSERVED');
+    assert.equal(result.run_disposition, 'UNKNOWN');
+    assert.equal(result.task_acceptance, 'UNKNOWN');
+    assert.deepEqual(result.token_usage, { input_tokens: 15, output_tokens: 5,
+      thinking_tokens: 1, cache_read_tokens: 9, total_tokens: 20 });
+    assert.equal(result.stdout_bytes, bytes.length);
+    assert.equal(JSON.stringify(result).includes('PRIVATE_PARTIAL_RESPONSE'), false);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('Antigravity stream classifies all documented CLI statuses without claiming task acceptance', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'pty-agy-status-'));
   const stdoutPath = join(directory, 'stdout.jsonl');
