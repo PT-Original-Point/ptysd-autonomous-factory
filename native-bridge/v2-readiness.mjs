@@ -711,6 +711,11 @@ function aggregateAntigravityUsage(values) {
   return values.length ? totals : null;
 }
 
+function hasPositiveAntigravityModelUsage(value) {
+  return Boolean(value && (value.input_tokens > 0 || value.output_tokens > 0 ||
+    value.thinking_tokens > 0));
+}
+
 function sameAntigravityCwd(actual, expected) {
   if (typeof actual !== 'string' || typeof expected !== 'string' || !actual || !expected) return false;
   if (win32.isAbsolute(actual) && win32.isAbsolute(expected))
@@ -748,6 +753,7 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
   let streamComplete = false;
   let agentTextObserved = false;
   let partialUsageMalformed = false;
+  let positiveStepUsageObserved = false;
   const stepUsageByIndex = new Map();
   let forbiddenToolObserved = false;
   try {
@@ -785,7 +791,13 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
         if (Object.hasOwn(step, 'usage')) {
           const usage = validAntigravityUsage(step.usage);
           if (!usage) partialUsageMalformed = true;
-          else stepUsageByIndex.set(step.step_index, usage);
+          else {
+            if (hasPositiveAntigravityModelUsage(usage)) positiveStepUsageObserved = true;
+            const previous = stepUsageByIndex.get(step.step_index);
+            if (!previous || hasPositiveAntigravityModelUsage(usage) ||
+                !hasPositiveAntigravityModelUsage(previous))
+              stepUsageByIndex.set(step.step_index, usage);
+          }
         }
         if (step.step_type === 'agent_response') {
           if (typeof step.text_delta === 'string' && step.text_delta.length) agentTextObserved = true;
@@ -826,13 +838,16 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
     const completedFileTools = fileTools.filter(tool => tool.state === 'DONE');
     const failedFileTools = fileTools.filter(tool => tool.failed);
     const incompleteFileTools = fileTools.filter(tool => tool.state === 'ACTIVE');
-    const usage = result?.usage ?? (!partialUsageMalformed && init
-      ? aggregateAntigravityUsage([...stepUsageByIndex.values()]) : null);
-    const positivePartialUsage = [...stepUsageByIndex.values()].some(value =>
-      value.input_tokens > 0 || value.output_tokens > 0 || value.thinking_tokens > 0);
-    const modelInvoked = usage
-      ? usage.input_tokens > 0 || usage.output_tokens > 0 || usage.thinking_tokens > 0
-      : positivePartialUsage ? true : null;
+    const partialUsage = !partialUsageMalformed && init
+      ? aggregateAntigravityUsage([...stepUsageByIndex.values()]) : null;
+    const positivePartialUsage = positiveStepUsageObserved;
+    const terminalUsageConflict = Boolean(result && positivePartialUsage &&
+      !hasPositiveAntigravityModelUsage(result.usage));
+    const usage = terminalUsageConflict ? null : result?.usage ?? partialUsage;
+    const partialUsageContradiction = positivePartialUsage && !hasPositiveAntigravityModelUsage(partialUsage);
+    const tokenUsage = terminalUsageConflict || partialUsageContradiction ? null : usage;
+    const modelInvoked = positivePartialUsage || hasPositiveAntigravityModelUsage(usage)
+      ? true : usage ? false : null;
     return { ...emptyAntigravityRunEvidence(false, reason,
       forbiddenToolObserved ? 'OBSERVED' : 'UNKNOWN'),
       session_id: init?.session_id ?? observedSessionId,
@@ -856,7 +871,7 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
       file_change_tool_completed_count: completedFileTools.length,
       file_change_tool_failed_count: failedFileTools.length,
       file_change_tool_incomplete_count: incompleteFileTools.length,
-      token_usage: usage ?? null,
+      token_usage: tokenUsage ?? null,
       event_count: eventCount,
       stdout_sha256: streamComplete ? stdoutHash : null,
       stdout_bytes: bytes };
@@ -867,6 +882,8 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
   if (!eventCount || !init || !result) return invalid('ANTIGRAVITY_JSONL_INCOMPLETE');
   if (expectedSha256 && stdoutHash.toLowerCase() !== expectedSha256.toLowerCase())
     return invalid('ANTIGRAVITY_CAPTURE_HASH_MISMATCH');
+  if (positiveStepUsageObserved && !hasPositiveAntigravityModelUsage(result.usage))
+    return invalid('ANTIGRAVITY_TERMINAL_USAGE_CONFLICT');
   const toolValues = [...tools.values()];
   const failedTools = toolValues.filter(tool => tool.failed);
   const incompleteTools = toolValues.filter(tool => tool.state === 'ACTIVE');
@@ -876,7 +893,7 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
   const failedFileTools = fileTools.filter(tool => tool.failed);
   const incompleteFileTools = fileTools.filter(tool => tool.state === 'ACTIVE');
   const usage = result.usage;
-  const modelInvoked = usage.input_tokens > 0 || usage.output_tokens > 0 || usage.thinking_tokens > 0;
+  const modelInvoked = positiveStepUsageObserved || hasPositiveAntigravityModelUsage(usage);
   const hasToolCalls = tools.size > 0;
   return { valid: true, reason: null, session_id: init.session_id, session_started: true,
     cli_status: result.status, run_disposition: ANTIGRAVITY_RUN_DISPOSITIONS[result.status],

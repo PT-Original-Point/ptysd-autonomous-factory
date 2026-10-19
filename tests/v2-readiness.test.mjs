@@ -839,6 +839,39 @@ test('incomplete Antigravity streams preserve deduplicated per-step usage withou
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('Antigravity terminal zero usage cannot erase positive per-step evidence', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-usage-conflict-'));
+  const stdoutPath = join(directory, 'stdout.jsonl');
+  const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  const usage = { input_tokens: 9, output_tokens: 1, thinking_tokens: 0,
+    cache_read_tokens: 0, total_tokens: 10 };
+  const zeroUsage = { input_tokens: 0, output_tokens: 0, thinking_tokens: 0,
+    cache_read_tokens: 0, total_tokens: 0 };
+  const events = [
+    { event: 'init', conversation_id: session,
+      init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+      state: 'ACTIVE', step_type: 'agent_response', usage } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+      state: 'DONE', step_type: 'agent_response', usage: zeroUsage } },
+    { event: 'result', result: { conversation_id: session, status: 'SUCCESS',
+      response: '', usage: zeroUsage } },
+  ];
+  try {
+    writeFileSync(stdoutPath, events.map(event => JSON.stringify(event)).join('\n') + '\n');
+    const result = await readAntigravityV2RunEvidence(stdoutPath, null, cwd);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'ANTIGRAVITY_TERMINAL_USAGE_CONFLICT');
+    assert.equal(result.model_invoked, true);
+    assert.equal(result.provider_usage_evidence, 'OBSERVED');
+    assert.equal(result.model_activity_evidence, 'OBSERVED');
+    assert.equal(result.run_disposition, 'CLI_SUCCESS_REQUIRES_SEMANTIC_REVIEW');
+    assert.equal(result.task_acceptance, 'UNKNOWN');
+    assert.equal(result.token_usage, null);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('Antigravity stream classifies all documented CLI statuses without claiming task acceptance', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'pty-agy-status-'));
   const stdoutPath = join(directory, 'stdout.jsonl');
