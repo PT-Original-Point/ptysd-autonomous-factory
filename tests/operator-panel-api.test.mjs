@@ -7,7 +7,12 @@ const html = readFileSync(new URL('../operator-panel/index.html', import.meta.ur
 const inlineScript = html.match(/<script>\s*([\s\S]*?)<\/script>/i)?.[1];
 assert.ok(inlineScript, 'operator panel inline module exists');
 const windowObject = { __PTYSD_TEST__: true };
-runInNewContext(inlineScript, { window: windowObject, document: {}, AbortController,
+const domElements = new Map();
+const documentMock = { getElementById(id) {
+  if (!domElements.has(id)) domElements.set(id, {});
+  return domElements.get(id);
+} };
+runInNewContext(inlineScript, { window: windowObject, document: documentMock, AbortController,
   setTimeout, clearTimeout }, { filename: 'operator-panel/index.html' });
 const panel = windowObject.PTYSDOperatorPanel;
 assert.ok(panel?.createApiClient && panel?.createResourceStore);
@@ -95,6 +100,49 @@ test('one page stays within the 21-request hourly polling budget', async () => {
   assert.equal(calls.filter(url => url.includes(`/commits/${head}/check-runs`)).length, 4);
 });
 
+test('manual sync coordination copy matches the configured fifteen-minute throttle', () => {
+  assert.equal(panel.constants.MANUAL_SYNC_MIN_MS, 15 * 60 * 1000);
+  const emptyResource = { data:null, fetchedAt:0, error:null };
+  panel.renderRateStatus({ status:'READY', coordination:'TAB_LOCAL_ONLY', remaining:null,
+    lastError:null, lastSuccessAt:null, resetAt:null, pauseUntil:null, indefinite:false },
+    { issue:emptyResource, pr:emptyResource, checks:emptyResource, main:emptyResource }, baseTime);
+  const detail=domElements.get('rate-alert-detail').textContent;
+  const next=domElements.get('next-sync').textContent;
+  assert.match(detail, /仍遵守 GitHub 共用冷卻及 15 分鐘最小間隔/);
+  assert.match(next, /手動同步會以 ETag 重新驗證，最短間隔 15 分鐘/);
+  assert.doesNotMatch(detail + next, /最短間隔 60 秒/);
+});
+
+test('scheduled polling plus throttled manual sync stays within 37 reads per hour', async () => {
+  let now = baseTime;
+  const calls = [];
+  const storage = memoryStorage();
+  const locks = serialLocks();
+  const client = panel.createApiClient(async (url, init) => {
+    calls.push(url);
+    if (url !== urls.issue && init?.headers?.['If-None-Match'])
+      return response(304, null, { ...quotaHeaders(now, 60 - calls.length), ETag: `etag:${url}` });
+    const body = url === urls.issue ? observationComments(now) : url === urls.pr ? pullRequest(437, head) :
+      url === urls.main ? { sha: head } : { check_runs: [] };
+    return response(200, body, { ...quotaHeaders(now, 60 - calls.length), ETag: `etag:${url}` });
+  }, { now: () => now, storage, locks });
+  const store = panel.createResourceStore(client, () => now);
+  const manualMinutes = [];
+
+  for (let minute = 0; minute < 60; minute++) {
+    now = baseTime + minute * 60 * 1000;
+    if (minute % 5 === 0) await panel.runSyncCycle(store, client, urls);
+    if (await client.claimManualSyncWindow()) {
+      manualMinutes.push(minute);
+      await panel.runSyncCycle(store, client, urls, { force: true });
+    }
+  }
+
+  assert.deepEqual(manualMinutes, [0, 15, 30, 45]);
+  assert.equal(calls.length, 37,
+    '21 scheduled reads plus at most four manual four-source revalidations');
+});
+
 test('manual sync revalidates fresh resources with ETags but cannot bypass a shared rate pause', async () => {
   let now = baseTime;
   let blockIssue = false;
@@ -135,6 +183,8 @@ test('manual sync revalidates fresh resources with ETags but cannot bypass a sha
 
 test('manual sync minimum interval is shared across tabs and respects the shared rate pause', async () => {
   let now = baseTime;
+  assert.equal(panel.constants.MANUAL_SYNC_MIN_MS, 15 * 60 * 1000,
+    'one page can issue at most four manual cycles (16 source reads) per hour');
   const storage = memoryStorage();
   const locks = serialLocks();
   let exhausted = false;
@@ -495,4 +545,79 @@ test('a late PR response cannot overwrite the resource after its task pin change
   assert.equal(store.resources.pr.url, newUrl);
   assert.equal(store.resources.pr.data.number, 438);
   assert.equal(store.resources.pr.inFlight, null);
+});
+
+test('a rejected fetch surfaces GITHUB_CORS_OR_NETWORK_UNKNOWN without faking data or pausing', async () => {
+  let now = baseTime;
+  let calls = 0;
+  const client = panel.createApiClient(async () => {
+    calls++;
+    throw new TypeError('Failed to fetch');
+  }, { now: () => now });
+  const store = panel.createResourceStore(client, () => now);
+
+  await assert.rejects(client.requestJson(urls.issue), { code: 'GITHUB_CORS_OR_NETWORK_UNKNOWN' });
+  assert.equal(calls, 1);
+  assert.equal(client.getRateState().lastSuccessAt, null, 'a rejected fetch never refreshes lastSuccessAt');
+  assert.equal(client.isPaused(), false, 'a network failure is not a primary-quota pause');
+  assert.equal(client.getRateState().status, 'READY');
+  assert.equal(client.getRateState().cause, null);
+
+  assert.equal(await store.loadResource('main', urls.main, 0), null);
+  assert.equal(store.resources.main.error, 'GITHUB_CORS_OR_NETWORK_UNKNOWN');
+  assert.equal(store.resources.main.data, null, 'no current data is fabricated');
+  assert.equal(store.resources.main.fetchedAt, 0, 'fetchedAt is not refreshed');
+  assert.equal(calls, 2);
+
+  const retryAt = store.resources.main.retryAt;
+  assert.ok(retryAt > now && retryAt <= now + 5 * 60 * 1000, 'the resource backoff is bounded');
+  assert.equal(await store.loadResource('main', urls.main, 0), null);
+  assert.equal(calls, 2, 'the failed resource is not retried immediately');
+  assert.equal(store.resources.main.retryAt, retryAt);
+});
+
+test('an HTTP 503 with remaining quota fails locally, lets unrelated reads proceed, and backs off per resource', async () => {
+  let now = baseTime;
+  const calls = [];
+  const client = panel.createApiClient(async url => {
+    calls.push(url);
+    if (url === urls.issue)
+      return response(503, { message: 'Service Unavailable' },
+        { 'X-RateLimit-Limit': 60, 'X-RateLimit-Remaining': 42 });
+    return response(200, { sha: head }, { 'X-RateLimit-Limit': 60, 'X-RateLimit-Remaining': 41 });
+  }, { now: () => now });
+  const store = panel.createResourceStore(client, () => now);
+
+  assert.equal(await store.loadResource('issue', urls.issue, 0), null);
+  assert.equal(store.resources.issue.error, 'GITHUB_HTTP_503');
+  assert.equal(store.resources.issue.data, null, 'no current data is fabricated');
+  assert.equal(store.resources.issue.fetchedAt, 0, 'fetchedAt is not refreshed');
+  assert.equal(calls.length, 1);
+  assert.equal(client.getRateState().lastSuccessAt, null, 'a 503 never refreshes lastSuccessAt');
+  assert.equal(client.isPaused(), false, 'nonzero remaining is not a primary-quota pause');
+  assert.equal(client.getRateState().status, 'READY');
+  assert.equal(client.getRateState().cause, null);
+
+  assert.deepEqual(await client.requestJson(urls.main), { sha: head },
+    'an unrelated public read is not blocked by the failed resource');
+  assert.equal(calls.length, 2);
+  assert.equal(client.getRateState().lastSuccessAt, now);
+
+  const firstRetryAt = store.resources.issue.retryAt;
+  assert.equal(firstRetryAt - now, 30 * 1000, 'the failing resource starts inside its bounded local backoff');
+  assert.equal(await store.loadResource('issue', urls.issue, 0), null);
+  assert.equal(calls.length, 2, 'the failed resource is not retried inside its retry window');
+
+  const backoffs = [];
+  let cursor = firstRetryAt;
+  while (backoffs.length < 6) {
+    now = cursor;
+    await store.loadResource('issue', urls.issue, 0);
+    const next = store.resources.issue.retryAt;
+    backoffs.push(next - now);
+    cursor = next;
+  }
+  assert.ok(backoffs.every(ms => ms > 0 && ms <= 5 * 60 * 1000), 'per-resource backoff stays within five minutes');
+  assert.ok(backoffs.every((ms, index) => index === 0 || ms >= backoffs[index - 1]), 'backoff never shrinks');
+  assert.equal(Math.max(...backoffs), 5 * 60 * 1000, 'per-resource backoff caps at five minutes');
 });

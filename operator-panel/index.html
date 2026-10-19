@@ -283,7 +283,9 @@
   const PR_POLL_MS = 15 * 60 * 1000;
   const CHECKS_POLL_MS = 15 * 60 * 1000;
   const MAIN_POLL_MS = 60 * 60 * 1000;
-  const MANUAL_SYNC_MIN_MS = 60 * 1000;
+  // Manual sync revalidates four GitHub resources; keep repeated user refreshes
+  // within the same low-cost budget as ordinary polling.
+  const MANUAL_SYNC_MIN_MS = 15 * 60 * 1000;
   const LOW_REMAINING_THRESHOLD = 10;
   const RATE_STATE_STORAGE_KEY = 'ptysd-operator-panel-rate-state-v1';
   const MANUAL_SYNC_STORAGE_KEY = 'ptysd-operator-panel-manual-sync-at-v1';
@@ -1291,8 +1293,9 @@
       'checks ' + sourceStatusLabel(resources.checks,now,CHECKS_POLL_MS),
       'main ' + sourceStatusLabel(resources.main,now,MAIN_POLL_MS),
     ].join('；');
+    const manualSyncIntervalMinutes=Math.ceil(MANUAL_SYNC_MIN_MS/60000);
     const coordination=coordinationUnavailable
-      ? '跨分頁鎖與公開資料快取未同時確認；啟動讀取後已停用自動輪詢。手動同步使用 ETag 重新驗證，仍遵守 GitHub 共用冷卻及 60 秒最小間隔。'
+      ? '跨分頁鎖與公開資料快取未同時確認；啟動讀取後已停用自動輪詢。手動同步使用 ETag 重新驗證，仍遵守 GitHub 共用冷卻及 ' + manualSyncIntervalMinutes + ' 分鐘最小間隔。'
       : '跨分頁請求以瀏覽器鎖序列化並共用公開資料快取；其他應用的 GitHub 額度仍獨立未知。';
     const detail='最後成功同步：' + (successfulAt ? readTime(new Date(successfulAt).toISOString()) : '尚無成功讀回') +
       '；GitHub 最近回報剩餘額度：' + (rateState?.remaining == null ? '未確認' : rateState.remaining) +
@@ -1309,7 +1312,7 @@
         ? '下一次允許讀取倒數 ' + countdownLabel(rateState.pauseUntil,now)
         : '恢復時間未確認')
       : coordinationUnavailable
-        ? '跨分頁鎖與公開快取未確認；已完成啟動讀取，自動輪詢停用；手動同步會以 ETag 重新驗證，最短間隔 60 秒'
+        ? '跨分頁鎖與公開快取未確認；已完成啟動讀取，自動輪詢停用；手動同步會以 ETag 重新驗證，最短間隔 ' + manualSyncIntervalMinutes + ' 分鐘'
       : 'Issue 每 5 分鐘；PR／CI 每 15 分鐘；main 每 60 分鐘' +
         (rateState?.remaining != null && rateState.remaining <= LOW_REMAINING_THRESHOLD
           ? '；剩餘額度低，PR／CI／main 已降頻' : ''));
@@ -1535,7 +1538,7 @@
     parseSnapshot, findSnapshot, latestTask, summarizeChecks, fieldFreshness, validJob,
     candidatePrPin, candidatePullIdentityMatches,
     classifyWorker, classifyW1, workerRecord, normalizeFormalTask, classifyRecentEvents,
-    freshnessOfSnapshot, createApiClient, createResourceStore,
+    freshnessOfSnapshot, createApiClient, createResourceStore, renderRateStatus,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
     constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS,
       MANUAL_SYNC_MIN_MS, LOW_REMAINING_THRESHOLD, MAX_LIVE_AGE_MS },
