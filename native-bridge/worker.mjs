@@ -850,7 +850,7 @@ export function buildOpenCodeChildEnv(sourceEnv = process.env, hostPlatform = pl
   return childEnv;
 }
 async function captureGitStdout(workspace, stateDir, requestId, attemptId, label, args,
-  keepStdout = false) {
+  keepStdout = false, readProcessTree) {
   const stem = `edit-git-${label}-${requestId}-${attemptId}`;
   const stdoutPath = join(stateDir, `${stem}.stdout.bin`);
   const stderrPath = join(stateDir, `${stem}.stderr.bin`);
@@ -859,6 +859,7 @@ async function captureGitStdout(workspace, stateDir, requestId, attemptId, label
     'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_EXTERNAL_DIFF', 'GIT_PAGER']) delete env[key];
   const result = await runCapturedProcess('git', ['-C', workspace, ...args], {
     cwd: workspace, env, stdoutPath, stderrPath, terminate: terminateProcessTree,
+    ...(typeof readProcessTree === 'function' ? { readProcessTree } : {}),
   });
   const evidence = result.local_evidence || {};
   const terminationFailure = {
@@ -888,25 +889,27 @@ function parseGitStatusPaths(bytes) {
     return { status: record.slice(0, 2), path: record.slice(3).replaceAll('\\', '/') };
   });
 }
-async function assertEditWorkspaceReady(config, job, attemptId) {
+async function assertEditWorkspaceReady(config, job, attemptId, readProcessTree) {
   const head = await captureGitStdout(config.workspace, config.state_dir, job.request_id,
-    attemptId, 'head', ['rev-parse', 'HEAD']);
+    attemptId, 'head', ['rev-parse', 'HEAD'], false, readProcessTree);
   if (head.output.toString('utf8').trim().toLowerCase() !== job.source_sha.toLowerCase())
     throw new Error('EDIT_WORKSPACE_SOURCE_SHA_MISMATCH');
   const status = await captureGitStdout(config.workspace, config.state_dir, job.request_id,
-    attemptId, 'before', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames']);
+    attemptId, 'before', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'],
+    false, readProcessTree);
   if (status.output.length !== 0) throw new Error('EDIT_WORKSPACE_NOT_CLEAN');
 }
-export async function captureScopedEditDiff({ workspace, state_dir, job, attempt_id }) {
+export async function captureScopedEditDiff({ workspace, state_dir, job, attempt_id, readProcessTree }) {
   if (!workspace || !state_dir || !job || !isEditExecutionKind(job.kind) ||
       !validEditPaths(job.edit_paths) || !/^[a-f0-9-]{36}$/i.test(attempt_id || ''))
     throw new Error('EDIT_DIFF_CAPTURE_INPUT_INVALID');
   const head = await captureGitStdout(workspace, state_dir, job.request_id,
-    attempt_id, 'after-head', ['rev-parse', 'HEAD']);
+    attempt_id, 'after-head', ['rev-parse', 'HEAD'], false, readProcessTree);
   if (head.output.toString('utf8').trim().toLowerCase() !== job.source_sha.toLowerCase())
     throw new Error('EDIT_WORKSPACE_SOURCE_SHA_CHANGED');
   const status = await captureGitStdout(workspace, state_dir, job.request_id,
-    attempt_id, 'after', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames']);
+    attempt_id, 'after', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'],
+    false, readProcessTree);
   const changes = parseGitStatusPaths(status.output);
   const changedFiles = [...new Set(changes.map(change => change.path))].sort();
   const allowed = new Set(job.edit_paths.map(path => process.platform === 'win32' ? path.toLowerCase() : path));
@@ -920,7 +923,8 @@ export async function captureScopedEditDiff({ workspace, state_dir, job, attempt
   }
   const diffPath = join(state_dir, `edit-diff-${job.request_id}-${attempt_id}.patch`);
   const diff = await captureGitStdout(workspace, state_dir, job.request_id, attempt_id,
-    'diff', ['diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames', 'HEAD'], true);
+    'diff', ['diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames', 'HEAD'],
+    true, readProcessTree);
   if (diff.stdoutPath.toLowerCase() !== diffPath.toLowerCase()) {
     // Capture into the unique attempt artifact name without buffering the patch.
     renameSync(diff.stdoutPath, diffPath);
@@ -962,7 +966,7 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
   try { cliBinarySha256 = await sha256File(cliPath); }
   catch { return wait('ANTIGRAVITY_CLI_BINARY_HASH_UNAVAILABLE'); }
 
-  try { await assertEditWorkspaceReady(config, job, attemptId); }
+  try { await assertEditWorkspaceReady(config, job, attemptId, dependencies.readGitProcessTree); }
   catch (error) {
     return { outcome: `ANTIGRAVITY_EDIT_SOURCE_${safeErrorCode(error, 'UNKNOWN')}`,
       exit_code: 46, evidence_sha256: null, evidence_bytes: 0,
@@ -1053,7 +1057,8 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     // but keep model activity, external effects and task acceptance unknown.
     let diff;
     try { diff = await captureScopedEditDiff({ workspace: config.workspace,
-      state_dir: config.state_dir, job, attempt_id: attemptId }); }
+      state_dir: config.state_dir, job, attempt_id: attemptId,
+      readProcessTree: dependencies.readGitProcessTree }); }
     catch (error) {
       return { ...evidencedResult,
         outcome: `ANTIGRAVITY_STREAM_EVIDENCE_${runEvidence.reason || 'UNKNOWN'}_DIFF_CAPTURE_FAILED_${safeErrorCode(error)}`,
@@ -1083,7 +1088,8 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
 
   let diff;
   try { diff = await captureScopedEditDiff({ workspace: config.workspace,
-    state_dir: config.state_dir, job, attempt_id: attemptId }); }
+    state_dir: config.state_dir, job, attempt_id: attemptId,
+    readProcessTree: dependencies.readGitProcessTree }); }
   catch (error) {
     return { ...evidencedResult, outcome: `ANTIGRAVITY_EDIT_DIFF_CAPTURE_FAILED_${safeErrorCode(error)}`,
       exit_code: -1, coding_state: 'UNKNOWN',
@@ -1125,12 +1131,20 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     exit_code: -1, coding_state: diff.changed_files.length ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNVERIFIED',
     scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
     ...diff, local_evidence: localEvidence };
-  if (runEvidence.tool_execution_failed_count > runEvidence.file_change_tool_failed_count ||
-      runEvidence.tool_execution_incomplete_count > runEvidence.file_change_tool_incomplete_count)
+  if (runEvidence.tool_execution_failed_count > runEvidence.file_change_tool_failed_count)
     return { ...diffEvidencedResult,
       outcome: diff.changed_files.length
         ? 'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED'
         : 'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_NO_DIFF',
+      cli_exit_code: evidencedResult.exit_code, exit_code: -1,
+      coding_state: diff.changed_files.length ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNVERIFIED',
+      scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
+      ...diff, local_evidence: localEvidence };
+  if (runEvidence.tool_execution_incomplete_count > runEvidence.file_change_tool_incomplete_count)
+    return { ...diffEvidencedResult,
+      outcome: diff.changed_files.length
+        ? 'ANTIGRAVITY_EDIT_TOOL_EXECUTION_INCOMPLETE_DIFF_PRESERVED'
+        : 'ANTIGRAVITY_EDIT_TOOL_EXECUTION_INCOMPLETE_NO_DIFF',
       cli_exit_code: evidencedResult.exit_code, exit_code: -1,
       coding_state: diff.changed_files.length ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNVERIFIED',
       scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,

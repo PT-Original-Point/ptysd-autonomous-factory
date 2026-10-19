@@ -760,6 +760,8 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
     { event: 'step_update', step_update: { conversation_id: session, step_index: 2,
       state: 'ERROR', step_type: 'tool', tool_name: 'run_command',
       tool_info: { error: { code: 'COMMAND_DENIED', message: 'PRIVATE_COMMAND_ERROR' } } } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 3,
+      state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command' } },
     { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
       state: 'DONE', step_type: 'agent_response', text_delta: 'done' } },
     { event: 'result', result: { conversation_id: session, status: 'SUCCESS',
@@ -777,9 +779,9 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
     assert.equal(result.permission_mode_evidence, 'ACCEPT_EDITS_CONFIRMED');
     assert.equal(result.model_invoked, true);
     assert.equal(result.model_activity_evidence, 'OBSERVED');
-    assert.equal(result.tool_execution_count, 2);
+    assert.equal(result.tool_execution_count, 3);
     assert.equal(result.tool_execution_failed_count, 1);
-    assert.equal(result.tool_execution_incomplete_count, 0);
+    assert.equal(result.tool_execution_incomplete_count, 1);
     assert.equal(result.forbidden_tool_execution_evidence, 'NOT_OBSERVED');
     assert.equal(result.file_change_tool_completed_count, 1);
     assert.equal(result.file_change_tool_incomplete_count, 0);
