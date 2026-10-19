@@ -764,6 +764,9 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
       state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command' } },
     { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
       state: 'DONE', step_type: 'agent_response', text_delta: 'done' } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 4,
+      state: 'DONE', step_type: 'checkpoint', usage: { input_tokens: 7, output_tokens: 3,
+        thinking_tokens: 2, cache_read_tokens: 11, total_tokens: 10 } } },
     { event: 'result', result: { conversation_id: session, status: 'SUCCESS',
       response: 'PRIVATE_MODEL_RESPONSE', usage: { input_tokens: 100, output_tokens: 20,
         thinking_tokens: 10, cache_read_tokens: 0, total_tokens: 120 } } },
@@ -785,7 +788,9 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
     assert.equal(result.forbidden_tool_execution_evidence, 'NOT_OBSERVED');
     assert.equal(result.file_change_tool_completed_count, 1);
     assert.equal(result.file_change_tool_incomplete_count, 0);
-    assert.equal(result.token_usage.total_tokens, 120);
+    assert.deepEqual(result.token_usage, { input_tokens: 100, output_tokens: 20,
+      thinking_tokens: 10, cache_read_tokens: 0, total_tokens: 120 },
+    'the cumulative terminal usage replaces per-step totals instead of double-counting them');
     assert.equal(result.stdout_bytes, bytes.length);
     assert.equal(JSON.stringify(result).includes('PRIVATE_MODEL_RESPONSE'), false);
     assert.equal(JSON.stringify(result).includes('PRIVATE_TOOL_OUTPUT'), false);
