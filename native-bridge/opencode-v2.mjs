@@ -1,7 +1,7 @@
 // OpenCode V2-only native CLI qualification and minimal read-only run contract.
 // No package installation, authentication, model invocation, or OS mutation here.
 import { execFileSync } from 'node:child_process';
-import { createReadStream, lstatSync, realpathSync, statSync } from 'node:fs';
+import { createReadStream, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { createHash } from 'node:crypto';
 import { delimiter, join, isAbsolute, normalize, resolve, relative } from 'node:path';
@@ -55,6 +55,53 @@ if ($signature.Status -ne 'Valid' -or
 function regularFile(p) {
   try { return statSync(p).isFile(); } catch { return false; }
 }
+const CLI_VERSION_DIR = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+const CLI_PACKAGING_LABELS = new Set(['x64', 'x86', 'ia32', 'amd64', 'arm64', 'arm',
+  'armv7l', 'aarch64', 'win32', 'win64', 'universal']);
+function withoutPackagingLabel(suffix) {
+  let current = suffix;
+  for (;;) {
+    if (CLI_PACKAGING_LABELS.has(current.toLowerCase())) return '';
+    const separator = current.lastIndexOf('-');
+    if (separator === -1) return current;
+    const label = current.slice(separator + 1);
+    if (!CLI_PACKAGING_LABELS.has(label.toLowerCase())) return current;
+    current = current.slice(0, separator);
+  }
+}
+function parseCliVersionDir(name) {
+  const match = CLI_VERSION_DIR.exec(name);
+  if (!match) return null;
+  const prerelease = match[4] ? withoutPackagingLabel(match[4]) : '';
+  return { parts: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: prerelease || null };
+}
+function comparePrereleaseIdentifiers(left, right) {
+  const a = left.split('.'), b = right.split('.');
+  const shared = Math.min(a.length, b.length);
+  for (let i = 0; i < shared; i++) {
+    const x = a[i], y = b[i];
+    const xNumeric = /^\d+$/.test(x), yNumeric = /^\d+$/.test(y);
+    if (xNumeric && yNumeric) {
+      const difference = Number(x) - Number(y);
+      if (difference !== 0) return difference;
+    } else if (xNumeric !== yNumeric) return xNumeric ? -1 : 1;
+    else if (x !== y) return x < y ? -1 : 1;
+  }
+  return a.length - b.length;
+}
+function compareCliVersionDirs(left, right) {
+  const a = parseCliVersionDir(left), b = parseCliVersionDir(right);
+  if (a && b) {
+    for (let i = 0; i < 3; i++) if (a.parts[i] !== b.parts[i]) return b.parts[i] - a.parts[i];
+    if ((a.prerelease === null) !== (b.prerelease === null)) return a.prerelease === null ? -1 : 1;
+    if (a.prerelease !== null) {
+      const difference = comparePrereleaseIdentifiers(a.prerelease, b.prerelease);
+      if (difference !== 0) return -difference;
+    }
+  } else if (a || b) return a ? -1 : 1;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
 export function discoverV2Executables(env = process.env, win = platform() === 'win32') {
   const splitter = win ? ';' : delimiter;
   const dirs = String(env.PATH || env.Path || '').split(splitter).filter(Boolean);
@@ -72,6 +119,23 @@ export function discoverV2Executables(env = process.env, win = platform() === 'w
       'resources', 'opencode-cli.exe'));
     const key = bundled.toLowerCase();
     if (!seen.has(key) && regularFile(bundled)) { seen.add(key); found.push(bundled); }
+  }
+  if (win && typeof env.APPDATA === 'string' && isAbsolute(env.APPDATA)) {
+    // The per-user Desktop CLI stores versioned builds under roaming APPDATA.
+    // Sort deterministically newest-first, but keep Authenticode qualification
+    // as the gate before any candidate is executed.
+    const cliRoot = normalize(join(env.APPDATA, 'ai.opencode.desktop', 'cli'));
+    let versions = [];
+    try {
+      versions = readdirSync(cliRoot, { withFileTypes: true })
+        .filter(entry => entry.isDirectory()).map(entry => entry.name)
+        .sort(compareCliVersionDirs);
+    } catch { versions = []; }
+    for (const version of versions) {
+      const candidate = normalize(join(cliRoot, version, 'opencode-cli.exe'));
+      const key = candidate.toLowerCase();
+      if (!seen.has(key) && regularFile(candidate)) { seen.add(key); found.push(candidate); }
+    }
   }
   for (const dir of dirs) {
     for (const name of named) {
