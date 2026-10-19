@@ -5,7 +5,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, openSync, writeFileSync, fsyncSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join, isAbsolute, win32 } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { getCurrentWindowsSid, validateWindowsTaskAction } from './windows-executor.mjs';
+import { buildHiddenWscriptArguments, getCurrentWindowsSid, validateWindowsTaskAction }
+  from './windows-executor.mjs';
 
 export const CODEX_JOB_KIND = 'codex_plan';
 export const NATIVE_JOB_MARKER = 'PTYSD_NATIVE_JOB_V1\n';
@@ -138,8 +139,9 @@ function codexExecutorTaskDescriptorReady(config) {
 
 export function codexExecutorTaskArguments(config) {
   if (!codexExecutorTaskDescriptorReady(config)) throw new Error('CODEX_EXECUTOR_TASK_DESCRIPTOR_INVALID');
-  return `//B //NoLogo "${config.codex_executor_launcher_path}" "${config.codex_executor_node_path}" ` +
-    `"${config.codex_executor_script_path}" "${config.codex_executor_config_path}"`;
+  return buildHiddenWscriptArguments({ launcher_path: config.codex_executor_launcher_path,
+    node_bin: config.codex_executor_node_path, script_path: config.codex_executor_script_path,
+    config_path: config.codex_executor_config_path });
 }
 
 export function validateCodexExecutorTaskXml(xml, config) {

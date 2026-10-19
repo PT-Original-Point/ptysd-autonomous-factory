@@ -93,6 +93,11 @@ function codexTaskXml(config, overrides = {}) {
 
 test('Codex dispatch task must match live identity, privilege, launch action and unbounded on-demand settings', () => {
   const config = readyConfig();
+  assert.equal(codexExecutorTaskArguments(config),
+    '//B //NoLogo "C:\\ProgramData\\PTYSDNativeBridge\\HiddenCodexExecutor.vbs" ' +
+    '"C:\\Program Files\\nodejs\\node.exe" ' +
+    '"C:\\ProgramData\\PTYSDNativeBridge\\codex-executor.mjs" ' +
+    '"C:\\ProgramData\\PTYSDNativeBridge\\executor-config.json"');
   const xml = codexTaskXml(config);
   assert.deepEqual(validateCodexExecutorTaskXml(xml, config), {
     ready: true, task_name: 'PTYSD-Codex-Executor', executor_user: config.codex_executor_task_user,

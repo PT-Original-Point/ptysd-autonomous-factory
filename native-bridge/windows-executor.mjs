@@ -32,6 +32,13 @@ function quoteWindowsArg(value) {
   if (typeof value !== 'string' || !value || /[\r\n"]/.test(value)) fail('EXECUTOR_PATH_INVALID');
   return `"${value}"`;
 }
+export function buildHiddenWscriptArguments({ launcher_path, node_bin, script_path, config_path,
+  manifest_dir } = {}) {
+  const paths = [launcher_path, node_bin, script_path, config_path];
+  if (manifest_dir !== undefined && manifest_dir !== null) paths.push(manifest_dir);
+  if (!paths.every(absoluteWindowsPath)) fail('EXECUTOR_LAUNCH_ARGUMENT_PATH_INVALID');
+  return `//B //NoLogo ${paths.map(quoteWindowsArg).join(' ')}`;
+}
 function normalizedWindowsPath(value) {
   return win32.normalize(value).replaceAll('/', '\\').toLocaleLowerCase('en-US');
 }
@@ -112,9 +119,7 @@ export function validateExecutorDescriptor(value) {
 
 export function executorTaskArguments(descriptor) {
   validateExecutorDescriptor(descriptor);
-  return `//B //NoLogo ${quoteWindowsArg(descriptor.launcher_path)} ${quoteWindowsArg(descriptor.node_bin)} ` +
-    `${quoteWindowsArg(descriptor.script_path)} ${quoteWindowsArg(descriptor.config_path)} ` +
-    quoteWindowsArg(descriptor.manifest_dir);
+  return buildHiddenWscriptArguments(descriptor);
 }
 
 // This is a reviewable template only. Production registration requires the
