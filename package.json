@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/csg/csg-trusted-pr-verifier-cli.test.mjs tests/native-bridge.test.mjs tests/opencode-v2.test.mjs tests/v2-readiness.test.mjs",
+    "test": "node --test tests/csg/csg-trusted-pr-verifier-cli.test.mjs tests/native-bridge.test.mjs tests/codex-continuation.test.mjs tests/codex-install-recovery.test.mjs tests/opencode-executor-registration.test.mjs tests/native-worker-install-bundle.test.mjs tests/opencode-v2.test.mjs tests/opencode-desktop-cli-discovery.test.mjs tests/runtime-limits.test.mjs tests/executor.test.mjs tests/executor-terminal-readback.test.mjs tests/v2-readiness.test.mjs tests/operator-observation.test.mjs tests/operator-panel-api.test.mjs",
     "test:trusted": "node --test tests/csg/csg-trusted-pr-verifier-cli.test.mjs"
   },
   "engines": {
