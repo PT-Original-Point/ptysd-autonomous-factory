@@ -793,7 +793,7 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('incomplete Antigravity streams preserve per-response usage without claiming a terminal result', async () => {
+test('incomplete Antigravity streams preserve deduplicated per-step usage without claiming a terminal result', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'pty-agy-partial-usage-'));
   const stdoutPath = join(directory, 'stdout.jsonl');
   const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
@@ -811,6 +811,9 @@ test('incomplete Antigravity streams preserve per-response usage without claimin
     { event: 'step_update', step_update: { conversation_id: session, step_index: 3,
       state: 'DONE', step_type: 'agent_response', usage: { input_tokens: 5,
         output_tokens: 2, thinking_tokens: 0, cache_read_tokens: 7, total_tokens: 7 } } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 2,
+      state: 'DONE', step_type: 'checkpoint', usage: { input_tokens: 2,
+        output_tokens: 4, thinking_tokens: 2, cache_read_tokens: 5, total_tokens: 6 } } },
   ];
   try {
     const bytes = Buffer.from(events.map(event => JSON.stringify(event)).join('\n') + '\n');
@@ -824,8 +827,8 @@ test('incomplete Antigravity streams preserve per-response usage without claimin
     assert.equal(result.model_activity_evidence, 'OBSERVED');
     assert.equal(result.run_disposition, 'UNKNOWN');
     assert.equal(result.task_acceptance, 'UNKNOWN');
-    assert.deepEqual(result.token_usage, { input_tokens: 15, output_tokens: 5,
-      thinking_tokens: 1, cache_read_tokens: 9, total_tokens: 20 });
+    assert.deepEqual(result.token_usage, { input_tokens: 17, output_tokens: 9,
+      thinking_tokens: 3, cache_read_tokens: 14, total_tokens: 26 });
     assert.equal(result.stdout_bytes, bytes.length);
     assert.equal(JSON.stringify(result).includes('PRIVATE_PARTIAL_RESPONSE'), false);
   } finally { rmSync(directory, { recursive: true, force: true }); }

@@ -748,7 +748,7 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
   let streamComplete = false;
   let agentTextObserved = false;
   let partialUsageMalformed = false;
-  const agentResponseUsage = new Map();
+  const stepUsageByIndex = new Map();
   let forbiddenToolObserved = false;
   try {
     const stream = createReadStream(stdoutPath);
@@ -782,13 +782,13 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
             step.step_index < 0 || !['ACTIVE', 'DONE', 'ERROR'].includes(step.state) ||
             typeof step.step_type !== 'string') { malformed = true; continue; }
         if (isForbiddenAntigravityToolName(step.step_type)) forbiddenToolObserved = true;
+        if (Object.hasOwn(step, 'usage')) {
+          const usage = validAntigravityUsage(step.usage);
+          if (!usage) partialUsageMalformed = true;
+          else stepUsageByIndex.set(step.step_index, usage);
+        }
         if (step.step_type === 'agent_response') {
           if (typeof step.text_delta === 'string' && step.text_delta.length) agentTextObserved = true;
-          if (Object.hasOwn(step, 'usage')) {
-            const usage = validAntigravityUsage(step.usage);
-            if (!usage) partialUsageMalformed = true;
-            else agentResponseUsage.set(step.step_index, usage);
-          }
         }
         if (step.step_type === 'tool') {
           if (isForbiddenAntigravityToolName(step.tool_name)) forbiddenToolObserved = true;
@@ -827,8 +827,8 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
     const failedFileTools = fileTools.filter(tool => tool.failed);
     const incompleteFileTools = fileTools.filter(tool => tool.state === 'ACTIVE');
     const usage = result?.usage ?? (!partialUsageMalformed && init
-      ? aggregateAntigravityUsage([...agentResponseUsage.values()]) : null);
-    const positivePartialUsage = [...agentResponseUsage.values()].some(value =>
+      ? aggregateAntigravityUsage([...stepUsageByIndex.values()]) : null);
+    const positivePartialUsage = [...stepUsageByIndex.values()].some(value =>
       value.input_tokens > 0 || value.output_tokens > 0 || value.thinking_tokens > 0);
     const modelInvoked = usage
       ? usage.input_tokens > 0 || usage.output_tokens > 0 || usage.thinking_tokens > 0
