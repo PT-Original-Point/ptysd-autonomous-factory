@@ -14,7 +14,7 @@ import {
   assertExecutorTaskReady, buildExecutorTaskXml, claimPendingManifest,
   candidateBundlePath, candidateWorkspacePath, cleanupExecutorAttempt,
   createExecutorSourceBundle, dispatchToExecutor, executorResultPath, makeExecutorManifest,
-  triggerPendingExecutorAttempt,
+  getCurrentWindowsSid, triggerPendingExecutorAttempt,
   executorTaskArguments, validateExecutorTaskXml,
 } from '../native-bridge/windows-executor.mjs';
 
@@ -34,9 +34,37 @@ test('error labels never expose arbitrary messages or untrusted code fields', ()
     'CODEX_RESULT_SCOPE_MISMATCH');
   assert.equal(safeErrorCode(new Error('SCOPED_EDIT_PARENT_PATH_MISSING')),
     'SCOPED_EDIT_PARENT_PATH_MISSING');
+  assert.equal(safeErrorCode(new Error('EDIT_GIT_HEAD_FAILED')),
+    'EDIT_GIT_HEAD_FAILED');
+  assert.equal(safeErrorCode(new Error('EDIT_PROVIDER_ACCESS_TOKEN_REJECTED')),
+    'UNKNOWN', 'edit error labels must still redact credential-shaped codes');
   assert.equal(safeErrorCode(Object.assign(providerError, { ptySafeCode: true })), 'UNKNOWN',
     'a forgeable marker on an error object cannot authorize logging its code');
   assert.equal(safeErrorCode({ code: 'CODEX_LOGIN_NOT_READY' }), 'CODEX_LOGIN_NOT_READY');
+  const privateFallback = 'Bearer ghp_SYNTHETIC_NOT_A_REAL_CREDENTIAL';
+  assert.equal(safeErrorCode({}, privateFallback), 'UNKNOWN',
+    'untrusted fallback text must be sanitized before it enters durable evidence');
+  assert.equal(safeErrorCode({}, 'CODEX_FALLBACK'), 'CODEX_FALLBACK',
+    'an allowlisted stable fallback code may be retained');
+  for (const code of ['INVALID', 'IO_ERROR', 'PREFLIGHT_FAILED',
+    'PROCESS_TREE_READBACK_FAILED', 'PROCESS_TREE_READBACK_UNKNOWN', 'UNKNOWN'])
+    assert.equal(safeErrorCode({}, code), code, `existing fallback code ${code} remains available`);
+});
+
+test('shared executor SID readback uses bounded hidden whoami and returns a validated SID', () => {
+  let invocation;
+  const sid=getCurrentWindowsSid({systemRoot:'C:\\Windows',execFile:(file,args,options)=>{
+    invocation={file,args,options};
+    return '"User Name","SID"\r\n"HOST\\worker","S-1-5-21-101-202-303-1002"\r\n';
+  }});
+  assert.equal(sid,'S-1-5-21-101-202-303-1002');
+  assert.equal(invocation.file,'C:\\Windows\\System32\\whoami.exe');
+  assert.deepEqual(invocation.args,['/user','/fo','csv','/nh']);
+  assert.equal(invocation.options.windowsHide,true);
+  assert.notEqual(invocation.options.shell,true);
+  assert.equal(invocation.options.timeout,5000);
+  assert.throws(()=>getCurrentWindowsSid({systemRoot:'C:\\Windows',execFile:()=> 'no SID'}),
+    /EXECUTOR_WINDOWS_IDENTITY_UNAVAILABLE/);
 });
 
 function fixture() {

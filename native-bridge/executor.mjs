@@ -86,8 +86,46 @@ function atomicJson(path, value) {
   renameSync(temp, path);
 }
 
+// A persisted terminal result is untrusted bytes until they are read back and
+// matched field-for-field. Bound the read by the exact serialized record just
+// written; do not impose a fixed receipt-size ceiling.
+export function readPersistedResult(path, { expectedBytes, statFile = lstatSync,
+  readBytes = readFileSync } = {}) {
+  if (!Number.isSafeInteger(expectedBytes) || expectedBytes < 0)
+    fail('EXECUTOR_RESULT_READBACK_FAILED');
+  let info;
+  try { info = statFile(path); } catch { fail('EXECUTOR_RESULT_READBACK_FAILED'); }
+  if (!info || typeof info.isFile !== 'function' || !info.isFile() || info.isSymbolicLink() ||
+      !Number.isSafeInteger(info.size) || info.size !== expectedBytes)
+    fail('EXECUTOR_RESULT_READBACK_FAILED');
+  let bytes;
+  try { bytes = readBytes(path); } catch { fail('EXECUTOR_RESULT_READBACK_FAILED'); }
+  const raw = Buffer.isBuffer(bytes) ? bytes : Buffer.from(String(bytes), 'utf8');
+  if (raw.length !== expectedBytes) fail('EXECUTOR_RESULT_READBACK_FAILED');
+  let value;
+  try { value = JSON.parse(raw.toString('utf8')); }
+  catch { fail('EXECUTOR_RESULT_READBACK_FAILED'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    fail('EXECUTOR_RESULT_READBACK_FAILED');
+  return value;
+}
+
+function persistAndReadback(path, record, readPersisted, { readError, mismatchError }) {
+  atomicJson(path, record);
+  let persisted;
+  try {
+    persisted = readPersisted(path, {
+      expectedBytes: Buffer.byteLength(JSON.stringify(record, null, 2), 'utf8'),
+    });
+  } catch { fail(readError); }
+  if (!persisted || typeof persisted !== 'object' || Array.isArray(persisted) ||
+      JSON.stringify(persisted) !== JSON.stringify(record))
+    fail(mismatchError);
+  return persisted;
+}
+
 export async function executePendingManifest({ config, manifestDir, currentSid = getCurrentWindowsSid,
-  execute = runPlan, rename = renameSync } = {}) {
+  execute = runPlan, rename = renameSync, readPersisted = readPersistedResult } = {}) {
   if (process.platform !== 'win32') fail('EXECUTOR_WINDOWS_ONLY');
   const runtime = config?.executor_runtime;
   if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime)) fail('EXECUTOR_RUNTIME_CONFIG_REQUIRED');
@@ -146,14 +184,15 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
   }
   if (isRecoverableModelPreflightWait(result, parsedJob)) {
     const waiting = receipt(parsedJob.request_id, manifest.attempt_id, 'WAITING', parsedJob, result);
-    atomicJson(target, { request_id: parsedJob.request_id, attempt_id: manifest.attempt_id,
-      terminal: waiting, local_evidence: result.local_evidence ?? null });
-    let persisted;
-    try { persisted = JSON.parse(readFileSync(target, 'utf8')); }
-    catch { fail('EXECUTOR_WAITING_RESULT_READBACK_FAILED'); }
-    if (persisted.request_id !== parsedJob.request_id || persisted.attempt_id !== manifest.attempt_id ||
-        persisted.terminal?.state !== 'WAITING' ||
-        persisted.terminal?.outcome !== result.outcome || persisted.terminal?.model_invoked !== false)
+    const persisted = persistAndReadback(target, {
+      request_id: parsedJob.request_id, attempt_id: manifest.attempt_id,
+      terminal: waiting, local_evidence: result.local_evidence ?? null,
+    }, readPersisted, {
+      readError: 'EXECUTOR_WAITING_RESULT_READBACK_FAILED',
+      mismatchError: 'EXECUTOR_WAITING_RESULT_IDENTITY_MISMATCH',
+    });
+    if (persisted.terminal.state !== 'WAITING' || persisted.terminal.outcome !== result.outcome ||
+        persisted.terminal.model_invoked !== false)
       fail('EXECUTOR_WAITING_RESULT_IDENTITY_MISMATCH');
     return { outcome: 'EXECUTOR_WAITING_PREFLIGHT_PERSISTED', exit_code: 0,
       terminal_state: 'WAITING', model_invoked: false, result_path: target,
@@ -161,11 +200,19 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
   }
   const terminal = receipt(parsedJob.request_id, manifest.attempt_id,
     terminalStateForResult(result), parsedJob, result);
-  atomicJson(target, { request_id: parsedJob.request_id, attempt_id: manifest.attempt_id,
-    terminal, local_evidence: result.local_evidence ?? null });
+  const persistedRecord = { request_id: parsedJob.request_id, attempt_id: manifest.attempt_id,
+    terminal, local_evidence: result.local_evidence ?? null };
+  // Read the exact persisted bytes back before reporting persisted. A missing,
+  // unreadable or mismatched readback is a fixed sanitized failure. It must not
+  // rerun the model and must not delete the already-written, ambiguous result.
+  const persisted = persistAndReadback(target, persistedRecord, readPersisted, {
+    readError: 'EXECUTOR_RESULT_READBACK_FAILED',
+    mismatchError: 'EXECUTOR_RESULT_READBACK_MISMATCH',
+  });
   return { outcome: 'EXECUTOR_RESULT_PERSISTED_NOT_SEMANTIC_ACCEPTANCE',
-    exit_code: terminal.exit_code, terminal_state: terminal.state, result_path: target,
-    evidence_sha256: terminal.evidence_sha256, evidence_bytes: terminal.evidence_bytes };
+    exit_code: persisted.terminal.exit_code, terminal_state: persisted.terminal.state,
+    result_path: target, evidence_sha256: persisted.terminal.evidence_sha256,
+    evidence_bytes: persisted.terminal.evidence_bytes };
 }
 
 async function main() {
