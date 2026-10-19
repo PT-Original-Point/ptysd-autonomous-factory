@@ -757,6 +757,9 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
       tool_info: { output: 'PRIVATE_TOOL_OUTPUT' } } },
     { event: 'step_update', step_update: { conversation_id: session, step_index: 2,
       state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command' } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 2,
+      state: 'ERROR', step_type: 'tool', tool_name: 'run_command',
+      tool_info: { error: { code: 'COMMAND_DENIED', message: 'PRIVATE_COMMAND_ERROR' } } } },
     { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
       state: 'DONE', step_type: 'agent_response', text_delta: 'done' } },
     { event: 'result', result: { conversation_id: session, status: 'SUCCESS',
@@ -775,6 +778,8 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
     assert.equal(result.model_invoked, true);
     assert.equal(result.model_activity_evidence, 'OBSERVED');
     assert.equal(result.tool_execution_count, 2);
+    assert.equal(result.tool_execution_failed_count, 1);
+    assert.equal(result.tool_execution_incomplete_count, 0);
     assert.equal(result.forbidden_tool_execution_evidence, 'NOT_OBSERVED');
     assert.equal(result.file_change_tool_completed_count, 1);
     assert.equal(result.file_change_tool_incomplete_count, 0);
@@ -782,6 +787,7 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
     assert.equal(result.stdout_bytes, bytes.length);
     assert.equal(JSON.stringify(result).includes('PRIVATE_MODEL_RESPONSE'), false);
     assert.equal(JSON.stringify(result).includes('PRIVATE_TOOL_OUTPUT'), false);
+    assert.equal(JSON.stringify(result).includes('PRIVATE_COMMAND_ERROR'), false);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

@@ -676,6 +676,7 @@ function emptyAntigravityRunEvidence(valid, reason = null, forbiddenToolEvidence
     permission_mode_evidence: 'UNKNOWN', response_sha256: null, model_invoked: null,
     provider_usage_evidence: 'UNKNOWN', model_activity_evidence: 'UNKNOWN',
     tool_execution_evidence: 'UNKNOWN', tool_execution_count: 0,
+    tool_execution_failed_count: 0, tool_execution_incomplete_count: 0,
     file_change_tool_evidence: 'UNKNOWN', file_change_tool_completed_count: 0,
     file_change_tool_failed_count: 0, file_change_tool_incomplete_count: 0,
     token_usage: null, event_count: 0, stdout_sha256: null, stdout_bytes: 0 };
@@ -798,6 +799,8 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
   const stdoutHash = hash.digest('hex');
   const invalid = reason => {
     const toolValues = [...tools.values()];
+    const failedTools = toolValues.filter(tool => tool.failed);
+    const incompleteTools = toolValues.filter(tool => tool.state === 'ACTIVE');
     const fileTools = toolValues.filter(tool => ['replace_file_content', 'write_file', 'write_to_file']
       .includes(tool.name));
     const completedFileTools = fileTools.filter(tool => tool.state === 'DONE');
@@ -823,6 +826,8 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
         result ? 'NO_ACTIVITY_OBSERVED' : 'UNKNOWN',
       tool_execution_evidence: tools.size ? 'OBSERVED' : 'UNKNOWN',
       tool_execution_count: tools.size,
+      tool_execution_failed_count: failedTools.length,
+      tool_execution_incomplete_count: incompleteTools.length,
       file_change_tool_evidence: fileTools.length ? 'OBSERVED' : 'UNKNOWN',
       file_change_tool_completed_count: completedFileTools.length,
       file_change_tool_failed_count: failedFileTools.length,
@@ -839,6 +844,8 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
   if (expectedSha256 && stdoutHash.toLowerCase() !== expectedSha256.toLowerCase())
     return invalid('ANTIGRAVITY_CAPTURE_HASH_MISMATCH');
   const toolValues = [...tools.values()];
+  const failedTools = toolValues.filter(tool => tool.failed);
+  const incompleteTools = toolValues.filter(tool => tool.state === 'ACTIVE');
   const fileTools = toolValues.filter(tool => ['replace_file_content', 'write_file', 'write_to_file']
     .includes(tool.name));
   const completedFileTools = fileTools.filter(tool => tool.state === 'DONE');
@@ -859,6 +866,8 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
       ? 'OBSERVED' : 'NO_ACTIVITY_OBSERVED',
     tool_execution_evidence: hasToolCalls ? 'OBSERVED' : 'NO_TOOL_CALLS_OBSERVED',
     tool_execution_count: tools.size,
+    tool_execution_failed_count: failedTools.length,
+    tool_execution_incomplete_count: incompleteTools.length,
     file_change_tool_evidence: fileTools.length ? 'OBSERVED' : 'NO_FILE_CHANGE_TOOL_OBSERVED',
     file_change_tool_completed_count: completedFileTools.length,
     file_change_tool_failed_count: failedFileTools.length,

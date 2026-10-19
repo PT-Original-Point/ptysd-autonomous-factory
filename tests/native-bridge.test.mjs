@@ -1584,6 +1584,11 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
             permission_mode:'request-review'}},
           {event:'step_update',step_update:{conversation_id:conversation,step_index:0,state:'DONE',
             step_type:'tool',tool_name:'write_to_file',tool_info:{}}},
+          {event:'step_update',step_update:{conversation_id:conversation,step_index:1,state:'ACTIVE',
+            step_type:'tool',tool_name:'run_command'}},
+          {event:'step_update',step_update:{conversation_id:conversation,step_index:1,state:'ERROR',
+            step_type:'tool',tool_name:'run_command',tool_info:{error:{code:'COMMAND_DENIED',
+              message:'PRIVATE_COMMAND_ERROR'}}}},
           {event:'result',result:{conversation_id:conversation,status:'SUCCESS',response:'private response text',
             usage:{input_tokens:90,output_tokens:20,thinking_tokens:4,cache_read_tokens:0,total_tokens:114}}},
         ];
@@ -1600,8 +1605,13 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
       },
     });
     assert.equal(readinessCalls,1); assert.equal(modelLaunches,1);
-    assert.equal(result.outcome,'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED');
+    assert.equal(result.outcome,'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED');
     assert.equal(result.coding_state,'DIFF_CAPTURED_UNVERIFIED');
+    assert.equal(result.exit_code,-1);
+    assert.equal(result.cli_exit_code,0);
+    assert.equal(result.tool_execution_failed_count,1);
+    assert.equal(result.tool_execution_incomplete_count,0);
+    assert.equal(terminalStateForResult(result),'BLOCKED');
     assert.equal(result.model_invoked,true);
     assert.equal(result.session_id,conversation);
     assert.equal(result.cli_status,'SUCCESS');
@@ -1627,6 +1637,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(finalReceipt.variant,'high');
     assert.equal(finalReceipt.permission_mode_evidence,'REQUEST_REVIEW_CONFIRMED');
     assert.equal(finalReceipt.cli_status,'SUCCESS');
+    assert.equal(finalReceipt.tool_execution_failed_count,1);
+    assert.equal(finalReceipt.tool_execution_incomplete_count,0);
     assert.equal(finalReceipt.run_disposition,'CLI_SUCCESS_REQUIRES_SEMANTIC_REVIEW');
     assert.equal(finalReceipt.cli_version,'1.4.2');
     assert.equal(finalReceipt.cli_binary_sha256,cliSha256);

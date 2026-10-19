@@ -192,6 +192,10 @@ export function parseReceipt(body) {
              .includes(o.tool_policy_evidence)) ||
          o.forbidden_tool_execution_evidence !== undefined && (o.kind !== 'antigravity_edit' ||
            !['UNKNOWN', 'NOT_OBSERVED', 'OBSERVED'].includes(o.forbidden_tool_execution_evidence)) ||
+          o.tool_execution_failed_count !== undefined && (o.kind !== 'antigravity_edit' ||
+            !Number.isSafeInteger(o.tool_execution_failed_count) || o.tool_execution_failed_count < 0) ||
+          o.tool_execution_incomplete_count !== undefined && (o.kind !== 'antigravity_edit' ||
+            !Number.isSafeInteger(o.tool_execution_incomplete_count) || o.tool_execution_incomplete_count < 0) ||
         (o.state === 'WAITING' && (!MODEL_EXECUTION_KINDS.has(o.kind) ||
           o.eligibility_state !== 'WAITING' || o.model_invoked !== false ||
           !RECOVERABLE_MODEL_PREFLIGHT_OUTCOMES.has(o.outcome))) ||
@@ -1017,6 +1021,8 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     token_usage: runEvidence.token_usage,
     tool_execution_evidence: runEvidence.tool_execution_evidence,
     tool_execution_count: runEvidence.tool_execution_count,
+    tool_execution_failed_count: runEvidence.tool_execution_failed_count,
+    tool_execution_incomplete_count: runEvidence.tool_execution_incomplete_count,
     file_change_tool_evidence: runEvidence.file_change_tool_evidence,
     file_change_tool_completed_count: runEvidence.file_change_tool_completed_count,
     file_change_tool_failed_count: runEvidence.file_change_tool_failed_count,
@@ -1032,7 +1038,9 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
           source_diff_evidence: runEvidence.source_diff_evidence,
           task_acceptance: runEvidence.task_acceptance,
         permission_mode_evidence: runEvidence.permission_mode_evidence,
-        event_count: runEvidence.event_count, stdout_bytes: runEvidence.stdout_bytes ?? 0 } },
+          event_count: runEvidence.event_count, stdout_bytes: runEvidence.stdout_bytes ?? 0,
+          tool_execution_failed_count: runEvidence.tool_execution_failed_count,
+          tool_execution_incomplete_count: runEvidence.tool_execution_incomplete_count } },
   };
   if (evidencedResult.local_evidence?.termination_state &&
       ['ORPHAN_POSSIBLE', 'TERMINATION_UNCONFIRMED', 'TERMINATION_REQUESTED']
@@ -1117,6 +1125,16 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     exit_code: -1, coding_state: diff.changed_files.length ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNVERIFIED',
     scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
     ...diff, local_evidence: localEvidence };
+  if (runEvidence.tool_execution_failed_count > runEvidence.file_change_tool_failed_count ||
+      runEvidence.tool_execution_incomplete_count > runEvidence.file_change_tool_incomplete_count)
+    return { ...diffEvidencedResult,
+      outcome: diff.changed_files.length
+        ? 'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED'
+        : 'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_NO_DIFF',
+      cli_exit_code: evidencedResult.exit_code, exit_code: -1,
+      coding_state: diff.changed_files.length ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNVERIFIED',
+      scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
+      ...diff, local_evidence: localEvidence };
   if (!diff.changed_files.length || diff.bytes === 0)
     return { ...diffEvidencedResult, outcome: 'ANTIGRAVITY_EDIT_NO_DIFF', cli_exit_code: evidencedResult.exit_code,
       exit_code: 47, coding_state: 'NO_DIFF', scope_valid: true,
@@ -1426,6 +1444,12 @@ export function receipt(requestId, attemptId, state, job, result = null) {
         cli_binary_integrity_evidence: result?.cli_binary_integrity_evidence ?? 'UNKNOWN',
         tool_policy_evidence: result?.tool_policy_evidence ?? 'UNKNOWN',
         forbidden_tool_execution_evidence: result?.forbidden_tool_execution_evidence ?? 'UNKNOWN',
+        ...(Number.isSafeInteger(result?.tool_execution_failed_count) ? {
+          tool_execution_failed_count: result.tool_execution_failed_count,
+        } : {}),
+        ...(Number.isSafeInteger(result?.tool_execution_incomplete_count) ? {
+          tool_execution_incomplete_count: result.tool_execution_incomplete_count,
+        } : {}),
         ...(Object.hasOwn(ANTIGRAVITY_RUN_DISPOSITIONS, result?.cli_status) ? {
           cli_status: result.cli_status,
           run_disposition: result.run_disposition,
