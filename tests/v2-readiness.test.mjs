@@ -872,6 +872,29 @@ test('Antigravity terminal zero usage cannot erase positive per-step evidence', 
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('Antigravity cache or aggregate tokens are positive provider usage evidence', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-aggregate-usage-'));
+  const stdoutPath = join(directory, 'stdout.jsonl');
+  const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  const usage = { input_tokens: 0, output_tokens: 0, thinking_tokens: 0,
+    cache_read_tokens: 12, total_tokens: 12 };
+  const events = [
+    { event: 'init', conversation_id: session,
+      init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+    { event: 'result', result: { conversation_id: session, status: 'SUCCESS',
+      response: '', usage } },
+  ];
+  try {
+    writeFileSync(stdoutPath, events.map(event => JSON.stringify(event)).join('\n') + '\n');
+    const result = await readAntigravityV2RunEvidence(stdoutPath, null, cwd);
+    assert.equal(result.valid, true);
+    assert.equal(result.model_invoked, true);
+    assert.equal(result.provider_usage_evidence, 'OBSERVED');
+    assert.deepEqual(result.token_usage, usage);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('Antigravity stream classifies all documented CLI statuses without claiming task acceptance', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'pty-agy-status-'));
   const stdoutPath = join(directory, 'stdout.jsonl');
