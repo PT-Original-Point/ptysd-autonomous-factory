@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { platform, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
@@ -19,6 +19,7 @@ test('shared Windows process-tree reader distinguishes live, dead, and unknown r
   const run = (file, args, options) => {
     calls.push({ file, args, options });
     return { trim: () => JSON.stringify({ state: 'ALIVE', process_ids: [42, 43],
+      census_complete: true,
       root_created_at: '2026-10-16T12:00:00.000Z' }) };
   };
   const alive = readWindowsProcessTree(42, run, 'win32');
@@ -30,11 +31,37 @@ test('shared Windows process-tree reader distinguishes live, dead, and unknown r
   assert.equal(calls[0].options.windowsHide, true);
   assert.equal(calls[0].options.shell, false);
   assert.match(calls[0].args.at(-1), /Get-CimInstance/);
+  assert.doesNotMatch(calls[0].args.at(-1), /Get-Process/,
+    'do not compare separately timed process lists and turn routine process churn into UNKNOWN');
+  assert.match(calls[0].args.at(-1), /processSet\.Contains\(\$PID\)/,
+    'the single CIM census must include the reader process before it can prove absence');
 
   const dead = readWindowsProcessTree(42, () => ({ trim: () =>
-    JSON.stringify({ state: 'DEAD', process_ids: [] }) }), 'win32');
+    JSON.stringify({ state: 'DEAD', process_ids: [], census_complete: true }) }), 'win32');
   assert.equal(dead.state, 'DEAD');
   assert.deepEqual(dead.process_ids, []);
+
+  let incompleteCalls = 0;
+  const incomplete = readWindowsProcessTree(42, () => ({ trim: () => {
+    incompleteCalls++;
+    return JSON.stringify({ state: 'UNKNOWN', process_ids: [], census_complete: false,
+      error: 'EXECUTOR_PROCESS_CENSUS_INCOMPLETE' });
+  } }), 'win32');
+  assert.equal(incomplete.state, 'UNKNOWN',
+    'an empty descendant list is not proof of termination unless the OS process census is complete');
+  assert.equal(incomplete.error, 'EXECUTOR_PROCESS_CENSUS_INCOMPLETE');
+  assert.equal(incompleteCalls, 2, 'only one bounded readback retry is allowed');
+
+  let transientCalls = 0;
+  const recovered = readWindowsProcessTree(42, () => ({ trim: () => {
+    transientCalls++;
+    return JSON.stringify(transientCalls === 1
+      ? { state: 'UNKNOWN', process_ids: [], census_complete: false,
+          error: 'EXECUTOR_PROCESS_CENSUS_INCOMPLETE' }
+      : { state: 'DEAD', process_ids: [], census_complete: true, error: null });
+  } }), 'win32');
+  assert.equal(recovered.state, 'DEAD');
+  assert.equal(transientCalls, 2, 'retry once after a transient incomplete census');
 
   const malformed = readWindowsProcessTree(42, () => ({ trim: () =>
     JSON.stringify({ state: 'DEAD', process_ids: [42] }) }), 'win32');
@@ -42,6 +69,17 @@ test('shared Windows process-tree reader distinguishes live, dead, and unknown r
   assert.equal(malformed.error, 'PROCESS_TREE_READBACK_FAILED');
   const unavailable = readWindowsProcessTree(42, () => { throw new Error('offline'); }, 'win32');
   assert.equal(unavailable.state, 'UNKNOWN');
+});
+
+test('positive process-tree evidence remains ALIVE when an unrelated process makes the census incomplete', () => {
+  const live = readWindowsProcessTree(42, () => ({ trim: () => JSON.stringify({
+    state: 'ALIVE', process_ids: [42, 43], census_complete: false,
+    root_created_at: '2026-10-19T00:00:00.000Z', error: null,
+  }) }), 'win32');
+  assert.equal(live.state, 'ALIVE',
+    'a known matching process tree proves liveness even if unrelated PIDs raced the census');
+  assert.deepEqual(live.process_ids, [42, 43]);
+  assert.equal(live.error, null);
 });
 
 test('tree termination requires OS readback after taskkill and when the root has exited', () => {
@@ -58,7 +96,9 @@ test('tree termination requires OS readback after taskkill and when the root has
   assert.equal(alive.treeConfirmed, undefined,
     'taskkill exit 0 is not evidence that the process tree is gone');
   assert.equal(alive.processTreeState, 'ALIVE');
-  assert.equal(alive.rootOnly, true);
+  assert.equal(alive.rootOnly, true,
+    'a root that is still running under a requested termination keeps an evidenced orphan');
+  assert.equal(alive.error, 'PROCESS_TREE_STILL_ACTIVE');
 
   const dead = terminateProcessTree(child, {
     platformName: 'win32', runTaskkill: () => {},
@@ -82,10 +122,11 @@ test('tree termination requires OS readback after taskkill and when the root has
   });
   assert.equal(taskkillAfterExit, false,
     'do not send a stale PID to taskkill after Node observed root exit');
-  assert.equal(exitedWithChild.rootOnly, true,
-    'a surviving descendant keeps termination unresolved after root exit');
-  assert.equal(exitedWithChild.error, 'PROCESS_TREE_STILL_ACTIVE',
-    'an ALIVE readback must report the confirmed live descendant state');
+  assert.equal(exitedWithChild.rootOnly, undefined,
+    'a child-only tree after root exit cannot be proven to belong to this attempt');
+  assert.equal(exitedWithChild.processTreeState, 'UNKNOWN');
+  assert.equal(exitedWithChild.error, 'PROCESS_TREE_IDENTITY_UNPROVEN',
+    'an unprovable surviving tree is reported as unknown, never as this attempt orphan');
 
   const unknown = terminateProcessTree(child, {
     platformName: 'win32', runTaskkill: () => {},
@@ -93,6 +134,59 @@ test('tree termination requires OS readback after taskkill and when the root has
   });
   assert.equal(unknown.treeConfirmed, undefined);
   assert.equal(unknown.processTreeState, 'UNKNOWN');
+});
+
+test('a reused root PID with descendants is never attributed to the exited attempt', () => {
+  // The root process is known to have closed, yet the OS readback finds the same
+  // PID alive with its own descendant and a fresh creation time. That proves the
+  // PID was recycled by an unrelated process, so the tree must not be associated
+  // with this attempt nor signalled.
+  const child = { pid: 61, exitCode: 0, signalCode: null, kill() {} };
+  let taskkillCalls = 0;
+  const reused = terminateProcessTree(child, {
+    platformName: 'win32',
+    runTaskkill: () => { taskkillCalls += 1; },
+    readProcessTree: pid => ({ root_pid: pid, state: 'ALIVE',
+      process_ids: [pid, pid + 1], root_created_at: '2026-10-19T00:00:00.000Z' }),
+  });
+  assert.equal(taskkillCalls, 0, 'never signal a possibly reused PID');
+  assert.equal(reused.treeConfirmed, undefined);
+  assert.equal(reused.rootOnly, undefined,
+    'a live root at the closed attempt PID proves reuse, not a surviving descendant');
+  assert.equal(reused.processTreeState, 'UNKNOWN');
+  assert.equal(reused.error, 'PROCESS_TREE_IDENTITY_MISMATCH');
+
+  // Reuse is still detected from the root PID appearing in the read-back tree
+  // when the reader does not surface the creation time.
+  const reusedWithoutCreationTime = terminateProcessTree(child, {
+    platformName: 'win32',
+    runTaskkill: () => { taskkillCalls += 1; },
+    readProcessTree: pid => ({ root_pid: pid, state: 'ALIVE', process_ids: [pid, pid + 1] }),
+  });
+  assert.equal(taskkillCalls, 0, 'never signal a possibly reused PID');
+  assert.equal(reusedWithoutCreationTime.rootOnly, undefined);
+  assert.equal(reusedWithoutCreationTime.treeConfirmed, undefined);
+  assert.equal(reusedWithoutCreationTime.processTreeState, 'UNKNOWN');
+});
+
+test('child-only ALIVE readback after the root exits cannot prove attempt identity', () => {
+  // The attempt root has exited and the OS read-back lists only a descendant:
+  // the root PID is absent and there is no creation time. With no spawn-time
+  // identity captured, the surviving tree may belong to an unrelated process
+  // that reused the PID, so it must never be credited as this attempt orphan.
+  const child = { pid: 71, exitCode: 0, signalCode: null, kill() {} };
+  let taskkillCalls = 0;
+  const survivor = terminateProcessTree(child, {
+    platformName: 'win32',
+    runTaskkill: () => { taskkillCalls += 1; },
+    readProcessTree: pid => ({ root_pid: pid, state: 'ALIVE', process_ids: [pid + 1] }),
+  });
+  assert.equal(taskkillCalls, 0, 'never signal after the root has exited');
+  assert.equal(survivor.treeConfirmed, undefined);
+  assert.equal(survivor.rootOnly, undefined,
+    'an unproven surviving tree is not this attempt evidenced orphan');
+  assert.equal(survivor.processTreeState, 'UNKNOWN');
+  assert.equal(survivor.error, 'PROCESS_TREE_IDENTITY_UNPROVEN');
 });
 
 test('captured process streams output larger than 2 MiB without terminating and preserves hashes', async () => {
@@ -158,6 +252,103 @@ test('captured process preserves a nonzero native exit code', async () => {
   }
 });
 
+for (const scenario of [
+  { label:'unprovable root-exited descendant', state:'ALIVE', ids:[4243],
+    expected:'TERMINATION_UNCONFIRMED', expectedTree:'UNKNOWN',
+    error:'PROCESS_TREE_READBACK_UNKNOWN' },
+  { label:'no surviving process', state:'DEAD', ids:[], expected:'NOT_REQUESTED',
+    expectedTree:'DEAD', error:null },
+  { label:'unavailable process readback', state:'UNKNOWN', ids:[], expected:'TERMINATION_UNCONFIRMED',
+    expectedTree:'UNKNOWN', error:'PROCESS_TREE_READBACK_UNKNOWN' },
+  { label:'reused root PID with descendant', state:'ALIVE', ids:[], includeRootPid:true,
+    expected:'TERMINATION_UNCONFIRMED', expectedTree:'UNKNOWN',
+    error:'PROCESS_TREE_READBACK_UNKNOWN' },
+]) {
+  test(`captured process reads the process tree after normal close: ${scenario.label}`, async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ptysd-capture-normal-close-tree-'));
+    const stdoutPath = join(home, 'stdout.bin');
+    try {
+      let readbackCalls = 0;
+      const result = await runCapturedProcess(process.execPath,
+        ['-e', 'process.stdout.write("root finished\\n")'], {
+          cwd: home, env: process.env, stdoutPath, stderrPath: join(home, 'stderr.bin'),
+          platformName:'win32',
+          readProcessTree: pid => {
+            readbackCalls++;
+            assert.ok(pid > 0);
+            assert.equal(readFileSync(stdoutPath, 'utf8'), 'root finished\n',
+              'process-tree readback follows child close and output persistence');
+            return { root_pid:pid, state:scenario.state,
+              process_ids: scenario.includeRootPid ? [pid, pid + 1] : scenario.ids };
+          },
+        });
+      assert.equal(readbackCalls, 1, 'a normal close still requires final OS process-tree readback');
+      assert.equal(result.local_evidence.process_tree_state, scenario.expectedTree);
+      assert.equal(result.local_evidence.termination_state, scenario.expected);
+      assert.equal(result.local_evidence.termination_error, scenario.error);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+}
+
+test('Win32 readback independently detects a hidden detached descendant without crediting the exited root attempt', {
+  skip:platform() !== 'win32',
+}, async () => {
+  const home = mkdtempSync(join(tmpdir(), 'ptysd-live-detached-descendant-'));
+  const stdoutPath = join(home, 'stdout.bin');
+  const releasePath = join(home, 'release-child');
+  let childPid = null;
+  let childCreatedAt = null;
+  const waitForOriginalChildExit = async () => {
+    if (!Number.isSafeInteger(childPid) || childPid < 1) return null;
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const current = readWindowsProcessTree(childPid);
+      if (current.state === 'DEAD' ||
+          (childCreatedAt && current.state === 'ALIVE' && current.root_created_at !== childCreatedAt))
+        return current;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return readWindowsProcessTree(childPid);
+  };
+  try {
+    const childCode = `const fs=require('node:fs');const release=${JSON.stringify(releasePath)};` +
+      `const poll=setInterval(()=>{if(fs.existsSync(release)){clearInterval(poll);process.exit(0)}},25);` +
+      'setTimeout(()=>process.exit(0),15000).unref();';
+    const parentCode = `const {spawn}=require('node:child_process');` +
+      `const child=spawn(process.execPath,['-e',${JSON.stringify(childCode)}],` +
+      `{stdio:'ignore',windowsHide:true,detached:true});child.unref();` +
+      `process.stdout.write(String(process.pid)+','+String(child.pid)+String.fromCharCode(10));`;
+    const result = await runCapturedProcess(process.execPath, ['-e', parentCode], {
+      cwd:home, env:process.env, stdoutPath, stderrPath:join(home,'stderr.bin'),
+    });
+    const [rootPid, parsedChildPid] = readFileSync(stdoutPath, 'utf8').trim().split(',').map(Number);
+    childPid = parsedChildPid;
+    assert.ok(Number.isSafeInteger(rootPid) && rootPid > 0);
+    assert.ok(Number.isSafeInteger(childPid) && childPid > 0);
+    const liveTree = readWindowsProcessTree(childPid);
+    childCreatedAt = liveTree.root_created_at;
+    assert.equal(liveTree.state, 'ALIVE', 'the detached child must still be running after its parent exits');
+    // The exited root attempt cannot prove the surviving tree is its own: its PID
+    // may have been reused, so the attempt is not credited with the live child.
+    assert.equal(result.local_evidence.process_tree_state, 'UNKNOWN');
+    assert.equal(result.local_evidence.termination_state, 'TERMINATION_UNCONFIRMED');
+    assert.notEqual(result.local_evidence.termination_state, 'ORPHAN_POSSIBLE',
+      'a root-exited attempt must not claim identity of an unprovable descendant');
+
+    writeFileSync(releasePath, 'exit');
+    const stoppedTree = await waitForOriginalChildExit();
+    assert.ok(stoppedTree.state === 'DEAD' ||
+      (childCreatedAt && stoppedTree.root_created_at !== childCreatedAt),
+    'the identified child must exit naturally after the release signal');
+  } finally {
+    try { writeFileSync(releasePath, 'exit'); } catch { /* Temporary directory may already be absent. */ }
+    await waitForOriginalChildExit();
+    rmSync(home, { recursive:true, force:true });
+  }
+});
+
 test('failed spawn preserves its error without misclassifying absent output pipes or terminating a child', async () => {
   const home = mkdtempSync(join(tmpdir(), 'ptysd-capture-spawn-failure-'));
   try {
@@ -194,6 +385,8 @@ test('captured process redacts credential-shaped provider error codes from evide
     const result = await runCapturedProcess('synthetic-executable', [], {
       cwd: home, env: process.env,
       stdoutPath: join(home, 'stdout.bin'), stderrPath: join(home, 'stderr.bin'),
+      platformName:'win32',
+      readProcessTree: pid => ({ root_pid:pid, state:'DEAD', process_ids:[] }),
       spawnProcess: () => {
         queueMicrotask(() => {
           child.emit('spawn');
@@ -367,13 +560,15 @@ test('capture failure before spawn defers termination until the child PID exists
       'a pre-spawn capture failure must be acted on after a PID becomes available');
     assert.equal(result.local_evidence.storage_error, 'EIO');
     assert.equal(result.outcome, 'EVIDENCE_STORAGE_FAILED');
-    assert.equal(result.local_evidence.termination_state, 'TERMINATION_REQUESTED');
+    assert.equal(result.local_evidence.termination_state, 'TERMINATION_CONFIRMED',
+      'the post-close OS readback supersedes the earlier termination request');
+    assert.equal(result.local_evidence.termination_error, null);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });
 
-test('failed tree termination after evidence failure is preserved as possible orphan state', async () => {
+test('failed tree termination after evidence failure is not credited after the root exits', async () => {
   const home = mkdtempSync(join(tmpdir(), 'ptysd-capture-orphan-'));
   try {
     const result = await runCapturedProcess(process.execPath,
@@ -381,11 +576,14 @@ test('failed tree termination after evidence failure is preserved as possible or
         cwd: home, env: process.env,
         stdoutPath: join(home, 'missing', 'stdout.bin'),
         stderrPath: join(home, 'missing', 'stderr.bin'),
+        platformName:'win32',
+        readProcessTree: pid => ({ root_pid:pid, state:'ALIVE', process_ids:[pid + 1] }),
         terminate: child => ({ rootOnly: child.kill(), error: 'TASKKILL_TREE_FAILED' }),
       });
     assert.equal(result.outcome, 'EVIDENCE_STORAGE_FAILED');
-    assert.equal(result.local_evidence.termination_state, 'ORPHAN_POSSIBLE');
-    assert.equal(result.local_evidence.termination_error, 'TASKKILL_TREE_FAILED');
+    assert.equal(result.local_evidence.termination_state, 'TERMINATION_UNCONFIRMED',
+      'after the root exits an unprovable surviving tree is never credited to this attempt');
+    assert.equal(result.local_evidence.termination_error, 'PROCESS_TREE_READBACK_UNKNOWN');
     assert.notEqual(result.exit_code, 0, 'an evidence failure is not an accepted process result');
   } finally {
     rmSync(home, { recursive: true, force: true });

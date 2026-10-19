@@ -15,22 +15,39 @@ export function readWindowsProcessTree(rootPid, run = execFileSync, platformName
       process_ids: [], observed_at: observedAt, error: 'PROCESS_TREE_QUERY_UNAVAILABLE' };
   const script = `$ErrorActionPreference='Stop';$rootPid=${rootPid};` +
     `$all=@(Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate);` +
+    `$processSet=[System.Collections.Generic.HashSet[int]]::new();$invalid=$false;` +
+    `foreach($p in $all){if($null-eq $p.ProcessId-or [int]$p.ProcessId-lt 0-or ` +
+    `!$processSet.Add([int]$p.ProcessId)){$invalid=$true}};` +
+    // A second process enumeration races with the CIM snapshot whenever Windows
+    // starts or exits an unrelated process. Validate one complete CIM snapshot
+    // instead of comparing two independently timed lists.
+    `$censusComplete=(!$invalid-and $processSet.Count-gt 0-and $processSet.Contains($PID));` +
     `$known=[System.Collections.Generic.HashSet[int]]::new();[void]$known.Add($rootPid);` +
     `$changed=$true;while($changed){$changed=$false;foreach($p in $all){` +
     `if($known.Contains([int]$p.ParentProcessId)-and $known.Add([int]$p.ProcessId)){$changed=$true}}};` +
     `$found=@($all|Where-Object{$known.Contains([int]$_.ProcessId)});` +
     `$root=@($found|Where-Object{[int]$_.ProcessId-eq $rootPid});$created=$null;` +
     `if($root.Count-eq 1){$created=$root[0].CreationDate.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')};` +
-    `$state='ALIVE';if($found.Count-eq 0){$state='DEAD'};` +
+    `$state='UNKNOWN';$errorCode='EXECUTOR_PROCESS_CENSUS_INCOMPLETE';` +
+    `if($found.Count-gt 0){$state='ALIVE';$errorCode=$null}` +
+    `elseif($censusComplete){$state='DEAD';$errorCode=$null};` +
     `[pscustomobject]@{state=$state;process_ids=@($found|ForEach-Object{[int]$_.ProcessId});` +
-    `root_created_at=$created}|ConvertTo-Json -Compress`;
+    `root_created_at=$created;census_complete=$censusComplete;error=$errorCode}|ConvertTo-Json -Compress`;
   try {
-    const output = run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
-      encoding: 'utf8', windowsHide: true, shell: false, timeout: 20000,
-      maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
-    const value = JSON.parse(output);
-    if (!['DEAD', 'ALIVE'].includes(value?.state)) throw new Error('PROCESS_TREE_RESPONSE_INVALID');
+    let value;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const output = run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
+        encoding: 'utf8', windowsHide: true, shell: false, timeout: 20000,
+        maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+      value = JSON.parse(output);
+      if (value?.state !== 'UNKNOWN' || value?.error !== 'EXECUTOR_PROCESS_CENSUS_INCOMPLETE') break;
+    }
+    if (!['DEAD', 'ALIVE', 'UNKNOWN'].includes(value?.state) ||
+        typeof value?.census_complete !== 'boolean' ||
+        (value.state === 'UNKNOWN' && value.census_complete) ||
+        (value.state === 'DEAD' && !value.census_complete))
+      throw new Error('PROCESS_TREE_RESPONSE_INVALID');
     const processIds = Array.isArray(value.process_ids) ? value.process_ids :
       Number.isSafeInteger(value.process_ids) ? [value.process_ids] : [];
     if (!processIds.every(pid => Number.isSafeInteger(pid) && pid > 0) ||
@@ -39,8 +56,10 @@ export function readWindowsProcessTree(rootPid, run = execFileSync, platformName
       throw new Error('PROCESS_TREE_RESPONSE_INVALID');
     const rootCreatedAt = typeof value.root_created_at === 'string' &&
       !Number.isNaN(Date.parse(value.root_created_at)) ? value.root_created_at : null;
+    const responseError = value.state === 'UNKNOWN'
+      ? safeErrorCode({ code: value.error }, 'PROCESS_TREE_READBACK_FAILED') : null;
     return { state: value.state, root_pid: rootPid, process_ids: processIds,
-      root_created_at: rootCreatedAt, observed_at: observedAt, error: null };
+      root_created_at: rootCreatedAt, observed_at: observedAt, error: responseError };
   } catch (error) {
     const code = safeErrorCode(error, 'PROCESS_TREE_READBACK_FAILED');
     return { state: 'UNKNOWN', root_pid: rootPid, process_ids: [],
@@ -81,9 +100,24 @@ export function terminateProcessTree(child, {
   catch { readback = null; }
   const exactIds = Array.isArray(readback?.process_ids) &&
     readback.process_ids.every(value => Number.isSafeInteger(value) && value > 0);
+  // Node already observed the root process exit, so the OS process table must no
+  // longer hold that PID. Any ALIVE read-back after that point can no longer be
+  // tied to this attempt: the root may still be present because the PID was
+  // reused, or only descendants may remain with no captured spawn-time identity
+  // to prove they are ours. Report UNKNOWN and never signal. Only a root that is
+  // still running under a requested termination yields an evidenced orphan.
+  const rootStillPresent = readback?.root_pid === pid &&
+    ((readback.root_created_at !== null && readback.root_created_at !== undefined) ||
+      (exactIds && readback.process_ids.includes(pid)));
+  const aliveTree = readback?.root_pid === pid && exactIds &&
+    readback.state === 'ALIVE' && readback.process_ids.length > 0;
+  if (rootExited && aliveTree)
+    return { requested: false, processTreeState: 'UNKNOWN',
+      error: terminationError || (rootStillPresent
+        ? 'PROCESS_TREE_IDENTITY_MISMATCH' : 'PROCESS_TREE_IDENTITY_UNPROVEN') };
   if (readback?.root_pid === pid && exactIds && readback.state === 'DEAD' && readback.process_ids.length === 0)
     return { treeConfirmed: true, processTreeState: 'DEAD', error: terminationError };
-  if (readback?.root_pid === pid && exactIds && readback.state === 'ALIVE' && readback.process_ids.length > 0)
+  if (aliveTree)
     return { rootOnly: true, processTreeState: 'ALIVE',
       error: terminationError || 'PROCESS_TREE_STILL_ACTIVE' };
   return { requested: !rootExited, processTreeState: 'UNKNOWN',
@@ -129,6 +163,8 @@ export async function runCapturedProcess(command, args, {
   stdinText,
   spawnProcess = spawn,
   terminate = terminateProcessTree,
+  platformName = platform(),
+  readProcessTree = readWindowsProcessTree,
   onSpawn = () => {},
 } = {}) {
   if (typeof command !== 'string' || !command || !Array.isArray(args) ||
@@ -154,6 +190,8 @@ export async function runCapturedProcess(command, args, {
   let terminationNeeded = false;
   let terminationState = 'NOT_REQUESTED';
   let terminationError = null;
+  let processTreeState = 'NOT_QUERIED';
+  let processTreeError = null;
   const terminateOnce = () => {
     terminationNeeded = true;
     if (!spawnStarted) return;
@@ -252,6 +290,34 @@ export async function runCapturedProcess(command, args, {
     child.once('close', (code, signal) => resolveClose({ code, signal }));
   });
   const [exit] = await Promise.all([closed, stdoutCapture, stderrCapture, stdinCapture]);
+  if (spawnStarted && Number.isSafeInteger(child.pid) && platformName === 'win32') {
+    if (exit.code === null && exit.signal === null) {
+      processTreeState = 'UNKNOWN';
+      processTreeError = 'PROCESS_EXIT_STATUS_UNKNOWN';
+      terminationState = 'TERMINATION_UNCONFIRMED';
+      terminationError = 'PROCESS_EXIT_STATUS_UNKNOWN';
+    } else {
+      // A normal root close does not prove that descendants have exited. The
+      // root-exited branch of terminateProcessTree performs readback only and
+      // never signals a potentially reused PID.
+      const finalTree = terminateProcessTree({ pid: child.pid, exitCode: exit.code,
+        signalCode: exit.signal }, { readProcessTree, platformName });
+      processTreeState = finalTree.processTreeState ?? 'UNKNOWN';
+      processTreeError = finalTree.error ?? null;
+      if (finalTree.treeConfirmed) {
+        if (terminationState !== 'NOT_REQUESTED') {
+          terminationState = 'TERMINATION_CONFIRMED';
+          terminationError = null;
+        }
+      } else if (finalTree.rootOnly) {
+        terminationState = 'ORPHAN_POSSIBLE';
+        terminationError = 'PROCESS_TREE_STILL_ACTIVE';
+      } else {
+        terminationState = 'TERMINATION_UNCONFIRMED';
+        terminationError = safeErrorCode(finalTree.error, 'PROCESS_TREE_READBACK_UNKNOWN');
+      }
+    }
+  }
   if (missingOutputPipe && !spawnError && !captureError)
     captureError = 'OUTPUT_PIPE_UNAVAILABLE';
 
@@ -284,6 +350,8 @@ export async function runCapturedProcess(command, args, {
       stdin_error: stdinError,
       termination_state: terminationState,
       termination_error: terminationError,
+      process_tree_state: processTreeState,
+      process_tree_error: processTreeError,
       exit_signal: exit.signal ?? null,
     },
   };
