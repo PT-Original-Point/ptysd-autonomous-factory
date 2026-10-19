@@ -103,8 +103,12 @@ export function qualifyOpenCodeV2(env = process.env, win = platform() === 'win32
 }
 export function buildV2ReadOnlyConfig() {
   // Last-match rules; the only allowed operations are discovery within the workspace.
+  // The leading catch-all deny makes every unlisted tool/action fail closed (browser,
+  // computer, mcp_*, and any future action); read/glob are then the only allows before
+  // workspace protection, and the explicit NEVER denials keep their prior ordering.
   // A custom PRIMARY agent prevents the built-in plan agent's plan-file edit exception.
   const permissions = [
+    { action: '*', resource: '*', effect: 'deny' },
     ...NEVER.map(action => ({ action, resource: '*', effect: 'deny' })),
     ...['read', 'glob'].map(action => ({ action, resource: '*', effect: 'allow' })),
     ...workspaceReadProtection(),
@@ -117,7 +121,12 @@ export function buildV2ReadOnlyConfig() {
       mode: 'primary',
       description: 'Read repository only; never run shell, write files, or delegate',
       system: 'Only inspect non-secret files in the assigned repository. Do not edit, run commands, browse the web, use plugins, access external directories, or delegate. Explain any limitation without requesting permission.',
-      permissions: NEVER.map(action => ({ action, resource: '*', effect: 'deny' })),
+      permissions: [
+        { action: '*', resource: '*', effect: 'deny' },
+        ...NEVER.map(action => ({ action, resource: '*', effect: 'deny' })),
+        ...['read', 'glob'].map(action => ({ action, resource: '*', effect: 'allow' })),
+        ...workspaceReadProtection(),
+      ],
     } },
   };
 }
@@ -142,6 +151,8 @@ export function buildV2ScopedEditConfig(workspace, editableFiles) {
   if (!Array.isArray(editableFiles) || editableFiles.length < 1)
     throw new Error('SCOPED_EDIT_FILE_ALLOWLIST_INVALID');
   const root = resolve(workspace);
+  if (platform() === 'win32' && /^\\\\[^\\]+\\[^\\]+/.test(root))
+    throw new Error('SCOPED_EDIT_WORKSPACE_UNC_PATH');
   const samePath = (left, right) => platform() === 'win32'
     ? normalize(left).toLowerCase() === normalize(right).toLowerCase()
     : normalize(left) === normalize(right);
@@ -201,6 +212,13 @@ export function buildV2ScopedEditConfig(workspace, editableFiles) {
         throw new Error('SCOPED_EDIT_PARENT_NOT_DIRECTORY');
       if (index === parts.length - 1 && !entry.isFile())
         throw new Error('SCOPED_EDIT_TARGET_NOT_FILE');
+      // Hard links are regular files without a reparse point, but their content
+      // is shared with every directory entry for the same inode. Reject them so
+      // an in-workspace alias cannot widen the exact edit allowlist beyond this
+      // workspace. Directories are excluded because their link count includes
+      // subdirectories.
+      if (index === parts.length - 1 && entry.isFile() && entry.nlink > 1)
+        throw new Error('SCOPED_EDIT_HARD_LINK');
       let physical;
       try { physical = realpathSync(current); }
       catch { throw new Error('SCOPED_EDIT_PATH_UNVERIFIABLE'); }
@@ -335,6 +353,7 @@ export async function readOpenCodeV2RunEvidence(stdoutPath, expectedSha256 = nul
   let usageObserved = false;
   let usagePositive = false;
   let modelTextObserved = false;
+  let providerErrorReason = null;
   let eventCount = 0;
   let lineNumber = 0;
   let malformed = false;
@@ -356,6 +375,13 @@ export async function readOpenCodeV2RunEvidence(stdoutPath, expectedSha256 = nul
         malformed = true; break;
       }
       eventCount++;
+      if (event.type === 'error') {
+        // Keep only stable allowlisted reason codes. Provider messages can contain
+        // account or request details and must not enter durable execution evidence.
+        if (event.error?.type === 'FreeTierError')
+          providerErrorReason = 'OPEN_CODE_FREE_TIER_REJECTED';
+        else providerErrorReason ??= 'OPEN_CODE_PROVIDER_ERROR';
+      }
       const session = event.sessionID ?? event.session_id ?? event.session?.id;
       if (session !== undefined) {
         if (typeof session !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(session)) {
@@ -421,7 +447,7 @@ export async function readOpenCodeV2RunEvidence(stdoutPath, expectedSha256 = nul
   else if (changedCounts.incomplete) fileEvidence = 'INCOMPLETE';
   const providerUsage = usageObserved && usagePositive;
   const modelActivity = modelTextObserved;
-  return { valid: true, reason: null, session_id: sessions.values().next().value ?? null,
+  return { valid: true, reason: providerErrorReason, session_id: sessions.values().next().value ?? null,
     session_started: sessions.size === 1 ? true : null,
     provider_usage_evidence: providerUsage ? 'CONFIRMED' : 'UNKNOWN',
     model_activity_evidence: modelActivity ? 'CONFIRMED' : 'UNKNOWN',
