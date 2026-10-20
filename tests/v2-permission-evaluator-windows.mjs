@@ -3,19 +3,30 @@
 // It is NOT a test of experimental tool.use policy or an OS sandbox.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, statSync } from 'node:fs';
+import { once } from 'node:events';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import net from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { buildV2ScopedEditConfig } from '../native-bridge/opencode-v2.mjs';
 
 const prefix = process.env.PTYSD_CI_V2_PREFIX;
-assert.ok(prefix, 'V2_PREFIX_REQUIRED');
-const exe = join(prefix, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe');
+assert.ok(process.env.PTYSD_V2_BIN || prefix, 'V2_EXECUTABLE_REQUIRED');
+const exe = process.env.PTYSD_V2_BIN
+  ? resolve(process.env.PTYSD_V2_BIN)
+  : join(prefix, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe');
 assert.ok(statSync(exe).isFile(), 'V2_NATIVE_EXE_NOT_FOUND');
 const configDir = mkdtempSync(join(tmpdir(), 'ptysd-v2-permissions-'));
-const scopedPolicy = buildV2ScopedEditConfig(configDir, ['src/allowed.mjs']);
+mkdirSync(join(configDir, 'src'));
+mkdirSync(join(configDir, '@types'));
+mkdirSync(join(configDir, '_helpers'));
+const scopedPaths = [
+  'src/allowed.mjs', 'src/module with spaces.mjs', 'src/控制器.mjs',
+  'src/a+b.mjs', 'src/module(1).mjs', 'src/file@draft.mjs', 'src/file!draft.mjs',
+  '@types/bridge.d.ts', '_helpers/worker.mjs',
+];
+const scopedPolicy = buildV2ScopedEditConfig(configDir, scopedPaths);
 const config = {
   ...scopedPolicy,
   agents: {
@@ -32,9 +43,20 @@ const config = {
   },
 };
 writeFileSync(join(configDir, 'opencode.json'), JSON.stringify(config));
-const env = { ...process.env, OPENCODE_DISABLE_AUTOUPDATE: 'true' };
-for (const key of ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG_CONTENT',
-  'OPENCODE_PERMISSION', 'OPENCODE_AUTO_SHARE']) delete env[key];
+for (const directory of ['appdata', 'localappdata', 'home', 'temp'])
+  mkdirSync(join(configDir, directory), { recursive: true });
+// The native evaluator does not need the interactive user's inherited provider
+// or publisher environment. Keep only Windows runtime paths and point all user
+// profile/config locations into this disposable, credential-free fixture.
+const env = Object.fromEntries(['PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT']
+  .filter(key => process.env[key])
+  .map(key => [key, process.env[key]]));
+Object.assign(env, {
+  USERPROFILE: join(configDir, 'home'), HOME: join(configDir, 'home'),
+  APPDATA: join(configDir, 'appdata'), LOCALAPPDATA: join(configDir, 'localappdata'),
+  TEMP: join(configDir, 'temp'), TMP: join(configDir, 'temp'),
+  OPENCODE_DISABLE_AUTOUPDATE: 'true',
+});
 // V2's native foreground API requires HTTP Basic Auth. Never use real credentials.
 const ephemeralPassword = randomBytes(24).toString('hex');
 env.OPENCODE_SERVER_PASSWORD = ephemeralPassword;
@@ -127,45 +149,78 @@ try {
       '_PRESENT=' + Boolean(item) + '_RULES=' + (Array.isArray(item?.permissions) ? item.permissions.length : 0));
     assert.ok(item && Array.isArray(item.permissions), 'V2_EXPECTED_CUSTOM_AGENT_NOT_LOADED_' + name);
   }
-  const response = await request('POST', '/api/session', {
-    agent: 'ptysd-allow', title: 'PTYSD ephemeral no-inference permission canary',
-    location: { directory: configDir },
-  });
-  if (response.status !== 200) throw new Error('V2_SESSION_API_HTTP_' + response.status);
-  const sessionID = response.data?.id;
-  assert.ok(typeof sessionID === 'string' && sessionID.length > 0, 'V2_SESSION_ID_NOT_RETURNED');
-  assert.ok(sameDir(response.data?.location?.directory), 'V2_SESSION_LOCATION_NOT_EXACT_TEST_SCOPE');
-  assert.equal(response.data?.agent, 'ptysd-allow', 'V2_SESSION_AGENT_NOT_REGISTERED');
+  async function createSession(agent) {
+    const response = await request('POST', '/api/session', {
+      agent, title: 'PTYSD ephemeral no-inference permission canary ' + agent,
+      location: { directory: configDir },
+    });
+    if (response.status !== 200) throw new Error('V2_SESSION_API_HTTP_' + response.status);
+    const sessionID = response.data?.id;
+    assert.ok(typeof sessionID === 'string' && sessionID.length > 0, 'V2_SESSION_ID_NOT_RETURNED');
+    assert.ok(sameDir(response.data?.location?.directory), 'V2_SESSION_LOCATION_NOT_EXACT_TEST_SCOPE');
+    assert.equal(response.data?.agent, agent, 'V2_SESSION_AGENT_NOT_REGISTERED');
+    return sessionID;
+  }
+  const allowSessionID = await createSession('ptysd-allow');
+  const denySessionID = await createSession('ptysd-deny');
+  const scopedSessionID = await createSession('ptysd-scoped-write');
   const cases = [
     ['shell', 'echo PTYSD_NO_EXECUTION'],
     ['edit', 'probe.txt'],
     ['external_directory', '../outside'],
   ];
   for (const [action, resource] of cases) {
-    const yes = await effect(sessionID, 'ptysd-allow', action, resource);
-    const no = await effect(sessionID, 'ptysd-deny', action, resource);
+    const yes = await effect(allowSessionID, 'ptysd-allow', action, resource);
+    const no = await effect(denySessionID, 'ptysd-deny', action, resource);
     console.log('V2_PERMISSION_' + action.toUpperCase() + '_CONTROL=' + yes + '_DENY=' + no);
     assert.equal(yes, 'allow', action + '_CONTROL_NOT_ALLOWED');
     assert.equal(no, 'deny', action + '_DENY_NOT_ENFORCED');
   }
   console.log('V2_NATIVE_PERMISSION_EVALUATOR_NEGATIVE_3_OF_3_PASS_ZERO_INFERENCE');
   const scopedChecks = [
+    ['edit', 'src/allowed.mjs', 'allow'],
+    ['edit', 'src/module with spaces.mjs', 'allow'],
+    ['edit', 'src/module.with.spaces.mjs', 'deny'],
+    ['edit', 'src/控制器.mjs', 'allow'],
+    ['edit', 'src/控制器-other.mjs', 'deny'],
+    ['edit', 'src/a+b.mjs', 'allow'], ['edit', 'src/aaab.mjs', 'deny'],
+    ['edit', 'src/module(1).mjs', 'allow'], ['edit', 'src/module1.mjs', 'deny'],
+    ['edit', 'src/file@draft.mjs', 'allow'],
+    ['edit', 'src/file!draft.mjs', 'allow'],
+    ['edit', '@types/bridge.d.ts', 'allow'], ['edit', '@types/other.d.ts', 'deny'],
+    ['edit', '_helpers/worker.mjs', 'allow'], ['edit', '_helpers/worker-extra.mjs', 'deny'],
+    ['edit', join('src', 'allowed.mjs'), 'allow'],
     ['edit', join(configDir, 'src', 'allowed.mjs'), 'allow'],
+    ['edit', 'src/other.mjs', 'deny'],
     ['edit', join(configDir, 'src', 'other.mjs'), 'deny'],
     ['edit', join(configDir, '..', 'outside.mjs'), 'deny'],
     ['shell', 'git status', 'deny'],
     ['external_directory', join(configDir, '..', 'outside.mjs'), 'deny'],
+    ['read', '.env.production', 'deny'],
+    ['read', 'src/.env.local', 'deny'],
+    ['read', 'src/.env.example', 'allow'],
+    ['read', '.npmrc', 'deny'],
+    ['read', 'src/credentials.json', 'deny'],
+    ['read', '.git/config', 'deny'],
+    ['read', 'keys/client.pem', 'deny'],
+    ['grep', 'API_KEY', 'deny'],
   ];
   for (const [action, resource, expected] of scopedChecks) {
-    const actual = await effect(sessionID, 'ptysd-scoped-write', action, resource);
+    const actual = await effect(scopedSessionID, 'ptysd-scoped-write', action, resource);
     assert.equal(actual, expected, 'V2_SCOPED_WRITE_' + action + '_POLICY_INVALID');
   }
-  console.log('V2_SCOPED_WRITE_PERMISSION_CONTRACT_5_OF_5_PASS_ZERO_INFERENCE');
+  console.log(`V2_SCOPED_WRITE_PERMISSION_CONTRACT_${scopedChecks.length}_OF_${scopedChecks.length}_PASS_ZERO_INFERENCE`);
 } finally {
   if (child.pid) {
     try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
       timeout: 5000, windowsHide: true, stdio: 'ignore',
     }); } catch { try { child.kill(); } catch { /* already exited */ } }
+    if (child.exitCode === null && child.signalCode === null) {
+      await Promise.race([
+        once(child, 'exit'),
+        new Promise(resolve => setTimeout(resolve, 5000)),
+      ]);
+    }
   }
-  rmSync(configDir, { recursive: true, force: true });
+  rmSync(configDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
 }
