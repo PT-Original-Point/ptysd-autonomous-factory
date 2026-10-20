@@ -254,6 +254,7 @@ test('Antigravity W2 readiness uses documented CLI settings and never probes int
   const workspace = mkdtempSync(join(tmpdir(), 'pty-agy-scoped-workspace-'));
   const calls = [];
   const help = '--project --print --output-format stream-json --model --effort --sandbox --mode accept-edits';
+  const projectScopedHelp = '--print --output-format stream-json --model --effort --sandbox --mode accept-edits';
   const required = ['command(*)', 'unsandboxed(*)', 'read_url(*)', 'execute_url(*)', 'mcp(*)'];
   const settingsDir = join(profile, '.gemini', 'antigravity-cli');
   mkdirSync(settingsDir, { recursive: true });
@@ -264,7 +265,8 @@ test('Antigravity W2 readiness uses documented CLI settings and never probes int
     calls.push({ args, options });
     const rest = args[0] === `--project=${testProjectId}` ? args.slice(1) : args;
     if (rest[0] === '--version') return '1.4.2';
-    if (rest[0] === '--help') return help;
+    if (rest[0] === '--help')
+      return args[0] === `--project=${testProjectId}` ? projectScopedHelp : help;
     if (rest.includes('--print=/config') || rest.includes('--print=/permissions'))
       throw new Error('Potentially model-invoking or interactive command must not run');
     if (rest[0] === 'models') return 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n';
@@ -282,10 +284,12 @@ test('Antigravity W2 readiness uses documented CLI settings and never probes int
     assert.equal(result.tool_policy_source, 'DOCUMENTED_GLOBAL_CLI_SETTINGS_JSON');
     assert.equal(result.authentication_evidence, 'AUTHENTICATED_QUOTA_READ');
     assert.equal(result.inference_executed, false);
+    assert.equal(result.project_flag_supported, true,
+      'global CLI help is authoritative even when project-scoped help omits global flags');
     assert.equal(antigravityV2ReadinessExecutionFailure(result), null);
     assert.deepEqual(calls.map(call => call.args), [
       [`--project=${testProjectId}`, '--version'],
-      [`--project=${testProjectId}`, '--help'],
+      ['--help'],
       [`--project=${testProjectId}`, 'models'],
       [`--project=${testProjectId}`, '--print', '/usage'],
     ]);

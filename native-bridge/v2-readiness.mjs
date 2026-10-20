@@ -585,7 +585,11 @@ export function runAntigravityV2Readiness(bin, directory, runner = runAntigravit
     if (!result.version) result.issues.push('VERSION_OUTPUT_UNRECOGNIZED');
   } catch { result.issues.push('VERSION_COMMAND_FAILED'); }
   try {
-    const help = metadataText(runner(bin, [...projectArgs, '--help'], options));
+    // Help is a global CLI capability listing. Passing a project can make the
+    // CLI emit scoped help that omits global flags such as --project itself.
+    // Project-scoped version/models/usage probes below still validate the
+    // selected project without misclassifying the global option.
+    const help = metadataText(runner(bin, ['--help'], options));
     if (typeof help !== 'string' || Buffer.byteLength(help) > MAX_MODELS_BYTES)
       throw new Error('HELP_OUTPUT_INVALID');
     result.headless_print_supported = help.includes('--print');
