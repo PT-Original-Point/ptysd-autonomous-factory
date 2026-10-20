@@ -757,8 +757,16 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
       tool_info: { output: 'PRIVATE_TOOL_OUTPUT' } } },
     { event: 'step_update', step_update: { conversation_id: session, step_index: 2,
       state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command' } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 2,
+      state: 'ERROR', step_type: 'tool', tool_name: 'run_command',
+      tool_info: { error: { code: 'COMMAND_DENIED', message: 'PRIVATE_COMMAND_ERROR' } } } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 3,
+      state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command' } },
     { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
       state: 'DONE', step_type: 'agent_response', text_delta: 'done' } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 4,
+      state: 'DONE', step_type: 'checkpoint', usage: { input_tokens: 7, output_tokens: 3,
+        thinking_tokens: 2, cache_read_tokens: 11, total_tokens: 10 } } },
     { event: 'result', result: { conversation_id: session, status: 'SUCCESS',
       response: 'PRIVATE_MODEL_RESPONSE', usage: { input_tokens: 100, output_tokens: 20,
         thinking_tokens: 10, cache_read_tokens: 0, total_tokens: 120 } } },
@@ -774,14 +782,116 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
     assert.equal(result.permission_mode_evidence, 'ACCEPT_EDITS_CONFIRMED');
     assert.equal(result.model_invoked, true);
     assert.equal(result.model_activity_evidence, 'OBSERVED');
-    assert.equal(result.tool_execution_count, 2);
+    assert.equal(result.tool_execution_count, 3);
+    assert.equal(result.tool_execution_failed_count, 1);
+    assert.equal(result.tool_execution_incomplete_count, 1);
     assert.equal(result.forbidden_tool_execution_evidence, 'NOT_OBSERVED');
     assert.equal(result.file_change_tool_completed_count, 1);
     assert.equal(result.file_change_tool_incomplete_count, 0);
-    assert.equal(result.token_usage.total_tokens, 120);
+    assert.deepEqual(result.token_usage, { input_tokens: 100, output_tokens: 20,
+      thinking_tokens: 10, cache_read_tokens: 0, total_tokens: 120 },
+    'the cumulative terminal usage replaces per-step totals instead of double-counting them');
     assert.equal(result.stdout_bytes, bytes.length);
     assert.equal(JSON.stringify(result).includes('PRIVATE_MODEL_RESPONSE'), false);
     assert.equal(JSON.stringify(result).includes('PRIVATE_TOOL_OUTPUT'), false);
+    assert.equal(JSON.stringify(result).includes('PRIVATE_COMMAND_ERROR'), false);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('incomplete Antigravity streams preserve deduplicated per-step usage without claiming a terminal result', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-partial-usage-'));
+  const stdoutPath = join(directory, 'stdout.jsonl');
+  const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  const events = [
+    { event: 'init', conversation_id: session,
+      init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 1,
+      state: 'ACTIVE', step_type: 'agent_response', usage: { input_tokens: 100,
+        output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 10, total_tokens: 100 } } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 1,
+      state: 'DONE', step_type: 'agent_response', text_delta: 'PRIVATE_PARTIAL_RESPONSE',
+      usage: { input_tokens: 10, output_tokens: 3, thinking_tokens: 1,
+        cache_read_tokens: 2, total_tokens: 13 } } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 3,
+      state: 'DONE', step_type: 'agent_response', usage: { input_tokens: 5,
+        output_tokens: 2, thinking_tokens: 0, cache_read_tokens: 7, total_tokens: 7 } } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 2,
+      state: 'DONE', step_type: 'checkpoint', usage: { input_tokens: 2,
+        output_tokens: 4, thinking_tokens: 2, cache_read_tokens: 5, total_tokens: 6 } } },
+  ];
+  try {
+    const bytes = Buffer.from(events.map(event => JSON.stringify(event)).join('\n') + '\n');
+    writeFileSync(stdoutPath, bytes);
+    const result = await readAntigravityV2RunEvidence(stdoutPath, null, cwd);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'ANTIGRAVITY_JSONL_INCOMPLETE');
+    assert.equal(result.session_id, session);
+    assert.equal(result.model_invoked, true);
+    assert.equal(result.provider_usage_evidence, 'OBSERVED');
+    assert.equal(result.model_activity_evidence, 'OBSERVED');
+    assert.equal(result.run_disposition, 'UNKNOWN');
+    assert.equal(result.task_acceptance, 'UNKNOWN');
+    assert.deepEqual(result.token_usage, { input_tokens: 17, output_tokens: 9,
+      thinking_tokens: 3, cache_read_tokens: 14, total_tokens: 26 });
+    assert.equal(result.stdout_bytes, bytes.length);
+    assert.equal(JSON.stringify(result).includes('PRIVATE_PARTIAL_RESPONSE'), false);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity terminal zero usage cannot erase positive per-step evidence', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-usage-conflict-'));
+  const stdoutPath = join(directory, 'stdout.jsonl');
+  const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  const usage = { input_tokens: 9, output_tokens: 1, thinking_tokens: 0,
+    cache_read_tokens: 0, total_tokens: 10 };
+  const zeroUsage = { input_tokens: 0, output_tokens: 0, thinking_tokens: 0,
+    cache_read_tokens: 0, total_tokens: 0 };
+  const events = [
+    { event: 'init', conversation_id: session,
+      init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+      state: 'ACTIVE', step_type: 'agent_response', usage } },
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+      state: 'DONE', step_type: 'agent_response', usage: zeroUsage } },
+    { event: 'result', result: { conversation_id: session, status: 'SUCCESS',
+      response: '', usage: zeroUsage } },
+  ];
+  try {
+    writeFileSync(stdoutPath, events.map(event => JSON.stringify(event)).join('\n') + '\n');
+    const result = await readAntigravityV2RunEvidence(stdoutPath, null, cwd);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'ANTIGRAVITY_TERMINAL_USAGE_CONFLICT');
+    assert.equal(result.model_invoked, true);
+    assert.equal(result.provider_usage_evidence, 'OBSERVED');
+    assert.equal(result.model_activity_evidence, 'OBSERVED');
+    assert.equal(result.run_disposition, 'CLI_SUCCESS_REQUIRES_SEMANTIC_REVIEW');
+    assert.equal(result.task_acceptance, 'UNKNOWN');
+    assert.equal(result.token_usage, null);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity cache or aggregate tokens are positive provider usage evidence', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-aggregate-usage-'));
+  const stdoutPath = join(directory, 'stdout.jsonl');
+  const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  const usage = { input_tokens: 0, output_tokens: 0, thinking_tokens: 0,
+    cache_read_tokens: 12, total_tokens: 12 };
+  const events = [
+    { event: 'init', conversation_id: session,
+      init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+    { event: 'result', result: { conversation_id: session, status: 'SUCCESS',
+      response: '', usage } },
+  ];
+  try {
+    writeFileSync(stdoutPath, events.map(event => JSON.stringify(event)).join('\n') + '\n');
+    const result = await readAntigravityV2RunEvidence(stdoutPath, null, cwd);
+    assert.equal(result.valid, true);
+    assert.equal(result.model_invoked, true);
+    assert.equal(result.provider_usage_evidence, 'OBSERVED');
+    assert.deepEqual(result.token_usage, usage);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
