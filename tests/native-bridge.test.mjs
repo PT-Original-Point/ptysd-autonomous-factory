@@ -18,7 +18,7 @@ import { ANTIGRAVITY_V2_MODEL, buildAntigravityChildEnvironment, buildNativeChil
   from '../native-bridge/v2-readiness.mjs';
 
 const commit = 'a'.repeat(40); const hash = 'b'.repeat(64);
-const humanGoalBody = `PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015\nCandidate task linkage fixture; this text is provenance only.`;
+const humanGoalBody = `<!-- PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015 -->\nCandidate task linkage fixture; this text is provenance only.`;
 const humanGoalComment = (overrides = {}) => ({ id: 6188322050,
   issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
   user: { login: 't14210184' }, body: humanGoalBody, ...overrides });
@@ -1584,6 +1584,11 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
             permission_mode:'request-review'}},
           {event:'step_update',step_update:{conversation_id:conversation,step_index:0,state:'DONE',
             step_type:'tool',tool_name:'write_to_file',tool_info:{}}},
+          {event:'step_update',step_update:{conversation_id:conversation,step_index:1,state:'ACTIVE',
+            step_type:'tool',tool_name:'run_command'}},
+          {event:'step_update',step_update:{conversation_id:conversation,step_index:1,state:'ERROR',
+            step_type:'tool',tool_name:'run_command',tool_info:{error:{code:'COMMAND_DENIED',
+              message:'PRIVATE_COMMAND_ERROR'}}}},
           {event:'result',result:{conversation_id:conversation,status:'SUCCESS',response:'private response text',
             usage:{input_tokens:90,output_tokens:20,thinking_tokens:4,cache_read_tokens:0,total_tokens:114}}},
         ];
@@ -1600,8 +1605,13 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
       },
     });
     assert.equal(readinessCalls,1); assert.equal(modelLaunches,1);
-    assert.equal(result.outcome,'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED');
+    assert.equal(result.outcome,'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED');
     assert.equal(result.coding_state,'DIFF_CAPTURED_UNVERIFIED');
+    assert.equal(result.exit_code,-1);
+    assert.equal(result.cli_exit_code,0);
+    assert.equal(result.tool_execution_failed_count,1);
+    assert.equal(result.tool_execution_incomplete_count,0);
+    assert.equal(terminalStateForResult(result),'BLOCKED');
     assert.equal(result.model_invoked,true);
     assert.equal(result.session_id,conversation);
     assert.equal(result.cli_status,'SUCCESS');
@@ -1627,6 +1637,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(finalReceipt.variant,'high');
     assert.equal(finalReceipt.permission_mode_evidence,'REQUEST_REVIEW_CONFIRMED');
     assert.equal(finalReceipt.cli_status,'SUCCESS');
+    assert.equal(finalReceipt.tool_execution_failed_count,1);
+    assert.equal(finalReceipt.tool_execution_incomplete_count,0);
     assert.equal(finalReceipt.run_disposition,'CLI_SUCCESS_REQUIRES_SEMANTIC_REVIEW');
     assert.equal(finalReceipt.cli_version,'1.4.2');
     assert.equal(finalReceipt.cli_binary_sha256,cliSha256);
@@ -1759,6 +1771,53 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
       com(9802,RECEIPT_MARKER+JSON.stringify(incompleteReceipt),'worker')];
     assert.equal(selectNext(incompleteComments,['t14210184'],'worker',job.host,job.source_sha),null,
       'an incomplete W2 session with captured edits is terminally unverified and cannot replay');
+
+    git('checkout','--','src/worker.mjs');
+    const incompleteCommandSession='conv_agy_incomplete_command_20261020';
+    const incompleteCommand=await executeOpenCodeTask(
+      'Synthetic; keep command state unknown when it never reaches a terminal event.',config,job,randomUUID(),{
+        now:()=>now,baseEnv:env,localAppData,runAntigravityV2Readiness:()=>readiness,
+        readGitProcessTree:pid=>({state:'DEAD',root_pid:pid,process_ids:[],
+          census_complete:true,observed_at:new Date().toISOString(),error:null}),
+        async runCapturedProcess(_bin,_args,options){
+          writeFileSync(join(workspace,'src','worker.mjs'),
+            'export const state = "changed-with-unconfirmed-command";\n');
+          const events=[
+            {event:'init',conversation_id:incompleteCommandSession,init:{
+              model:ANTIGRAVITY_V2_MODEL,cwd:workspace,permission_mode:'accept-edits'}},
+            {event:'step_update',step_update:{conversation_id:incompleteCommandSession,step_index:0,
+              state:'DONE',step_type:'tool',tool_name:'write_to_file',tool_info:{}}},
+            {event:'step_update',step_update:{conversation_id:incompleteCommandSession,step_index:1,
+              state:'ACTIVE',step_type:'tool',tool_name:'run_command'}},
+            {event:'result',result:{conversation_id:incompleteCommandSession,status:'SUCCESS',response:'',
+              usage:{input_tokens:5,output_tokens:2,thinking_tokens:0,cache_read_tokens:0,total_tokens:7}}},
+          ];
+          const out=Buffer.from(events.map(event=>JSON.stringify(event)).join('\n')+'\n');
+          const err=Buffer.alloc(0);
+          writeFileSync(options.stdoutPath,out,{flag:'wx'}); writeFileSync(options.stderrPath,err,{flag:'wx'});
+          const combined=createHash('sha256').update(out).update(Buffer.from('\n--- STDERR ---\n')).update(err).digest('hex');
+          return {outcome:'SYNTHETIC_PROCESS_EXITED',exit_code:0,evidence_sha256:combined,
+            evidence_bytes:out.length+Buffer.byteLength('\n--- STDERR ---\n'),local_evidence:{
+              stdout_file:basename(options.stdoutPath),stdout_sha256:createHash('sha256').update(out).digest('hex'),
+              stdout_bytes:out.length,stderr_file:basename(options.stderrPath),
+              stderr_sha256:createHash('sha256').update(err).digest('hex'),stderr_bytes:0,
+              termination_state:'NOT_REQUESTED'}};
+        },
+      });
+    assert.equal(incompleteCommand.outcome,
+      'ANTIGRAVITY_EDIT_TOOL_EXECUTION_INCOMPLETE_DIFF_PRESERVED');
+    assert.equal(incompleteCommand.exit_code,-1);
+    assert.equal(incompleteCommand.cli_exit_code,0);
+    assert.equal(incompleteCommand.tool_execution_failed_count,0);
+    assert.equal(incompleteCommand.tool_execution_incomplete_count,1);
+    assert.equal(incompleteCommand.task_acceptance,'UNKNOWN');
+    assert.equal(terminalStateForResult(incompleteCommand),'BLOCKED');
+    const incompleteCommandReceipt=receipt(job.request_id,randomUUID(),
+      terminalStateForResult(incompleteCommand),job,incompleteCommand);
+    assert.equal(incompleteCommandReceipt.tool_execution_failed_count,0);
+    assert.equal(incompleteCommandReceipt.tool_execution_incomplete_count,1);
+    assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(incompleteCommandReceipt)).outcome,
+      'ANTIGRAVITY_EDIT_TOOL_EXECUTION_INCOMPLETE_DIFF_PRESERVED');
 
     git('checkout','--','src/worker.mjs');
     const forbiddenSession='conv_agy_forbidden_tool_20261018';
