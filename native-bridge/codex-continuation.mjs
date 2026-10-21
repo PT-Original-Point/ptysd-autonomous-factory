@@ -284,15 +284,24 @@ function canonicalUtcTimestamp(value) {
   catch { return false; }
 }
 
-function extractCodexScopedAction(body) {
+export function codexScopedActionStatus(body) {
+  if (typeof body !== 'string' || body.length > MAX_GITHUB_ISSUE_COMMENT_BODY_LENGTH)
+    return { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_INVALID' };
   const matches = [...body.matchAll(/^\*\*Codex 下一動作\*\*[：:][ \t]*/gm)];
-  if (matches.length !== 1) throw new Error('HUMAN_GOAL_SCOPED_ACTION_INVALID');
+  if (matches.length === 0) return { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' };
+  if (matches.length !== 1) return { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_INVALID' };
   const match = matches[0];
   const tail = body.slice(match.index + match[0].length);
   const nextSection = /(?:^|\r?\n)(?:#{1,6}\s+|\*\*[^*\r\n]+\*\*[：:])/m.exec(tail);
   const action = (nextSection ? tail.slice(0, nextSection.index) : tail).trim();
-  if (!action) throw new Error('HUMAN_GOAL_SCOPED_ACTION_INVALID');
-  return action;
+  if (!action) return { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' };
+  return { ready: true, action };
+}
+
+function extractCodexScopedAction(body) {
+  const result = codexScopedActionStatus(body);
+  if (!result.ready) throw new Error(result.code);
+  return result.action;
 }
 
 function validateHumanGoalContext(job, context) {

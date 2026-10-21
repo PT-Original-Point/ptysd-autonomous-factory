@@ -15,7 +15,7 @@ import { ANTIGRAVITY_V2_MODEL, ANTIGRAVITY_RUN_DISPOSITIONS, buildNativeChildEnv
   antigravityV2ReadinessExecutionFailure,
   readAntigravityV2RunEvidence, readV2ProviderAuth,
   resolveAntigravityProjectId, runV2Readiness, runAntigravityV2Readiness } from './v2-readiness.mjs';
-import { parseCodexJob, codexExecutionGate, claimCodexAttempt,
+import { parseCodexJob, codexExecutionGate, claimCodexAttempt, codexScopedActionStatus,
   releaseCodexAttempt, makeCodexExecutorRequest, publishCodexExecutorRequest,
   executorResultPath as codexExecutorResultPath,
   validateCodexExecutorRequest, validateCodexExecutorResult,
@@ -244,18 +244,64 @@ function resolvedAttemptState(comments, started, workerLogin) {
   const last = entries.at(-1)?.receipt;
   return resolvedAttemptStates.has(last?.state) ? last.state : null;
 }
-function candidatePullRequestHeadSha(job, pull) {
+function candidatePullRequestSourceStatus(job, pull) {
   const repositoryName = REPO.toLowerCase();
-  if (!([5, 6].includes(job?.schema) && Number.isSafeInteger(job.source_pr) &&
-    pull?.number === job.source_pr && pull.state === 'open' &&
-    pull.base?.ref === 'main' && pull.base?.repo?.id === OFFICIAL_REPOSITORY_ID &&
-    pull.head?.repo?.id === OFFICIAL_REPOSITORY_ID &&
-    typeof pull.base.repo.full_name === 'string' &&
-    pull.base.repo.full_name.toLowerCase() === repositoryName &&
-    typeof pull.head.repo.full_name === 'string' &&
-    pull.head.repo.full_name.toLowerCase() === repositoryName &&
-    SHA.test(pull.head.sha || ''))) return null;
-  return pull.head.sha;
+  const observedSha = SHA.test(pull?.head?.sha || '') ? pull.head.sha.toLowerCase() : null;
+  let reason = null;
+  if (!([5, 6].includes(job?.schema) && Number.isSafeInteger(job?.source_pr)))
+    reason = 'JOB_SOURCE_BINDING_INVALID';
+  else if (!pull || typeof pull !== 'object') reason = 'PR_READBACK_INVALID';
+  else if (pull.number !== job.source_pr) reason = 'PR_NUMBER_MISMATCH';
+  else if (pull.state !== 'open') reason = 'PR_NOT_OPEN';
+  else if (pull.base?.ref !== 'main') reason = 'BASE_NOT_MAIN';
+  else if (pull.base?.repo?.id !== OFFICIAL_REPOSITORY_ID) reason = 'BASE_REPOSITORY_ID_MISMATCH';
+  else if (pull.head?.repo?.id !== OFFICIAL_REPOSITORY_ID) reason = 'HEAD_REPOSITORY_ID_MISMATCH';
+  else if (typeof pull.base.repo.full_name !== 'string' ||
+      pull.base.repo.full_name.toLowerCase() !== repositoryName)
+    reason = 'BASE_REPOSITORY_NAME_MISMATCH';
+  else if (typeof pull.head.repo.full_name !== 'string' ||
+      pull.head.repo.full_name.toLowerCase() !== repositoryName)
+    reason = 'HEAD_REPOSITORY_NAME_MISMATCH';
+  else if (!observedSha) reason = 'HEAD_SHA_INVALID';
+  return { eligible: reason === null, reason, sha: reason === null ? observedSha : null, observedSha };
+}
+function candidatePullRequestHeadSha(job, pull) {
+  return candidatePullRequestSourceStatus(job, pull).sha;
+}
+function staleCandidateSourceEntries(comments, dispatchers, workerLogin, host, candidateSourceShas) {
+  const jobs = new Map();
+  const receipts = new Map();
+  for (const comment of comments) {
+    const login = comment.user?.login;
+    const job = dispatchers.includes(login) ? parseJob(comment.body) : null;
+    if (job?.schema === 6 && job.host.toUpperCase() === host.toUpperCase() &&
+        Number.isSafeInteger(job.source_pr)) {
+      if (!jobs.has(job.request_id)) jobs.set(job.request_id,
+        { job, body: comment.body, id: comment.id, duplicate: false });
+      else if (jobs.get(job.request_id).body !== comment.body) jobs.get(job.request_id).duplicate = true;
+    }
+    if (login === workerLogin) {
+      const receipt = parseReceipt(comment.body);
+      if (receipt) {
+        if (!receipts.has(receipt.request_id)) receipts.set(receipt.request_id, []);
+        receipts.get(receipt.request_id).push({ id: comment.id, receipt });
+      }
+    }
+  }
+  const stale = [];
+  for (const { job, id, duplicate } of jobs.values()) {
+    if (duplicate) continue;
+    const prior = (receipts.get(job.request_id) || []).filter(entry =>
+      entry.receipt.host.toUpperCase() === job.host.toUpperCase() &&
+      entry.receipt.source_sha.toLowerCase() === job.source_sha.toLowerCase() &&
+      entry.receipt.kind === job.kind);
+    if (hasBlockingRequestReceipt(prior)) continue;
+    const observedSha = candidateSourceShas.get(job.source_pr);
+    if (SHA.test(observedSha || '') && observedSha.toLowerCase() !== job.source_sha.toLowerCase())
+      stale.push({ id, request_id: job.request_id, source_pr: job.source_pr,
+        expected_sha: job.source_sha.toLowerCase(), observed_sha: observedSha.toLowerCase() });
+  }
+  return stale.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
 }
 function candidateGoalCommentMatches(job, comment, dispatchers) {
   return job?.schema === 6 && comment?.id === job.goal_comment_id &&
@@ -356,10 +402,15 @@ function humanDirectiveMatches(job, comment, dispatchers) {
     typeof comment.body === 'string' && humanDirectiveMarker(comment.body) === job.goal_marker &&
     digest(Buffer.from(comment.body, 'utf8')) === job.goal_body_sha256;
 }
-function codexGoalPolicyReady(policy) {
-  return policy?.enabled === true && typeof policy.model === 'string' &&
-    typeof policy.reasoning_effort === 'string' && Array.isArray(policy.write_paths) &&
-    policy.write_paths.length > 0;
+function codexGoalPolicyFailure(policy) {
+  if (!policy || typeof policy !== 'object') return 'HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED';
+  if (policy.enabled !== true) return policy.enabled === false
+    ? 'HUMAN_GOAL_CODEX_POLICY_DISABLED' : 'HUMAN_GOAL_CODEX_POLICY_INVALID';
+  if (typeof policy.model !== 'string' || !policy.model ||
+      typeof policy.reasoning_effort !== 'string' || !policy.reasoning_effort ||
+      !Array.isArray(policy.write_paths) || policy.write_paths.length === 0)
+    return 'HUMAN_GOAL_CODEX_POLICY_INVALID';
+  return null;
 }
 function humanDirectiveCodexJob(comment, host, sourceSha, spec, policy) {
   const marker = humanDirectiveMarker(comment?.body);
@@ -445,8 +496,13 @@ export async function readPinnedCandidateSources(comments, dispatchers, workerLo
         log(`CANDIDATE_PR_READBACK_UNKNOWN_${job.source_pr}`);
       }
     }
-    const headSha = candidatePullRequestHeadSha(job, pullReadbacks.get(job.source_pr));
-    if (headSha) sourceShas.set(job.source_pr, headSha);
+    const pull = pullReadbacks.get(job.source_pr);
+    if (pull === null || pull === undefined) continue;
+    const sourceStatus = candidatePullRequestSourceStatus(job, pull);
+    if (sourceStatus.eligible) sourceShas.set(job.source_pr, sourceStatus.sha);
+    else log(`CANDIDATE_SOURCE_NOT_DISPATCHABLE_${job.request_id}_PR_${job.source_pr}_` +
+      `REASON_${sourceStatus.reason}_EXPECTED_SHA_${job.source_sha.toLowerCase()}_` +
+      `OBSERVED_SHA_${sourceStatus.observedSha || 'UNKNOWN'}_NO_DISPATCH`);
   }
   return sourceShas;
 }
@@ -750,6 +806,26 @@ function atomicJSON(path, data) {
   const temp = `${path}.${randomUUID()}.tmp`;
   writeFileSync(temp, JSON.stringify(data, null, 2), { flag: 'wx', mode: 0o600 });
   renameSync(temp, path);
+}
+function persistOperatorObservationDiagnostic(config, status, sourceSha, error) {
+  const path = join(config.state_dir, 'operator-observation-last-error.json');
+  if (status === 'UPDATED') {
+    try { rmSync(path, { force: true }); } catch { /* diagnostics never change publication status */ }
+    return null;
+  }
+  const diagnosticStatus = status === 'NOT_SEEDED' ? 'NOT_SEEDED' : 'UNKNOWN';
+  const fallback = diagnosticStatus === 'NOT_SEEDED'
+    ? 'OPERATOR_OBSERVATION_NOT_SEEDED' : 'OPERATOR_OBSERVATION_UPDATE_UNKNOWN';
+  const safeError = typeof error === 'string' ? { code: error } : error;
+  const errorCode = safeErrorCode(safeError, fallback);
+  atomicJSON(path, {
+    schema: 1,
+    status: diagnosticStatus,
+    observed_at: new Date().toISOString(),
+    source_sha: SHA.test(sourceSha || '') ? sourceSha.toLowerCase() : null,
+    error_code: errorCode,
+  });
+  return errorCode;
 }
 export function guardConfig(c) {
   if (c.repo !== REPO || c.project_id !== PROJECT || c.host.toUpperCase() !== hostname().toUpperCase())
@@ -1947,27 +2023,36 @@ export async function runWorker(configInput, adapters = {}) {
     } else if (legacyReceiptStatus === 'UNKNOWN') {
       humanGoalWaitingReason ??= 'HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN';
       log(`HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN_${latestDirective.id}_NO_REPLAY`);
-    } else if (!codexGoalPolicyReady(config.human_goal_codex_policy)) {
-      humanGoalWaitingReason ??= 'HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED';
-      log(`HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED_${latestDirective.id}_NO_MODEL`);
     } else {
-      try {
-        const goalSpecBytes = readSpecBytes(CODEX_HUMAN_GOAL_SPEC_PATH, head, apiRead);
-        const goalSpec = goalSpecBytes.toString('utf8');
-        const job = humanDirectiveCodexJob(latestDirective, config.host, head, goalSpec,
-          config.human_goal_codex_policy);
-        if (!job) {
-          humanGoalWaitingReason ??= 'HUMAN_GOAL_CODEX_POLICY_INVALID';
-          log(`HUMAN_GOAL_CODEX_POLICY_INVALID_${latestDirective.id}_NO_MODEL`);
-        } else {
-          humanGoalTask = { comment: latestDirective, spec: goalSpec };
-          comments.push({ id: latestDirective.id, body: JOB_MARKER + JSON.stringify(job),
-            user: latestDirective.user, issue_url: latestDirective.issue_url });
-          comments.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+      const scopedAction = codexScopedActionStatus(latestDirective.body);
+      const policyFailure = codexGoalPolicyFailure(config.human_goal_codex_policy);
+      if (!scopedAction.ready) {
+        humanGoalWaitingReason ??= scopedAction.code;
+        log(`${scopedAction.code}_${latestDirective.id}_NO_MODEL`);
+      }
+      if (policyFailure) {
+        humanGoalWaitingReason ??= policyFailure;
+        log(`${policyFailure}_${latestDirective.id}_NO_MODEL`);
+      }
+      if (scopedAction.ready && !policyFailure) {
+        try {
+          const goalSpecBytes = readSpecBytes(CODEX_HUMAN_GOAL_SPEC_PATH, head, apiRead);
+          const goalSpec = goalSpecBytes.toString('utf8');
+          const job = humanDirectiveCodexJob(latestDirective, config.host, head, goalSpec,
+            config.human_goal_codex_policy);
+          if (!job) {
+            humanGoalWaitingReason ??= 'HUMAN_GOAL_CODEX_POLICY_INVALID';
+            log(`HUMAN_GOAL_CODEX_POLICY_INVALID_${latestDirective.id}_NO_MODEL`);
+          } else {
+            humanGoalTask = { comment: latestDirective, spec: goalSpec };
+            comments.push({ id: latestDirective.id, body: JOB_MARKER + JSON.stringify(job),
+              user: latestDirective.user, issue_url: latestDirective.issue_url });
+            comments.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+          }
+        } catch {
+          humanGoalWaitingReason ??= 'HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN';
+          log(`HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN_${latestDirective.id}_NO_DISPATCH`);
         }
-      } catch {
-        humanGoalWaitingReason ??= 'HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN';
-        log(`HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN_${latestDirective.id}_NO_DISPATCH`);
       }
     }
     if (legacyReceiptStatus === 'PRIOR_BODY_TERMINAL')
@@ -1976,6 +2061,17 @@ export async function runWorker(configInput, adapters = {}) {
   const candidateSourceShas = await readPinnedCandidateSources(comments,
     config.dispatchers, me, config.host, apiRead, log, [...blockedKinds],
     () => humanGoalComments ?? goalCommentsRead());
+  const authorizedW1JobExists = comments.some(comment => {
+    if (!config.dispatchers.includes(comment.user?.login)) return false;
+    const job = parseJob(comment.body);
+    return job?.kind === 'opencode_edit' && job.host.toUpperCase() === config.host.toUpperCase();
+  });
+  if (!authorizedW1JobExists) log('NO_AUTHORIZED_W1_JOB');
+  for (const stale of staleCandidateSourceEntries(comments, config.dispatchers, me,
+    config.host, candidateSourceShas)) {
+    log(`STALE_CANDIDATE_SOURCE_${stale.request_id}_PR_${stale.source_pr}_` +
+      `EXPECTED_SHA_${stale.expected_sha}_OBSERVED_SHA_${stale.observed_sha}_NO_DISPATCH`);
+  }
   const selectNextCandidate = () => selectNextWithCodexClaim(comments.filter(comment => {
     const job = parseJob(comment.body);
     return !job || !skippedRequestIds.has(job.request_id);
@@ -1985,15 +2081,34 @@ export async function runWorker(configInput, adapters = {}) {
   let next = selected.next;
   if (selected.unresolvedRequestId)
     log(`CODEX_LOCAL_CLAIM_UNRECONCILED_${selected.unresolvedRequestId}_NO_REPLAY`);
+  let observation;
   try {
-    const observation = await publishOperatorObservation(
+    observation = await publishOperatorObservation(
       config, me, comments, head, adapters.observationDependencies, candidateSourceShas,
     );
-    if (observation.status === 'UPDATED') log('OPERATOR_OBSERVATION_UPDATED');
-    else if (observation.status === 'UNKNOWN') log('OPERATOR_OBSERVATION_UPDATE_UNKNOWN');
-  } catch {
+  } catch (error) {
     // Status publishing failure must not block a valid queued task.
-    log('OPERATOR_OBSERVATION_UPDATE_UNKNOWN');
+    const errorCode = safeErrorCode(error, 'OPERATOR_OBSERVATION_UPDATE_UNKNOWN');
+    try {
+      persistOperatorObservationDiagnostic(config, 'UNKNOWN', head, errorCode);
+    } catch {
+      log('OPERATOR_OBSERVATION_DIAGNOSTIC_WRITE_FAILED');
+    }
+    log(`OPERATOR_OBSERVATION_UPDATE_UNKNOWN_${errorCode}`);
+  }
+  if (observation) {
+    let errorCode = null;
+    try {
+      errorCode = persistOperatorObservationDiagnostic(
+        config, observation.status, head, observation.error || observation.reason,
+      );
+    } catch {
+      log('OPERATOR_OBSERVATION_DIAGNOSTIC_WRITE_FAILED');
+    }
+    if (observation.status === 'UPDATED') log('OPERATOR_OBSERVATION_UPDATED');
+    else if (observation.status === 'NOT_SEEDED')
+      log(`OPERATOR_OBSERVATION_NOT_SEEDED_${errorCode || 'OPERATOR_OBSERVATION_NOT_SEEDED'}`);
+    else log(`OPERATOR_OBSERVATION_UPDATE_UNKNOWN_${errorCode || 'OPERATOR_OBSERVATION_UPDATE_UNKNOWN'}`);
   }
   let waitingEligibility = null;
   let preparedSourceBundle = null;
@@ -2102,7 +2217,8 @@ export async function runWorker(configInput, adapters = {}) {
       return { state: 'WAITING_ELIGIBILITY', reason: waitingReason };
     }
     log('NO_DELTA_NO_LLM');
-    return { state: 'NO_DELTA' };
+    return { state: 'NO_DELTA', scope: 'FORMAL_WORK_QUEUE_ONLY',
+      reason: 'NO_DISPATCHABLE_JOB', mission_complete: false };
   }
   const job = next.job;
   const discardPreparedSourceBundle = () => {

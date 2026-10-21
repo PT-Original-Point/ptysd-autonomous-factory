@@ -11,6 +11,7 @@ import { runCapturedProcess } from '../native-bridge/captured-process.mjs';
 import {
   CODEX_JOB_KEYS, CODEX_HUMAN_GOAL_JOB_KEYS, CODEX_HUMAN_GOAL_SPEC_PATH,
   NATIVE_JOB_MARKER, parseCodexJob, parseCodexReceipt,
+  codexScopedActionStatus,
   codexExecutionGate, codexTaskFingerprint, claimCodexAttempt,
   codexExecutorTaskArguments, validateCodexExecutorTaskXml, assertCodexExecutorTaskReady,
   releaseCodexAttempt,
@@ -22,6 +23,18 @@ import {
 import { buildCodexChildEnvironment, changedPaths, runCodex, runExecutorOnce, takeNextRequest } from '../native-bridge/codex-executor.mjs';
 import { codexTerminalReceipt, dispatchCodexJob, selectNext, selectNextWithCodexClaim,
   reconcileCodexExecutorResult, terminalStateForResult, writeCodexReceiptOnce } from '../native-bridge/worker.mjs';
+
+test('Codex scoped-action preflight distinguishes missing, malformed, and ready Human instructions', () => {
+  assert.deepEqual(codexScopedActionStatus('# Goal\nNo action section.'),
+    { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' });
+  assert.deepEqual(codexScopedActionStatus('**Codex 下一動作**：\n\n## Another section\ntext'),
+    { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' });
+  assert.deepEqual(codexScopedActionStatus(
+    '**Codex 下一動作**：first\n**Codex 下一動作**：second'),
+  { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_INVALID' });
+  assert.deepEqual(codexScopedActionStatus('**Codex 下一動作**：repair one bounded source bug\n## Limits'),
+    { ready: true, action: 'repair one bounded source bug' });
+});
 
 const sha = 'a'.repeat(40);
 const taskHash = 'b'.repeat(64);
@@ -494,9 +507,10 @@ test('Human Issue #310 goal context is bound to exact author, comment bytes and 
       spec, bundle, bundleSha, { ...context, fetched_at: 'not-a-UTC-timestamp' }),
     /HUMAN_GOAL_CONTEXT_IDENTITY_INVALID/);
 
-    for (const bodyWithoutUniqueAction of [
-      `# P0\n${marker}\nNo scoped action header.\n`,
-      `# P0\n${marker}\n**Codex 下一動作**：first\n**Codex 下一動作**：second\n`,
+    for (const [bodyWithoutUniqueAction, expectedError] of [
+      [`# P0\n${marker}\nNo scoped action header.\n`, 'HUMAN_GOAL_SCOPED_ACTION_MISSING'],
+      [`# P0\n${marker}\n**Codex 下一動作**：first\n**Codex 下一動作**：second\n`,
+        'HUMAN_GOAL_SCOPED_ACTION_INVALID'],
     ]) {
       const bodySha = createHash('sha256').update(bodyWithoutUniqueAction).digest('hex');
       const unscopedJob = { ...picked,
@@ -504,7 +518,7 @@ test('Human Issue #310 goal context is bound to exact author, comment bytes and 
         goal_body_sha256: bodySha };
       assert.throws(() => makeCodexExecutorRequest(unscopedJob, attemptId, spec, bundle, bundleSha,
         { ...context, body: bodyWithoutUniqueAction, body_sha256: bodySha }),
-      /HUMAN_GOAL_SCOPED_ACTION_INVALID/);
+      new RegExp(expectedError));
     }
     assert.throws(() => validateCodexExecutorRequest({ ...request,
       human_goal_context_base64: Buffer.from(JSON.stringify({ ...context, author: 'other' })).toString('base64') }),
