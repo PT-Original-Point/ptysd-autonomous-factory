@@ -120,6 +120,29 @@ export function discoverV2Executables(env = process.env, win = platform() === 'w
     const key = bundled.toLowerCase();
     if (!seen.has(key) && regularFile(bundled)) { seen.add(key); found.push(bundled); }
   }
+  if (win && typeof env.LOCALAPPDATA === 'string' && isAbsolute(env.LOCALAPPDATA)) {
+    // The managed PTYSD OpenCode install uses a versioned local directory and
+    // the official @opencode/cli package layout. Discover only valid version
+    // names; qualifyOpenCodeV2 still verifies Authenticode before running one.
+    const localAppData = normalize(env.LOCALAPPDATA);
+    let installs = [];
+    try {
+      installs = readdirSync(localAppData, { withFileTypes: true })
+        .filter(entry => entry.isDirectory())
+        .map(entry => ({ name: entry.name,
+          version: /^PTYSDOpenCodeCLI-v(.+)$/.exec(entry.name)?.[1] }))
+        .filter(entry => entry.version && parseCliVersionDir(entry.version))
+        .sort((left, right) => compareCliVersionDirs(left.version, right.version));
+    } catch { installs = []; }
+    for (const install of installs) {
+      const candidate = normalize(join(localAppData, install.name, 'node_modules',
+        '@opencode', 'cli', 'bin', 'opencode.exe'));
+      const key = candidate.toLowerCase();
+      if (!seen.has(key) && regularFile(candidate)) {
+        seen.add(key); found.push(candidate);
+      }
+    }
+  }
   if (win && typeof env.APPDATA === 'string' && isAbsolute(env.APPDATA)) {
     // The per-user Desktop CLI stores versioned builds under roaming APPDATA.
     // Sort deterministically newest-first, but keep Authenticode qualification
