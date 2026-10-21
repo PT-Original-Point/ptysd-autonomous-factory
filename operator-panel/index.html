@@ -1119,7 +1119,7 @@
     const taskKind = record?.task_kind || (id === 'W1'
       ? currentTask?.kind || formalTask?.job?.kind || latestTask?.kind : null);
     const taskState = id === 'W1' ? currentTask?.state || formalTask?.state || latestTask?.state : null;
-    const activity = record?.activity_observed_at || (id === 'W1' ? oc.activity_observed_at || oc.process_observed_at : null);
+    const activity = record?.activity_observed_at || (id === 'W1' ? oc.activity_observed_at || oc.last_tool_activity_at : null);
     const taskText = taskId
       ? String(taskId) + (taskKind ? '／' + String(taskKind) : '') +
         (id === 'W1' && taskState ? '；' + String(taskState) : '')
@@ -1436,9 +1436,10 @@
     text('native-retired','Monitor 排程 ' +
       (windows.legacy_monitor_registered === false ? '未註冊' : windows.legacy_monitor_registered === true ? '仍註冊' : '未知') +
       '；2667 ' + (windows.listener_2667 === false ? '無 Listener' : windows.listener_2667 === true ? '仍有 Listener' : '未知'));
-    text('native-publisher',snapshot?.native_worker
-      ? '此快照有 Worker 收據資料；正式發布器部署未由靜態頁面確認。'
-      : '未取得 Worker 發布狀態；不推論已部署。');
+    text('native-publisher',snapshot?.publisher_login
+      ? '最近發布者 ' + String(snapshot.publisher_login) + '；觀測留言作者 ' +
+        String(snapshot.comment_author_login || snapshot.publisher_login) + '；需與同一留言讀回核對。'
+      : '此快照未記錄發布者與留言作者；身份關係未確認。');
     text('task-detail',(task.action_kind || 'Action 未知') + '；' + (task.identity_class || '執行身分未知') +
       '；IgnoreNew ' + (task.multiple_instances || '未知') + '；' + (task.last_result || '結果未知'));
     text('opencode-detail',(oc.installed_version || '版本未確認') + '；程序數 ' +

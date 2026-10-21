@@ -565,17 +565,21 @@ function issueCommentsFor(issueNumber) {
   return raw.flat().filter(c => typeof c?.id === 'number').sort((a, b) => a.id - b.id);
 }
 function issueComments(config) { return issueCommentsFor(config.issue); }
-function latestOperatorJob(comments, config, workerLogin, mainSha, candidateSourceShas = new Map()) {
-  const jobs = comments.filter(c => config.dispatchers.includes(c.user?.login))
+function latestOperatorJob(comments, config, workerLogin, mainSha, candidateSourceShas = new Map(),
+  allowedKinds = null) {
+  const allJobs = comments.filter(c => config.dispatchers.includes(c.user?.login))
     .map(c => ({ id: c.id, body: c.body, job: parseJob(c.body) }))
     .filter(x => x.job && x.job.host.toUpperCase() === config.host.toUpperCase())
     .sort((a, b) => a.id - b.id);
+  const jobs = allowedKinds ? allJobs.filter(x => allowedKinds.has(x.job.kind)) : allJobs;
   if (!jobs.length) return null;
-  const job = jobs.at(-1).job;
-  const duplicate = jobs.filter(entry => entry.job.request_id === job.request_id);
+  const selected = jobs.at(-1);
+  const job = selected.job;
+  const duplicate = allJobs.filter(entry => entry.job.request_id === job.request_id);
   if (new Set(duplicate.map(entry => entry.body)).size > 1) {
     return { request_id: job.request_id, attempt_id: null, kind: job.kind,
-      source_sha: job.source_sha, state: 'AMBIGUOUS_DUPLICATE' };
+      source_sha: job.source_sha, job_comment_id: selected.id,
+      state: 'AMBIGUOUS_DUPLICATE' };
   }
   const receipts = comments.filter(c => c.user?.login === workerLogin)
     .map(c => ({ id: c.id, receipt: parseReceipt(c.body) }))
@@ -605,21 +609,82 @@ function latestOperatorJob(comments, config, workerLogin, mainSha, candidateSour
   else if (!candidateHeadKnown) state = 'SOURCE_UNKNOWN';
   else if (!sourceCurrent) state = 'STALE_SOURCE';
   return { request_id: job.request_id, attempt_id: attemptId, kind: job.kind,
+    job_comment_id: selected.id,
     source_sha: job.source_sha, ...(job.source_pr !== undefined ? { source_pr: job.source_pr } : {}), state,
     outcome: typeof last?.outcome === 'string' && /^[A-Z0-9_-]{1,80}$/.test(last.outcome)
       ? last.outcome : 'UNKNOWN',
     exit_code: Number.isSafeInteger(last?.exit_code) ? last.exit_code : null };
 }
+function observationWorkerRecords(comments, config, workerLogin, mainSha, candidateSourceShas) {
+  const records = [];
+  for (const [workerId, kinds] of [
+    ['W1', new Set(['opencode_edit'])],
+    ['W2', new Set(['antigravity_edit'])],
+  ]) {
+    const task = latestOperatorJob(comments, config, workerLogin, mainSha,
+      candidateSourceShas, kinds);
+    if (!task) {
+      records.push({ worker_id: workerId, status: 'UNKNOWN',
+        blocker_code: workerId === 'W1' ? 'NO_AUTHORIZED_W1_JOB' : 'NO_CURRENT_W2_TASK',
+        model_eligibility: 'UNKNOWN', next_owner: '等待精確、受信任的正式任務來源' });
+      continue;
+    }
+    const status = ['QUEUED_NOT_STARTED', 'STARTED_UNVERIFIED', 'WAITING_ELIGIBILITY']
+      .includes(task.state) ? 'PENDING'
+      : ['BLOCKED', 'STALE_SOURCE', 'AMBIGUOUS_DUPLICATE'].includes(task.state) ? 'BLOCKED' : 'UNKNOWN';
+    const blocker = task.state === 'STALE_SOURCE' ? 'STALE_CANDIDATE_SOURCE'
+      : task.state === 'SOURCE_UNKNOWN' ? 'CANDIDATE_PR_READBACK_UNKNOWN'
+        : task.state === 'AMBIGUOUS_DUPLICATE' ? 'DUPLICATE_TASK_REQUEST_AMBIGUOUS'
+          : task.state === 'STARTED_UNVERIFIED' ? 'STARTED_WITHOUT_VERIFIED_MODEL_ACTIVITY'
+            : task.state === 'WAITING_ELIGIBILITY' || task.state === 'BLOCKED'
+              ? task.outcome : undefined;
+    const taskSource = `Issue #310 comment ${task.job_comment_id}` +
+      (task.source_pr ? `; PR #${task.source_pr}@${task.source_sha}` : `; main@${task.source_sha}`);
+    records.push({ worker_id: workerId, status, task_id: task.request_id,
+      task_kind: task.kind, task_source: taskSource, task_source_sha: task.source_sha,
+      task_comment_id: task.job_comment_id, ...(task.source_pr ? { source_pr: task.source_pr } : {}),
+      ...(task.attempt_id ? { attempt_id: task.attempt_id } : {}), task_state: task.state,
+      model_eligibility: task.state === 'WAITING_ELIGIBILITY' ? 'WAITING' : 'UNKNOWN',
+      code_changes: 'UNPROVEN', files_modified: 'UNPROVEN',
+      ...(task.state === 'FINISHED_NOT_ACCEPTANCE'
+        ? { delivery_status: 'FINISHED_UNVERIFIED' } : {}),
+      ...(blocker ? { blocker_code: blocker } : {}),
+      evidence_ref: task.job_comment_id
+        ? `https://github.com/${REPO}/issues/310#issuecomment-${task.job_comment_id}` : undefined,
+      next_owner: task.state === 'STALE_SOURCE' ? 'Codex：核對新來源後再評估，不重播舊任務'
+        : task.state === 'FINISHED_NOT_ACCEPTANCE' ? 'Codex：驗證交付證據與語意結果'
+          : task.state === 'WAITING_ELIGIBILITY' ? '重新檢查資格；不自動重播未知效果'
+            : 'Codex：核對此任務的即時執行證據' });
+  }
+  records.push({ worker_id: 'W3', status: 'UNKNOWN',
+    blocker_code: 'W3_ZERO_RISK_HANDOFF_NOT_IN_NATIVE_SNAPSHOT',
+    model_eligibility: 'UNKNOWN', next_owner: 'Codex 建立有效請求；Human 手動轉送 Zero Risk' });
+  return records;
+}
+function operatorPublisherError(code, identity) {
+  const error = new Error(code);
+  error.operator_identity = identity;
+  return error;
+}
 export async function publishOperatorObservation(config, workerLogin, comments, mainSha,
   dependencies = {}, candidateSourceShas = new Map()) {
-  const existing = comments.find(c =>
+  const marked = comments.filter(c =>
     typeof c?.body === 'string' && c.body.startsWith('PTYSD_OPERATOR_OBSERVATION_V1\n'));
-  if (!existing) return { status: 'NOT_SEEDED' };
+  if (!marked.length) return { status: 'NOT_SEEDED' };
+  const existing = marked[0];
+  const commentAuthorLogin = existing.user?.login;
+  const publisherIdentity = { publisher_login: workerLogin,
+    comment_author_login: commentAuthorLogin };
   const now = dependencies.now ? dependencies.now() : new Date();
   const observedAt = now.toISOString();
   const windows = (dependencies.collectWindowsObservation || collectWindowsObservation)();
-  const prior = findOperatorComment(comments, workerLogin);
-  if (prior.status !== 'OK') throw new Error(prior.error || 'OPERATOR_COMMENT_UNKNOWN');
+  const prior = findOperatorComment(comments, commentAuthorLogin);
+  if (prior.status !== 'OK')
+    throw operatorPublisherError(prior.error || 'OPERATOR_COMMENT_UNKNOWN', publisherIdentity);
+  if (prior.comment.id !== existing.id || prior.observation.source?.comment_id !== existing.id)
+    throw operatorPublisherError('OPERATOR_COMMENT_ID_MISMATCH', publisherIdentity);
+  if (workerLogin !== commentAuthorLogin && !config.dispatchers.includes(workerLogin))
+    throw operatorPublisherError('OPERATOR_PUBLISHER_IDENTITY_NOT_AUTHORIZED', publisherIdentity);
   let repositoryRunner = { status: 'UNKNOWN', count: null, observed_at: observedAt };
   try {
     const response = await (dependencies.readRunnerRegistration
@@ -642,6 +707,8 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
   const snapshot = {
     schema: 1, project_id: OPERATOR_PROJECT, repo: OPERATOR_REPO, issue: OPERATOR_ISSUE,
     host_alias: 'win11-primary', snapshot_id: randomUUID(),
+    publisher_login: workerLogin,
+    comment_author_login: commentAuthorLogin,
     sequence: (Number.isSafeInteger(prior.observation.sequence) ? prior.observation.sequence : 0) + 1,
     observed_at: observedAt,
     expires_at: new Date(now.getTime() + 10 * 60 * 1000).toISOString(),
@@ -672,6 +739,7 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
       code_changes: 'UNPROVEN',
       remote_commit: null, pull_request: null, ci: 'UNKNOWN',
     },
+    workers: observationWorkerRecords(comments, config, workerLogin, mainSha, candidateSourceShas),
     github: {
       observed_at: observedAt, main_sha: mainSha,
       issue_comments_count: comments.length,
@@ -684,22 +752,30 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
     incident: null,
   };
   const body = encodeOperatorObservation(snapshot);
-  return updateExistingOperatorComment({
-    comments, expectedLogin: workerLogin, body,
-    readComment: dependencies.readComment ||
-      (id => api('repos/' + OPERATOR_REPO + '/issues/comments/' + id)),
-    patchComment: (id, nextBody) => {
-      if (dependencies.patchComment) return dependencies.patchComment(id, nextBody);
-      const uri = 'repos/' + OPERATOR_REPO + '/issues/comments/' + id;
-      const temp = join(config.state_dir, 'operator-observation-' + randomUUID() + '.json');
-      writeFileSync(temp, JSON.stringify({ body: nextBody }),
-        { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-      try { gh(['api', uri, '--method', 'PATCH', '--input', temp]); }
-      finally { rmSync(temp, { force: true }); }
-    },
-    readComments: dependencies.readComments || (() => issueComments(config)),
-    now: dependencies.now || Date.now,
-  });
+  try {
+    const result = await updateExistingOperatorComment({
+      comments, expectedLogin: commentAuthorLogin, body,
+      readComment: dependencies.readComment ||
+        (id => api('repos/' + OPERATOR_REPO + '/issues/comments/' + id)),
+      patchComment: (id, nextBody) => {
+        if (dependencies.patchComment) return dependencies.patchComment(id, nextBody);
+        const uri = 'repos/' + OPERATOR_REPO + '/issues/comments/' + id;
+        const temp = join(config.state_dir, 'operator-observation-' + randomUUID() + '.json');
+        writeFileSync(temp, JSON.stringify({ body: nextBody }),
+          { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+        try { gh(['api', uri, '--method', 'PATCH', '--input', temp]); }
+        finally { rmSync(temp, { force: true }); }
+      },
+      readComments: dependencies.readComments || (() => issueComments(config)),
+      now: dependencies.now || Date.now,
+    });
+    return { ...result, publisher_identity: publisherIdentity };
+  } catch (error) {
+    const wrapped = new Error(error?.message || 'OPERATOR_COMMENT_UPDATE_FAILED');
+    if (error?.code) wrapped.code = error.code;
+    wrapped.operator_identity = publisherIdentity;
+    throw wrapped;
+  }
 }
 export function writeReceipt(config, data, workerLogin, dependencies = {}) {
   const body = RECEIPT_MARKER + JSON.stringify(data);
@@ -807,7 +883,7 @@ function atomicJSON(path, data) {
   writeFileSync(temp, JSON.stringify(data, null, 2), { flag: 'wx', mode: 0o600 });
   renameSync(temp, path);
 }
-function persistOperatorObservationDiagnostic(config, status, sourceSha, error) {
+function persistOperatorObservationDiagnostic(config, status, sourceSha, error, publisherIdentity = null) {
   const path = join(config.state_dir, 'operator-observation-last-error.json');
   if (status === 'UPDATED') {
     try { rmSync(path, { force: true }); } catch { /* diagnostics never change publication status */ }
@@ -818,13 +894,24 @@ function persistOperatorObservationDiagnostic(config, status, sourceSha, error) 
     ? 'OPERATOR_OBSERVATION_NOT_SEEDED' : 'OPERATOR_OBSERVATION_UPDATE_UNKNOWN';
   const safeError = typeof error === 'string' ? { code: error } : error;
   const errorCode = safeErrorCode(safeError, fallback);
-  atomicJSON(path, {
+  const diagnostic = {
     schema: 1,
     status: diagnosticStatus,
     observed_at: new Date().toISOString(),
     source_sha: SHA.test(sourceSha || '') ? sourceSha.toLowerCase() : null,
     error_code: errorCode,
-  });
+  };
+  if (publisherIdentity && typeof publisherIdentity === 'object') {
+    const safeLogin = value => typeof value === 'string' && /^[A-Za-z0-9-]{1,39}$/.test(value)
+      ? value : undefined;
+    const publisher = safeLogin(publisherIdentity.publisher_login);
+    const author = safeLogin(publisherIdentity.comment_author_login);
+    if (publisher || author) diagnostic.publisher_identity = {
+      ...(publisher ? { publisher_login: publisher } : {}),
+      ...(author ? { comment_author_login: author } : {}),
+    };
+  }
+  atomicJSON(path, diagnostic);
   return errorCode;
 }
 export function guardConfig(c) {
@@ -2090,7 +2177,8 @@ export async function runWorker(configInput, adapters = {}) {
     // Status publishing failure must not block a valid queued task.
     const errorCode = safeErrorCode(error, 'OPERATOR_OBSERVATION_UPDATE_UNKNOWN');
     try {
-      persistOperatorObservationDiagnostic(config, 'UNKNOWN', head, errorCode);
+      persistOperatorObservationDiagnostic(config, 'UNKNOWN', head, errorCode,
+        error?.operator_identity);
     } catch {
       log('OPERATOR_OBSERVATION_DIAGNOSTIC_WRITE_FAILED');
     }
@@ -2101,6 +2189,7 @@ export async function runWorker(configInput, adapters = {}) {
     try {
       errorCode = persistOperatorObservationDiagnostic(
         config, observation.status, head, observation.error || observation.reason,
+        observation.publisher_identity,
       );
     } catch {
       log('OPERATOR_OBSERVATION_DIAGNOSTIC_WRITE_FAILED');

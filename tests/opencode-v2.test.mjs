@@ -388,6 +388,36 @@ test('Windows V2 discovery prefers the verified Desktop CLI over an older user-l
     assert.equal(result.version,'2.0.32');
   } finally {rmSync(tmp,{recursive:true,force:true});}
 });
+test('Windows V2 discovery finds managed PTYSDOpenCodeCLI installs newest-first and verifies before probing', () => {
+  const tmp=mkdtempSync(join(tmpdir(),'oc2-managed-cli-'));
+  try {
+    const home=join(tmp,'user'), localAppData=join(tmp,'local');
+    const makeExe=(version)=>join(localAppData,`PTYSDOpenCodeCLI-v${version}`,
+      'node_modules','@opencode','cli','bin','opencode.exe');
+    const newest=makeExe('2.0.32'), older=makeExe('2.0.27');
+    mkdirSync(home);
+    for (const version of ['2.0.32','2.0.27']) {
+      mkdirSync(join(localAppData,`PTYSDOpenCodeCLI-v${version}`,
+        'node_modules','@opencode','cli','bin'),{recursive:true});
+    }
+    for (const exe of [newest,older]) {
+      writeFileSync(exe,'synthetic executable');
+    }
+    const env={PATH:'',USERPROFILE:home,LOCALAPPDATA:localAppData};
+    assert.deepEqual(discoverV2Executables(env,true),[newest,older]);
+    const calls=[];
+    const result=qualifyOpenCodeV2(env,true,(path,args)=>{
+      calls.push(['version',path,args]);return 'opencode v2.0.27';
+    },path=>{
+      calls.push(['signature',path]);return path===older;
+    });
+    assert.equal(result.ready,true);
+    assert.equal(result.bin,older);
+    assert.deepEqual(calls,[['signature',newest],['signature',older],
+      ['version',older,['--version']]],
+    'an unsigned newer install must never be executed; signed fallback remains available');
+  } finally {rmSync(tmp,{recursive:true,force:true});}
+});
 test('Windows V2 qualification verifies the signed publisher before executing a discovered CLI', () => {
   const tmp=mkdtempSync(join(tmpdir(),'oc2-signature-'));
   try {

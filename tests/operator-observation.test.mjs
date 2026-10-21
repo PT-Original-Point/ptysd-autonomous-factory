@@ -42,6 +42,10 @@ test('operator snapshot requires exact project identity, time bounds, and de-ide
   assert.throws(() => encodeOperatorObservation(observation({
     expires_at: new Date(now + 16 * 60 * 1000).toISOString(),
   })), /INVALID_OPERATOR_OBSERVATION/);
+  assert.throws(() => encodeOperatorObservation(observation({ publisher_login: 'bad login' })),
+    /INVALID_OPERATOR_OBSERVATION/);
+  assert.throws(() => encodeOperatorObservation(observation({ comment_author_login: 'bad/login' })),
+    /INVALID_OPERATOR_OBSERVATION/);
 });
 
 test('operator snapshot accepts the GitHub-supported body range beyond the old local ceiling', () => {
@@ -72,6 +76,9 @@ test('snapshot does not duplicate GitHub publication time; legacy published_at r
 test('one trusted observation comment is updated; missing, duplicate, or foreign author fails closed', () => {
   assert.equal(findOperatorComment([], 'trusted-publisher').status, 'NOT_SEEDED');
   assert.equal(findOperatorComment([comment(observation())], 'trusted-publisher').status, 'OK');
+  assert.equal(findOperatorComment([comment(observation({ source: {
+    ...observation().source, comment_id: 2,
+  } }))], 'trusted-publisher').error, 'OPERATOR_COMMENT_ID_MISMATCH');
   assert.equal(findOperatorComment([comment(observation(), 'someone-else')], 'trusted-publisher').error,
     'OPERATOR_COMMENT_AUTHOR_MISMATCH');
   assert.equal(findOperatorComment([
@@ -438,6 +445,8 @@ test('dashboard starts dark and worker states require role-bound recent evidence
   assert.equal(api.classifyWorker({ worker_id:'W2', status:'IDLE',
     activity_observed_at:live, evidence_kind:'NO_ACTIVE_WORK' }, 'FRESH', now).status, 'UNKNOWN');
   assert.equal(api.workerRecord({workers:[{worker_id:'W1'}]},'W2'), null);
+  assert.match(html, /snapshot\.publisher_login/);
+  assert.match(html, /snapshot\.comment_author_login/);
 });
 
 test('check-run states stay bound to exact SHA and skipped/cancelled are not passes', () => {
@@ -908,6 +917,8 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
   assert.match(elements.get('overall').className,/fresh/);
   assert.match(elements.get('metric-workers').textContent,/0／3/);
   assert.equal(elements.get('w1-badge').textContent,'狀態未確認');
+  assert.equal(elements.get('w1-activity').textContent,'沒有可核對的近期活動時間',
+    'process observation time alone is not model or tool activity');
   assert.equal(elements.get('w2-badge').textContent,'狀態未確認');
   assert.equal(elements.get('w3-badge').textContent,'狀態未確認');
   assert.equal(elements.get('runner-badge').textContent,'等待檢查結果');
