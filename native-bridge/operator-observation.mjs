@@ -1,16 +1,27 @@
 // A bounded, de-identified observation written into one existing Issue #407 comment.
 // This module never creates work, calls a model, or starts a background process.
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { platform } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const OPERATOR_MARKER = 'PTYSD_OPERATOR_OBSERVATION_V1\n';
 export const OPERATOR_REPO = 'PT-Original-Point/ptysd-autonomous-factory';
 export const OPERATOR_PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
 export const OPERATOR_ISSUE = 407;
+export const OPERATOR_COMMENT_ID = 6144415195;
 const MAX_OPERATOR_COMMENT_BODY_LENGTH = 65_536;
 const FORBIDDEN_KEYS = /^(?:pid|process_id|command|commandline|command_line|argv|path|absolute_path|stdout|stderr|prompt|token|authorization|credential|diff|environment|username|user_name|user_id|email|computer_name|host_name)$/i;
+const GITHUB_LOGIN = /^[A-Za-z0-9-]{1,39}$/;
 const SNAPSHOT_ID = /^[a-f0-9-]{36}$/i;
 const SENSITIVE_VALUE = /(?:\b[A-Z]:\\|\\\\[^\\\s]+\\|\bgh[pousr]_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bBearer\s+[A-Za-z0-9._~-]{16,})/i;
+const DEPLOYED_RUNTIME_FILES = [
+  'worker.mjs', 'operator-observation.mjs', 'codex-continuation.mjs', 'safe-error-code.mjs',
+];
+const SHA1 = /^[a-f0-9]{40}$/i;
+const SHA256 = /^[a-f0-9]{64}$/i;
 
 function object(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -24,6 +35,28 @@ function containsForbiddenKey(value) {
   if (!object(value)) return false;
   return Object.entries(value).some(([key, child]) =>
     FORBIDDEN_KEYS.test(key) || containsForbiddenKey(child));
+}
+
+function validRuntimeDeployment(value) {
+  if (!object(value) || !['MANIFEST_MATCHED', 'UNKNOWN'].includes(value.status) ||
+      !validTime(value.observed_at) || !SHA256.test(value.bundle_sha256 || '') ||
+      !object(value.component_sha256)) return false;
+  const entries = Object.entries(value.component_sha256);
+  if (entries.length !== DEPLOYED_RUNTIME_FILES.length ||
+      DEPLOYED_RUNTIME_FILES.some(name => !Object.hasOwn(value.component_sha256, name)))
+    return false;
+  if (value.status === 'MANIFEST_MATCHED')
+    return entries.every(([, sha]) => SHA256.test(sha || '')) &&
+      SHA1.test(value.source_main_sha || '') && Number.isSafeInteger(value.deployment_pr) &&
+      value.deployment_pr > 0 && SHA1.test(value.deployment_pr_head || '');
+  if (entries.some(([, sha]) => sha !== null && !SHA256.test(sha || ''))) return false;
+  if (value.status === 'UNKNOWN')
+    return typeof value.reason_code === 'string' &&
+      ['DEPLOYMENT_MANIFEST_NOT_MATCHED', 'DEPLOYMENT_MANIFEST_AMBIGUOUS',
+        'RUNTIME_FILES_UNAVAILABLE'].includes(value.reason_code) &&
+      value.source_main_sha === undefined && value.deployment_pr === undefined &&
+      value.deployment_pr_head === undefined;
+  return false;
 }
 
 export function parseOperatorObservation(body) {
@@ -40,6 +73,11 @@ export function parseOperatorObservation(body) {
       !Number.isSafeInteger(value.sequence) || value.sequence < 1 ||
       !validTime(value.observed_at) ||
       (value.published_at !== undefined && !validTime(value.published_at)) ||
+      (value.publisher_login !== undefined && !GITHUB_LOGIN.test(value.publisher_login || '')) ||
+      (value.comment_author_login !== undefined && !GITHUB_LOGIN.test(value.comment_author_login || '')) ||
+      (value.source?.comment_id !== undefined &&
+        (!Number.isSafeInteger(value.source.comment_id) || value.source.comment_id < 1)) ||
+      (value.runtime_deployment !== undefined && !validRuntimeDeployment(value.runtime_deployment)) ||
       !validTime(value.expires_at) || containsForbiddenKey(value)) return null;
   const observed = Date.parse(value.observed_at);
   const expires = Date.parse(value.expires_at);
@@ -55,7 +93,7 @@ export function encodeOperatorObservation(value) {
   return body;
 }
 
-export function findOperatorComment(comments, expectedLogin) {
+export function findOperatorComment(comments, expectedLogin, expectedCommentId = null) {
   if (!Array.isArray(comments) || typeof expectedLogin !== 'string' || !expectedLogin)
     return { status: 'UNKNOWN', error: 'INVALID_OPERATOR_COMMENT_INPUT' };
   const matches = comments.filter(comment =>
@@ -63,17 +101,22 @@ export function findOperatorComment(comments, expectedLogin) {
   if (!matches.length) return { status: 'NOT_SEEDED', error: null };
   if (matches.length !== 1) return { status: 'UNKNOWN', error: 'DUPLICATE_OPERATOR_COMMENTS' };
   const comment = matches[0];
+  if (expectedCommentId !== null && comment.id !== expectedCommentId)
+    return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_ID_MISMATCH' };
   if (comment.user?.login !== expectedLogin)
     return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_AUTHOR_MISMATCH' };
   const observation = parseOperatorObservation(comment.body);
   if (!observation) return { status: 'UNKNOWN', error: 'INVALID_OPERATOR_OBSERVATION' };
+  if (observation.source?.comment_id !== undefined && observation.source.comment_id !== comment.id)
+    return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_ID_MISMATCH' };
   return { status: 'OK', comment, observation, error: null };
 }
 
 export async function updateExistingOperatorComment({
-  comments, expectedLogin, body, readComment, patchComment, readComments, now = Date.now,
+  comments, expectedLogin, expectedCommentId = null, body, readComment, patchComment, readComments,
+  now = Date.now,
 }) {
-  const existing = findOperatorComment(comments, expectedLogin);
+  const existing = findOperatorComment(comments, expectedLogin, expectedCommentId);
   if (existing.status === 'NOT_SEEDED') return { status: 'NOT_SEEDED' };
   if (existing.status !== 'OK') return existing;
   const candidate = parseOperatorObservation(body);
@@ -96,7 +139,7 @@ export async function updateExistingOperatorComment({
   let commentsAfterWrite;
   try { commentsAfterWrite = await readComments(); }
   catch { return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN' }; }
-  const fresh = findOperatorComment(commentsAfterWrite, expectedLogin);
+  const fresh = findOperatorComment(commentsAfterWrite, expectedLogin, expectedCommentId);
   if (fresh.status !== 'OK' || fresh.comment.id !== existing.comment.id ||
       fresh.comment.body !== body)
     return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN' };
@@ -121,6 +164,63 @@ export function observationFreshness(observation, now = Date.now()) {
     return 'UNKNOWN';
   if (Date.parse(observation.observed_at) > now + 5 * 60 * 1000) return 'UNKNOWN';
   return Date.parse(observation.expires_at) <= now ? 'STALE' : 'FRESH';
+}
+
+export function collectRuntimeDeployment({
+  runtimeDir = dirname(fileURLToPath(import.meta.url)),
+  now = () => new Date().toISOString(),
+} = {}) {
+  const observedAt = now();
+  const componentSha256 = Object.fromEntries(DEPLOYED_RUNTIME_FILES.map(file => [file, null]));
+  try {
+    for (const file of DEPLOYED_RUNTIME_FILES) {
+      const target = join(runtimeDir, file);
+      const stat = lstatSync(target);
+      if (!stat.isFile() || stat.isSymbolicLink())
+        throw new Error('RUNTIME_FILE_NOT_REGULAR');
+      componentSha256[file] = createHash('sha256').update(readFileSync(target)).digest('hex');
+    }
+  } catch {
+    return { status: 'UNKNOWN', observed_at: observedAt,
+      reason_code: 'RUNTIME_FILES_UNAVAILABLE',
+      bundle_sha256: createHash('sha256').update(JSON.stringify(componentSha256)).digest('hex'),
+      component_sha256: componentSha256 };
+  }
+  const orderedFiles = DEPLOYED_RUNTIME_FILES.map(file => [file, componentSha256[file]]);
+  const bundleSha256 = createHash('sha256').update(JSON.stringify(orderedFiles)).digest('hex');
+  let backupEntries = [];
+  try {
+    backupEntries = readdirSync(join(runtimeDir, 'backups'), { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && /^worker-deploy-accepted-[A-Za-z0-9-]+$/.test(entry.name));
+  } catch {}
+  const matching = [];
+  for (const entry of backupEntries) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(runtimeDir, 'backups', entry.name, 'manifest.json'), 'utf8'));
+      if (!object(manifest) || manifest.schema !== 1 || !SHA1.test(manifest.source_main_sha || '') ||
+          !Number.isSafeInteger(manifest.accepted_pr) || manifest.accepted_pr < 1 ||
+          !SHA1.test(manifest.accepted_pr_head || '') || !Array.isArray(manifest.files)) continue;
+      const stagedFilesMatch = DEPLOYED_RUNTIME_FILES.every(file => {
+        const staged = manifest.files.filter(item => object(item) && item.file === file &&
+          SHA256.test(item.stage_sha256 || ''));
+        return staged.length === 1 && staged[0].stage_sha256.toLowerCase() === componentSha256[file];
+      });
+      if (stagedFilesMatch)
+        matching.push({ source_main_sha: manifest.source_main_sha.toLowerCase(),
+          deployment_pr: manifest.accepted_pr,
+          deployment_pr_head: manifest.accepted_pr_head.toLowerCase() });
+    } catch {}
+  }
+  const identities = new Map(matching.map(item =>
+    [`${item.source_main_sha}:${item.deployment_pr}:${item.deployment_pr_head}`, item]));
+  if (identities.size !== 1) {
+    return { status: 'UNKNOWN', observed_at: observedAt,
+      reason_code: identities.size ? 'DEPLOYMENT_MANIFEST_AMBIGUOUS' : 'DEPLOYMENT_MANIFEST_NOT_MATCHED',
+      bundle_sha256: bundleSha256, component_sha256: componentSha256 };
+  }
+  const accepted = [...identities.values()][0];
+  return { status: 'MANIFEST_MATCHED', observed_at: observedAt, ...accepted,
+    bundle_sha256: bundleSha256, component_sha256: componentSha256 };
 }
 
 const POWERSHELL_READBACK = String.raw`
