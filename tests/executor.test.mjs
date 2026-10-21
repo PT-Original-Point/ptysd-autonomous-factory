@@ -144,7 +144,7 @@ test('shared executor SID readback uses bounded hidden whoami and returns a vali
 });
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'ptysd-executor-'));
+  const root = mkdtempSync(join(homedir(), 'ptysd-executor-'));
   const manifestDir = join(root, 'inbox');
   const resultsDir = join(root, 'results');
   mkdirSync(manifestDir);
@@ -551,6 +551,97 @@ test('executor refuses a source bundle hash mismatch without invoking OpenCode',
     assert.match(saved.terminal.outcome,
       /CANDIDATE_WORKSPACE_SETUP_BLOCKED_CANDIDATE_SOURCE_BUNDLE_HASH_MISMATCH/);
     assert.equal(existsSync(candidateWorkspacePath(f.resultsDir, ATTEMPT)), false);
+  } finally { f.dispose(); }
+});
+
+test('executor refuses W1 and W2 edit manifests without an attempt-pinned workspace', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
+  for (const lane of ['opencode', 'antigravity']) {
+    const f = fixture();
+    try {
+      const source = sourceRepository(f.root, `source-${lane}`);
+      const spec = `Synthetic ${lane} edit; no model invocation is permitted.`;
+      const baseJob = { ...modelJob(spec), source_sha: source.sourceSha,
+        request_id: `PTYSD_${lane.toUpperCase()}_REQUIRES_SOURCE_BUNDLE_20261022` };
+      const job = lane === 'opencode'
+        ? { ...baseJob, schema: 4, kind: 'opencode_edit', edit_paths: ['README.md'] }
+        : { schema: 6, project_id: PROJECT, host: hostname().toUpperCase(),
+          request_id: baseJob.request_id, kind: 'antigravity_edit', source_sha: source.sourceSha,
+          spec_path: 'native-bridge/tasks/w2-review.md', spec_sha256: baseJob.spec_sha256,
+          model: 'gemini-3.8-flash-high', variant: 'high', edit_paths: ['README.md'],
+          source_pr: 461, goal_comment_id: 6188322050, goal_body_sha256: 'c'.repeat(64) };
+      writeFileSync(join(f.manifestDir, `${ATTEMPT}.pending.json`), JSON.stringify(
+        makeExecutorManifest(job, spec, ATTEMPT)), { flag: 'wx' });
+      let modelCalls = 0;
+      const outcome = await executePendingManifest({ manifestDir: f.descriptor.manifest_dir,
+        currentSid: () => EXECUTOR_SID,
+        config: { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
+          executor_runtime: { user_sid: EXECUTOR_SID, publisher_sid: PUBLISHER_SID,
+            manifest_dir: f.descriptor.manifest_dir, results_dir: f.descriptor.results_dir },
+          workspace: source.workspace, state_dir: f.descriptor.results_dir,
+          ...(lane === 'opencode' ? { enable_v2_model_runs: true } : { enable_antigravity_model_runs: true }) },
+        execute: async () => { modelCalls++; throw new Error('MODEL_MUST_NOT_RUN'); },
+      });
+      assert.equal(modelCalls, 0, `${lane} cannot execute against the configured source workspace`);
+      assert.equal(outcome.terminal_state, 'BLOCKED');
+      const saved = JSON.parse(readFileSync(executorResultPath(f.resultsDir,
+        job.request_id, ATTEMPT), 'utf8'));
+      assert.equal(saved.terminal.outcome, 'EXECUTOR_EDIT_SOURCE_BUNDLE_REQUIRED');
+      assert.equal(saved.terminal.model_invoked, false);
+      assert.equal(saved.terminal.coding_state, 'NOT_STARTED');
+      assert.equal(existsSync(candidateWorkspacePath(f.resultsDir, ATTEMPT)), false);
+      assert.equal(readFileSync(join(source.workspace, 'README.md'), 'utf8'), 'pinned source fixture\n');
+    } finally { f.dispose(); }
+  }
+});
+
+test('Worker will not start an edit attempt when its Executor lacks per-attempt source bundles', async () => {
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root);
+    const spec = 'Synthetic edit; the executor must be configured for an attempt-pinned workspace.';
+    const job = { ...modelJob(spec), schema: 4, kind: 'opencode_edit',
+      request_id: 'PTYSD_EXECUTOR_BUNDLE_REQUIRED_BEFORE_START_20261022',
+      source_sha: source.sourceSha, edit_paths: ['README.md'] };
+    const comments = [{ id: 1, body: JOB_MARKER + JSON.stringify(job),
+      user: { login: 'dispatcher' } }];
+    const receipts = [];
+    let bundleCalls = 0, dispatchCalls = 0, modelCalls = 0;
+    const config = { repo: REPO, project_id: PROJECT, host: hostname().toUpperCase(), issue: 407,
+      workspace: source.workspace, state_dir: f.resultsDir, dispatchers: ['dispatcher'],
+      allowed_models: { 'opencode/spark': ['high'] }, enable_v2_model_runs: true,
+      executor: { ...f.descriptor, source_bundle_per_attempt: false } };
+    const result = await runWorker(config, {
+      apiRead(uri) {
+        if (uri === 'user') return { login: 'native-worker' };
+        if (uri.endsWith('/issues/407'))
+          return { title: '[PTYSD-NATIVE] OpenCode dispatch and receipts', state: 'open' };
+        if (uri.includes('/git/ref/heads/main')) return { object: { sha: source.sourceSha } };
+        const match = uri.match(/\/issues\/comments\/(\d+)$/);
+        if (match) return comments.find(comment => comment.id === Number(match[1]));
+        if (uri.includes('/contents/')) return { encoding: 'base64',
+          content: Buffer.from(spec, 'utf8').toString('base64') };
+        throw new Error(`UNEXPECTED_API_READ_${uri}`);
+      },
+      commentsRead: () => comments,
+      goalCommentsRead: () => [],
+      assertExecutorTaskReady: () => ({ ready: true }),
+      createExecutorSourceBundle: () => { bundleCalls++; throw new Error('MUST_NOT_CREATE_BUNDLE'); },
+      dispatchToExecutor: () => { dispatchCalls++; throw new Error('MUST_NOT_DISPATCH'); },
+      runPlan: async () => { modelCalls++; throw new Error('MUST_NOT_RUN_MODEL'); },
+      writeReceipt: (_config, receipt, login) => {
+        receipts.push(receipt);
+        comments.push({ id: comments.length + 1, body: RECEIPT_MARKER + JSON.stringify(receipt),
+          user: { login } });
+      },
+      observationDependencies: { collectWindowsObservation: () => ({ status: 'UNKNOWN' }) },
+      log: () => {},
+    });
+    assert.equal(result.state, 'WAITING_ELIGIBILITY');
+    assert.equal(bundleCalls, 0);
+    assert.equal(dispatchCalls, 0);
+    assert.equal(modelCalls, 0);
+    assert.equal(receipts.length, 0, 'a malformed edit executor is rejected before STARTED');
   } finally { f.dispose(); }
 });
 
