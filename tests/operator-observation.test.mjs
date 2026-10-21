@@ -42,6 +42,10 @@ test('operator snapshot requires exact project identity, time bounds, and de-ide
   assert.throws(() => encodeOperatorObservation(observation({
     expires_at: new Date(now + 16 * 60 * 1000).toISOString(),
   })), /INVALID_OPERATOR_OBSERVATION/);
+  assert.throws(() => encodeOperatorObservation(observation({ publisher_login: 'bad login' })),
+    /INVALID_OPERATOR_OBSERVATION/);
+  assert.throws(() => encodeOperatorObservation(observation({ comment_author_login: 'bad/login' })),
+    /INVALID_OPERATOR_OBSERVATION/);
 });
 
 test('operator snapshot accepts the GitHub-supported body range beyond the old local ceiling', () => {
@@ -72,6 +76,9 @@ test('snapshot does not duplicate GitHub publication time; legacy published_at r
 test('one trusted observation comment is updated; missing, duplicate, or foreign author fails closed', () => {
   assert.equal(findOperatorComment([], 'trusted-publisher').status, 'NOT_SEEDED');
   assert.equal(findOperatorComment([comment(observation())], 'trusted-publisher').status, 'OK');
+  assert.equal(findOperatorComment([comment(observation({ source: {
+    ...observation().source, comment_id: 2,
+  } }))], 'trusted-publisher').error, 'OPERATOR_COMMENT_ID_MISMATCH');
   assert.equal(findOperatorComment([comment(observation(), 'someone-else')], 'trusted-publisher').error,
     'OPERATOR_COMMENT_AUTHOR_MISMATCH');
   assert.equal(findOperatorComment([
@@ -438,6 +445,8 @@ test('dashboard starts dark and worker states require role-bound recent evidence
   assert.equal(api.classifyWorker({ worker_id:'W2', status:'IDLE',
     activity_observed_at:live, evidence_kind:'NO_ACTIVE_WORK' }, 'FRESH', now).status, 'UNKNOWN');
   assert.equal(api.workerRecord({workers:[{worker_id:'W1'}]},'W2'), null);
+  assert.match(html, /snapshot\.publisher_login/);
+  assert.match(html, /snapshot\.comment_author_login/);
 });
 
 test('check-run states stay bound to exact SHA and skipped/cancelled are not passes', () => {
