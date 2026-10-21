@@ -235,7 +235,7 @@
     <article class="panel infra-card">
       <h3>任務來源 PR／CI</h3><span id="pr-badge" class="badge neutral">未確認</span>
       <p id="pr-detail" class="infra-summary">來源候選、CI 與 Win11 部署各自獨立判定。</p>
-      <dl class="facts"><dt>目前 PR 狀態</dt><dd id="pr-state">未確認</dd><dt>精確 PR HEAD</dt><dd id="pr-head">未確認</dd><dt>PR base／main HEAD</dt><dd id="pr-base">未確認</dd><dt>正式接受／部署</dt><dd id="pr-deployment">未確認</dd></dl>
+      <dl class="facts"><dt>目前 PR 狀態</dt><dd id="pr-state">未確認</dd><dt>精確 PR HEAD</dt><dd id="pr-head">未確認</dd><dt>PR base／main HEAD</dt><dd id="pr-base">未確認</dd><dt>正式接受／部署</dt><dd id="pr-deployment">未確認</dd><dt>Win11 已部署來源</dt><dd id="runtime-source">未確認</dd><dt>Win11 runtime bundle SHA-256</dt><dd id="runtime-bundle">未確認</dd></dl>
     </article>
   </section>
 
@@ -1119,7 +1119,7 @@
     const taskKind = record?.task_kind || (id === 'W1'
       ? currentTask?.kind || formalTask?.job?.kind || latestTask?.kind : null);
     const taskState = id === 'W1' ? currentTask?.state || formalTask?.state || latestTask?.state : null;
-    const activity = record?.activity_observed_at || (id === 'W1' ? oc.activity_observed_at || oc.process_observed_at : null);
+    const activity = record?.activity_observed_at || (id === 'W1' ? oc.activity_observed_at || oc.last_tool_activity_at : null);
     const taskText = taskId
       ? String(taskId) + (taskKind ? '／' + String(taskKind) : '') +
         (id === 'W1' && taskState ? '；' + String(taskState) : '')
@@ -1436,9 +1436,10 @@
     text('native-retired','Monitor 排程 ' +
       (windows.legacy_monitor_registered === false ? '未註冊' : windows.legacy_monitor_registered === true ? '仍註冊' : '未知') +
       '；2667 ' + (windows.listener_2667 === false ? '無 Listener' : windows.listener_2667 === true ? '仍有 Listener' : '未知'));
-    text('native-publisher',snapshot?.native_worker
-      ? '此快照有 Worker 收據資料；正式發布器部署未由靜態頁面確認。'
-      : '未取得 Worker 發布狀態；不推論已部署。');
+    text('native-publisher',snapshot?.publisher_login
+      ? '最近發布者 ' + String(snapshot.publisher_login) + '；觀測留言作者 ' +
+        String(snapshot.comment_author_login || snapshot.publisher_login) + '；需與同一留言讀回核對。'
+      : '此快照未記錄發布者與留言作者；身份關係未確認。');
     text('task-detail',(task.action_kind || 'Action 未知') + '；' + (task.identity_class || '執行身分未知') +
       '；IgnoreNew ' + (task.multiple_instances || '未知') + '；' + (task.last_result || '結果未知'));
     text('opencode-detail',(oc.installed_version || '版本未確認') + '；程序數 ' +
@@ -1495,6 +1496,23 @@
     text('pr-head',head || (pr ? 'GitHub 回傳的 head SHA 格式錯誤' : '未讀回'));
     text('pr-base',(safeSha(pr?.base?.sha) || 'PR base 未讀回') +
       '；main ' + (safeSha(main?.sha) || (mainFresh === 'STALE' ? '上次讀回已過期' : '未讀回')));
+    const runtime = snapshot?.runtime_deployment;
+    const runtimeMain = safeSha(runtime?.source_main_sha);
+    const runtimeAge = osFreshness === 'FRESH' ? '本次有效觀測' : '歷史快照 ' + osFreshness;
+    const runtimeCompare = runtime?.status === 'MANIFEST_MATCHED' && runtimeMain &&
+      osFreshness === 'FRESH' && mainFresh === 'FRESH'
+      ? runtimeMain.toLowerCase() === safeSha(main?.sha)?.toLowerCase()
+        ? '與目前正式 main 相符' : '與目前正式 main 不同'
+      : '目前 main 比對未確認';
+    text('runtime-source',runtime?.status === 'MANIFEST_MATCHED' && runtimeMain
+      ? '部署紀錄 PR #' + runtime.deployment_pr + ' HEAD ' + safeSha(runtime.deployment_pr_head) +
+        '；部署 main ' + runtimeMain + '；實際檔案與部署 manifest 相符；' + runtimeCompare + '；' + runtimeAge
+      : 'UNKNOWN：Win11 部署來源 main 未經 manifest 與實際檔案雜湊共同核對' +
+        (runtime?.reason_code ? '（' + runtime.reason_code + '）' : '') +
+        (runtimeAge ? '；' + runtimeAge : ''));
+    text('runtime-bundle',runtime?.bundle_sha256 && /^[a-f0-9]{64}$/i.test(runtime.bundle_sha256)
+      ? runtime.bundle_sha256 + '；' + runtimeAge
+      : 'UNKNOWN：沒有可核對的 runtime bundle SHA-256');
     text('pr-deployment',pr?.merged
       ? '已進入 main；Win11 Worker 部署仍需獨立來源驗收。'
       : '未接受／未合併；不可部署候選 Worker。Branch protection API 權限未知。');

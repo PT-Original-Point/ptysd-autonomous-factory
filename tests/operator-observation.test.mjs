@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import vm from 'node:vm';
 import './native-worker-install-bundle.test.mjs';
 import {
   OPERATOR_MARKER, encodeOperatorObservation, parseOperatorObservation,
   findOperatorComment, updateExistingOperatorComment, observationFreshness,
-  collectWindowsObservation,
+  collectWindowsObservation, collectRuntimeDeployment,
 } from '../native-bridge/operator-observation.mjs';
 
 const now = Date.parse('2026-10-13T10:00:00.000Z');
@@ -42,6 +45,10 @@ test('operator snapshot requires exact project identity, time bounds, and de-ide
   assert.throws(() => encodeOperatorObservation(observation({
     expires_at: new Date(now + 16 * 60 * 1000).toISOString(),
   })), /INVALID_OPERATOR_OBSERVATION/);
+  assert.throws(() => encodeOperatorObservation(observation({ publisher_login: 'bad login' })),
+    /INVALID_OPERATOR_OBSERVATION/);
+  assert.throws(() => encodeOperatorObservation(observation({ comment_author_login: 'bad/login' })),
+    /INVALID_OPERATOR_OBSERVATION/);
 });
 
 test('operator snapshot accepts the GitHub-supported body range beyond the old local ceiling', () => {
@@ -69,9 +76,64 @@ test('snapshot does not duplicate GitHub publication time; legacy published_at r
     current.observed_at);
 });
 
+test('runtime source identity is published only when a deployment manifest matches every installed module', () => {
+  const root=mkdtempSync(join(tmpdir(),'pty-runtime-fingerprint-'));
+  const runtimeDir=join(root,'runtime');
+  const backup=join(runtimeDir,'backups','worker-deploy-accepted-fixture');
+  const files=['worker.mjs','operator-observation.mjs','codex-continuation.mjs','safe-error-code.mjs'];
+  const digest=value=>createHash('sha256').update(value).digest('hex');
+  try {
+    mkdirSync(backup,{recursive:true});
+    const staged=files.map(file=>{
+      const bytes=Buffer.from('verified runtime component ' + file);
+      writeFileSync(join(runtimeDir,file),bytes);
+      return {file,stage_sha256:digest(bytes)};
+    });
+    const manifest={schema:1,source_main_sha:'a'.repeat(40),accepted_pr:462,
+      accepted_pr_head:'b'.repeat(40),files:staged};
+    writeFileSync(join(backup,'manifest.json'),JSON.stringify(manifest));
+    const verified=collectRuntimeDeployment({runtimeDir,now:()=>new Date(now).toISOString()});
+    assert.equal(verified.status,'MANIFEST_MATCHED');
+    assert.equal(verified.source_main_sha,'a'.repeat(40));
+    assert.equal(verified.deployment_pr,462);
+    assert.equal(verified.component_sha256['worker.mjs'],staged[0].stage_sha256);
+    assert.equal(parseOperatorObservation(encodeOperatorObservation(observation({
+      runtime_deployment:verified,
+    }))).runtime_deployment.status,'MANIFEST_MATCHED');
+    assert.equal(JSON.stringify(verified).includes(root),false,'public fingerprint must not expose local paths');
+
+    const duplicateFiles={...manifest,files:[...staged,staged[0]]};
+    writeFileSync(join(backup,'manifest.json'),JSON.stringify(duplicateFiles));
+    const duplicateEntry=collectRuntimeDeployment({runtimeDir,now:()=>new Date(now).toISOString()});
+    assert.equal(duplicateEntry.status,'UNKNOWN','duplicate module entries must fail closed');
+    assert.equal(duplicateEntry.reason_code,'DEPLOYMENT_MANIFEST_NOT_MATCHED');
+    writeFileSync(join(backup,'manifest.json'),JSON.stringify(manifest));
+
+    const conflictingBackup=join(runtimeDir,'backups','worker-deploy-accepted-conflicting');
+    mkdirSync(conflictingBackup,{recursive:true});
+    writeFileSync(join(conflictingBackup,'manifest.json'),JSON.stringify({...manifest,
+      accepted_pr:463,accepted_pr_head:'c'.repeat(40)}));
+    const ambiguous=collectRuntimeDeployment({runtimeDir,now:()=>new Date(now).toISOString()});
+    assert.equal(ambiguous.status,'UNKNOWN','different matching deployment identities are ambiguous');
+    assert.equal(ambiguous.reason_code,'DEPLOYMENT_MANIFEST_AMBIGUOUS');
+    rmSync(conflictingBackup,{recursive:true,force:true});
+
+    writeFileSync(join(runtimeDir,'worker.mjs'),'changed after deployment');
+    const mismatch=collectRuntimeDeployment({runtimeDir,now:()=>new Date(now).toISOString()});
+    assert.equal(mismatch.status,'UNKNOWN');
+    assert.equal(mismatch.reason_code,'DEPLOYMENT_MANIFEST_NOT_MATCHED');
+    assert.equal(mismatch.source_main_sha,undefined,'a stale manifest must not claim the deployed commit');
+  } finally {
+    rmSync(root,{recursive:true,force:true});
+  }
+});
+
 test('one trusted observation comment is updated; missing, duplicate, or foreign author fails closed', () => {
   assert.equal(findOperatorComment([], 'trusted-publisher').status, 'NOT_SEEDED');
   assert.equal(findOperatorComment([comment(observation())], 'trusted-publisher').status, 'OK');
+  assert.equal(findOperatorComment([comment(observation({ source: {
+    ...observation().source, comment_id: 2,
+  } }))], 'trusted-publisher').error, 'OPERATOR_COMMENT_ID_MISMATCH');
   assert.equal(findOperatorComment([comment(observation(), 'someone-else')], 'trusted-publisher').error,
     'OPERATOR_COMMENT_AUTHOR_MISMATCH');
   assert.equal(findOperatorComment([
@@ -438,6 +500,8 @@ test('dashboard starts dark and worker states require role-bound recent evidence
   assert.equal(api.classifyWorker({ worker_id:'W2', status:'IDLE',
     activity_observed_at:live, evidence_kind:'NO_ACTIVE_WORK' }, 'FRESH', now).status, 'UNKNOWN');
   assert.equal(api.workerRecord({workers:[{worker_id:'W1'}]},'W2'), null);
+  assert.match(html, /snapshot\.publisher_login/);
+  assert.match(html, /snapshot\.comment_author_login/);
 });
 
 test('check-run states stay bound to exact SHA and skipped/cancelled are not passes', () => {
@@ -864,6 +928,10 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
       kind:'opencode_edit',source_pr:437,source_sha:sha,state:'QUEUED_NOT_STARTED'}},
     opencode_v2:{installed_version:'opencode v2.0.27',process_count:0,
       process_observed_at:observedAt,historical_sessions_count:42},
+    runtime_deployment:{status:'MANIFEST_MATCHED',observed_at:observedAt,source_main_sha:sha,
+      deployment_pr:462,deployment_pr_head:'b'.repeat(40),bundle_sha256:'c'.repeat(64),
+      component_sha256:{'worker.mjs':'d'.repeat(64),'operator-observation.mjs':'e'.repeat(64),
+        'codex-continuation.mjs':'f'.repeat(64),'safe-error-code.mjs':'1'.repeat(64)}},
   });
   const comments=[{id:42,body:encodeOperatorObservation(snapshot),
     user:{login:'wfvupu1212'},created_at:observedAt,
@@ -908,12 +976,17 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
   assert.match(elements.get('overall').className,/fresh/);
   assert.match(elements.get('metric-workers').textContent,/0／3/);
   assert.equal(elements.get('w1-badge').textContent,'狀態未確認');
+  assert.equal(elements.get('w1-activity').textContent,'沒有可核對的近期活動時間',
+    'process observation time alone is not model or tool activity');
   assert.equal(elements.get('w2-badge').textContent,'狀態未確認');
   assert.equal(elements.get('w3-badge').textContent,'狀態未確認');
   assert.equal(elements.get('runner-badge').textContent,'等待檢查結果');
   assert.match(elements.get('runner-checks').textContent,/成功 3／失敗 0／queued 0／pending 1/);
   assert.match(elements.get('runner-checks').textContent,/略過或 neutral 1/);
   assert.match(elements.get('pr-state').textContent,/Draft/);
+  assert.match(elements.get('runtime-source').textContent,/PR #462/);
+  assert.match(elements.get('runtime-source').textContent,/與目前正式 main 相符/);
+  assert.equal(elements.get('runtime-bundle').textContent,'c'.repeat(64) + '；本次有效觀測');
   assert.match(elements.get('opencode-detail').textContent,/42/);
   assert.match(elements.get('rate-alert-title').textContent,/跨分頁鎖與公開快取未確認/);
   assert.equal(browserCalls,4,'startup reads the four sources once in dependency order');
