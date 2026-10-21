@@ -183,7 +183,7 @@ test('runPlan does not qualify or launch a model when host-local execution enabl
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
-test('runPlan dispatches an explicitly allowlisted no-auth OpenCode edit and keeps its diff unverified', async () => {
+test('runPlan keeps an OpenCode edit waiting without provider auth despite a free-model allowlist', async () => {
   const root=mkdtempSync(join(tmpdir(),'oc2-noauth-edit-runplan-'));
   const workspace=join(root,'workspace'),state_dir=join(root,'state');
   const model='opencode/deepseek-v4.1-flash-free';
@@ -207,50 +207,30 @@ test('runPlan dispatches an explicitly allowlisted no-auth OpenCode edit and kee
       config,job,'11111111-1111-4111-8111-111111111111',{
         qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2',version:'2.0.32'}),
         readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_RECORD_ABSENT'}),
-        runCapturedProcess:async(bin,args,options)=>{
-          launches++;
-          assert.equal(bin,'qualified-opencode-v2');
-          assert.equal(args[0],'run');
-          assert.equal(args.includes('--standalone'),true);
-          assert.equal(args[args.indexOf('--agent')+1],'ptysd-scoped-write');
-          assert.equal(args[args.indexOf('--model')+1],model);
-          assert.equal(options.cwd,workspace);
-          assert.equal(options.env.GITHUB_TOKEN,undefined);
-          assert.equal(options.env.GH_TOKEN,undefined);
-          assert.equal(options.env.OPENCODE_CONFIG_CONTENT,undefined);
-          writeFileSync(join(workspace,'src','answer.mjs'),'export const answer = 42;\n');
-          const bytes=Buffer.from(JSON.stringify({type:'step_start',sessionID:'ses_noauthedit1234567'})+'\n');
-          writeFileSync(options.stdoutPath,bytes);
-          return {outcome:'OPENCODE_V2_CLI_EXIT_0_UNVERIFIED',exit_code:0,
-            local_evidence:{stdout_file:basename(options.stdoutPath),
-              stdout_sha256:createHash('sha256').update(bytes).digest('hex'),
-              stdout_bytes:bytes.length,termination_state:'NOT_REQUESTED'}};
-        },
+        runCapturedProcess:async()=>{launches++;throw new Error('MODEL_MUST_NOT_LAUNCH');},
       });
-    assert.equal(launches,1);
-    assert.equal(result.outcome,'V2_EDIT_DIFF_CAPTURED_UNVERIFIED');
-    assert.equal(result.coding_state,'DIFF_CAPTURED_UNVERIFIED');
-    assert.equal(result.local_evidence.provider_authorization,
-      'EXPLICIT_LOCAL_UNAUTHENTICATED_FREE_MODEL_ALLOWLIST');
-    assert.equal(result.scope_valid,true);
-    assert.deepEqual(result.changed_files,['src/answer.mjs']);
-    assert.ok(result.diff_sha256);
-    assert.equal(readFileSync(join(workspace,'src','answer.mjs'),'utf8'),'export const answer = 42;\n');
+    assert.equal(launches,0);
+    assert.equal(result.outcome,'OPENCODE_V2_AUTH_NOT_READY');
+    assert.equal(result.eligibility_state,'WAITING');
+    assert.equal(result.model_invoked,false);
+    assert.equal(readFileSync(join(workspace,'src','answer.mjs'),'utf8'),'export const answer = 41;\n');
     assert.equal(existsSync(join(workspace,'opencode.json')),false);
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
-test('runPlan keeps unauthenticated OpenCode models gated unless exact free-model authorization is present', async t => {
+test('runPlan requires provider authentication and model authorization independently', async t => {
   const model='opencode/deepseek-v4.1-flash-free';
   const cases=[
     {name:'unknown provider metadata',auth:{status:'AUTH_PROVIDER_METADATA_UNKNOWN'},
-      freeModels:[model],allowed:true,expected:'OPENCODE_V2_AUTH_METADATA_UNKNOWN'},
-    {name:'missing explicit no-auth free-model authorization',auth:{status:'AUTH_PROVIDER_RECORD_ABSENT'},
-      freeModels:[],allowed:true,expected:'OPENCODE_V2_AUTH_NOT_READY'},
-    {name:'different free model in authorization list',auth:{status:'AUTH_PROVIDER_RECORD_ABSENT'},
-      freeModels:['opencode/another-free-model'],allowed:true,expected:'OPENCODE_V2_AUTH_NOT_READY'},
+      legacyFreeModels:[model],allowed:true,expected:'OPENCODE_V2_AUTH_METADATA_UNKNOWN'},
+    {name:'provider record absent without legacy allowlist',auth:{status:'AUTH_PROVIDER_RECORD_ABSENT'},
+      legacyFreeModels:undefined,allowed:true,expected:'OPENCODE_V2_AUTH_NOT_READY'},
+    {name:'provider record absent with exact legacy allowlist',auth:{status:'AUTH_PROVIDER_RECORD_ABSENT'},
+      legacyFreeModels:[model],allowed:true,expected:'OPENCODE_V2_AUTH_NOT_READY'},
+    {name:'provider record absent with another legacy allowlist entry',auth:{status:'AUTH_PROVIDER_RECORD_ABSENT'},
+      legacyFreeModels:['opencode/another-free-model'],allowed:true,expected:'OPENCODE_V2_AUTH_NOT_READY'},
     {name:'model absent from the general model allowlist',auth:{status:'AUTH_PROVIDER_RECORD_ABSENT'},
-      freeModels:[model],allowed:false,expected:'MODEL_NOT_EXPLICITLY_ALLOWED'},
+      legacyFreeModels:[model],allowed:false,expected:'MODEL_NOT_EXPLICITLY_ALLOWED'},
   ];
   for (const [index,scenario] of cases.entries()) await t.test(scenario.name,async()=>{
     const root=mkdtempSync(join(tmpdir(),'oc2-noauth-deny-'));
@@ -260,7 +240,7 @@ test('runPlan keeps unauthenticated OpenCode models gated unless exact free-mode
       model,variant:null};
     const config={workspace,state_dir,enable_v2_model_runs:true,
       allowed_models:scenario.allowed?{[model]:[null]}:{},
-      unauthenticated_free_models:scenario.freeModels};
+      unauthenticated_free_models:scenario.legacyFreeModels};
     let launches=0,authReads=0;
     try {
       const result=await runPlan('Synthetic read-only qualification; model transport must not launch.',

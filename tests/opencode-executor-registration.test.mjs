@@ -5,7 +5,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildExecutorTaskXml, validateExecutorTaskXml } from '../native-bridge/windows-executor.mjs';
+import { buildExecutorTaskXml, validateExecutorDescriptor, validateExecutorTaskXml }
+  from '../native-bridge/windows-executor.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const registrationScript = join(repoRoot, 'native-bridge', 'register-opencode-executor.ps1');
@@ -47,6 +48,80 @@ test('OpenCode registration XML builder delegates to the shared validated task t
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('lane-aware XML builder selects only the requested Antigravity descriptor', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pty-antigravity-task-xml-'));
+  try {
+    const configPath = join(root, 'publisher-config.json');
+    const opencode = descriptor();
+    const antigravity = { ...descriptor(), task_name: '\\PTYSD\\AntigravityExecutor',
+      user_sid: 'S-1-5-21-101-202-303-1003',
+      script_path: 'C:\\ProgramData\\PTYSD\\antigravity-executor.mjs',
+      config_path: 'C:\\Users\\PTYSD-Antigravity\\PTYSD\\executor-config.json',
+      manifest_dir: 'C:\\ProgramData\\PTYSD\\antigravity-requests',
+      results_dir: 'C:\\Users\\PTYSD-Antigravity\\PTYSD\\results',
+      working_directory: 'C:\\ProgramData\\PTYSD\\antigravity-requests' };
+    writeFileSync(configPath, JSON.stringify({ executors: { opencode, antigravity } }), 'utf8');
+    const result = spawnSync(process.execPath, [xmlBuilder, configPath, 'antigravity'], { encoding: 'utf8' });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, buildExecutorTaskXml(antigravity));
+    assert.deepEqual(validateExecutorTaskXml(result.stdout, antigravity), {
+      ready: true, user_sid: antigravity.user_sid, logon_type: 'Password',
+      run_level: 'LeastPrivilege', execution_time_limit: 'PT0S', multiple_instances: 'IgnoreNew',
+    });
+    assert.doesNotMatch(result.stdout, /OpenCodeExecutor/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('single-descriptor executor_lane is honored by the XML builder and cannot register under another lane', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pty-single-executor-lane-'));
+  try {
+    const configPath = join(root, 'publisher-config.json');
+    const antigravity = { ...descriptor(), task_name: '\\PTYSD-AgilityLaneTest',
+      user_sid: 'S-1-5-21-101-202-303-1003',
+      script_path: 'C:\\ProgramData\\PTYSD\\antigravity-executor.mjs',
+      config_path: 'C:\\Users\\PTYSD-Antigravity\\PTYSD\\executor-config.json',
+      manifest_dir: 'C:\\ProgramData\\PTYSD\\antigravity-requests',
+      results_dir: 'C:\\Users\\PTYSD-Antigravity\\PTYSD\\results',
+      working_directory: 'C:\\ProgramData\\PTYSD\\antigravity-requests' };
+    writeFileSync(configPath, JSON.stringify({ executor_lane: 'antigravity', executor: antigravity }), 'utf8');
+
+    const selected = spawnSync(process.execPath, [xmlBuilder, configPath, 'antigravity'], { encoding: 'utf8' });
+    assert.equal(selected.error, undefined);
+    assert.equal(selected.status, 0, selected.stderr);
+    assert.equal(selected.stdout, buildExecutorTaskXml(antigravity));
+
+    const wrongLane = spawnSync(process.execPath, [xmlBuilder, configPath, 'opencode'], { encoding: 'utf8' });
+    assert.notEqual(wrongLane.status, 0);
+    assert.match(wrongLane.stderr, /EXECUTOR_NOT_CONFIGURED_FOR_OPENCODE/);
+    assert.equal(wrongLane.stdout, '');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('lane-aware XML builder fails closed for absent W2 mapping, invalid lane, and ambiguous config', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pty-invalid-executor-lane-'));
+  try {
+    const configPath = join(root, 'publisher-config.json');
+    const opencode = descriptor();
+    for (const [config, lane, code] of [
+      [{ executors: { opencode } }, 'antigravity', 'EXECUTOR_NOT_CONFIGURED_FOR_ANTIGRAVITY'],
+      [{ executors: { opencode }, executor: opencode }, 'opencode', 'EXECUTOR_ROUTING_CONFIG_AMBIGUOUS'],
+      [{ executor_lane: 'Antigravity', executor: opencode }, 'antigravity', 'EXECUTOR_LANE_CONFIG_INVALID'],
+      [{ executor_lane: ['antigravity'], executor: opencode }, 'antigravity', 'EXECUTOR_LANE_CONFIG_INVALID'],
+      [{ executor_lane: null, executor: opencode }, 'antigravity', 'EXECUTOR_LANE_CONFIG_INVALID'],
+      [{ executors: { opencode, antigravity: { ...opencode,
+        task_name: '\\PTYSD\\AntigravityExecutor' } } }, 'antigravity', 'EXECUTOR_LANE_IDENTITY_COLLISION'],
+      [{ executors: { opencode } }, 'codex', 'EXECUTOR_LANE_INVALID'],
+    ]) {
+      writeFileSync(configPath, JSON.stringify(config), 'utf8');
+      const result = spawnSync(process.execPath, [xmlBuilder, configPath, lane], { encoding: 'utf8' });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, new RegExp(code));
+      assert.equal(result.stdout, '');
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('OpenCode XML builder rejects missing or invalid descriptors without emitting a task', () => {
   const root = mkdtempSync(join(tmpdir(), 'pty-opencode-invalid-task-'));
   try {
@@ -74,6 +149,24 @@ test('OpenCode descriptor accepts the root Task Scheduler namespace used by the 
     /EXECUTOR_TASK_NAME_INVALID/);
 });
 
+test('executor descriptors reject nested mailboxes and protected files below executor-writable mailboxes', () => {
+  const base = descriptor();
+  assert.throws(() => validateExecutorDescriptor({ ...base,
+    results_dir: `${base.manifest_dir}\\results` }), /EXECUTOR_MANIFEST_RESULT_DIR_COLLISION/);
+  assert.throws(() => validateExecutorDescriptor({ ...base,
+    results_dir: `${base.manifest_dir}\\..\\requests\\results` }),
+  /EXECUTOR_MANIFEST_RESULT_DIR_COLLISION/);
+
+  for (const key of ['wscript_path', 'launcher_path', 'node_bin', 'script_path', 'config_path']) {
+    const unsafeManifest = { ...base, [key]: `${base.manifest_dir}\\${key.replaceAll('_', '-')}` };
+    assert.throws(() => validateExecutorDescriptor(unsafeManifest),
+      /EXECUTOR_PROTECTED_FILE_IN_WRITABLE_DIRECTORY/, `${key} was placed below manifest_dir`);
+    const unsafeResults = { ...base, [key]: `${base.results_dir}\\${key.replaceAll('_', '-')}` };
+    assert.throws(() => validateExecutorDescriptor(unsafeResults),
+      /EXECUTOR_PROTECTED_FILE_IN_WRITABLE_DIRECTORY/, `${key} was placed below results_dir`);
+  }
+});
+
 test('OpenCode installer audit is read-only and reports an absent publisher descriptor', {
   skip: process.platform !== 'win32',
 }, () => {
@@ -92,9 +185,64 @@ test('OpenCode installer audit is read-only and reports an absent publisher desc
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('PowerShell audit honors a single explicit Antigravity lane without registering or starting a task', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const root = mkdtempSync(join(tmpdir(), 'pty-antigravity-executor-audit-'));
+  try {
+    const configPath = join(root, 'publisher-config.json');
+    const identity = spawnSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8' });
+    assert.equal(identity.status, 0, identity.stderr);
+    const publisherSid = identity.stdout.match(/S-\d+(?:-\d+)+/)?.[0];
+    assert.ok(publisherSid, `current Windows SID not returned: ${identity.stdout}`);
+    const antigravity = { ...descriptor(), task_name: '\\PTYSD-AgilityLaneAudit',
+      user_sid: 'S-1-5-21-101-202-303-1003',
+      publisher_sid: publisherSid,
+      script_path: 'C:\\ProgramData\\PTYSD\\antigravity-executor.mjs',
+      config_path: 'C:\\Users\\PTYSD-Antigravity\\PTYSD\\executor-config.json',
+      manifest_dir: 'C:\\ProgramData\\PTYSD\\antigravity-requests',
+      results_dir: 'C:\\Users\\PTYSD-Antigravity\\PTYSD\\results',
+      working_directory: 'C:\\ProgramData\\PTYSD\\antigravity-requests' };
+    writeFileSync(configPath, JSON.stringify({ executor_lane: 'antigravity', executor: antigravity }), 'utf8');
+    const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', registrationScript,
+      '-Mode', 'Audit', '-ExecutorLane', 'antigravity', '-PublisherConfigPath', configPath,
+      '-NodeExecutable', process.execPath];
+    const selected = spawnSync('powershell.exe', args, { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+    assert.equal(selected.error, undefined, `PowerShell harness failed to start: ${selected.error}`);
+    assert.equal(selected.status, 0, `stdout:\n${selected.stdout}\nstderr:\n${selected.stderr}`);
+    assert.match(selected.stdout, /ANTIGRAVITY_EXECUTOR_TASK=ABSENT;DESCRIPTOR=\\PTYSD-AgilityLaneAudit/);
+    assert.match(selected.stdout, /MODEL_EXECUTION=NOT_TESTED/);
+
+    for (const executorLane of ['Antigravity', ['antigravity'], null]) {
+      writeFileSync(configPath, JSON.stringify({ executor_lane: executorLane, executor: antigravity }), 'utf8');
+      const invalidConfig = spawnSync('powershell.exe', args, { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+      assert.notEqual(invalidConfig.status, 0,
+        `accepted invalid executor_lane ${JSON.stringify(executorLane)}; stdout:\n${invalidConfig.stdout}`);
+      assert.match(invalidConfig.stderr, /EXECUTOR_LANE_CONFIG_INVALID/);
+    }
+
+    writeFileSync(configPath, JSON.stringify({ executor_lane: 'antigravity', executor: antigravity }), 'utf8');
+
+    const wrongLaneArgs = [...args];
+    wrongLaneArgs[wrongLaneArgs.indexOf('-ExecutorLane') + 1] = 'opencode';
+    const wrongLane = spawnSync('powershell.exe', wrongLaneArgs,
+      { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+    assert.equal(wrongLane.status, 0, `stdout:\n${wrongLane.stdout}\nstderr:\n${wrongLane.stderr}`);
+    assert.match(wrongLane.stdout, /OPENCODE_EXECUTOR_DESCRIPTOR=NOT_CONFIGURED/);
+    assert.doesNotMatch(wrongLane.stdout, /AGILITYLANEAUDIT/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('OpenCode registration source never starts, removes, or installs host components', () => {
   const source = readFileSync(registrationScript, 'utf8');
   assert.match(source, /Register-ScheduledTask/);
+  assert.match(source, /ValidateSet\('opencode','antigravity'\)\]\[string\]\$ExecutorLane = 'opencode'/);
+  assert.match(source, /\$publisherConfig\.PSObject\.Properties\['executor_lane'\]/);
+  assert.match(source, /\$configuredLane -cnotin @\('opencode', 'antigravity'\)/);
+  assert.match(source, /\$configuredLane -ceq \$ExecutorLane/);
+  assert.match(source, /Get-Field \$executorMap \$ExecutorLane/);
+  assert.match(source, /Get-Field \$Config 'enable_antigravity_model_runs'/);
+  assert.match(source, /\$builderPath \$PublisherConfigPath \$ExecutorLane/);
   assert.match(source, /Get-ScheduledTask/);
   assert.doesNotMatch(source, /\b(?:Start-ScheduledTask|Unregister-ScheduledTask|Set-Acl|New-LocalUser|Move-Item)\b/);
   assert.match(source, /EXECUTOR_TASK_EXISTS_REVIEW_REQUIRED_NO_OVERWRITE/);
@@ -102,6 +250,8 @@ test('OpenCode registration source never starts, removes, or installs host compo
   assert.match(source, /MODEL_EXECUTION_MUST_REMAIN_DISABLED_FOR_REGISTRATION/);
   assert.match(source, /EXECUTOR_ACL_BROAD_WRITE_PRINCIPAL/);
   assert.match(source, /EXECUTOR_RUNTIME_MUST_BE_READ_ONLY/);
+  assert.match(source, /function Assert-ExecutorPathParentsReadOnly\(\[string\]\$Path, \[string\]\$ExecutorSid\)/);
+  assert.match(source, /Assert-ExecutorPathParentsReadOnly \$path \$executorSid/);
   assert.match(source, /EXECUTOR_TASK_FOLDER_NOT_FOUND_NO_CREATE/);
   assert.match(source, /if \(\$separator -eq 0\)/);
   assert.match(source, /\$taskPath = '\\'/);
