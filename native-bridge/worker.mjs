@@ -29,7 +29,7 @@ import { runCapturedProcess, terminateProcessTree } from './captured-process.mjs
 import { safeErrorCode } from './safe-error-code.mjs';
 import { assertExecutorTaskReady, cleanupExecutorAttempt, createExecutorSourceBundle,
   createPinnedSourceBundle, dispatchToExecutor, executorResultPath, triggerPendingExecutorAttempt,
-  validateExecutorDescriptor } from './windows-executor.mjs';
+  validateExecutorRoutingMap, validateExecutorDescriptor } from './windows-executor.mjs';
 
 export const PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
 export const REPO = 'PT-Original-Point/ptysd-autonomous-factory';
@@ -111,6 +111,44 @@ function validEditPaths(paths) {
 function isOpenCodeExecutionKind(kind) { return OPENCODE_EXECUTION_KINDS.has(kind); }
 function isModelExecutionKind(kind) { return MODEL_EXECUTION_KINDS.has(kind); }
 function isEditExecutionKind(kind) { return EDIT_EXECUTION_KINDS.has(kind); }
+function executorLaneForJobKind(kind) {
+  if (isOpenCodeExecutionKind(kind)) return 'opencode';
+  if (ANTIGRAVITY_EXECUTION_KINDS.has(kind)) return 'antigravity';
+  return null;
+}
+export function executorForJobKind(config, kind) {
+  const lane = executorLaneForJobKind(kind);
+  if (!lane) return null;
+  if (config?.executors !== undefined) return config.executors?.[lane] ?? null;
+  if (config?.executor_lane !== undefined)
+    return config.executor_lane === lane ? config.executor ?? null : null;
+  // The legacy descriptor came from the OpenCode registrar; never infer that
+  // it is an Antigravity identity. W2 requires an explicit lane binding.
+  return lane === 'opencode' ? config?.executor ?? null : null;
+}
+function strictExecutorLaneRouting(config) {
+  return config.executors !== undefined || config.executor_lane !== undefined ||
+    config.executor !== undefined;
+}
+function executorRouteFailure(config, kind) {
+  const lane = executorLaneForJobKind(kind);
+  if (config.executors !== undefined || config.executor_lane !== undefined ||
+      (config.executor !== undefined && lane === 'antigravity'))
+    return 'EXECUTOR_NOT_CONFIGURED_FOR_' + lane.toUpperCase();
+  return 'EXECUTOR_NOT_CONFIGURED';
+}
+function validateExecutorRouting(config) {
+  if (config.executors === undefined) {
+    if (config.executor_lane !== undefined &&
+        (!['opencode', 'antigravity'].includes(config.executor_lane) || config.executor === undefined))
+      throw new Error('EXECUTOR_LANE_CONFIG_INVALID');
+    if (config.executor !== undefined) validateExecutorDescriptor(config.executor);
+    return;
+  }
+  if (config.executor !== undefined || config.executor_lane !== undefined)
+    throw new Error('EXECUTOR_ROUTING_CONFIG_AMBIGUOUS');
+  validateExecutorRoutingMap(config.executors);
+}
 function validJobModel(job) {
   return job?.kind === 'antigravity_edit'
     ? job.schema === 6 && job.model === ANTIGRAVITY_V2_MODEL && job.variant === 'high'
@@ -944,15 +982,6 @@ export function guardConfig(c) {
       !variants.every(v => validConfiguredModel(model, v))) throw new Error('MODEL_ALLOWLIST_INVALID');
     }
   }
-  // A public model catalog is not a price or terms receipt. This local-only
-  // allowlist is explicit operator authorization and cannot be supplied by a job.
-  if (c.unauthenticated_free_models !== undefined) {
-    const models = c.unauthenticated_free_models;
-    if (!Array.isArray(models) || new Set(models).size !== models.length || models.some(model =>
-      typeof model !== 'string' || model.split('/')[0]?.toLowerCase() !== 'opencode' ||
-      !validConfiguredModel(model, null) || !c.allowed_models?.[model]?.includes(null)))
-      throw new Error('UNAUTHENTICATED_FREE_MODEL_ALLOWLIST_INVALID');
-  }
   if (c.enable_v2_model_runs !== undefined && typeof c.enable_v2_model_runs !== 'boolean')
     throw new Error('V2_MODEL_ENABLE_FLAG_INVALID');
   if (c.enable_antigravity_model_runs !== undefined && typeof c.enable_antigravity_model_runs !== 'boolean')
@@ -961,7 +990,7 @@ export function guardConfig(c) {
       (typeof c.antigravity_cli_project_id !== 'string' ||
        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(c.antigravity_cli_project_id)))
     throw new Error('ANTIGRAVITY_CLI_PROJECT_ID_INVALID');
-  if (c.executor !== undefined) validateExecutorDescriptor(c.executor);
+  validateExecutorRouting(c);
   mkdirSync(c.state_dir, { recursive: true });
   return c;
 }
@@ -986,13 +1015,6 @@ export function checkModelAuthorization(job, config) {
   const variants = config.allowed_models?.[job.model];
   return Array.isArray(variants) && variants.includes(job.variant);
 }
-function hasExplicitUnauthenticatedFreeModelAuthorization(job, config) {
-  return typeof job?.model === 'string' && job.model.split('/')[0]?.toLowerCase() === 'opencode' &&
-    Array.isArray(config?.unauthenticated_free_models) &&
-    config.unauthenticated_free_models.includes(job.model) &&
-    Array.isArray(config.allowed_models?.[job.model]) &&
-    config.allowed_models[job.model].includes(job.variant);
-}
 export function antigravityExecutionAuthorization(job, config, now = Date.now()) {
   if (job?.kind !== 'antigravity_edit' || job.schema !== 6 || !validJobModel(job))
     return 'ANTIGRAVITY_JOB_IDENTITY_INVALID';
@@ -1016,9 +1038,9 @@ export function antigravityExecutionAuthorization(job, config, now = Date.now())
   return null;
 }
 export function buildOpenCodeChildEnv(sourceEnv = process.env, hostPlatform = platform()) {
-  // The CLI reads its signed-in profile from the user's normal profile paths.
-  // Do not inherit ambient provider/Publisher credentials or Node startup
-  // injection: neither participates in the authorization decision for a job.
+  // Preserve the signed-in profile paths, but derive authorization from the
+  // exact job/profile readback; ambient provider/Publisher credentials and
+  // Node injection cannot change billing, auth, or child execution policy.
   const childEnv = buildNativeChildEnvironment(sourceEnv, hostPlatform);
   childEnv.OPENCODE_DISABLE_AUTOUPDATE = 'true';
   return childEnv;
@@ -1154,6 +1176,8 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
   // --print alias here can consume the next option as a positional prompt.
   const args = ['--input-format', 'stream-json', '--output-format', 'stream-json',
     `--project=${projectId}`,
+    // The exact model ID pins Gemini 3.8 Flash High. A separate --effort
+    // override previously failed for this model, so keep it out of the command.
     '--model', ANTIGRAVITY_V2_MODEL,
     // This selects the documented agent execution mode. The stream's
     // permission_mode is a separate headless tool-policy value and may be
@@ -1411,14 +1435,9 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
   try {
     providerAuth = readProviderAuth(cli.bin, job.model.split('/')[0], config.workspace);
   } catch { providerAuth = { status: 'AUTH_PROVIDER_METADATA_UNKNOWN' }; }
-  // `auth list` absence is recoverable for a model explicitly approved in the
-  // local no-cost allowlist; unknown auth metadata remains WAITING. The model
-  // stays pinned in the CLI args, so no paid fallback is possible.
-  const explicitlyApprovedUnauthenticatedFreeModel =
-    providerAuth?.status === 'AUTH_PROVIDER_RECORD_ABSENT' &&
-    hasExplicitUnauthenticatedFreeModelAuthorization(job, config);
-  if (providerAuth?.status !== 'AUTH_PROVIDER_RECORD_PRESENT' &&
-      !explicitlyApprovedUnauthenticatedFreeModel)
+  // A free catalog entry or local allowlist cannot create a provider identity.
+  // OpenCode's provider must be present in the executor's saved auth state.
+  if (providerAuth?.status !== 'AUTH_PROVIDER_RECORD_PRESENT')
     return waiting(providerAuth?.status === 'AUTH_PROVIDER_RECORD_ABSENT'
       ? 'OPENCODE_V2_AUTH_NOT_READY' : 'OPENCODE_V2_AUTH_METADATA_UNKNOWN', 48);
   // V2, not V1: ordered permissions, shell/subagent, provider/model#variant.
@@ -1480,9 +1499,7 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
     file_change_tool_failed_count: runEvidence.file_change_tool_failed_count,
     file_change_tool_incomplete_count: runEvidence.file_change_tool_incomplete_count,
     local_evidence: { ...processResult.local_evidence,
-      provider_authorization: explicitlyApprovedUnauthenticatedFreeModel
-        ? 'EXPLICIT_LOCAL_UNAUTHENTICATED_FREE_MODEL_ALLOWLIST'
-        : 'SAVED_PROVIDER_RECORD_PRESENT',
+      provider_authorization: 'SAVED_PROVIDER_RECORD_PRESENT',
       opencode_run: { valid: runEvidence.valid, reason: runEvidence.reason,
         event_count: runEvidence.event_count, stdout_bytes: runEvidence.stdout_bytes ?? 0 } },
   };
@@ -1951,6 +1968,13 @@ export async function runWorker(configInput, adapters = {}) {
     if (!s || s.state !== 'STARTED' || s.host.toUpperCase() !== config.host.toUpperCase()) continue;
     const resolutionState = resolvedAttemptState(comments, s, me);
     const hasResolution = resolutionState !== null;
+    const executor = isModelExecutionKind(s.kind) ? executorForJobKind(config, s.kind) : null;
+    if (isModelExecutionKind(s.kind) && strictExecutorLaneRouting(config) && !executor) {
+      if (!hasResolution || resolutionState === 'WAITING') blockedKinds.add(s.kind);
+      log(`EXECUTOR_LANE_DESCRIPTOR_MISSING_${executorLaneForJobKind(s.kind)?.toUpperCase()}_` +
+        `${s.request_id}_NO_REPLAY`);
+      continue;
+    }
     if (s.kind === 'codex_plan') {
       if (hasResolution) continue;
       const recovery = await reconcileCodexExecutorResult(s, config, me, blockedKinds, {
@@ -1974,13 +1998,13 @@ export async function runWorker(configInput, adapters = {}) {
       else log(`CODEX_EXECUTOR_RESULT_${recovery.reason}_${s.request_id}_UNKNOWN_NO_REPLAY`);
       continue;
     }
-    const resultDir = isModelExecutionKind(s.kind) && config.executor ?
-      resolveExecutorResultsDir(config.executor) : config.state_dir;
-    const path = isModelExecutionKind(s.kind) && config.executor ?
+    const resultDir = isModelExecutionKind(s.kind) && executor ?
+      resolveExecutorResultsDir(executor) : config.state_dir;
+    const path = isModelExecutionKind(s.kind) && executor ?
       resolveExecutorResultPath(resultDir, s.request_id, s.attempt_id) :
       join(resultDir, `result-${s.request_id}-${s.attempt_id}.json`);
     if (hasResolution) {
-      if (isModelExecutionKind(s.kind) && config.executor) {
+      if (isModelExecutionKind(s.kind) && executor) {
         if (existsSync(path)) {
           let result;
           try { result = JSON.parse(readFileSync(path, 'utf8')); }
@@ -2001,7 +2025,7 @@ export async function runWorker(configInput, adapters = {}) {
             continue;
           }
         }
-        try { cleanupExecutorAttempt(config.executor, s.attempt_id); }
+        try { cleanupExecutorAttempt(executor, s.attempt_id); }
         catch (error) {
           if (resolutionState === 'WAITING') {
             blockedKinds.add(s.kind);
@@ -2038,8 +2062,8 @@ export async function runWorker(configInput, adapters = {}) {
           `${safeErrorCode(error)}_NO_REPLAY`);
         continue;
       }
-      if (isModelExecutionKind(s.kind) && config.executor) {
-        try { cleanupExecutorAttempt(config.executor, s.attempt_id); } catch { /* exact result and receipt remain durable */ }
+      if (isModelExecutionKind(s.kind) && executor) {
+        try { cleanupExecutorAttempt(executor, s.attempt_id); } catch { /* exact result and receipt remain durable */ }
       }
       log(`RECOVERED_EXECUTOR_RESULT_${result.terminal.state}_${s.request_id}`);
       blockedKinds.add(s.kind);
@@ -2047,7 +2071,7 @@ export async function runWorker(configInput, adapters = {}) {
     }
     if (isModelExecutionKind(s.kind)) {
       blockedKinds.add(s.kind);
-      if (isEditExecutionKind(s.kind) && config.executor) {
+      if (isEditExecutionKind(s.kind) && executor) {
         const sources = comments.filter(comment => config.dispatchers.includes(comment.user?.login))
           .map(comment => ({ comment, job: parseJob(comment.body) }))
           .filter(item => item.job?.request_id === s.request_id && item.job.kind === s.kind &&
@@ -2081,7 +2105,7 @@ export async function runWorker(configInput, adapters = {}) {
           continue;
         }
         try {
-          const triggered = triggerPendingExecutor(config.executor, s.attempt_id, { expectedJob });
+          const triggered = triggerPendingExecutor(executor, s.attempt_id, { expectedJob });
           if (triggered?.outcome === 'EXECUTOR_PENDING_ATTEMPT_TRIGGERED_NOT_ACCEPTANCE')
             log(`PENDING_EXECUTOR_RETRIGGERED_${s.request_id}_${s.attempt_id}_NO_NEW_RECEIPT`);
           else log(`PENDING_EXECUTOR_RETRIGGER_NOT_CONFIRMED_${s.request_id}_NO_REPLAY`);
@@ -2205,8 +2229,10 @@ export async function runWorker(configInput, adapters = {}) {
   }
   let waitingEligibility = null;
   let preparedSourceBundle = null;
+  let preparedExecutor = null;
   while (next) {
     preparedSourceBundle = null;
+    preparedExecutor = null;
     if (next.job.kind === 'codex_plan') {
       const gate = codexExecutionGate(next.job, config);
       let reason = null;
@@ -2235,8 +2261,11 @@ export async function runWorker(configInput, adapters = {}) {
       }
     } else if (isModelExecutionKind(next.job.kind)) {
       let reason = null;
+      preparedExecutor = executorForJobKind(config, next.job.kind);
+      if (next.job.kind === 'antigravity_edit' && !preparedExecutor)
+        reason = executorRouteFailure(config, next.job.kind);
       if (next.job.kind === 'antigravity_edit') {
-        reason = antigravityExecutionAuthorization(next.job, config);
+        if (!reason) reason = antigravityExecutionAuthorization(next.job, config);
         if (!reason) {
           const baseEnv = adapters.baseEnv ?? process.env;
           const localAppData = adapters.localAppData ?? baseEnv.LOCALAPPDATA;
@@ -2265,21 +2294,24 @@ export async function runWorker(configInput, adapters = {}) {
           reason = `EDIT_SCOPE_${safeErrorCode(error, 'INVALID')}`;
         }
       }
-      if (!reason && !config.executor) reason = 'EXECUTOR_NOT_CONFIGURED';
+      if (!reason && !preparedExecutor) reason = executorRouteFailure(config, next.job.kind);
       else if (!reason) {
         try {
           // The OpenCode verifier's contract is throw-on-failure and return the
           // validated Task Scheduler readback on success; unlike the Codex
           // verifier, it does not expose a `ready` boolean.
-          verifyExecutor(config.executor);
+          verifyExecutor(preparedExecutor);
         } catch (error) {
           reason = `EXECUTOR_TASK_${safeErrorCode(error)}`;
         }
       }
-      if (!reason && config.executor.source_bundle_per_attempt === true) {
+      if (!reason && isEditExecutionKind(next.job.kind) &&
+          preparedExecutor.source_bundle_per_attempt !== true)
+        reason = 'EXECUTOR_SOURCE_BUNDLE_PER_ATTEMPT_REQUIRED';
+      if (!reason && preparedExecutor.source_bundle_per_attempt === true) {
         try {
           const bundle = createSourceBundle({ workspace: config.workspace,
-            descriptor: config.executor, job: next.job, attemptId: randomUUID() });
+            descriptor: preparedExecutor, job: next.job, attemptId: randomUUID() });
           if (bundle.source_sha !== next.job.source_sha || !HASH.test(bundle.sha256 || ''))
             throw new Error('EXECUTOR_SOURCE_BUNDLE_IDENTITY_MISMATCH');
           preparedSourceBundle = { attempt_id: bundle.attempt_id, sha256: bundle.sha256 };
@@ -2316,7 +2348,7 @@ export async function runWorker(configInput, adapters = {}) {
   const job = next.job;
   const discardPreparedSourceBundle = () => {
     if (!preparedSourceBundle) return;
-    try { cleanupExecutorAttempt(config.executor, preparedSourceBundle.attempt_id); }
+    try { cleanupExecutorAttempt(preparedExecutor, preparedSourceBundle.attempt_id); }
     catch { log(`EXECUTOR_SOURCE_BUNDLE_CLEANUP_UNKNOWN_${job.request_id}`); }
   };
   if (job.source_pr === undefined && job.source_sha !== head) {
@@ -2429,7 +2461,7 @@ export async function runWorker(configInput, adapters = {}) {
   const start = receipt(job.request_id, attemptId, 'STARTED', job);
   postReceipt(config, start, me);
   if (executorDispatch) {
-    const dispatched = dispatchExecutor(config.executor, {
+    const dispatched = dispatchExecutor(preparedExecutor, {
       request_id: job.request_id, attempt_id: attemptId, source_sha: job.source_sha, job, spec,
       ...(preparedSourceBundle ? { source_bundle_sha256: preparedSourceBundle.sha256 } : {}),
     });

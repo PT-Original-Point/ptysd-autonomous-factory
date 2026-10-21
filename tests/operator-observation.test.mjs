@@ -80,7 +80,10 @@ test('runtime source identity is published only when a deployment manifest match
   const root=mkdtempSync(join(tmpdir(),'pty-runtime-fingerprint-'));
   const runtimeDir=join(root,'runtime');
   const backup=join(runtimeDir,'backups','worker-deploy-accepted-fixture');
-  const files=['worker.mjs','operator-observation.mjs','codex-continuation.mjs','safe-error-code.mjs'];
+  const installer=readFileSync(new URL('../native-bridge/install.ps1',import.meta.url),'utf8');
+  const runtimeBundle=installer.match(/\$runtimeFiles\s*=\s*@\(([\s\S]*?)\)/i);
+  assert.ok(runtimeBundle,'installer declares the deployed Worker runtime bundle');
+  const files=[...runtimeBundle[1].matchAll(/['"]([^'"]+\.mjs)['"]/g)].map(match=>match[1]);
   const digest=value=>createHash('sha256').update(value).digest('hex');
   try {
     mkdirSync(backup,{recursive:true});
@@ -94,6 +97,8 @@ test('runtime source identity is published only when a deployment manifest match
     writeFileSync(join(backup,'manifest.json'),JSON.stringify(manifest));
     const verified=collectRuntimeDeployment({runtimeDir,now:()=>new Date(now).toISOString()});
     assert.equal(verified.status,'MANIFEST_MATCHED');
+    assert.deepEqual(Object.keys(verified.component_sha256).sort(),[...files].sort(),
+      'runtime fingerprint covers every module copied by the production installer');
     assert.equal(verified.source_main_sha,'a'.repeat(40));
     assert.equal(verified.deployment_pr,462);
     assert.equal(verified.component_sha256['worker.mjs'],staged[0].stage_sha256);
@@ -117,6 +122,13 @@ test('runtime source identity is published only when a deployment manifest match
     assert.equal(ambiguous.status,'UNKNOWN','different matching deployment identities are ambiguous');
     assert.equal(ambiguous.reason_code,'DEPLOYMENT_MANIFEST_AMBIGUOUS');
     rmSync(conflictingBackup,{recursive:true,force:true});
+
+    writeFileSync(join(runtimeDir,'opencode-v2.mjs'),'dependency changed after deployment');
+    const dependencyMismatch=collectRuntimeDeployment({runtimeDir,now:()=>new Date(now).toISOString()});
+    assert.equal(dependencyMismatch.status,'UNKNOWN',
+      'a changed non-entry runtime dependency must invalidate deployment identity');
+    assert.equal(dependencyMismatch.reason_code,'DEPLOYMENT_MANIFEST_NOT_MATCHED');
+    writeFileSync(join(runtimeDir,'opencode-v2.mjs'),Buffer.from('verified runtime component opencode-v2.mjs'));
 
     writeFileSync(join(runtimeDir,'worker.mjs'),'changed after deployment');
     const mismatch=collectRuntimeDeployment({runtimeDir,now:()=>new Date(now).toISOString()});
@@ -931,7 +943,9 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
     runtime_deployment:{status:'MANIFEST_MATCHED',observed_at:observedAt,source_main_sha:sha,
       deployment_pr:462,deployment_pr_head:'b'.repeat(40),bundle_sha256:'c'.repeat(64),
       component_sha256:{'worker.mjs':'d'.repeat(64),'operator-observation.mjs':'e'.repeat(64),
-        'codex-continuation.mjs':'f'.repeat(64),'safe-error-code.mjs':'1'.repeat(64)}},
+        'codex-continuation.mjs':'f'.repeat(64),'safe-error-code.mjs':'1'.repeat(64),
+        'opencode-v2.mjs':'2'.repeat(64),'v2-readiness.mjs':'3'.repeat(64),
+        'captured-process.mjs':'4'.repeat(64),'windows-executor.mjs':'5'.repeat(64)}},
   });
   const comments=[{id:42,body:encodeOperatorObservation(snapshot),
     user:{login:'wfvupu1212'},created_at:observedAt,
