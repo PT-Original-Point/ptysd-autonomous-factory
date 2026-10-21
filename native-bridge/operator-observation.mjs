@@ -9,6 +9,7 @@ export const OPERATOR_PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
 export const OPERATOR_ISSUE = 407;
 const MAX_OPERATOR_COMMENT_BODY_LENGTH = 65_536;
 const FORBIDDEN_KEYS = /^(?:pid|process_id|command|commandline|command_line|argv|path|absolute_path|stdout|stderr|prompt|token|authorization|credential|diff|environment|username|user_name|user_id|email|computer_name|host_name)$/i;
+const GITHUB_LOGIN = /^[A-Za-z0-9-]{1,39}$/;
 const SNAPSHOT_ID = /^[a-f0-9-]{36}$/i;
 const SENSITIVE_VALUE = /(?:\b[A-Z]:\\|\\\\[^\\\s]+\\|\bgh[pousr]_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bBearer\s+[A-Za-z0-9._~-]{16,})/i;
 
@@ -40,6 +41,10 @@ export function parseOperatorObservation(body) {
       !Number.isSafeInteger(value.sequence) || value.sequence < 1 ||
       !validTime(value.observed_at) ||
       (value.published_at !== undefined && !validTime(value.published_at)) ||
+      (value.publisher_login !== undefined && !GITHUB_LOGIN.test(value.publisher_login || '')) ||
+      (value.comment_author_login !== undefined && !GITHUB_LOGIN.test(value.comment_author_login || '')) ||
+      (value.source?.comment_id !== undefined &&
+        (!Number.isSafeInteger(value.source.comment_id) || value.source.comment_id < 1)) ||
       !validTime(value.expires_at) || containsForbiddenKey(value)) return null;
   const observed = Date.parse(value.observed_at);
   const expires = Date.parse(value.expires_at);
@@ -67,6 +72,8 @@ export function findOperatorComment(comments, expectedLogin) {
     return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_AUTHOR_MISMATCH' };
   const observation = parseOperatorObservation(comment.body);
   if (!observation) return { status: 'UNKNOWN', error: 'INVALID_OPERATOR_OBSERVATION' };
+  if (observation.source?.comment_id !== undefined && observation.source.comment_id !== comment.id)
+    return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_ID_MISMATCH' };
   return { status: 'OK', comment, observation, error: null };
 }
 

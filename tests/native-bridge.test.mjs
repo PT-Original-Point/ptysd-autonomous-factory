@@ -239,10 +239,13 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
     assert.equal(existsSync(ambiguousDiagnosticPath), true);
     const diagnostic = JSON.parse(readFileSync(ambiguousDiagnosticPath, 'utf8'));
     assert.deepEqual(Object.keys(diagnostic).sort(),
-      ['error_code', 'observed_at', 'schema', 'source_sha', 'status'].sort());
+      ['error_code', 'observed_at', 'publisher_identity', 'schema', 'source_sha', 'status'].sort());
     assert.equal(diagnostic.status, 'UNKNOWN');
     assert.equal(diagnostic.source_sha, commit);
     assert.equal(diagnostic.error_code, 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN');
+    assert.deepEqual(diagnostic.publisher_identity, {
+      publisher_login: 'trusted-publisher', comment_author_login: 'trusted-publisher',
+    });
     assert.ok(!JSON.stringify(diagnostic).includes('MOCK_READBACK_UNAVAILABLE_AFTER_PATCH'));
     const observations = ambiguous.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
     assert.equal(observations.length, 1);
@@ -699,6 +702,83 @@ test('candidate observation distinguishes unknown PR readback from stale and cur
     assert.equal(state==='STARTED' ? observed.current_task?.request_id : observed.current_task,
       state==='STARTED' ? candidate.request_id : null);
   }
+});
+
+test('operator observation publishes the single seeded comment with role-separated identity and conservative W1/W2/W3 records', async () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const actor = 't14210184';
+  const commentAuthor = 'wfvupu1212';
+  const now = Date.now();
+  const prior = seededOperatorObservation(701, 2, 'c'.repeat(40), now - 60_000);
+  const observationComment = { id: 701, user: { login: commentAuthor },
+    body: encodeOperatorObservation(prior), updated_at: new Date(now - 50_000).toISOString() };
+  const w2Job = withHumanGoal({ schema: 6, project_id: PROJECT, host,
+    request_id: 'PTYSD_W2_OBSERVATION_STALE_20261021', kind: 'antigravity_edit',
+    source_sha: 'c'.repeat(40), spec_path: 'native-bridge/tasks/w2-quota-canary.md',
+    spec_sha256: hash, model: ANTIGRAVITY_V2_MODEL, variant: 'high',
+    edit_paths: ['src/w2-quota-canary.mjs'], source_pr: 461 });
+  const jobComment = { ...com(702, encoded(w2Job), actor),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+  const comments = [observationComment, jobComment];
+  const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
+    dispatchers: [actor], state_dir: 'unused' };
+  const dependencies = {
+    now: () => new Date(now),
+    collectWindowsObservation: () => ({ status: 'FRESH', observed_at: new Date(now).toISOString(),
+      native_task: { registered: true, enabled: true, state: 'READY' } }),
+    readRunnerRegistration: () => ({ total_count: 0 }),
+    readComment: id => structuredClone(comments.find(item => item.id === id)),
+    patchComment: (id, body) => {
+      const target = comments.find(item => item.id === id);
+      assert.equal(id, 701);
+      target.body = body;
+      target.updated_at = new Date(now + 1_000).toISOString();
+    },
+    readComments: () => structuredClone(comments),
+  };
+  const result = await publishOperatorObservation(config, actor, comments, 'e'.repeat(40),
+    dependencies, new Map([[461, 'd'.repeat(40)]]));
+
+  assert.equal(result.status, 'UPDATED');
+  assert.deepEqual(result.publisher_identity, {
+    publisher_login: actor, comment_author_login: commentAuthor,
+  });
+  assert.equal(result.comment_id, 701);
+  assert.equal(comments.filter(item => item.body.startsWith(OPERATOR_MARKER)).length, 1);
+  assert.equal(result.observation.sequence, 3);
+  assert.equal(result.observation.publisher_login, actor);
+  assert.equal(result.observation.comment_author_login, commentAuthor);
+  assert.deepEqual(result.observation.workers.map(worker => worker.worker_id), ['W1', 'W2', 'W3']);
+  const w1 = result.observation.workers.find(worker => worker.worker_id === 'W1');
+  assert.equal(w1.status, 'UNKNOWN');
+  assert.equal(w1.blocker_code, 'NO_AUTHORIZED_W1_JOB');
+  const w2 = result.observation.workers.find(worker => worker.worker_id === 'W2');
+  assert.equal(w2.status, 'BLOCKED');
+  assert.equal(w2.task_id, w2Job.request_id);
+  assert.equal(w2.task_state, 'STALE_SOURCE');
+  assert.equal(w2.blocker_code, 'STALE_CANDIDATE_SOURCE');
+  assert.equal(w2.task_source_sha, 'c'.repeat(40));
+  assert.equal(w2.source_pr, 461);
+  const w3 = result.observation.workers.find(worker => worker.worker_id === 'W3');
+  assert.equal(w3.status, 'UNKNOWN');
+  assert.equal(w3.blocker_code, 'W3_ZERO_RISK_HANDOFF_NOT_IN_NATIVE_SNAPSHOT');
+});
+
+test('operator observation publisher rejects an untrusted actor without modifying the seeded comment', async () => {
+  const now = Date.now();
+  const comment = { id: 711, user: { login: 'wfvupu1212' },
+    body: encodeOperatorObservation(seededOperatorObservation(711, 2, 'c'.repeat(40), now - 60_000)),
+    updated_at: new Date(now - 50_000).toISOString() };
+  let patches = 0;
+  await assert.rejects(publishOperatorObservation({ repo: REPO, project_id: PROJECT,
+    host: 'DESKTOP-1B6PD2P', issue: 407, dispatchers: [], state_dir: 'unused' },
+  'untrusted-actor', [comment], 'e'.repeat(40), {
+    now: () => new Date(now),
+    collectWindowsObservation: () => ({ status: 'FRESH' }),
+    patchComment: () => { patches++; },
+  }), /OPERATOR_PUBLISHER_IDENTITY_NOT_AUTHORIZED/);
+  assert.equal(patches, 0);
+  assert.equal(comment.body.includes('"sequence":2'), true);
 });
 
 test('Issue #310 structured candidate task dispatches through the existing Executor and receipts stay on #407', async () => {
