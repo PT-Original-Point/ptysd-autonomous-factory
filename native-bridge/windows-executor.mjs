@@ -117,6 +117,43 @@ export function validateExecutorDescriptor(value) {
   return value;
 }
 
+function executorPathsOverlap(left, right) {
+  const a = normalizedWindowsPath(left);
+  const b = normalizedWindowsPath(right);
+  const contains = (parent, child) => child.startsWith(parent.endsWith('\\') ? parent : `${parent}\\`);
+  return a === b || contains(a, b) || contains(b, a);
+}
+
+export function validateExecutorRoutingMap(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('EXECUTOR_LANE_CONFIG_INVALID');
+  const entries = Object.entries(value);
+  if (!entries.length || entries.some(([lane]) => !['opencode', 'antigravity'].includes(lane)))
+    fail('EXECUTOR_LANE_CONFIG_INVALID');
+  const userSids = new Set();
+  const taskNames = new Set();
+  const isolatedPaths = [];
+  let publisherSid = null;
+  for (const [lane, descriptor] of entries) {
+    validateExecutorDescriptor(descriptor);
+    const userSid = descriptor.user_sid.toUpperCase();
+    const taskName = descriptor.task_name.toLocaleLowerCase('en-US');
+    if (userSids.has(userSid)) fail('EXECUTOR_LANE_IDENTITY_COLLISION');
+    if (taskNames.has(taskName)) fail('EXECUTOR_LANE_TASK_COLLISION');
+    if (publisherSid && publisherSid !== descriptor.publisher_sid.toUpperCase())
+      fail('EXECUTOR_LANE_PUBLISHER_MISMATCH');
+    userSids.add(userSid);
+    taskNames.add(taskName);
+    publisherSid = descriptor.publisher_sid.toUpperCase();
+    for (const key of ['config_path', 'manifest_dir', 'results_dir', 'working_directory']) {
+      const path = { lane, value: descriptor[key] };
+      if (isolatedPaths.some(other => other.lane !== lane && executorPathsOverlap(path.value, other.value)))
+        fail('EXECUTOR_LANE_PATH_COLLISION');
+      isolatedPaths.push(path);
+    }
+  }
+  return value;
+}
+
 export function executorTaskArguments(descriptor) {
   validateExecutorDescriptor(descriptor);
   return buildHiddenWscriptArguments(descriptor);

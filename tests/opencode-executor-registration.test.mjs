@@ -47,6 +47,52 @@ test('OpenCode registration XML builder delegates to the shared validated task t
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('lane-aware XML builder selects only the requested Antigravity descriptor', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pty-antigravity-task-xml-'));
+  try {
+    const configPath = join(root, 'publisher-config.json');
+    const opencode = descriptor();
+    const antigravity = { ...descriptor(), task_name: '\\PTYSD\\AntigravityExecutor',
+      user_sid: 'S-1-5-21-101-202-303-1003',
+      script_path: 'C:\\ProgramData\\PTYSD\\antigravity-executor.mjs',
+      config_path: 'C:\\Users\\PTYSD-Antigravity\\PTYSD\\executor-config.json',
+      manifest_dir: 'C:\\ProgramData\\PTYSD\\antigravity-requests',
+      results_dir: 'C:\\Users\\PTYSD-Antigravity\\PTYSD\\results',
+      working_directory: 'C:\\ProgramData\\PTYSD\\antigravity-requests' };
+    writeFileSync(configPath, JSON.stringify({ executors: { opencode, antigravity } }), 'utf8');
+    const result = spawnSync(process.execPath, [xmlBuilder, configPath, 'antigravity'], { encoding: 'utf8' });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, buildExecutorTaskXml(antigravity));
+    assert.deepEqual(validateExecutorTaskXml(result.stdout, antigravity), {
+      ready: true, user_sid: antigravity.user_sid, logon_type: 'Password',
+      run_level: 'LeastPrivilege', execution_time_limit: 'PT0S', multiple_instances: 'IgnoreNew',
+    });
+    assert.doesNotMatch(result.stdout, /OpenCodeExecutor/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('lane-aware XML builder fails closed for absent W2 mapping, invalid lane, and ambiguous config', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pty-invalid-executor-lane-'));
+  try {
+    const configPath = join(root, 'publisher-config.json');
+    const opencode = descriptor();
+    for (const [config, lane, code] of [
+      [{ executors: { opencode } }, 'antigravity', 'EXECUTOR_NOT_CONFIGURED_FOR_ANTIGRAVITY'],
+      [{ executors: { opencode }, executor: opencode }, 'opencode', 'EXECUTOR_ROUTING_CONFIG_AMBIGUOUS'],
+      [{ executors: { opencode, antigravity: { ...opencode,
+        task_name: '\\PTYSD\\AntigravityExecutor' } } }, 'antigravity', 'EXECUTOR_LANE_IDENTITY_COLLISION'],
+      [{ executors: { opencode } }, 'codex', 'EXECUTOR_LANE_INVALID'],
+    ]) {
+      writeFileSync(configPath, JSON.stringify(config), 'utf8');
+      const result = spawnSync(process.execPath, [xmlBuilder, configPath, lane], { encoding: 'utf8' });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, new RegExp(code));
+      assert.equal(result.stdout, '');
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('OpenCode XML builder rejects missing or invalid descriptors without emitting a task', () => {
   const root = mkdtempSync(join(tmpdir(), 'pty-opencode-invalid-task-'));
   try {
@@ -95,6 +141,10 @@ test('OpenCode installer audit is read-only and reports an absent publisher desc
 test('OpenCode registration source never starts, removes, or installs host components', () => {
   const source = readFileSync(registrationScript, 'utf8');
   assert.match(source, /Register-ScheduledTask/);
+  assert.match(source, /ValidateSet\('opencode','antigravity'\)\]\[string\]\$ExecutorLane = 'opencode'/);
+  assert.match(source, /Get-Field \$executorMap \$ExecutorLane/);
+  assert.match(source, /Get-Field \$Config 'enable_antigravity_model_runs'/);
+  assert.match(source, /\$builderPath \$PublisherConfigPath \$ExecutorLane/);
   assert.match(source, /Get-ScheduledTask/);
   assert.doesNotMatch(source, /\b(?:Start-ScheduledTask|Unregister-ScheduledTask|Set-Acl|New-LocalUser|Move-Item)\b/);
   assert.match(source, /EXECUTOR_TASK_EXISTS_REVIEW_REQUIRED_NO_OVERWRITE/);
