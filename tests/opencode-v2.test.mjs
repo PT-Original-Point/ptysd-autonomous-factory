@@ -240,17 +240,17 @@ test('runPlan dispatches an explicitly allowlisted no-auth OpenCode edit and kee
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
-test('runPlan keeps unauthenticated OpenCode models gated unless exact free-model authorization is present', async t => {
+test('runPlan requires provider authentication and model authorization independently', async t => {
   const model='opencode/deepseek-v4.1-flash-free';
   const cases=[
     {name:'unknown provider metadata',auth:{status:'AUTH_PROVIDER_METADATA_UNKNOWN'},
-      freeModels:[model],allowed:true,expected:'OPENCODE_V2_AUTH_METADATA_UNKNOWN'},
-    {name:'missing explicit no-auth free-model authorization',auth:{status:'AUTH_PROVIDER_RECORD_ABSENT'},
-      freeModels:[],allowed:true,expected:'OPENCODE_V2_AUTH_NOT_READY'},
-    {name:'different free model in authorization list',auth:{status:'AUTH_PROVIDER_RECORD_ABSENT'},
-      freeModels:['opencode/another-free-model'],allowed:true,expected:'OPENCODE_V2_AUTH_NOT_READY'},
+      legacyFreeModels:[model],allowed:true,expected:'OPENCODE_V2_AUTH_METADATA_UNKNOWN'},
+    {name:'provider record absent without legacy allowlist',auth:{status:'AUTH_PROVIDER_RECORD_ABSENT'},
+      legacyFreeModels:undefined,allowed:true,expected:'OPENCODE_V2_AUTH_NOT_READY'},
+    {name:'provider record absent with another legacy allowlist entry',auth:{status:'AUTH_PROVIDER_RECORD_ABSENT'},
+      legacyFreeModels:['opencode/another-free-model'],allowed:true,expected:'OPENCODE_V2_AUTH_NOT_READY'},
     {name:'model absent from the general model allowlist',auth:{status:'AUTH_PROVIDER_RECORD_ABSENT'},
-      freeModels:[model],allowed:false,expected:'MODEL_NOT_EXPLICITLY_ALLOWED'},
+      legacyFreeModels:[model],allowed:false,expected:'MODEL_NOT_EXPLICITLY_ALLOWED'},
   ];
   for (const [index,scenario] of cases.entries()) await t.test(scenario.name,async()=>{
     const root=mkdtempSync(join(tmpdir(),'oc2-noauth-deny-'));
@@ -260,7 +260,7 @@ test('runPlan keeps unauthenticated OpenCode models gated unless exact free-mode
       model,variant:null};
     const config={workspace,state_dir,enable_v2_model_runs:true,
       allowed_models:scenario.allowed?{[model]:[null]}:{},
-      unauthenticated_free_models:scenario.freeModels};
+      unauthenticated_free_models:scenario.legacyFreeModels};
     let launches=0,authReads=0;
     try {
       const result=await runPlan('Synthetic read-only qualification; model transport must not launch.',
