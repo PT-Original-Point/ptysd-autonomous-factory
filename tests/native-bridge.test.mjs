@@ -9,7 +9,7 @@ import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
   RECEIPT_MARKER, checkModelAuthorization, terminalStateForResult,
   runWorker as runWorkerImplementation, main as runWorker, writeReceipt, ISSUE_TITLE, guardConfig,
   runPlan as executeOpenCodeTask, verifyCapturedEvidence, antigravityExecutionAuthorization,
-  codexTerminalReceipt, selectNextWithCodexClaim, readPinnedCandidateSources,
+  codexTerminalReceipt, selectNextWithCodexClaim, readPinnedCandidateSources, executorForJobKind,
   publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight } from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, OPERATOR_COMMENT_ID, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
@@ -58,6 +58,80 @@ function seededOperatorObservation(commentId, sequence, mainSha, at = Date.now()
     monitor_candidate: null, incident: null,
   };
 }
+
+function executorDescriptorForLane(lane, userSuffix) {
+  const root = `C:\\PTYSD\\${lane}`;
+  return {
+    task_name: `\\PTYSD\\${lane}Executor`,
+    user_sid: `S-1-5-21-100-200-300-${userSuffix}`,
+    publisher_sid: 'S-1-5-21-100-200-300-1002',
+    wscript_path: 'C:\\Windows\\System32\\wscript.exe',
+    launcher_path: 'C:\\PTYSD\\HiddenExecutor.vbs',
+    node_bin: 'C:\\Node\\node.exe',
+    script_path: 'C:\\PTYSD\\executor.mjs',
+    config_path: `${root}\\executor.json`,
+    manifest_dir: `${root}\\manifests`,
+    results_dir: `${root}\\results`,
+    working_directory: `${root}\\work`,
+    source_bundle_per_attempt: true,
+  };
+}
+
+test('model Executor routing isolates W1 and W2 identities, tasks, manifests and workspaces', () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-executor-lane-routing-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const stateDir = join(root, 'state');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(stateDir, { recursive: true });
+    const opencode = executorDescriptorForLane('OpenCode', 1001);
+    const antigravity = executorDescriptorForLane('Antigravity', 1003);
+    const base = { repo: REPO, project_id: PROJECT, host: hostname().toUpperCase(), issue: 407,
+      workspace, state_dir: stateDir, dispatchers: ['t14210184'] };
+    const config = guardConfig({ ...base, executors: { opencode, antigravity } });
+
+    assert.equal(executorForJobKind(config, 'opencode_plan'), opencode);
+    assert.equal(executorForJobKind(config, 'opencode_edit'), opencode);
+    assert.equal(executorForJobKind(config, 'antigravity_edit'), antigravity);
+    assert.equal(executorForJobKind({ executors: { opencode } }, 'antigravity_edit'), null,
+      'an explicit but missing W2 route must not fall back to W1');
+    assert.equal(executorForJobKind({ executor: opencode }, 'opencode_edit'), opencode,
+      'the unmarked legacy descriptor remains assigned to OpenCode');
+    assert.equal(executorForJobKind({ executor: opencode }, 'antigravity_edit'), null,
+      'an unmarked legacy descriptor is never assumed to be a W2 executor');
+    assert.equal(executorForJobKind({ executor: opencode, enable_antigravity_model_runs: true },
+      'antigravity_edit'), null,
+    'enabling W2 does not infer that a legacy W1 identity is safe for W2');
+    assert.equal(executorForJobKind({ executor: opencode, executor_lane: 'antigravity' },
+      'antigravity_edit'), opencode,
+    'a legacy descriptor can serve W2 only when explicitly lane-bound');
+    assert.equal(executorForJobKind({ executor: opencode, executor_lane: 'antigravity' },
+      'opencode_edit'), null);
+    assert.equal(executorForJobKind({ executor: opencode, executor_lane: 'opencode' }, 'antigravity_edit'), null,
+      'a legacy descriptor explicitly assigned to W1 cannot execute W2 jobs');
+    assert.equal(executorForJobKind({ executor: opencode, executor_lane: 'opencode' }, 'opencode_edit'), opencode);
+    assert.equal(executorForJobKind({ executor: opencode, enable_v2_model_runs: true,
+      enable_antigravity_model_runs: true }, 'antigravity_edit'), null,
+    'a shared legacy descriptor cannot serve both enabled Worker lanes');
+    assert.equal(executorForJobKind(config, 'ping'), null);
+
+    assert.throws(() => guardConfig({ ...base, executor: opencode,
+      executors: { opencode, antigravity } }), /EXECUTOR_ROUTING_CONFIG_AMBIGUOUS/);
+    assert.throws(() => guardConfig({ ...base, executor: opencode, executor_lane: 'codex' }),
+      /EXECUTOR_LANE_CONFIG_INVALID/);
+    assert.throws(() => guardConfig({ ...base, executor: opencode, executor_lane: 'opencode',
+      executors: { opencode, antigravity } }), /EXECUTOR_ROUTING_CONFIG_AMBIGUOUS/);
+    assert.throws(() => guardConfig({ ...base, executors: { opencode,
+      antigravity: { ...antigravity, user_sid: opencode.user_sid } } }),
+    /EXECUTOR_LANE_IDENTITY_COLLISION/);
+    assert.throws(() => guardConfig({ ...base, executors: { opencode,
+      antigravity: { ...antigravity, manifest_dir: opencode.results_dir } } }),
+    /EXECUTOR_LANE_PATH_COLLISION/);
+    assert.throws(() => guardConfig({ ...base, executors: { opencode,
+      antigravity: { ...antigravity, task_name: opencode.task_name } } }),
+    /EXECUTOR_LANE_TASK_COLLISION/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservation = null,
   seededObservation = true,
@@ -882,7 +956,8 @@ test('Issue #310 structured candidate task dispatches through the existing Execu
       manifest_dir:join(root,'manifests'),results_dir:join(root,'results'),
       working_directory:root,source_bundle_per_attempt:true};
     const config={repo:REPO,project_id:PROJECT,host,issue:407,workspace,state_dir:stateDir,
-      dispatchers:['t14210184'],executor,enable_v2_model_runs:true,
+      dispatchers:['t14210184'],executors:{opencode:executor,
+        antigravity:executorDescriptorForLane('Antigravity',1003)},enable_v2_model_runs:true,
       allowed_models:{'opencode/spark':['high']}};
     let bundleCalls=0,dispatchCalls=0,modelCalls=0,candidatePrReads=0,posted=[];
     const result=await executeWorker(config,{
@@ -900,12 +975,14 @@ test('Issue #310 structured candidate task dispatches through the existing Execu
         throw new Error(`UNEXPECTED_TEST_API_${uri}`);
       },
       commentsRead:()=>receiptComments,
-      assertExecutorTaskReady:()=>({ready:true}),
-      createExecutorSourceBundle:({job:sourceJob,attemptId})=>{
+      assertExecutorTaskReady:descriptor=>{assert.equal(descriptor,executor);return {ready:true};},
+      createExecutorSourceBundle:({descriptor,job:sourceJob,attemptId})=>{
+        assert.equal(descriptor,executor,'W1 source bundles must use the OpenCode descriptor');
         bundleCalls++; assert.equal(sourceJob.kind,'opencode_edit'); assert.equal(sourceJob.source_pr,437);
         return {attempt_id:attemptId,source_sha:sourceJob.source_sha,sha256:'c'.repeat(64)};
       },
-      dispatchToExecutor:(_descriptor,manifest)=>{
+      dispatchToExecutor:(descriptor,manifest)=>{
+        assert.equal(descriptor,executor,'W1 dispatch must not cross into the W2 task or SID');
         dispatchCalls++; assert.equal(manifest.job.kind,'opencode_edit'); assert.equal(manifest.job.source_pr,437);
         assert.deepEqual(manifest.job.edit_paths,['src/worker.mjs']);
         assert.equal(manifest.source_bundle_sha256,'c'.repeat(64));
@@ -993,14 +1070,10 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
       antigravity_execution_attestation:{...attestation,observed_at:new Date(Date.now()+60_000).toISOString()}},
     Date.now()),'ANTIGRAVITY_EXECUTION_ATTESTATION_UNKNOWN',
     'future-dated policy evidence remains invalid');
-    const executor={task_name:'\\PTYSD\\OpenCodeExecutor',user_sid:'S-1-5-21-100-200-300-1001',
-      publisher_sid:'S-1-5-21-100-200-300-1002',wscript_path:'C:\\Windows\\System32\\wscript.exe',
-      launcher_path:'C:\\PTYSD\\HiddenCodexExecutor.vbs',node_bin:'C:\\Node\\node.exe',
-      script_path:'C:\\PTYSD\\executor.mjs',config_path:'C:\\PTYSD\\executor.json',
-      manifest_dir:join(root,'manifests'),results_dir:join(root,'results'),
-      working_directory:root,source_bundle_per_attempt:true};
+    const executor=executorDescriptorForLane('Antigravity',1003);
     const config={repo:REPO,project_id:PROJECT,host,issue:407,workspace,state_dir:stateDir,
-      dispatchers:['t14210184'],executor,enable_antigravity_model_runs:false,
+      dispatchers:['t14210184'],executors:{opencode:executorDescriptorForLane('OpenCode',1001),
+        antigravity:executor},enable_antigravity_model_runs:false,
       antigravity_cli_project_id:undefined};
     let bundles=0,dispatches=0,inlineRuns=0,prReads=0,readinessCalls=0,nextReceiptId=420;
     let readinessCreditSetting='SETTINGS_FILE_MISSING';
@@ -1021,7 +1094,10 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
           return {encoding:'base64',content:Buffer.from(spec).toString('base64')};
         throw new Error(`UNEXPECTED_W2_TEST_API_${uri}`);
       },
-      commentsRead:()=>comments,assertExecutorTaskReady:()=>({ready:true}),
+      commentsRead:()=>comments,assertExecutorTaskReady(descriptor){
+        assert.equal(descriptor,executor,'W2 readiness must check the W2 Task Scheduler identity');
+        return {ready:true};
+      },
       localAppData:root,
       resolveAntigravityProjectId(directory){
         assert.equal(directory,workspace);
@@ -1044,12 +1120,14 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
           gemini_aggregate_quota:{status:'GEMINI_AGGREGATE_QUOTA_READ',
             source:'GEMINI_MODELS_AGGREGATE',weekly_remaining_percent:95,five_hour_remaining_percent:99}};
       },
-      createExecutorSourceBundle({job:sourceJob,attemptId}){
+      createExecutorSourceBundle({descriptor,job:sourceJob,attemptId}){
+        assert.equal(descriptor,executor,'W2 source bundles must use the W2 manifest root');
         bundles++; assert.equal(sourceJob.kind,'antigravity_edit');
         assert.equal(sourceJob.model,ANTIGRAVITY_V2_MODEL); assert.equal(sourceJob.variant,'high');
         return {attempt_id:attemptId,source_sha:sourceJob.source_sha,sha256:'d'.repeat(64)};
       },
-      dispatchToExecutor(_descriptor,manifest){
+      dispatchToExecutor(descriptor,manifest){
+        assert.equal(descriptor,executor,'W2 dispatch must not use the W1 task or SID');
         dispatches++; assert.equal(manifest.job.kind,'antigravity_edit');
         assert.equal(manifest.job.source_pr,448); assert.equal(manifest.source_bundle_sha256,'d'.repeat(64));
         return {outcome:'SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION'};
@@ -1088,6 +1166,25 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
 
     Object.assign(config,{enable_antigravity_model_runs:true,
       antigravity_execution_attestation:attestation,allowed_models:{[ANTIGRAVITY_V2_MODEL]:['high']}});
+    const w2Executor=config.executors.antigravity;
+    const w1Executor=config.executors.opencode;
+    delete config.executors;
+    config.executor=w1Executor;
+    const independentPing=mkjob({host,request_id:'PTYSD_PING_WITHOUT_W2_EXECUTOR_20261018'});
+    comments.push({...com(412,encoded(independentPing),'t14210184'),
+      issue_url:`https://api.github.com/repos/${REPO}/issues/310`});
+    const missingW2Executor=await executeWorker(config,adapters);
+    assert.equal(missingW2Executor.state,'FINISHED');
+    assert.equal(missingW2Executor.request_id,independentPing.request_id,
+      'missing W2 identity does not starve an independent authorized ping');
+    assert.ok(logs.some(value=>value.includes('ANTIGRAVITY_LANE_WAITING_ELIGIBILITY_EXECUTOR_NOT_CONFIGURED_FOR_ANTIGRAVITY')),
+      logs.join('\n'));
+    assert.equal(posted.filter(item=>item.request_id===job.request_id).length,0,
+      'missing lane routing must not publish STARTED or claim the W2 task');
+    assert.equal(bundles,0); assert.equal(dispatches,0); assert.equal(readinessCalls,0);
+    delete config.executor;
+    config.executors={opencode:w1Executor,antigravity:w2Executor};
+
     readinessCreditSetting='CREDIT_FALLBACK_DISABLED';
     const authorizedPrReadsBefore=prReads;
     const result=await executeWorker(config,adapters);

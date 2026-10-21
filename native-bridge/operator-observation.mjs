@@ -18,7 +18,8 @@ const GITHUB_LOGIN = /^[A-Za-z0-9-]{1,39}$/;
 const SNAPSHOT_ID = /^[a-f0-9-]{36}$/i;
 const SENSITIVE_VALUE = /(?:\b[A-Z]:\\|\\\\[^\\\s]+\\|\bgh[pousr]_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bBearer\s+[A-Za-z0-9._~-]{16,})/i;
 const DEPLOYED_RUNTIME_FILES = [
-  'worker.mjs', 'operator-observation.mjs', 'codex-continuation.mjs', 'safe-error-code.mjs',
+  'worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs', 'codex-continuation.mjs',
+  'operator-observation.mjs', 'captured-process.mjs', 'safe-error-code.mjs', 'windows-executor.mjs',
 ];
 const SHA1 = /^[a-f0-9]{40}$/i;
 const SHA256 = /^[a-f0-9]{64}$/i;
