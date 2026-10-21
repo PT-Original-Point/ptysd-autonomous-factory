@@ -13,7 +13,8 @@ import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
   publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight } from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
-import { makeCodexExecutorRequest } from '../native-bridge/codex-continuation.mjs';
+import { makeCodexExecutorRequest, codexScopedActionStatus }
+  from '../native-bridge/codex-continuation.mjs';
 import { ANTIGRAVITY_V2_MODEL, buildAntigravityChildEnvironment, buildNativeChildEnvironment }
   from '../native-bridge/v2-readiness.mjs';
 
@@ -59,7 +60,8 @@ function seededOperatorObservation(commentId, sequence, mainSha, at = Date.now()
 }
 
 function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservation = null,
-  goalComments = [] } = {}) {
+  seededObservation = true,
+  goalComments = [], taskComments = [], candidatePulls = {}, configOverrides = {} } = {}) {
   const root = mkdtempSync(join(homedir(), '.ptysd-worker-observation-'));
   const workspace = join(root, 'workspace');
   const stateDir = join(root, 'state');
@@ -72,10 +74,11 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
   const store = {
     next: 703,
     comments: [
-      { ...com(observationId, encodeOperatorObservation(
+      ...(seededObservation ? [{ ...com(observationId, encodeOperatorObservation(
         priorObservation || seededOperatorObservation(observationId, 17, commit, Date.now() - 60_000),
-      ), publisher), updated_at: new Date(Date.now() - 60_000).toISOString() },
+      ), publisher), updated_at: new Date(Date.now() - 60_000).toISOString() }] : []),
       com(702, encoded(job), 't14210184'),
+      ...taskComments,
     ],
     patches: 0,
     posts: 0,
@@ -83,15 +86,22 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
     now: Date.now(),
   };
   const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
-    workspace, state_dir: stateDir, dispatchers: ['t14210184'] };
+    workspace, state_dir: stateDir, dispatchers: ['t14210184'], ...configOverrides };
   const api = uri => {
     if (uri === 'user') return { login: publisher };
     if (uri === `repos/${REPO}/issues/407`)
       return { title: ISSUE_TITLE, state: 'open' };
     if (uri === `repos/${REPO}/git/ref/heads/main`)
       return { object: { sha: commit } };
+    const pullMatch = uri.match(new RegExp(`^repos/${REPO}/pulls/(\\d+)$`));
+    if (pullMatch) {
+      const pull = candidatePulls[Number(pullMatch[1])];
+      if (!pull) throw new Error(`MOCK_PULL_MISSING:${pullMatch[1]}`);
+      return structuredClone(pull);
+    }
     const match = uri.match(/\/issues\/comments\/(\d+)$/);
-    if (match) return store.comments.find(c => c.id === Number(match[1]));
+    if (match) return store.comments.find(c => c.id === Number(match[1])) ||
+      goalComments.find(c => c.id === Number(match[1]));
     throw new Error(`UNEXPECTED_MOCK_API_ROUTE:${uri}`);
   };
   const observationDependencies = {
@@ -175,8 +185,10 @@ test('FINISHED is attempt lifecycle only and preserves an unverified semantic ou
 
 test('Worker main publishes the seeded observation, verifies sequence readback, and preserves legal dispatch on ambiguity', async () => {
   const successful = makeObservationWorkerFixture();
+  const diagnosticPath = join(successful.root, 'state', 'operator-observation-last-error.json');
   try {
     await successful.run();
+    assert.equal(existsSync(diagnosticPath), false);
     let observations = successful.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
     assert.equal(observations.length, 1);
     assert.equal(observations[0].id, successful.observationId);
@@ -199,6 +211,9 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
       successful.store.now += 60_000;
       result = await successful.run();
       assert.equal(result.state, 'NO_DELTA');
+      assert.equal(result.scope, 'FORMAL_WORK_QUEUE_ONLY');
+      assert.equal(result.mission_complete, false,
+        'an empty formal queue does not close the Human mission');
     }
     observations = successful.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
     value = parseOperatorObservation(observations[0].body);
@@ -211,16 +226,30 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
       'ten source-only idle ticks must not invoke the model adapter');
     assert.equal(successful.codexDispatchCalls.count, 0,
       'ten source-only idle ticks must not start the Codex executor');
+    assert.ok(successful.logs.includes('NO_AUTHORIZED_W1_JOB'),
+      'absence of a W1 job is reported separately from model eligibility');
+    assert.ok(!successful.logs.some(x => x.startsWith('OPENCODE_LANE_WAITING_ELIGIBILITY_')),
+      'no W1 job must not be misreported as a model login or qualification failure');
   } finally { successful.cleanup(); }
 
   const ambiguous = makeObservationWorkerFixture({ ambiguousReadback: true });
+  const ambiguousDiagnosticPath = join(ambiguous.root, 'state', 'operator-observation-last-error.json');
   try {
     await ambiguous.run();
+    assert.equal(existsSync(ambiguousDiagnosticPath), true);
+    const diagnostic = JSON.parse(readFileSync(ambiguousDiagnosticPath, 'utf8'));
+    assert.deepEqual(Object.keys(diagnostic).sort(),
+      ['error_code', 'observed_at', 'schema', 'source_sha', 'status'].sort());
+    assert.equal(diagnostic.status, 'UNKNOWN');
+    assert.equal(diagnostic.source_sha, commit);
+    assert.equal(diagnostic.error_code, 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN');
+    assert.ok(!JSON.stringify(diagnostic).includes('MOCK_READBACK_UNAVAILABLE_AFTER_PATCH'));
     const observations = ambiguous.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER));
     assert.equal(observations.length, 1);
     assert.equal(observations[0].id, ambiguous.observationId);
     assert.equal(ambiguous.store.patches, 1);
-    assert.ok(ambiguous.logs.includes('OPERATOR_OBSERVATION_UPDATE_UNKNOWN'));
+    assert.ok(ambiguous.logs.includes(
+      'OPERATOR_OBSERVATION_UPDATE_UNKNOWN_OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN'));
     assert.ok(!ambiguous.logs.includes('OPERATOR_OBSERVATION_UPDATED'));
     assert.deepEqual(ambiguous.receiptWrites.map(x => x.state), ['STARTED', 'FINISHED'],
       'an ambiguous status readback must not block an otherwise valid ping dispatch');
@@ -234,10 +263,26 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
     assert.equal(ambiguous.receiptWrites.length, 2,
       'reconciliation must not replay the completed task or create duplicate receipts');
     assert.ok(ambiguous.logs.includes('OPERATOR_OBSERVATION_UPDATED'));
+    assert.equal(existsSync(ambiguousDiagnosticPath), false,
+      'a verified same-comment recovery clears the prior local failure diagnostic');
     assert.equal(ambiguous.modelCalls.count, 0);
     assert.equal(ambiguous.codexDispatchCalls.count, 0,
       'observation recovery must not launch the Codex executor');
   } finally { ambiguous.cleanup(); }
+
+  const unseeded = makeObservationWorkerFixture({ seededObservation: false });
+  const unseededDiagnosticPath = join(unseeded.root, 'state', 'operator-observation-last-error.json');
+  try {
+    const result = await unseeded.run();
+    assert.equal(result.state, 'FINISHED', 'missing monitor seed must not block independent dispatch');
+    assert.ok(unseeded.logs.includes('OPERATOR_OBSERVATION_NOT_SEEDED_OPERATOR_OBSERVATION_NOT_SEEDED'));
+    assert.deepEqual(unseeded.receiptWrites.map(value => value.state), ['STARTED', 'FINISHED']);
+    assert.equal(unseeded.modelCalls.count, 0);
+    const diagnostic = JSON.parse(readFileSync(unseededDiagnosticPath, 'utf8'));
+    assert.equal(diagnostic.status, 'NOT_SEEDED');
+    assert.equal(diagnostic.error_code, 'OPERATOR_OBSERVATION_NOT_SEEDED');
+    assert.equal(diagnostic.source_sha, commit);
+  } finally { unseeded.cleanup(); }
 });
 
 test('Worker recognizes the two trusted Human R4 directive markers without starting a model', async () => {
@@ -250,6 +295,8 @@ test('Worker recognizes the two trusted Human R4 directive markers without start
     const fixture = makeObservationWorkerFixture({ goalComments: [comment] });
     try {
       await fixture.run();
+      assert.ok(fixture.logs.includes(`HUMAN_GOAL_SCOPED_ACTION_MISSING_${id}_NO_MODEL`),
+        'a trusted goal without a scoped Codex action is explicitly rejected');
       assert.ok(fixture.logs.includes(`HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED_${id}_NO_MODEL`),
         `the latest trusted Human marker ${marker} must be discovered`);
       assert.equal(fixture.modelCalls.count, 0,
@@ -258,6 +305,97 @@ test('Worker recognizes the two trusted Human R4 directive markers without start
         'marker discovery alone must not start an executor');
     } finally { fixture.cleanup(); }
   }
+});
+
+test('a scoped-action omission is reported even when an explicit Codex policy exists', async () => {
+  const id = 6233999101;
+  const comment = humanGoalComment({ id,
+    body: '# Human directive\n<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261021 -->\nNo scoped next action.' });
+  const fixture = makeObservationWorkerFixture({ goalComments: [comment], configOverrides: {
+    human_goal_codex_policy: { enabled: true, model: 'gpt-6.1-sol', reasoning_effort: 'medium',
+      write_paths: ['native-bridge/worker.mjs'] },
+  } });
+  try {
+    const result = await fixture.run();
+    assert.equal(result.state, 'FINISHED',
+      'the scoped Human directive is rejected without starving the independent ping');
+    assert.ok(fixture.logs.includes(`HUMAN_GOAL_SCOPED_ACTION_MISSING_${id}_NO_MODEL`));
+    assert.ok(!fixture.logs.includes(`HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED_${id}_NO_MODEL`));
+    assert.equal(fixture.modelCalls.count, 0);
+    assert.equal(fixture.codexDispatchCalls.count, 0);
+    assert.deepEqual(fixture.receiptWrites.map(value => value.kind), ['ping', 'ping']);
+  } finally { fixture.cleanup(); }
+});
+
+test('stale W2 candidate source is reported with both SHAs while an independent ping still runs', async () => {
+  const host = hostname().toUpperCase();
+  const expectedSha = 'c'.repeat(40), observedSha = 'd'.repeat(40);
+  const w2Job = withHumanGoal({ schema: 6, project_id: PROJECT, host,
+    request_id: 'PTYSD_W2_STALE_SOURCE_20261021', kind: 'antigravity_edit',
+    source_sha: expectedSha, spec_path: 'native-bridge/tasks/w2-quota-canary.md',
+    spec_sha256: hash, model: ANTIGRAVITY_V2_MODEL, variant: 'high',
+    edit_paths: ['src/w2-quota-canary.mjs'], source_pr: 461 });
+  const w2Comment = { ...com(6188322051, encoded(w2Job)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+  const sameRepo = { id: 1352411536, full_name: REPO };
+  const pull = { number: 461, state: 'open',
+    base: { ref: 'main', repo: sameRepo }, head: { sha: observedSha, repo: sameRepo } };
+  const fixture = makeObservationWorkerFixture({
+    goalComments: [humanGoalComment(), w2Comment], candidatePulls: { 461: pull },
+  });
+  try {
+    const result = await fixture.run();
+    assert.equal(result.state, 'FINISHED', 'the independent zero-model ping remains runnable');
+    assert.ok(fixture.logs.includes(`STALE_CANDIDATE_SOURCE_${w2Job.request_id}_PR_461_` +
+      `EXPECTED_SHA_${expectedSha}_OBSERVED_SHA_${observedSha}_NO_DISPATCH`));
+    assert.deepEqual(fixture.receiptWrites.map(value => value.kind), ['ping', 'ping']);
+    assert.equal(fixture.modelCalls.count, 0);
+    assert.equal(fixture.codexDispatchCalls.count, 0);
+  } finally { fixture.cleanup(); }
+});
+
+test('closed candidate PR is reported as non-dispatchable with its observed SHA', async () => {
+  const host = hostname().toUpperCase();
+  const expectedSha = 'c'.repeat(40), observedSha = 'd'.repeat(40);
+  const w2Job = withHumanGoal({ schema: 6, project_id: PROJECT, host,
+    request_id: 'PTYSD_W2_CLOSED_SOURCE_20261021', kind: 'antigravity_edit',
+    source_sha: expectedSha, spec_path: 'native-bridge/tasks/w2-quota-canary.md',
+    spec_sha256: hash, model: ANTIGRAVITY_V2_MODEL, variant: 'high',
+    edit_paths: ['src/w2-quota-canary.mjs'], source_pr: 461 });
+  const w2Comment = { ...com(6188322051, encoded(w2Job)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+  const sameRepo = { id: 1352411536, full_name: REPO };
+  const pull = { number: 461, state: 'closed',
+    base: { ref: 'main', repo: sameRepo }, head: { sha: observedSha, repo: sameRepo } };
+  const fixture = makeObservationWorkerFixture({
+    goalComments: [humanGoalComment(), w2Comment], candidatePulls: { 461: pull },
+  });
+  try {
+    const result = await fixture.run();
+    assert.equal(result.state, 'FINISHED', 'a rejected candidate does not block an independent ping');
+    assert.ok(fixture.logs.includes(`CANDIDATE_SOURCE_NOT_DISPATCHABLE_${w2Job.request_id}_PR_461_` +
+      `REASON_PR_NOT_OPEN_EXPECTED_SHA_${expectedSha}_OBSERVED_SHA_${observedSha}_NO_DISPATCH`));
+    assert.deepEqual(fixture.receiptWrites.map(value => value.kind), ['ping', 'ping']);
+    assert.equal(fixture.modelCalls.count, 0);
+  } finally { fixture.cleanup(); }
+});
+
+test('an unresolved W2 STARTED attempt is not replayed after its pinned source drifts', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const w2Job = withHumanGoal({ schema: 6, project_id: PROJECT, host,
+    request_id: 'PTYSD_W2_UNKNOWN_EFFECT_20261021', kind: 'antigravity_edit',
+    source_sha: 'c'.repeat(40), spec_path: 'native-bridge/tasks/w2-quota-canary.md',
+    spec_sha256: hash, model: ANTIGRAVITY_V2_MODEL, variant: 'high',
+    edit_paths: ['src/w2-quota-canary.mjs'], source_pr: 461 });
+  const attemptId = '33333333-3333-4333-8333-333333333333';
+  const started = receipt(w2Job.request_id, attemptId, 'STARTED', w2Job);
+  const task = com(1, encoded(w2Job));
+  const unresolved = com(2, RECEIPT_MARKER + JSON.stringify(started), 'worker');
+  const ping = com(3, encoded(mkjob({ host, request_id: 'PTYSD_INDEPENDENT_PING_20261021' })));
+  const next = selectNext([task, unresolved, ping], ['t14210184'], 'worker', host, commit, [],
+    new Map([[461, 'd'.repeat(40)]]));
+  assert.equal(next?.id, ping.id,
+    'unknown W2 external effects remain protected while an unrelated READY job proceeds');
 });
 
 test('fresh OS publication does not carry stale W1 activity or incident state into the new snapshot', async () => {
@@ -1204,7 +1342,8 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
 
     const staleState=join(root,'stale-state'); mkdirSync(staleState);
     const staleDirective={...directive,id:6219236274,
-      body:`# P0\n${marker}\nOriginal directive body before final readback.`};
+      body:`# P0\n${marker}\nOriginal directive body before final readback.\n` +
+        '**Codex 下一動作**：Perform this bounded source-only unit within the pinned write paths.\n'};
     const editedDirective={...staleDirective,body:`${staleDirective.body}\nEdited after intake.`};
     let directReads=0;
     const staleAdapters={...adapters,

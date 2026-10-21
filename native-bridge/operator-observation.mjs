@@ -93,7 +93,10 @@ export async function updateExistingOperatorComment({
   if (Date.parse(candidate.observed_at) <= Date.parse(existing.observation.observed_at))
     return { status: 'UNKNOWN', error: 'OPERATOR_OBSERVED_AT_NOT_MONOTONIC' };
   await patchComment(existing.comment.id, body);
-  const fresh = findOperatorComment(await readComments(), expectedLogin);
+  let commentsAfterWrite;
+  try { commentsAfterWrite = await readComments(); }
+  catch { return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN' }; }
+  const fresh = findOperatorComment(commentsAfterWrite, expectedLogin);
   if (fresh.status !== 'OK' || fresh.comment.id !== existing.comment.id ||
       fresh.comment.body !== body)
     return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN' };
