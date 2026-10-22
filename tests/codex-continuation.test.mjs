@@ -67,7 +67,7 @@ function readyConfig(overrides = {}) {
     codex_login_verified: true,
     enable_codex_model_runs: true,
     codex_usage_authorized: true,
-    codex_sandbox_boundary: 'VERIFIED_WORKSPACE_ONLY',
+    codex_sandbox_boundary: 'VERIFIED_EXACT_PATH_PERMISSION_PROFILE',
     publisher_identity_sid: 'S-1-5-21-1000',
     executor_identity_sid: 'S-1-5-21-2000',
     codex_executor_task: 'PTYSD-Codex-Executor',
@@ -295,6 +295,7 @@ test('execution gate fails closed on missing cost, identity, sandbox, provider o
   for (const config of [
     readyConfig({ enable_codex_model_runs: false }),
     readyConfig({ codex_usage_authorized: false }),
+    readyConfig({ codex_sandbox_boundary: 'VERIFIED_WORKSPACE_ONLY' }),
     readyConfig({ codex_sandbox_boundary: 'UNKNOWN' }),
     readyConfig({ executor_identity_sid: 'S-1-5-21-PUBLISHER' }),
     readyConfig({ codex_executor_task: 'PTYSD-Native-OpenCode' }),
@@ -342,13 +343,27 @@ test('claim can be released only for the exact attempt before publication', () =
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('Codex CLI args use noninteractive JSONL and workspace-write sandbox without shell or fallback', () => {
+test('Codex CLI args bind writes to exact task paths with native permissions and no shell or fallback', () => {
   const args = buildCodexExecArgs(job(), 'C:\\isolated\\attempt');
-  assert.deepEqual(args, ['exec', '--json', '--sandbox', 'workspace-write', '--model', 'gpt-6.1-sol',
-    '--config', 'approval_policy=never', '--config', 'model_reasoning_effort="medium"',
-    '-C', 'C:\\isolated\\attempt', '-']);
-  assert.equal(buildCodexExecArgs(job({ reasoning_effort: 'model-defined-tier-7' }),
-    'C:\\isolated\\attempt')[9], 'model_reasoning_effort="model-defined-tier-7"');
+  const configs = args.flatMap((value, index) => value === '--config' ? [args[index + 1]] : []);
+  assert.equal(args[0], 'exec');
+  assert.equal(args.includes('--json'), true);
+  assert.equal(args.includes('--ignore-user-config'), true,
+    'legacy user sandbox settings must not override the per-task permissions profile');
+  assert.equal(args.includes('--strict-config'), true,
+    'unsupported permission configuration must fail closed before execution');
+  assert.equal(args.includes('--sandbox'), false,
+    'workspace-write would widen the per-file permission profile');
+  assert.equal(configs.includes('default_permissions="pty_exact_scope"'), true);
+  assert.equal(configs.includes('permissions.pty_exact_scope.filesystem={":minimal"="read","C:\\\\isolated\\\\attempt"="read","C:\\\\isolated\\\\attempt\\\\native-bridge\\\\sample.mjs"="write"}'), true);
+  assert.equal(configs.includes('permissions.pty_exact_scope.network.enabled=false'), true);
+  assert.equal(configs.includes('permissions.pty_exact_scope.filesystem={":minimal"="read","C:\\\\isolated\\\\attempt"="write"}'), false,
+    'the workspace root must stay read-only');
+  const reasoningArgs = buildCodexExecArgs(job({ reasoning_effort: 'model-defined-tier-7' }),
+    'C:\\isolated\\attempt');
+  const reasoningConfigs = reasoningArgs.flatMap((value, index) =>
+    value === '--config' ? [reasoningArgs[index + 1]] : []);
+  assert.equal(reasoningConfigs.includes('model_reasoning_effort="model-defined-tier-7"'), true);
   assert.equal(args.includes('--approve-for-me'), false,
     'scheduled execution must not invoke an unapproved automatic review model');
   assert.equal(args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
