@@ -1185,14 +1185,30 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
       exit_code: 46, evidence_sha256: null, evidence_bytes: 0,
       eligibility_state: 'BLOCKED', model_invoked: false, coding_state: 'NOT_STARTED' };
   }
+  if (typeof config.antigravity_project_root === 'string') {
+    try {
+      await assertEditWorkspaceReady({ ...config, workspace: config.antigravity_project_root }, job,
+        attemptId, dependencies.readGitProcessTree);
+    } catch (error) {
+      return { outcome: `ANTIGRAVITY_EDIT_PROJECT_ROOT_${safeErrorCode(error, 'UNKNOWN')}`,
+        exit_code: 46, evidence_sha256: null, evidence_bytes: 0,
+        eligibility_state: 'BLOCKED', model_invoked: false, coding_state: 'NOT_STARTED' };
+    }
+  }
 
-  const prompt = `${spec}\n\nOnly edit these exact repository-relative paths: ${job.edit_paths.join(', ')}. ` +
+  const scopedAbsolutePaths = job.edit_paths.map(path => resolve(config.workspace, path));
+  const prompt = `${spec}\n\nThe only writable files are these exact absolute paths inside this attempt workspace: ` +
+    `${scopedAbsolutePaths.join(', ')}. Use these absolute paths; do not resolve the paths from the registered parent project. ` +
     'Do not run shell commands, access the network, inspect credentials, or edit any other path. ' +
     'If a required permission or file is unavailable, report the blocker without requesting broader access.';
   // Stream-json mode exclusively consumes user prompts from stdin; passing the
   // --print alias here can consume the next option as a positional prompt.
   const args = ['--input-format', 'stream-json', '--output-format', 'stream-json',
     `--project=${projectId}`,
+    // Antigravity's selected project can remain bound to the outer task PR
+    // while the executor runs in a per-attempt checkout beneath it. Explicitly
+    // add that checkout so file tools can address the exact candidate root.
+    '--add-dir', config.workspace,
     // The exact model ID pins Gemini 3.8 Flash High. A separate --effort
     // override previously failed for this model, so keep it out of the command.
     '--model', ANTIGRAVITY_V2_MODEL,
@@ -1266,6 +1282,40 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
         .includes(evidencedResult.local_evidence.termination_state))
     return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROCESS_TERMINATION_UNCONFIRMED',
       exit_code: -1, coding_state: 'UNKNOWN_PROCESS_MAY_STILL_WRITE' };
+  if (typeof config.antigravity_project_root === 'string') {
+    let projectRootStatus;
+    try {
+      projectRootStatus = await captureGitStdout(config.antigravity_project_root, config.state_dir,
+        job.request_id, attemptId, 'project-root-after',
+        ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'],
+        false, dependencies.readGitProcessTree);
+    } catch (error) {
+      return { ...evidencedResult, outcome:
+        `ANTIGRAVITY_EDIT_PROJECT_ROOT_READBACK_UNKNOWN_${safeErrorCode(error, 'UNKNOWN')}`,
+      exit_code: -1, coding_state: 'UNKNOWN', external_effects: 'UNKNOWN', scope_valid: false,
+      local_evidence: { ...evidencedResult.local_evidence,
+        antigravity_project_root_check: { status: 'READBACK_UNKNOWN' } } };
+    }
+    let projectRootChanges;
+    try { projectRootChanges = parseGitStatusPaths(projectRootStatus.output); }
+    catch (error) {
+      return { ...evidencedResult, outcome:
+        `ANTIGRAVITY_EDIT_PROJECT_ROOT_STATUS_INVALID_${safeErrorCode(error, 'UNKNOWN')}`,
+      exit_code: -1, coding_state: 'UNKNOWN', external_effects: 'UNKNOWN', scope_valid: false,
+      local_evidence: { ...evidencedResult.local_evidence,
+        antigravity_project_root_check: { status: 'STATUS_INVALID' } } };
+    }
+    if (projectRootChanges.length) {
+      return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROJECT_ROOT_WRITE_ESCAPED_ATTEMPT',
+        exit_code: -1, coding_state: 'PROJECT_ROOT_WRITE_PRESERVED_UNVERIFIED',
+        external_effects: 'UNKNOWN', scope_valid: false,
+        project_root_changed_files_count: projectRootChanges.length,
+        local_evidence: { ...evidencedResult.local_evidence,
+          antigravity_project_root_check: { status: 'CHANGES_PRESERVED',
+            sha256: createHash('sha256').update(projectRootStatus.output).digest('hex'),
+            bytes: projectRootStatus.output.length } } };
+    }
+  }
   if (!runEvidence.valid) {
     // The process has exited, so it is now safe to inspect its scoped workspace
     // even when its stream is truncated or malformed. Preserve any real diff,
@@ -2052,8 +2102,7 @@ export async function runWorker(configInput, adapters = {}) {
             continue;
           }
         }
-        try { cleanupExecutorAttempt(executor, s.attempt_id, undefined,
-          s.kind === 'antigravity_edit' ? { candidateWorkspaceRoot: config.workspace } : undefined); }
+        try { cleanupExecutorAttempt(executor, s.attempt_id); }
         catch (error) {
           if (resolutionState === 'WAITING') {
             blockedKinds.add(s.kind);
@@ -2091,8 +2140,7 @@ export async function runWorker(configInput, adapters = {}) {
         continue;
       }
       if (isModelExecutionKind(s.kind) && executor) {
-        try { cleanupExecutorAttempt(executor, s.attempt_id, undefined,
-          s.kind === 'antigravity_edit' ? { candidateWorkspaceRoot: config.workspace } : undefined); }
+        try { cleanupExecutorAttempt(executor, s.attempt_id); }
         catch { /* exact result and receipt remain durable */ }
       }
       log(`RECOVERED_EXECUTOR_RESULT_${result.terminal.state}_${s.request_id}`);

@@ -1782,25 +1782,33 @@ test('OpenCode V2 edit intake captures exact scoped diff without treating exit z
 test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage authorization and preserves an unverified scoped diff', async () => {
   const home=mkdtempSync(join(homedir(),'.ptysd-antigravity-edit-test-'));
   try {
-    const workspace=join(home,'workspace'),stateDir=join(home,'state'),localAppData=join(home,'localappdata');
-    mkdirSync(join(workspace,'src'),{recursive:true}); mkdirSync(stateDir);
+    const registeredProjectRoot=join(home,'registered-project');
+    const workspace=join(home,'attempt-workspaces',randomUUID());
+    const stateDir=join(home,'state'),localAppData=join(home,'localappdata');
+    mkdirSync(join(registeredProjectRoot,'src'),{recursive:true}); mkdirSync(stateDir);
+    mkdirSync(dirname(workspace),{recursive:true});
     const cliPath=join(localAppData,'agy','bin','agy.exe');
     mkdirSync(dirname(cliPath),{recursive:true});
     const cliBytes=Buffer.from('synthetic signed Antigravity CLI 1.4.2');
     writeFileSync(cliPath,cliBytes);
     const cliSha256=createHash('sha256').update(cliBytes).digest('hex');
-    const git=(...args)=>{
-      const result=spawnSync('git',['-C',workspace,...args],{encoding:'utf8',windowsHide:true});
+    const git=(root,...args)=>{
+      const result=spawnSync('git',['-C',root,...args],{encoding:'utf8',windowsHide:true});
       assert.equal(result.status,0,result.stderr); return result.stdout.trim();
     };
-    git('init','--quiet'); git('config','user.name','PTYSD test'); git('config','user.email','test@example.invalid');
-    writeFileSync(join(workspace,'src','worker.mjs'),'export const state = "base";\n');
-    git('add','src/worker.mjs'); git('commit','--quiet','-m','test source');
-    const sourceSha=git('rev-parse','HEAD');
+    git(registeredProjectRoot,'init','--quiet');
+    git(registeredProjectRoot,'config','user.name','PTYSD test');
+    git(registeredProjectRoot,'config','user.email','test@example.invalid');
+    writeFileSync(join(registeredProjectRoot,'src','worker.mjs'),'export const state = "base";\n');
+    git(registeredProjectRoot,'add','src/worker.mjs');
+    git(registeredProjectRoot,'commit','--quiet','-m','test source');
+    const sourceSha=git(registeredProjectRoot,'rev-parse','HEAD');
+    git(registeredProjectRoot,'worktree','add','--quiet','--detach',workspace,sourceSha);
     const now=Date.now();
     const attestation={model:ANTIGRAVITY_V2_MODEL,entitlement:'VERIFIED',
       cost:'NO_ADDITIONAL_CHARGE',observed_at:new Date(now).toISOString()};
-    const config={workspace,state_dir:stateDir,enable_antigravity_model_runs:true,
+    const config={workspace,antigravity_project_root:registeredProjectRoot,state_dir:stateDir,
+      enable_antigravity_model_runs:true,
       allowed_models:{[ANTIGRAVITY_V2_MODEL]:['high']},antigravity_execution_attestation:attestation,
       antigravity_cli_project_id:'b8fbf647-6c41-4932-9d0a-8a7af257a27a'};
     const job=withHumanGoal({schema:6,project_id:PROJECT,host:hostname().toUpperCase(),
@@ -1965,6 +1973,11 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
         assert.deepEqual(args.slice(0,4),['--input-format','stream-json','--output-format','stream-json']);
         assert.equal(args[4],`--project=${config.antigravity_cli_project_id}`,
           'execution must target the exact candidate-scoped Antigravity project');
+        const addDirIndex=args.indexOf('--add-dir');
+        assert.notEqual(addDirIndex,-1,'execution must explicitly add the attempt checkout to the selected project');
+        assert.equal(args[addDirIndex+1],workspace);
+        assert.ok(JSON.parse(options.stdinText).message.content.includes(resolve(workspace,'src/worker.mjs')),
+          'the file tool must receive the exact absolute path inside the attempt checkout');
         assert.equal(args.includes('--print'),false,
           'stream-json mode reads the prompt from stdin and must not pass the print alias');
         assert.equal(args.includes('--prompt'),false);
@@ -2068,7 +2081,7 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     'a receipt cannot claim an unsupported Antigravity permission mode');
     assert.equal(await verifyCapturedEvidence(stateDir,{terminal:finalReceipt,local_evidence:result.local_evidence}),true);
 
-    git('checkout','--','src/worker.mjs');
+    git(workspace,'checkout','--','src/worker.mjs');
     const zeroUsageSession='conv_antigravity_zero_usage_20261018';
     const zeroUsage=await executeOpenCodeTask('Change the state value.',config,job,randomUUID(),{
       now:()=>now,baseEnv:env,localAppData,
@@ -2104,7 +2117,7 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.match(zeroUsage.diff_sha256,/^[a-f0-9]{64}$/);
     assert.equal(terminalStateForResult(zeroUsage),'BLOCKED');
 
-    git('checkout','--','src/worker.mjs');
+    git(workspace,'checkout','--','src/worker.mjs');
     const changedBinary=await executeOpenCodeTask('Synthetic; binary changes during run.',config,job,randomUUID(),{
       now:()=>now,baseEnv:env,localAppData,runAntigravityV2Readiness:()=>readiness,
       async runCapturedProcess(_bin,_args,options){
@@ -2132,10 +2145,12 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(changedBinary.external_effects,'UNKNOWN');
     assert.equal(terminalStateForResult(changedBinary),'BLOCKED');
     writeFileSync(cliPath,cliBytes);
-    git('checkout','--','src/worker.mjs');
+    git(workspace,'checkout','--','src/worker.mjs');
     const incompleteStream=await executeOpenCodeTask(
       'Synthetic; retain edits when stream terminates without a result.',config,job,randomUUID(),{
         now:()=>now,baseEnv:env,localAppData,runAntigravityV2Readiness:()=>readiness,
+        readGitProcessTree:pid=>({state:'DEAD',root_pid:pid,process_ids:[],
+          census_complete:true,observed_at:new Date().toISOString(),error:null}),
         async runCapturedProcess(_bin,_args,options){
           writeFileSync(join(workspace,'src','worker.mjs'),
             'export const state = "changed-before-truncated-stream";\n');
@@ -2178,7 +2193,7 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(selectNext(incompleteComments,['t14210184'],'worker',job.host,job.source_sha),null,
       'an incomplete W2 session with captured edits is terminally unverified and cannot replay');
 
-    git('checkout','--','src/worker.mjs');
+    git(workspace,'checkout','--','src/worker.mjs');
     const incompleteCommandSession='conv_agy_incomplete_command_20261020';
     const incompleteCommand=await executeOpenCodeTask(
       'Synthetic; keep command state unknown when it never reaches a terminal event.',config,job,randomUUID(),{
@@ -2225,7 +2240,7 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(incompleteCommandReceipt)).outcome,
       'ANTIGRAVITY_EDIT_TOOL_EXECUTION_INCOMPLETE_DIFF_PRESERVED');
 
-    git('checkout','--','src/worker.mjs');
+    git(workspace,'checkout','--','src/worker.mjs');
     const forbiddenSession='conv_agy_forbidden_tool_20261018';
     const forbiddenTool=await executeOpenCodeTask(
       'Synthetic; detect a prohibited browser tool event after process exit.',config,job,randomUUID(),{
@@ -2273,6 +2288,31 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
       com(9812,RECEIPT_MARKER+JSON.stringify(forbiddenReceipt),'worker')];
     assert.equal(selectNext(forbiddenComments,['t14210184'],'worker',job.host,job.source_sha),null,
       'a forbidden tool event with possible edits is preserved as terminal and never replayed');
+
+    const escapedWorkspace=join(home,'attempt-workspaces',randomUUID());
+    git(registeredProjectRoot,'worktree','add','--quiet','--detach',escapedWorkspace,sourceSha);
+    const escapedAttempt=await executeOpenCodeTask('Synthetic project-root escape; no inference.',
+      {...config,workspace:escapedWorkspace},job,randomUUID(),{
+        now:()=>now,baseEnv:env,localAppData,runAntigravityV2Readiness:()=>readiness,
+        async runCapturedProcess(_bin,_args,options){
+          writeFileSync(join(registeredProjectRoot,'src','escaped.mjs'),'export const escaped = true;\n');
+          const empty=Buffer.alloc(0);
+          writeFileSync(options.stdoutPath,empty,{flag:'wx'});
+          writeFileSync(options.stderrPath,empty,{flag:'wx'});
+          return {outcome:'SYNTHETIC_PROCESS_EXITED',exit_code:0,evidence_sha256:'0'.repeat(64),
+            evidence_bytes:0,local_evidence:{stdout_file:basename(options.stdoutPath),
+              stdout_sha256:createHash('sha256').update(empty).digest('hex'),stdout_bytes:0,
+              stderr_file:basename(options.stderrPath),
+              stderr_sha256:createHash('sha256').update(empty).digest('hex'),stderr_bytes:0,
+              termination_state:'NOT_REQUESTED'}};
+        },
+      });
+    assert.equal(escapedAttempt.outcome,'ANTIGRAVITY_EDIT_PROJECT_ROOT_WRITE_ESCAPED_ATTEMPT');
+    assert.equal(escapedAttempt.scope_valid,false);
+    assert.equal(escapedAttempt.external_effects,'UNKNOWN');
+    assert.equal(escapedAttempt.project_root_changed_files_count,1);
+    assert.equal(existsSync(join(registeredProjectRoot,'src','escaped.mjs')),true,
+      'escaped model output is preserved for reconciliation and never silently discarded');
   } finally { rmSync(home,{recursive:true,force:true}); }
 });
 

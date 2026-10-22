@@ -643,8 +643,10 @@ test('executor persists a recoverable Antigravity preflight wait for the exact p
       execute:async(_spec,executionConfig,receivedJob)=>{
         executeCalls++;
         assert.equal(receivedJob.kind,'antigravity_edit');
-        assert.equal(executionConfig.workspace,join(source.workspace,'.pty-native-executor',
-          'candidate-workspaces',ATTEMPT_EDIT));
+        assert.equal(executionConfig.antigravity_project_root,source.workspace,
+          'the executor must preserve the registered outer project root separately from the attempt checkout');
+        assert.equal(executionConfig.workspace,join(f.resultsDir,'candidate-workspaces',ATTEMPT_EDIT),
+          'the attempt checkout must be outside the registered source project');
         assert.equal(execFileSync('git',['-C',executionConfig.workspace,'rev-parse','HEAD'],{
           encoding:'utf8',windowsHide:true,shell:false}).trim(),source.sourceSha);
         return {outcome:'ANTIGRAVITY_CREDIT_FALLBACK_SETTING_UNKNOWN',exit_code:48,
@@ -657,16 +659,16 @@ test('executor persists a recoverable Antigravity preflight wait for the exact p
     assert.equal(saved.terminal.model,'gemini-3.8-flash-high');
     assert.equal(saved.terminal.model_invoked,false);
     assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(saved.terminal)).state,'WAITING');
-    const workspace=join(source.workspace,'.pty-native-executor','candidate-workspaces',ATTEMPT_EDIT);
+    const workspace=join(f.resultsDir,'candidate-workspaces',ATTEMPT_EDIT);
     assert.ok(existsSync(workspace),'the candidate remains available until receipt reconciliation');
     cleanupExecutorAttempt({...f.descriptor,manifest_dir:f.manifestDir,results_dir:f.resultsDir},
-      ATTEMPT_EDIT,undefined,{candidateWorkspaceRoot:source.workspace});
-    assert.equal(existsSync(workspace),false,'receipt reconciliation removes the exact nested attempt workspace');
+      ATTEMPT_EDIT);
+    assert.equal(existsSync(workspace),false,'receipt reconciliation removes the exact attempt workspace');
     assert.equal(readFileSync(join(source.workspace,'README.md'),'utf8'),'pinned source fixture\n');
   } finally { f.dispose(); }
 });
 
-test('Antigravity candidate and cleanup refuse a junction at the registered project boundary', async t => {
+test('Antigravity attempt stays outside the registered project and cleanup refuses its legacy junction path', async t => {
   if (process.platform !== 'win32') return t.skip('Task Scheduler executor lifecycle is Windows-only');
   const f=fixture();
   try {
@@ -700,14 +702,20 @@ test('Antigravity candidate and cleanup refuse a junction at the registered proj
         executor_runtime:{user_sid:EXECUTOR_SID,publisher_sid:PUBLISHER_SID,
           manifest_dir:f.manifestDir,results_dir:f.resultsDir},
         workspace:source.workspace,state_dir:f.resultsDir},
-      execute:async()=>{executeCalls++;throw new Error('MODEL_MUST_NOT_RUN');}});
-    assert.equal(executeCalls,0);
-    assert.equal(outcome.terminal_state,'BLOCKED');
-    const saved=JSON.parse(readFileSync(executorResultPath(f.resultsDir,job.request_id,ATTEMPT_EDIT),'utf8'));
-    assert.match(saved.terminal.outcome,
-      /CANDIDATE_WORKSPACE_SETUP_BLOCKED_CANDIDATE_WORKSPACE_BASE_NOT_PHYSICAL/);
+      execute:async(_spec,executionConfig)=>{
+        executeCalls++;
+        assert.equal(executionConfig.workspace,candidateWorkspacePath(f.resultsDir,ATTEMPT_EDIT));
+        return {outcome:'ANTIGRAVITY_CREDIT_FALLBACK_SETTING_UNKNOWN',exit_code:48,
+          eligibility_state:'WAITING',model_invoked:false,evidence_sha256:null,evidence_bytes:0};
+      }});
+    assert.equal(executeCalls,1,'the registered-project junction cannot block an external attempt checkout');
+    assert.equal(outcome.terminal_state,'WAITING');
     assert.equal(existsSync(join(outside,'candidate-workspaces')),false,
-      'executor must reject the junction before creating any path outside the registered project');
+      'the executor must not traverse or create candidate data through a project-root junction');
+    assert.equal(existsSync(candidateWorkspacePath(f.resultsDir,ATTEMPT_EDIT)),true);
+    cleanupExecutorAttempt({...f.descriptor,manifest_dir:f.manifestDir,results_dir:f.resultsDir},ATTEMPT_EDIT);
+    assert.equal(existsSync(candidateWorkspacePath(f.resultsDir,ATTEMPT_EDIT)),false,
+      'the exact external attempt checkout is removed only after its receipt is persisted');
 
     const attempt=join(outside,'candidate-workspaces',ATTEMPT_EDIT);
     mkdirSync(attempt,{recursive:true});

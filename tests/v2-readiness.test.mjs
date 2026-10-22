@@ -264,7 +264,7 @@ test('Antigravity W2 readiness uses documented CLI settings and never probes int
   const profile = mkdtempSync(join(tmpdir(), 'pty-agy-scoped-readiness-'));
   const workspace = mkdtempSync(join(tmpdir(), 'pty-agy-scoped-workspace-'));
   const calls = [];
-  const help = '--project --print --output-format stream-json --model --effort --sandbox --mode accept-edits';
+  const help = '--project --add-dir --print --output-format stream-json --model --effort --sandbox --mode accept-edits';
   const projectScopedHelp = '--print --output-format stream-json --model --effort --sandbox --mode accept-edits';
   const required = ['command(*)', 'unsandboxed(*)', 'read_url(*)', 'execute_url(*)', 'mcp(*)'];
   const settingsDir = join(profile, '.gemini', 'antigravity-cli');
@@ -539,6 +539,7 @@ test('Antigravity readiness qualifies the pinned model and CLI auth through no-i
   --mode Execution mode (default|accept-edits|plan)
   --output-format Output format (text, json, stream-json)
   --input-format Input format (text, stream-json)
+  --add-dir Add a directory to the workspace (repeatable)
   --sandbox Run with terminal sandbox restrictions enabled`;
   const models='Fetching available models...\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\n';
   const runner=(bin,args,options)=>{
@@ -559,6 +560,7 @@ test('Antigravity readiness qualifies the pinned model and CLI auth through no-i
     assert.equal(r.stream_json_supported,true);
     assert.equal(r.model_flag_supported,true);
     assert.equal(r.effort_flag_supported,true);
+    assert.equal(r.add_dir_flag_supported,true);
     assert.equal(r.sandbox_flag_supported,true);
     assert.equal(r.mode_flag_supported,true);
     assert.equal(r.inference_executed,false);
@@ -669,7 +671,7 @@ test('Antigravity nonzero usage exit cannot authenticate or read quota even with
   assert.notEqual(antigravityV2ReadinessExecutionFailure(r),null);
 });
 
-test('Antigravity readiness does not invent a model or effort option absent from real CLI help', () => {
+test('Antigravity readiness requires add-dir but does not invent a model or effort option absent from real CLI help', () => {
   const runner=(_bin,args)=>args[0]==='--version' ? '1.4.1' : args[0]==='--help'
     ? '--print --output-format stream-json --sandbox'
     : 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)';
@@ -677,6 +679,7 @@ test('Antigravity readiness does not invent a model or effort option absent from
   assert.equal(r.status,'METADATA_QUALIFICATION_INCOMPLETE');
   assert.equal(r.model_flag_supported,false);
   assert.equal(r.effort_flag_supported,false);
+  assert.equal(r.add_dir_flag_supported,false);
   assert.equal(r.mode_flag_supported,false);
   assert.ok(r.issues.includes('REQUIRED_HEADLESS_FLAGS_NOT_CONFIRMED'));
   assert.equal(r.inference_executed,false);
@@ -690,7 +693,7 @@ test('Antigravity exact High model does not require the unrelated generic effort
   const settingsDir=join(profile,'.gemini','antigravity-cli');
   mkdirSync(settingsDir,{recursive:true});
   writeFileSync(join(settingsDir,'settings.json'),JSON.stringify({useG1Credits:false}));
-  const help='--print --output-format stream-json --model --sandbox --mode accept-edits';
+  const help='--print --output-format stream-json --model --add-dir --sandbox --mode accept-edits';
   const runner=(_bin,args)=>args[0]==='--version' ? '1.4.2' : args[0]==='--help'
     ? help : args[0]==='models' ? 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n'
       : args[0]==='--print' ? validAntigravityUsage
