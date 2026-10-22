@@ -233,11 +233,11 @@ export function buildCodexChildEnvironment(request, evidenceDir, source = proces
 
 export async function runCodex(request, config, worktree, evidenceDir, deps = {}) {
   // Validate the complete request before deriving any filesystem paths from
-  // request identifiers. buildCodexExecArgs validates the job only; attempt_id
-  // must also be checked before output and credential-isolation paths exist.
+  // request identifiers. The CLI permission profile is also bound to the
+  // validated attempt_id, before output and credential-isolation paths exist.
   const validatedRequest = validateCodexExecutorRequest(request);
   const job = validatedRequest.job;
-  const args = buildCodexExecArgs(job, worktree);
+  const args = buildCodexExecArgs(job, worktree, request.attempt_id);
   const outPath = join(evidenceDir, `${job.request_id}-${request.attempt_id}.stdout.jsonl`);
   const errPath = join(evidenceDir, `${job.request_id}-${request.attempt_id}.stderr.txt`);
   // Do not expose a Publisher's stored gh configuration to the model process.
