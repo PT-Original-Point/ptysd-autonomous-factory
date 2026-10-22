@@ -1111,6 +1111,23 @@ async function assertEditWorkspaceReady(config, job, attemptId, readProcessTree,
     false, readProcessTree, platformName);
   if (status.output.length !== 0) throw new Error('EDIT_WORKSPACE_NOT_CLEAN');
 }
+async function captureAntigravityProjectRootSnapshot(config, job, attemptId, label,
+  readProcessTree, platformName = platform()) {
+  const root = config.antigravity_project_root;
+  const headBefore = await captureGitStdout(root, config.state_dir, job.request_id,
+    attemptId, `${label}-head-before`, ['rev-parse', 'HEAD'], false, readProcessTree, platformName);
+  const status = await captureGitStdout(root, config.state_dir, job.request_id,
+    attemptId, `${label}-status`, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'],
+    false, readProcessTree, platformName);
+  const headAfter = await captureGitStdout(root, config.state_dir, job.request_id,
+    attemptId, `${label}-head-after`, ['rev-parse', 'HEAD'], false, readProcessTree, platformName);
+  const beforeSha = headBefore.output.toString('utf8').trim().toLowerCase();
+  const afterSha = headAfter.output.toString('utf8').trim().toLowerCase();
+  if (!/^[a-f0-9]{40}$/.test(beforeSha) || !/^[a-f0-9]{40}$/.test(afterSha) || beforeSha !== afterSha)
+    throw new Error('EDIT_PROJECT_ROOT_HEAD_CHANGED_DURING_READ');
+  return { head_sha: beforeSha, status_bytes: status.output,
+    changes: parseGitStatusPaths(status.output) };
+}
 export async function captureScopedEditDiff({ workspace, state_dir, job, attempt_id, readProcessTree,
   platformName = platform() }) {
   if (!workspace || !state_dir || !job || !isEditExecutionKind(job.kind) ||
@@ -1185,14 +1202,32 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
       exit_code: 46, evidence_sha256: null, evidence_bytes: 0,
       eligibility_state: 'BLOCKED', model_invoked: false, coding_state: 'NOT_STARTED' };
   }
+  let projectRootBefore = null;
+  if (typeof config.antigravity_project_root === 'string') {
+    try {
+      projectRootBefore = await captureAntigravityProjectRootSnapshot(config, job, attemptId,
+        'project-root-before', dependencies.readGitProcessTree);
+      if (projectRootBefore.changes.length) throw new Error('EDIT_PROJECT_ROOT_NOT_CLEAN');
+    } catch (error) {
+      return { outcome: `ANTIGRAVITY_EDIT_PROJECT_ROOT_${safeErrorCode(error, 'UNKNOWN')}`,
+        exit_code: 46, evidence_sha256: null, evidence_bytes: 0,
+        eligibility_state: 'BLOCKED', model_invoked: false, coding_state: 'NOT_STARTED' };
+    }
+  }
 
-  const prompt = `${spec}\n\nOnly edit these exact repository-relative paths: ${job.edit_paths.join(', ')}. ` +
+  const scopedAbsolutePaths = job.edit_paths.map(path => resolve(config.workspace, path));
+  const prompt = `${spec}\n\nThe only writable files are these exact absolute paths inside this attempt workspace: ` +
+    `${scopedAbsolutePaths.join(', ')}. Use these absolute paths; do not resolve the paths from the registered parent project. ` +
     'Do not run shell commands, access the network, inspect credentials, or edit any other path. ' +
     'If a required permission or file is unavailable, report the blocker without requesting broader access.';
   // Stream-json mode exclusively consumes user prompts from stdin; passing the
   // --print alias here can consume the next option as a positional prompt.
   const args = ['--input-format', 'stream-json', '--output-format', 'stream-json',
     `--project=${projectId}`,
+    // Antigravity's selected project can remain bound to the outer task PR
+    // while the executor runs in a per-attempt checkout beneath it. Explicitly
+    // add that checkout so file tools can address the exact candidate root.
+    '--add-dir', config.workspace,
     // The exact model ID pins Gemini 3.8 Flash High. A separate --effort
     // override previously failed for this model, so keep it out of the command.
     '--model', ANTIGRAVITY_V2_MODEL,
@@ -1247,6 +1282,9 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     file_change_tool_failed_count: runEvidence.file_change_tool_failed_count,
     file_change_tool_incomplete_count: runEvidence.file_change_tool_incomplete_count,
     local_evidence: { ...processResult.local_evidence,
+      ...(projectRootBefore ? { antigravity_project_root_check: {
+        status: 'CLEAN_BEFORE', head_sha: projectRootBefore.head_sha,
+      } } : {}),
       antigravity_run: { valid: runEvidence.valid, reason: runEvidence.reason,
           cli_version: readiness.version ?? null, cli_binary_sha256: cliBinarySha256,
           cli_binary_integrity_evidence: cliBinaryIntegrityEvidence,
@@ -1266,6 +1304,44 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
         .includes(evidencedResult.local_evidence.termination_state))
     return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROCESS_TERMINATION_UNCONFIRMED',
       exit_code: -1, coding_state: 'UNKNOWN_PROCESS_MAY_STILL_WRITE' };
+  if (typeof config.antigravity_project_root === 'string') {
+    let projectRootAfter;
+    try {
+      projectRootAfter = await captureAntigravityProjectRootSnapshot(config, job, attemptId,
+        'project-root-after', dependencies.readGitProcessTree);
+    } catch (error) {
+      return { ...evidencedResult, outcome:
+        `ANTIGRAVITY_EDIT_PROJECT_ROOT_READBACK_UNKNOWN_${safeErrorCode(error, 'UNKNOWN')}`,
+      exit_code: -1, coding_state: 'UNKNOWN', external_effects: 'UNKNOWN', scope_valid: false,
+      local_evidence: { ...evidencedResult.local_evidence,
+        antigravity_project_root_check: { status: 'READBACK_UNKNOWN' } } };
+    }
+    if (projectRootAfter.head_sha !== projectRootBefore?.head_sha) {
+      return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROJECT_ROOT_HEAD_CHANGED',
+        exit_code: -1, coding_state: 'UNKNOWN', external_effects: 'UNKNOWN', scope_valid: false,
+        local_evidence: { ...evidencedResult.local_evidence,
+          antigravity_project_root_check: { status: 'HEAD_CHANGED',
+            head_before_sha: projectRootBefore?.head_sha ?? null,
+            head_after_sha: projectRootAfter.head_sha } } };
+    }
+    if (projectRootAfter.changes.length) {
+      return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROJECT_ROOT_WRITE_ESCAPED_ATTEMPT',
+        exit_code: -1, coding_state: 'PROJECT_ROOT_WRITE_PRESERVED_UNVERIFIED',
+        external_effects: 'UNKNOWN', scope_valid: false,
+        project_root_changed_files_count: projectRootAfter.changes.length,
+        local_evidence: { ...evidencedResult.local_evidence,
+          antigravity_project_root_check: { status: 'CHANGES_PRESERVED',
+            head_sha: projectRootAfter.head_sha,
+            sha256: createHash('sha256').update(projectRootAfter.status_bytes).digest('hex'),
+            bytes: projectRootAfter.status_bytes.length } } };
+    }
+    evidencedResult.local_evidence.antigravity_project_root_check = {
+      status: 'CLEAN_STABLE', head_before_sha: projectRootBefore.head_sha,
+      head_after_sha: projectRootAfter.head_sha,
+      status_sha256: createHash('sha256').update(projectRootAfter.status_bytes).digest('hex'),
+      status_bytes: projectRootAfter.status_bytes.length,
+    };
+  }
   if (!runEvidence.valid) {
     // The process has exited, so it is now safe to inspect its scoped workspace
     // even when its stream is truncated or malformed. Preserve any real diff,
@@ -2052,8 +2128,7 @@ export async function runWorker(configInput, adapters = {}) {
             continue;
           }
         }
-        try { cleanupExecutorAttempt(executor, s.attempt_id, undefined,
-          s.kind === 'antigravity_edit' ? { candidateWorkspaceRoot: config.workspace } : undefined); }
+        try { cleanupExecutorAttempt(executor, s.attempt_id); }
         catch (error) {
           if (resolutionState === 'WAITING') {
             blockedKinds.add(s.kind);
@@ -2091,8 +2166,7 @@ export async function runWorker(configInput, adapters = {}) {
         continue;
       }
       if (isModelExecutionKind(s.kind) && executor) {
-        try { cleanupExecutorAttempt(executor, s.attempt_id, undefined,
-          s.kind === 'antigravity_edit' ? { candidateWorkspaceRoot: config.workspace } : undefined); }
+        try { cleanupExecutorAttempt(executor, s.attempt_id); }
         catch { /* exact result and receipt remain durable */ }
       }
       log(`RECOVERED_EXECUTOR_RESULT_${result.terminal.state}_${s.request_id}`);
