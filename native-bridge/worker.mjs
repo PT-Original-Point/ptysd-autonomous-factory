@@ -2052,7 +2052,8 @@ export async function runWorker(configInput, adapters = {}) {
             continue;
           }
         }
-        try { cleanupExecutorAttempt(executor, s.attempt_id); }
+        try { cleanupExecutorAttempt(executor, s.attempt_id, undefined,
+          s.kind === 'antigravity_edit' ? { candidateWorkspaceRoot: config.workspace } : undefined); }
         catch (error) {
           if (resolutionState === 'WAITING') {
             blockedKinds.add(s.kind);
@@ -2090,7 +2091,9 @@ export async function runWorker(configInput, adapters = {}) {
         continue;
       }
       if (isModelExecutionKind(s.kind) && executor) {
-        try { cleanupExecutorAttempt(executor, s.attempt_id); } catch { /* exact result and receipt remain durable */ }
+        try { cleanupExecutorAttempt(executor, s.attempt_id, undefined,
+          s.kind === 'antigravity_edit' ? { candidateWorkspaceRoot: config.workspace } : undefined); }
+        catch { /* exact result and receipt remain durable */ }
       }
       log(`RECOVERED_EXECUTOR_RESULT_${result.terminal.state}_${s.request_id}`);
       blockedKinds.add(s.kind);

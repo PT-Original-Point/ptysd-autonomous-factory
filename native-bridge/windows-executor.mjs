@@ -603,9 +603,20 @@ export function executorResultPath(resultsDir, requestId, attemptId) {
   return join(resultsDir, `result-${requestId}-${attemptId}.json`);
 }
 
-export function cleanupExecutorAttempt(descriptor, attemptId, remove = rmSync) {
+export function cleanupExecutorAttempt(descriptor, attemptId, remove = rmSync, { candidateWorkspaceRoot } = {}) {
   validateExecutorDescriptor(descriptor);
   if (!ATTEMPT.test(attemptId || '')) fail('EXECUTOR_RESULT_ID_INVALID');
+  let workspaceBase = descriptor.results_dir;
+  if (candidateWorkspaceRoot !== undefined) {
+    if (!absoluteWindowsPath(candidateWorkspaceRoot)) fail('EXECUTOR_PROJECT_WORKSPACE_PATH_INVALID');
+    assertPhysicalDirectory(candidateWorkspaceRoot, 'EXECUTOR_PROJECT_WORKSPACE_UNAVAILABLE');
+    workspaceBase = join(candidateWorkspaceRoot, '.pty-native-executor');
+    if (existsSync(workspaceBase))
+      assertPhysicalDirectory(workspaceBase, 'EXECUTOR_PROJECT_WORKSPACE_BASE_NOT_PHYSICAL');
+    const candidateRoot = join(workspaceBase, 'candidate-workspaces');
+    if (existsSync(candidateRoot))
+      assertPhysicalDirectory(candidateRoot, 'EXECUTOR_PROJECT_CANDIDATE_ROOT_NOT_PHYSICAL');
+  }
   for (const suffix of ['pending', 'running']) {
     remove(join(descriptor.manifest_dir, `${attemptId}.${suffix}.json`), { force: true });
   }
@@ -619,5 +630,5 @@ export function cleanupExecutorAttempt(descriptor, attemptId, remove = rmSync) {
     if (existsSync(path)) fail('EXECUTOR_ATTEMPT_ARTIFACT_CLEANUP_UNCONFIRMED');
   };
   removeExact(candidateBundlePath(descriptor.manifest_dir, attemptId), 'file');
-  removeExact(candidateWorkspacePath(descriptor.results_dir, attemptId), 'directory');
+  removeExact(candidateWorkspacePath(workspaceBase, attemptId), 'directory');
 }

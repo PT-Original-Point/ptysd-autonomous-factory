@@ -367,8 +367,24 @@ function sameAntigravityLocalPath(left, right) {
   return false;
 }
 
-// Bind a CLI project ID to exactly one local workspace. Project-specific
-// config files are not treated as effective CLI permission evidence.
+function antigravityPathWithinRegisteredFolder(root, candidate) {
+  if (typeof root !== 'string' || typeof candidate !== 'string') return false;
+  if (win32.isAbsolute(root) && win32.isAbsolute(candidate)) {
+    const remainder = win32.relative(win32.resolve(root), win32.resolve(candidate));
+    return remainder === '' || (!win32.isAbsolute(remainder) && remainder !== '..' &&
+      !remainder.startsWith(`..${win32.sep}`));
+  }
+  if (isAbsolute(root) && isAbsolute(candidate)) {
+    const remainder = relative(resolve(root), resolve(candidate));
+    return remainder === '' || (!isAbsolute(remainder) && remainder !== '..' &&
+      !remainder.startsWith(`..${sep}`));
+  }
+  return false;
+}
+
+// Bind a CLI project ID to one registered folder. Attempt workspaces may be
+// physical descendants of that folder; sibling paths, additional project
+// folders, and reparse-point escapes remain outside scope.
 function readAntigravityProjectConfiguration(projectId, directory, baseEnv = process.env) {
   if (typeof projectId !== 'string' || !ANTIGRAVITY_PROJECT_ID_PATTERN.test(projectId) ||
       typeof directory !== 'string' || !(isAbsolute(directory) || win32.isAbsolute(directory)))
@@ -404,7 +420,7 @@ function readAntigravityProjectConfiguration(projectId, directory, baseEnv = pro
     if (!registeredDirectory) return 'PROJECT_SCOPE_UNKNOWN';
     const registeredReal = realpathSync(registeredDirectory);
     const expectedReal = realpathSync(directory);
-    return sameAntigravityLocalPath(registeredReal, expectedReal)
+    return antigravityPathWithinRegisteredFolder(registeredReal, expectedReal)
       ? 'PROJECT_WORKSPACE_MATCHED' : 'PROJECT_WORKSPACE_MISMATCH';
   } catch {
     return 'PROJECT_SCOPE_UNKNOWN';
@@ -482,7 +498,7 @@ export function resolveAntigravityProjectId(directory, baseEnv = process.env, ex
       // Removed old worktrees cannot resolve to the current existing workspace.
       if (!existsSync(registeredDirectory)) continue;
       const registeredReal = realpathSync(registeredDirectory);
-      if (sameAntigravityLocalPath(registeredReal, expectedReal)) matches.push(config.id);
+      if (antigravityPathWithinRegisteredFolder(registeredReal, expectedReal)) matches.push(config.id);
     } catch {
       return { projectId: null, projectScopeEvidence: 'PROJECT_SCOPE_UNKNOWN' };
     }

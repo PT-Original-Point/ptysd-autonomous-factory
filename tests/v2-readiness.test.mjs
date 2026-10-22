@@ -108,14 +108,19 @@ function writeAntigravityProject(profile, projectId, workspace, resources = null
   writeFileSync(join(projectDir, `${projectId}.json`), JSON.stringify(config));
 }
 
-test('Antigravity project binding must resolve one exact local workspace', () => {
+test('Antigravity project binding accepts one registered workspace and its isolated descendants', () => {
   const profile = mkdtempSync(join(tmpdir(), 'pty-agy-project-binding-'));
   const workspace = mkdtempSync(join(tmpdir(), 'pty-agy-workspace-'));
   const otherWorkspace = mkdtempSync(join(tmpdir(), 'pty-agy-other-workspace-'));
+  const candidateWorkspace = join(workspace, '.pty-native-executor', 'candidate-workspaces',
+    '00000000-0000-4000-8000-000000000001');
   try {
     writeAntigravityProject(profile, testProjectId, workspace);
     assert.equal(readAntigravityProjectBinding(testProjectId, workspace, { USERPROFILE: profile }),
       'PROJECT_WORKSPACE_MATCHED');
+    mkdirSync(candidateWorkspace, { recursive: true });
+    assert.equal(readAntigravityProjectBinding(testProjectId, candidateWorkspace, { USERPROFILE: profile }),
+      'PROJECT_WORKSPACE_MATCHED', 'an attempt workspace nested under the sole registered project stays in scope');
     writeAntigravityProject(profile, testProjectId, workspace,
       [{ gitFolder: { folderUri: pathToFileURL(workspace).href } }]);
     assert.equal(readAntigravityProjectBinding(testProjectId, workspace, { USERPROFILE: profile }),
@@ -137,12 +142,14 @@ test('Antigravity project binding must resolve one exact local workspace', () =>
   }
 });
 
-test('Antigravity project discovery uses one exact native workspace binding and fails closed', () => {
+test('Antigravity project discovery uses one native workspace root and fails closed outside it', () => {
   const profile = mkdtempSync(join(tmpdir(), 'pty-agy-project-discovery-'));
   const workspace = mkdtempSync(join(tmpdir(), 'pty-agy-discovery-workspace-'));
   const otherWorkspace = mkdtempSync(join(tmpdir(), 'pty-agy-discovery-other-'));
   const staleWorkspace = mkdtempSync(join(tmpdir(), 'pty-agy-discovery-stale-'));
   const env = { USERPROFILE: profile };
+  const attemptWorkspace = join(workspace, '.pty-native-executor', 'candidate-workspaces',
+    '00000000-0000-4000-8000-000000000001');
   const matchingId = 'b8fbf647-6c41-4932-9d0a-8a7af257a27a';
   const otherId = 'c8fbf647-6c41-4932-9d0a-8a7af257a27a';
   const secondMatchingId = 'd8fbf647-6c41-4932-9d0a-8a7af257a27a';
@@ -153,6 +160,10 @@ test('Antigravity project discovery uses one exact native workspace binding and 
     rmSync(staleWorkspace, { recursive: true, force: true });
     const unique = resolveAntigravityProjectId(workspace, env);
     assert.deepEqual(unique, { projectId: matchingId, projectScopeEvidence: 'PROJECT_WORKSPACE_MATCHED' });
+    mkdirSync(attemptWorkspace, { recursive: true });
+    assert.deepEqual(resolveAntigravityProjectId(attemptWorkspace, env),
+      { projectId: matchingId, projectScopeEvidence: 'PROJECT_WORKSPACE_MATCHED' },
+      'a disposable nested attempt resolves to its sole registered project');
     rmSync(join(profile, '.gemini', 'config', 'projects', `${matchingId}.json`));
     assert.deepEqual(resolveAntigravityProjectId(workspace, env),
       { projectId: null, projectScopeEvidence: 'PROJECT_WORKSPACE_MISMATCH' });
