@@ -48,7 +48,7 @@ function absoluteWindowsPath(value) {
 
 export function validateWindowsTaskAction(xml, {
   taskName, userIds, command, argumentsText, workingDirectory, errorPrefix = 'TASK',
-  expectedLogonType = 'Password',
+  expectedLogonType = 'Password', nativeRunLevel, nativeEnabled,
 } = {}) {
   const reject = code => fail(`${errorPrefix}_${code}`);
   if (!['Password', 'InteractiveToken'].includes(expectedLogonType))
@@ -70,15 +70,38 @@ export function validateWindowsTaskAction(xml, {
   if (!userIds.some(id => actualUser.toUpperCase() === id.toUpperCase())) reject('IDENTITY_MISMATCH');
   const logonType = oneTag(source, 'LogonType', errorPrefix);
   if (logonType !== expectedLogonType) reject('LOGON_TYPE_UNSAFE');
-  const runLevel = oneTag(source, 'RunLevel', errorPrefix);
-  if (runLevel !== 'LeastPrivilege') reject('RUNLEVEL_UNSAFE');
+  const runLevels = tagValues(source, 'RunLevel');
+  if (runLevels.length > 1) reject('RUNLEVEL_AMBIGUOUS');
+  let runLevel;
+  if (runLevels.length === 1) {
+    runLevel = runLevels[0];
+    if (runLevel !== 'LeastPrivilege') reject('RUNLEVEL_UNSAFE');
+    if (nativeRunLevel !== undefined && nativeRunLevel !== 'LeastPrivilege')
+      reject('RUNLEVEL_READBACK_MISMATCH');
+  } else {
+    // Task Scheduler omits the schema-default LeastPrivilege value when it
+    // exports a task. Accept that omission only when Get-ScheduledTask readback
+    // independently confirms the same task's principal is Limited.
+    if (nativeRunLevel === undefined) reject('RUNLEVEL_AMBIGUOUS');
+    if (nativeRunLevel !== 'LeastPrivilege') reject('RUNLEVEL_UNSAFE');
+    runLevel = 'LeastPrivilege';
+  }
   const multipleInstances = oneTag(source, 'MultipleInstancesPolicy', errorPrefix);
   if (multipleInstances !== 'IgnoreNew') reject('MULTIPLE_INSTANCE_POLICY_UNSAFE');
   const executionTimeLimit = oneTag(source, 'ExecutionTimeLimit', errorPrefix);
   if (executionTimeLimit !== 'PT0S') reject('TIME_LIMIT_NOT_UNBOUNDED');
   if (oneTag(source, 'AllowHardTerminate', errorPrefix).toLowerCase() !== 'false')
     reject('HARD_TERMINATE_ENABLED');
-  if (oneTag(source, 'Enabled', errorPrefix).toLowerCase() !== 'true') reject('DISABLED');
+  const enabledValues = tagValues(source, 'Enabled');
+  if (enabledValues.length > 1) reject('ENABLED_AMBIGUOUS');
+  if (enabledValues.length === 1) {
+    if (enabledValues[0].toLowerCase() !== 'true') reject('DISABLED');
+    if (nativeEnabled !== undefined && nativeEnabled !== true) reject('ENABLED_READBACK_MISMATCH');
+  } else {
+    // Task Scheduler may omit the schema-default Enabled=true on export.
+    if (nativeEnabled === undefined) reject('ENABLED_AMBIGUOUS');
+    if (nativeEnabled !== true) reject('DISABLED');
+  }
   if (oneTag(source, 'Hidden', errorPrefix).toLowerCase() !== 'true') reject('NOT_HIDDEN');
   if (/<(?:[A-Za-z0-9_-]+:)?[A-Za-z0-9_-]*Trigger\b/i.test(source)) reject('TRIGGERS_NOT_ALLOWED');
   const execActions = [...source.matchAll(/<(?:[A-Za-z0-9_-]+:)?Exec(?:\s[^>]*)?>/gi)];
@@ -215,14 +238,14 @@ export function buildExecutorTaskXml(descriptor) {
     `</Exec></Actions></Task>`;
 }
 
-export function validateExecutorTaskXml(xml, descriptor) {
+export function validateExecutorTaskXml(xml, descriptor, { nativeRunLevel, nativeEnabled } = {}) {
   validateExecutorDescriptor(descriptor);
   const expectedLogonType = descriptor.execution_phase === 'WIN11_TRANSITION'
     ? 'InteractiveToken' : 'Password';
   const result = validateWindowsTaskAction(xml, { taskName: descriptor.task_name,
     userIds: [descriptor.user_sid], command: descriptor.wscript_path,
     argumentsText: executorTaskArguments(descriptor), workingDirectory: descriptor.working_directory,
-    errorPrefix: 'EXECUTOR_TASK', expectedLogonType });
+    errorPrefix: 'EXECUTOR_TASK', expectedLogonType, nativeRunLevel, nativeEnabled });
   return { ready: true, user_sid: descriptor.user_sid, logon_type: result.logon_type,
     run_level: result.run_level, execution_time_limit: result.execution_time_limit,
     multiple_instances: result.multiple_instances };
@@ -236,6 +259,73 @@ export function getCurrentWindowsSid({ execFile = execFileSync, systemRoot = pro
   const match = output.match(/S-1-(?:\d+-)+\d+/i);
   if (!match || !SID.test(match[0])) fail('EXECUTOR_WINDOWS_IDENTITY_UNAVAILABLE');
   return match[0].toUpperCase();
+}
+
+function readNativeTaskState(taskName, {
+  execFile = execFileSync, systemRoot = process.env.SystemRoot,
+} = {}) {
+  if (process.platform !== 'win32' || !systemRoot) fail('EXECUTOR_TASK_NATIVE_READBACK_UNAVAILABLE');
+  const powershell = win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const separator = taskName.lastIndexOf('\\');
+  const taskPathLiteral = `'${taskName.slice(0, separator + 1).replaceAll("'", "''") || '\\'}'`;
+  const taskNameLiteral = `'${taskName.slice(separator + 1).replaceAll("'", "''")}'`;
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$task = Get-ScheduledTask -TaskPath ${taskPathLiteral} -TaskName ${taskNameLiteral} -ErrorAction Stop`,
+    'if ($null -eq $task) { throw \'Task Scheduler returned no task\' }',
+    '$sid = [string]$task.Principal.UserId',
+    "if ($sid -notmatch '^S-1-') { $sid = ([System.Security.Principal.NTAccount]::new($sid)).Translate([System.Security.Principal.SecurityIdentifier]).Value }",
+    '[pscustomobject]@{ task_name=[string]$task.TaskName; task_path=[string]$task.TaskPath; user_sid=$sid; logon_type=[string]$task.Principal.LogonType; run_level=[string]$task.Principal.RunLevel; enabled=[bool]$task.Settings.Enabled } | ConvertTo-Json -Compress -Depth 3',
+  ].join('; ');
+  let output;
+  try {
+    output = execFile(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch {
+    fail('EXECUTOR_TASK_NATIVE_READBACK_UNAVAILABLE');
+  }
+  try {
+    const value = JSON.parse(String(output).trim());
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid readback');
+    return value;
+  } catch {
+    fail('EXECUTOR_TASK_NATIVE_READBACK_INVALID');
+  }
+}
+
+function verifiedNativeTaskState(readback, descriptor) {
+  if (!readback || typeof readback !== 'object' || Array.isArray(readback))
+    fail('EXECUTOR_TASK_NATIVE_READBACK_INVALID');
+  const expectedName = descriptor.task_name.toLowerCase();
+  const actualName = `${readback.task_path || ''}${readback.task_name || ''}`.toLowerCase();
+  if (actualName !== expectedName ||
+      String(readback.user_sid || '').toUpperCase() !== descriptor.user_sid.toUpperCase())
+    fail('EXECUTOR_TASK_NATIVE_IDENTITY_MISMATCH');
+  const expectedLogonType = descriptor.execution_phase === 'WIN11_TRANSITION'
+    ? 'InteractiveToken' : 'Password';
+  const actualLogonType = readback.logon_type === 'Interactive'
+    ? 'InteractiveToken' : readback.logon_type;
+  if (actualLogonType !== expectedLogonType) fail('EXECUTOR_TASK_NATIVE_LOGON_TYPE_MISMATCH');
+  let runLevel;
+  if (readback.run_level === 'Limited' || readback.run_level === 'LeastPrivilege') runLevel = 'LeastPrivilege';
+  else if (readback.run_level === 'Highest' || readback.run_level === 'HighestAvailable') runLevel = 'HighestAvailable';
+  else fail('EXECUTOR_TASK_RUNLEVEL_READBACK_AMBIGUOUS');
+  if (typeof readback.enabled !== 'boolean') fail('EXECUTOR_TASK_ENABLED_READBACK_AMBIGUOUS');
+  return { run_level: runLevel, enabled: readback.enabled };
+}
+
+function validateExecutorTaskReadback(xml, descriptor, readTaskState) {
+  if (typeof xml !== 'string') fail('EXECUTOR_TASK_XML_INVALID');
+  const source = xml.replace(/<!--[\s\S]*?-->/g, '');
+  const runLevels = tagValues(source, 'RunLevel');
+  const enabledValues = tagValues(source, 'Enabled');
+  let nativeState;
+  if (runLevels.length === 0 || enabledValues.length === 0)
+    nativeState = verifiedNativeTaskState(readTaskState(descriptor.task_name), descriptor);
+  return validateExecutorTaskXml(xml, descriptor, {
+    nativeRunLevel: nativeState?.run_level, nativeEnabled: nativeState?.enabled,
+  });
 }
 
 export function assertPhysicalDirectory(path, code) {
@@ -353,6 +443,7 @@ export function assertExecutorTaskReady(descriptor, {
   readTaskXml = taskName => execFileSync('schtasks.exe', ['/Query', '/TN', taskName, '/XML'], {
     encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
   }),
+  readTaskState = taskName => readNativeTaskState(taskName),
 } = {}) {
   validateExecutorDescriptor(descriptor);
   const actualPublisherSid = currentSid().toUpperCase();
@@ -360,7 +451,7 @@ export function assertExecutorTaskReady(descriptor, {
   assertPhysicalDirectory(filesystemPath(descriptor.manifest_dir), 'EXECUTOR_MANIFEST_DIRECTORY_UNAVAILABLE');
   assertPhysicalDirectory(filesystemPath(descriptor.results_dir), 'EXECUTOR_RESULT_DIRECTORY_UNAVAILABLE');
   const xml = readTaskXml(descriptor.task_name);
-  const task = validateExecutorTaskXml(xml, descriptor);
+  const task = validateExecutorTaskReadback(xml, descriptor, readTaskState);
   const mailbox = executorMailboxState(filesystemPath(descriptor.manifest_dir));
   if (!mailbox.empty) fail('EXECUTOR_ATTEMPT_UNRESOLVED');
   return { ...task, publisher_sid: actualPublisherSid, mailbox: 'EMPTY' };
@@ -385,11 +476,12 @@ export function dispatchToExecutor(descriptor, manifest, {
   filesystemPath = value => value,
   writeFile = writeFileSync,
   readTaskXml,
+  readTaskState,
   runTask = taskName => execFileSync('schtasks.exe', ['/Run', '/TN', taskName], {
     encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
   }),
 } = {}) {
-  assertExecutorTaskReady(descriptor, { currentSid, filesystemPath, readTaskXml });
+  assertExecutorTaskReady(descriptor, { currentSid, filesystemPath, readTaskXml, readTaskState });
   const payload = makeExecutorManifest(manifest.job, manifest.spec, manifest.attempt_id,
     manifest.source_bundle_sha256 ?? null);
   if (payload.request_id !== manifest.request_id || payload.source_sha !== manifest.source_sha)
@@ -422,6 +514,7 @@ export function triggerPendingExecutorAttempt(descriptor, attemptId, {
   readTaskXml = taskName => execFileSync('schtasks.exe', ['/Query', '/TN', taskName, '/XML'], {
     encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
   }),
+  readTaskState = taskName => readNativeTaskState(taskName),
   runTask = taskName => execFileSync('schtasks.exe', ['/Run', '/TN', taskName], {
     encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
   }),
@@ -437,7 +530,7 @@ export function triggerPendingExecutorAttempt(descriptor, attemptId, {
   const resultsDir = filesystemPath(descriptor.results_dir);
   assertPhysicalDirectory(manifestDir, 'EXECUTOR_MANIFEST_DIRECTORY_UNAVAILABLE');
   assertPhysicalDirectory(resultsDir, 'EXECUTOR_RESULT_DIRECTORY_UNAVAILABLE');
-  validateExecutorTaskXml(readTaskXml(descriptor.task_name), descriptor);
+  validateExecutorTaskReadback(readTaskXml(descriptor.task_name), descriptor, readTaskState);
 
   const name = `${attemptId}.pending.json`;
   const manifestPath = join(manifestDir, name);
