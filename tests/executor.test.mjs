@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync,
+  writeFileSync } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -642,7 +643,8 @@ test('executor persists a recoverable Antigravity preflight wait for the exact p
       execute:async(_spec,executionConfig,receivedJob)=>{
         executeCalls++;
         assert.equal(receivedJob.kind,'antigravity_edit');
-        assert.notEqual(executionConfig.workspace,source.workspace);
+        assert.equal(executionConfig.workspace,join(source.workspace,'.pty-native-executor',
+          'candidate-workspaces',ATTEMPT_EDIT));
         assert.equal(execFileSync('git',['-C',executionConfig.workspace,'rev-parse','HEAD'],{
           encoding:'utf8',windowsHide:true,shell:false}).trim(),source.sourceSha);
         return {outcome:'ANTIGRAVITY_CREDIT_FALLBACK_SETTING_UNKNOWN',exit_code:48,
@@ -655,7 +657,66 @@ test('executor persists a recoverable Antigravity preflight wait for the exact p
     assert.equal(saved.terminal.model,'gemini-3.8-flash-high');
     assert.equal(saved.terminal.model_invoked,false);
     assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(saved.terminal)).state,'WAITING');
-    cleanupExecutorAttempt({...f.descriptor,manifest_dir:f.manifestDir,results_dir:f.resultsDir},ATTEMPT_EDIT);
+    const workspace=join(source.workspace,'.pty-native-executor','candidate-workspaces',ATTEMPT_EDIT);
+    assert.ok(existsSync(workspace),'the candidate remains available until receipt reconciliation');
+    cleanupExecutorAttempt({...f.descriptor,manifest_dir:f.manifestDir,results_dir:f.resultsDir},
+      ATTEMPT_EDIT,undefined,{candidateWorkspaceRoot:source.workspace});
+    assert.equal(existsSync(workspace),false,'receipt reconciliation removes the exact nested attempt workspace');
+    assert.equal(readFileSync(join(source.workspace,'README.md'),'utf8'),'pinned source fixture\n');
+  } finally { f.dispose(); }
+});
+
+test('Antigravity candidate and cleanup refuse a junction at the registered project boundary', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler executor lifecycle is Windows-only');
+  const f=fixture();
+  try {
+    const source=sourceRepository(f.root);
+    const outside=join(f.root,'external-project-root');
+    mkdirSync(outside);
+    const executorRoot=join(source.workspace,'.pty-native-executor');
+    try { symlinkSync(outside,executorRoot,'junction'); }
+    catch (error) {
+      if (['EPERM','EACCES','ENOTSUP'].includes(error.code)) {
+        t.skip(`Windows junction creation is unavailable: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+    const spec='Synthetic W2 junction-boundary rejection; no model invocation is permitted.';
+    const job={schema:6,project_id:PROJECT,host:hostname().toUpperCase(),
+      request_id:'PTYSD_ANTIGRAVITY_JUNCTION_BOUNDARY_20261022',kind:'antigravity_edit',
+      source_sha:source.sourceSha,spec_path:'native-bridge/tasks/w2-review.md',
+      spec_sha256:createHash('sha256').update(spec).digest('hex'),
+      model:'gemini-3.8-flash-high',variant:'high',edit_paths:['README.md'],source_pr:448,
+      goal_comment_id:6188322050,goal_body_sha256:'c'.repeat(64)};
+    const bundle=createExecutorSourceBundle({workspace:source.workspace,descriptor:f.descriptor,
+      job,attemptId:ATTEMPT_EDIT,filesystemPath:localPathMap(f)});
+    writeFileSync(join(f.manifestDir,`${ATTEMPT_EDIT}.pending.json`),JSON.stringify(
+      makeExecutorManifest(job,spec,ATTEMPT_EDIT,bundle.sha256)),{flag:'wx'});
+    let executeCalls=0;
+    const outcome=await executePendingManifest({manifestDir:f.manifestDir,
+      currentSid:()=>EXECUTOR_SID,filesystemPath:localPathMap(f),
+      config:{project_id:PROJECT,repo:REPO,host:hostname().toUpperCase(),
+        executor_runtime:{user_sid:EXECUTOR_SID,publisher_sid:PUBLISHER_SID,
+          manifest_dir:f.manifestDir,results_dir:f.resultsDir},
+        workspace:source.workspace,state_dir:f.resultsDir},
+      execute:async()=>{executeCalls++;throw new Error('MODEL_MUST_NOT_RUN');}});
+    assert.equal(executeCalls,0);
+    assert.equal(outcome.terminal_state,'BLOCKED');
+    const saved=JSON.parse(readFileSync(executorResultPath(f.resultsDir,job.request_id,ATTEMPT_EDIT),'utf8'));
+    assert.match(saved.terminal.outcome,
+      /CANDIDATE_WORKSPACE_SETUP_BLOCKED_CANDIDATE_WORKSPACE_BASE_NOT_PHYSICAL/);
+    assert.equal(existsSync(join(outside,'candidate-workspaces')),false,
+      'executor must reject the junction before creating any path outside the registered project');
+
+    const attempt=join(outside,'candidate-workspaces',ATTEMPT_EDIT);
+    mkdirSync(attempt,{recursive:true});
+    const marker=join(attempt,'preserve.txt');
+    writeFileSync(marker,'outside data must survive');
+    assert.throws(()=>cleanupExecutorAttempt({...f.descriptor,manifest_dir:f.manifestDir,
+      results_dir:f.resultsDir},ATTEMPT_EDIT,undefined,{candidateWorkspaceRoot:source.workspace}),
+    /EXECUTOR_PROJECT_WORKSPACE_BASE_NOT_PHYSICAL/);
+    assert.equal(readFileSync(marker,'utf8'),'outside data must survive');
   } finally { f.dispose(); }
 });
 

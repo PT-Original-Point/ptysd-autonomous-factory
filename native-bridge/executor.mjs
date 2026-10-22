@@ -2,8 +2,8 @@
 // Dedicated Task Scheduler entrypoint. It has no GitHub publisher API calls.
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { guardConfig, isRecoverableModelPreflightWait, JOB_MARKER, parseJob,
   receipt, runPlan, terminalStateForResult } from './worker.mjs';
@@ -21,8 +21,26 @@ function runGit(args, code, options) {
   catch (cause) { const error = new Error(code, { cause }); error.code = code; throw error; }
 }
 
-function removeCandidateWorkspace(resultsDir, attemptId) {
-  const path = candidateWorkspacePath(resultsDir, attemptId);
+function ensurePhysicalChildDirectory(parent, name, code) {
+  assertPhysicalDirectory(parent, `${code}_PARENT_NOT_PHYSICAL`);
+  const child = join(parent, name);
+  try { lstatSync(child); }
+  catch { mkdirSync(child); }
+  assertPhysicalDirectory(child, code);
+  return child;
+}
+
+function removeCandidateWorkspace(workspaceBase, attemptId, projectRoot = null) {
+  if (projectRoot) {
+    assertPhysicalDirectory(projectRoot, 'CANDIDATE_PROJECT_ROOT_NOT_PHYSICAL');
+    const workspaceRoot = join(projectRoot, '.pty-native-executor');
+    if (existsSync(workspaceRoot))
+      assertPhysicalDirectory(workspaceRoot, 'CANDIDATE_WORKSPACE_BASE_NOT_PHYSICAL');
+    const candidateRoot = join(workspaceRoot, 'candidate-workspaces');
+    if (existsSync(candidateRoot))
+      assertPhysicalDirectory(candidateRoot, 'CANDIDATE_WORKSPACE_ROOT_NOT_PHYSICAL');
+  }
+  const path = candidateWorkspacePath(workspaceBase, attemptId);
   if (!existsSync(path)) return;
   const stat = lstatSync(path);
   if (!stat.isDirectory() || stat.isSymbolicLink()) fail('CANDIDATE_WORKSPACE_NOT_PHYSICAL_DIRECTORY');
@@ -30,7 +48,7 @@ function removeCandidateWorkspace(resultsDir, attemptId) {
   if (existsSync(path)) fail('CANDIDATE_WORKSPACE_CLEANUP_UNCONFIRMED');
 }
 
-function materializeCandidateWorkspace(manifestDir, resultsDir, manifest, job) {
+function materializeCandidateWorkspace(manifestDir, workspaceBase, manifest, job, projectRoot = null) {
   if (!['opencode_plan', 'opencode_edit', 'antigravity_edit'].includes(job?.kind) ||
       !HASH.test(manifest.source_bundle_sha256 || ''))
     fail('CANDIDATE_SOURCE_BUNDLE_IDENTITY_INVALID');
@@ -43,10 +61,26 @@ function materializeCandidateWorkspace(manifestDir, resultsDir, manifest, job) {
       digest(readFileSync(bundle)) !== manifest.source_bundle_sha256.toLowerCase())
     fail('CANDIDATE_SOURCE_BUNDLE_HASH_MISMATCH');
 
-  const workspaceRoot = resolve(resultsDir, 'candidate-workspaces');
-  mkdirSync(workspaceRoot, { recursive: true });
-  assertPhysicalDirectory(workspaceRoot, 'CANDIDATE_WORKSPACE_ROOT_NOT_PHYSICAL');
-  const workspace = candidateWorkspacePath(resultsDir, manifest.attempt_id);
+  let workspaceRoot;
+  if (projectRoot) {
+    assertPhysicalDirectory(projectRoot, 'CANDIDATE_PROJECT_ROOT_NOT_PHYSICAL');
+    if (resolve(workspaceBase) !== resolve(projectRoot, '.pty-native-executor'))
+      fail('CANDIDATE_WORKSPACE_BASE_OUTSIDE_PROJECT');
+    const executorRoot = ensurePhysicalChildDirectory(projectRoot, '.pty-native-executor',
+      'CANDIDATE_WORKSPACE_BASE_NOT_PHYSICAL');
+    workspaceRoot = ensurePhysicalChildDirectory(executorRoot, 'candidate-workspaces',
+      'CANDIDATE_WORKSPACE_ROOT_NOT_PHYSICAL');
+    const projectReal = realpathSync(projectRoot);
+    const candidateRootReal = realpathSync(workspaceRoot);
+    const remainder = relative(projectReal, candidateRootReal);
+    if (remainder === '..' || isAbsolute(remainder) || remainder.startsWith(`..${sep}`))
+      fail('CANDIDATE_WORKSPACE_ROOT_OUTSIDE_PROJECT');
+  } else {
+    workspaceRoot = resolve(workspaceBase, 'candidate-workspaces');
+    mkdirSync(workspaceRoot, { recursive: true });
+    assertPhysicalDirectory(workspaceRoot, 'CANDIDATE_WORKSPACE_ROOT_NOT_PHYSICAL');
+  }
+  const workspace = candidateWorkspacePath(workspaceBase, manifest.attempt_id);
   if (existsSync(workspace)) fail('CANDIDATE_WORKSPACE_ALREADY_EXISTS_NO_REUSE');
   const bundleRef = `refs/pty-native/executor-bundles/${manifest.attempt_id}`;
   try {
@@ -74,7 +108,7 @@ function materializeCandidateWorkspace(manifestDir, resultsDir, manifest, job) {
     assertPhysicalDirectory(workspace, 'CANDIDATE_WORKSPACE_NOT_PHYSICAL_DIRECTORY');
     return workspace;
   } catch (error) {
-    try { removeCandidateWorkspace(resultsDir, manifest.attempt_id); }
+    try { removeCandidateWorkspace(workspaceBase, manifest.attempt_id, projectRoot); }
     catch { fail('CANDIDATE_WORKSPACE_FAILED_CLEANUP_UNKNOWN'); }
     throw error;
   }
@@ -189,7 +223,11 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
   }
   if (!result && manifest.source_bundle_sha256 !== undefined) {
     try {
-      const workspace = materializeCandidateWorkspace(manifestDir, runtime.results_dir, manifest, parsedJob);
+      const antigravityProjectRoot = parsedJob.kind === 'antigravity_edit' ? config.workspace : null;
+      const workspaceBase = antigravityProjectRoot
+        ? join(antigravityProjectRoot, '.pty-native-executor') : runtime.results_dir;
+      const workspace = materializeCandidateWorkspace(manifestDir, workspaceBase, manifest, parsedJob,
+        antigravityProjectRoot);
       executionConfig = { ...config, workspace };
     } catch (error) {
       const code = safeErrorCode(error, 'CANDIDATE_WORKSPACE_SETUP_UNKNOWN');
