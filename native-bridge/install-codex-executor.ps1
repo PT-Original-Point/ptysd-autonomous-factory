@@ -1,9 +1,10 @@
-# Source-only installer for the on-demand, separately identified Codex Executor.
+# Source-only installer for the on-demand Codex Executor.
 # It never changes PTYSD-Native-OpenCode or HiddenWorker.vbs. Do not execute this
-# installer before the R14 source and the Human identity/cost gates are accepted.
+# installer before the exact source and the Human model/cost gates are accepted.
 [CmdletBinding()]
 param(
     [ValidateSet('Audit','Install','Uninstall')][string]$Mode = 'Audit',
+    [ValidateSet('WIN11_TRANSITION','VM_ISOLATED')][string]$ExecutionPhase = 'VM_ISOLATED',
     [PSCredential]$ExecutorCredential,
     [string]$NodeExecutable = '',
     [string]$CodexExecutable = ''
@@ -17,19 +18,24 @@ $dispatcherTaskName = 'PTYSD-Native-OpenCode'
 $project = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE'
 $repo = 'PT-Original-Point/ptysd-autonomous-factory'
 $sourceRoot = $PSScriptRoot
+$isTransition = $ExecutionPhase -eq 'WIN11_TRANSITION'
 $publisherSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $workerConfigPath = Join-Path $env:LOCALAPPDATA 'PTYSDNativeBridge\config.json'
-# Public Documents grants batch-logon users DELETE_CHILD on the parent, which
-# can replace a child runtime even when that child's DACL is protected. Keep the
-# executor root under ProgramData and verify its parent before creating it.
-$sharedBase = Join-Path $env:ProgramData 'PTYSDCodexExecutor'
+# A same-user transition runs from the loaded x profile and does not change ACLs
+# or stage a second Codex CLI. VM_ISOLATED retains the dedicated ProgramData tree.
+$sharedBase = if ($isTransition) {
+    Join-Path $env:LOCALAPPDATA 'PTYSDNativeBridge\CodexExecutor'
+} else {
+    Join-Path $env:ProgramData 'PTYSDCodexExecutor'
+}
 $spoolDir = Join-Path $sharedBase 'CodexSpool'
 $runtimeDir = Join-Path $sharedBase 'CodexRuntime'
 $executorConfigPath = Join-Path $runtimeDir 'executor-config.json'
 $executorScriptPath = Join-Path $runtimeDir 'codex-executor.mjs'
 $continuationScriptPath = Join-Path $runtimeDir 'codex-continuation.mjs'
 $launcherPath = Join-Path $runtimeDir 'HiddenCodexExecutor.vbs'
-$installStatePath = Join-Path (Split-Path -Parent $workerConfigPath) 'codex-executor-install-state.json'
+$installStatePath = Join-Path (Split-Path -Parent $workerConfigPath) `
+    ('codex-executor-install-state-' + $ExecutionPhase + '.json')
 $backupPath = $null
 $registeredHere = $false
 
@@ -48,6 +54,45 @@ function Assert-CodexExecutorInstallPathChain([string]$Path) {
             $item = Get-Item -LiteralPath $cursor -Force
             if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw 'INSTALL_REPARSE_POINT_REVIEW_REQUIRED'
+            }
+        }
+        $parent = Split-Path -Parent $cursor
+        if (-not $parent -or $parent -eq $cursor) { break }
+        $cursor = $parent
+    }
+}
+
+function Assert-CodexExecutorTransitionAcl([string]$Path) {
+    $target = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $writeMask = [int]([System.Security.AccessControl.FileSystemRights]::Write -bor
+        [System.Security.AccessControl.FileSystemRights]::Delete -bor
+        [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+    $parentReplacementMask = [int]([System.Security.AccessControl.FileSystemRights]::Delete -bor
+        [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+    $broadSids = @('S-1-1-0','S-1-5-11','S-1-5-32-545')
+    $cursor = $target
+    while ($cursor) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'EXECUTOR_TRANSITION_REPARSE_POINT_REVIEW_REQUIRED'
+            }
+            try { $acl = Get-Acl -LiteralPath $cursor -ErrorAction Stop }
+            catch { throw 'EXECUTOR_TRANSITION_ACL_READBACK_FAILED' }
+            $isTarget = [string]::Equals($cursor, $target, [StringComparison]::OrdinalIgnoreCase)
+            $deniedRights = if ($isTarget) { $writeMask } else { $parentReplacementMask }
+            foreach ($rule in @($acl.GetAccessRules($true, $true,
+                [System.Security.Principal.SecurityIdentifier]))) {
+                if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
+                    $rule.IdentityReference.Value -notin $broadSids) { continue }
+                if (([int]$rule.FileSystemRights -band $deniedRights) -ne 0) {
+                    if ($isTarget) { throw 'EXECUTOR_TRANSITION_ACL_BROAD_WRITE' }
+                    throw 'EXECUTOR_TRANSITION_ACL_BROAD_PARENT_REPLACEMENT'
+                }
             }
         }
         $parent = Split-Path -Parent $cursor
@@ -320,6 +365,7 @@ function Set-RoleAcl([string]$Path, [string]$ExecutorSid,
 
 if ($env:COMPUTERNAME.ToUpperInvariant() -ne $expectedHost) { throw 'WRONG_HOST_STOP' }
 if ($Mode -eq 'Audit') {
+    Write-Output ('EXECUTION_PHASE=' + $ExecutionPhase)
     $dispatcher = Get-TaskOptional $dispatcherTaskName
     if ($null -eq $dispatcher) { Write-Output 'DISPATCHER_TASK=ABSENT' }
     else {
@@ -357,7 +403,6 @@ if ($Mode -eq 'Uninstall') {
     return
 }
 
-if ($null -eq $ExecutorCredential) { throw 'SEPARATE_EXECUTOR_CREDENTIAL_REQUIRED' }
 if (-not (Test-Path -LiteralPath $workerConfigPath -PathType Leaf)) { throw 'EXISTING_WORKER_CONFIG_REQUIRED' }
 if ($null -ne (Get-TaskOptional $executorTaskName)) { throw 'EXECUTOR_TASK_EXISTS_REVIEW_REQUIRED_NO_OVERWRITE' }
 $dispatcher = Get-TaskOptional $dispatcherTaskName
@@ -366,37 +411,97 @@ if ($null -eq $dispatcher -or @($dispatcher.Actions).Count -ne 1 -or
     throw 'EXISTING_DISPATCHER_IDENTITY_MISMATCH'
 }
 
-$executorName = $ExecutorCredential.UserName
-$executorSid = Resolve-Sid $executorName
-if ($executorSid -eq $publisherSid) { throw 'PUBLISHER_EXECUTOR_IDENTITY_MUST_DIFFER' }
-Assert-SafeSharedParentAcl -Path $env:ProgramData
-try {
-    $admins = @(Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop)
-    if ($admins.SID.Value -contains $executorSid) { throw 'EXECUTOR_MUST_BE_STANDARD_USER' }
-} catch {
-    if ($_.Exception.Message -eq 'EXECUTOR_MUST_BE_STANDARD_USER') { throw }
-    throw 'EXECUTOR_ADMIN_MEMBERSHIP_UNKNOWN_STOP'
+if ($isTransition) {
+    if ($null -ne $ExecutorCredential) { throw 'TRANSITION_MUST_NOT_USE_SEPARATE_CREDENTIAL' }
+    if (-not $env:USERPROFILE -or -not $env:LOCALAPPDATA -or
+        -not (Test-Path -LiteralPath $env:USERPROFILE -PathType Container) -or
+        -not (Test-Path -LiteralPath $env:LOCALAPPDATA -PathType Container) -or
+        [Diagnostics.Process]::GetCurrentProcess().SessionId -le 0) {
+        throw 'TRANSITION_CURRENT_PROFILE_OR_INTERACTIVE_SESSION_UNAVAILABLE'
+    }
+    Assert-CodexExecutorTransitionAcl $sharedBase
+    $executorName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $executorSid = $publisherSid
+} else {
+    if ($null -eq $ExecutorCredential) { throw 'SEPARATE_EXECUTOR_CREDENTIAL_REQUIRED' }
+    $executorName = $ExecutorCredential.UserName
+    $executorSid = Resolve-Sid $executorName
+    if ($executorSid -eq $publisherSid) { throw 'PUBLISHER_EXECUTOR_IDENTITY_MUST_DIFFER' }
+    try {
+        $admins = @(Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop)
+        if ($admins.SID.Value -contains $executorSid) { throw 'EXECUTOR_MUST_BE_STANDARD_USER' }
+    } catch {
+        if ($_.Exception.Message -eq 'EXECUTOR_MUST_BE_STANDARD_USER') { throw }
+        throw 'EXECUTOR_ADMIN_MEMBERSHIP_UNKNOWN_STOP'
+    }
+    Assert-SafeSharedParentAcl -Path $env:ProgramData
 }
 
-foreach ($candidate in @($NodeExecutable, $CodexExecutable)) {
-    if (-not $candidate -or -not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-        throw 'MACHINE_ACCESSIBLE_NODE_AND_CODEX_PATHS_REQUIRED'
-    }
-    $fullCandidate = [IO.Path]::GetFullPath($candidate)
-    $programFilesRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
-    if (-not ($programFilesRoots | Where-Object {
-        $fullCandidate.StartsWith([IO.Path]::GetFullPath($_) + [IO.Path]::DirectorySeparatorChar,
-            [StringComparison]::OrdinalIgnoreCase) })) {
-        throw 'EXECUTABLE_MUST_BE_MACHINE_ACCESSIBLE_NOT_PUBLISHER_APPDATA'
-    }
-}
-$signature = Get-AuthenticodeSignature -FilePath $CodexExecutable
-if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'OpenAI OpCo, LLC') {
-    throw 'CODEX_EXECUTABLE_SIGNATURE_NOT_QUALIFIED'
+if (-not $NodeExecutable -or -not (Test-Path -LiteralPath $NodeExecutable -PathType Leaf)) {
+    throw 'MACHINE_ACCESSIBLE_NODE_PATH_REQUIRED'
 }
 $nodePath = [IO.Path]::GetFullPath($NodeExecutable)
-$codexPath = [IO.Path]::GetFullPath($CodexExecutable)
-$codexHash = (Get-FileHash -LiteralPath $codexPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$programFilesRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+if (-not ($programFilesRoots | Where-Object {
+    $nodePath.StartsWith([IO.Path]::GetFullPath($_) + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase) })) {
+    throw 'NODE_MUST_BE_MACHINE_ACCESSIBLE'
+}
+Assert-CodexExecutorInstallPathChain $nodePath
+
+if (-not $CodexExecutable -or -not (Test-Path -LiteralPath $CodexExecutable -PathType Leaf)) {
+    throw 'CODEX_EXECUTABLE_NOT_FOUND'
+}
+$codexSourcePath = [IO.Path]::GetFullPath($CodexExecutable)
+if ([IO.Path]::GetFileName($codexSourcePath) -ine 'codex.exe') {
+    throw 'CODEX_EXECUTABLE_PATH_NOT_QUALIFIED'
+}
+$codexProgramFilesInstall = @($programFilesRoots | Where-Object {
+    $codexSourcePath.StartsWith([IO.Path]::GetFullPath($_) + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+$localCodexBin = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'))
+$codexVersionDirectory = Split-Path -Parent $codexSourcePath
+$codexBinDirectory = Split-Path -Parent $codexVersionDirectory
+$officialUserCodexInstall = [string]::Equals([IO.Path]::GetFullPath($codexBinDirectory), $localCodexBin,
+    [StringComparison]::OrdinalIgnoreCase)
+if (-not ($codexProgramFilesInstall -or $officialUserCodexInstall)) {
+    throw 'CODEX_EXECUTABLE_MUST_BE_PROGRAM_FILES_OR_OFFICIAL_LOCAL_CODEX'
+}
+Assert-CodexExecutorInstallPathChain $codexSourcePath
+
+$codexSignature = Get-AuthenticodeSignature -FilePath $codexSourcePath
+if ($codexSignature.Status -ne 'Valid' -or
+    $codexSignature.SignerCertificate.Subject -notmatch 'OpenAI OpCo, LLC') {
+    throw 'CODEX_EXECUTABLE_SIGNATURE_NOT_QUALIFIED'
+}
+
+# The VM account cannot depend on the publisher's per-user AppData, so VM mode
+# stages and hashes the signed official bundle. The Win11 transition runs as x
+# and invokes x's already installed Codex CLI directly; it never copies OAuth- or
+# profile-bound CLI files into another runtime directory.
+$codexCliBundleNames = if ($isTransition) { @() } else {
+    @('codex.exe','codex-code-mode-host.exe','codex-command-runner.exe',
+        'codex-windows-sandbox-setup.exe')
+}
+$codexCliSources = [ordered]@{}
+$codexCliHashes = [ordered]@{}
+$codexSourceDirectory = Split-Path -Parent $codexSourcePath
+foreach ($name in $codexCliBundleNames) {
+    $source = Join-Path $codexSourceDirectory $name
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw ('CODEX_CLI_BUNDLE_FILE_MISSING: ' + $name)
+    }
+    Assert-CodexExecutorInstallPathChain $source
+    $sourceSignature = Get-AuthenticodeSignature -FilePath $source
+    if ($sourceSignature.Status -ne 'Valid' -or
+        $sourceSignature.SignerCertificate.Subject -notmatch 'OpenAI OpCo, LLC') {
+        throw ('CODEX_CLI_BUNDLE_SIGNATURE_NOT_QUALIFIED: ' + $name)
+    }
+    $codexCliSources[$name] = $source
+    $codexCliHashes[$name] = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+$codexRuntimePath = if ($isTransition) { $codexSourcePath } else { Join-Path $runtimeDir 'codex.exe' }
+$codexHash = (Get-FileHash -LiteralPath $codexSourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $sourceNames = @('codex-executor.mjs','codex-continuation.mjs','captured-process.mjs','safe-error-code.mjs',
     'windows-executor.mjs','HiddenCodexExecutor.vbs')
@@ -409,8 +514,9 @@ foreach ($name in $sourceNames) {
 $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
 $executorConfig = [ordered]@{
     project_id=$project; repo=$repo; spool_dir=$spoolDir
+    codex_executor_execution_phase=$ExecutionPhase
     workspace_root=(Join-Path $spoolDir 'workspaces')
-    codex_executable=$codexPath; codex_executable_sha256=$codexHash
+    codex_executable=$codexRuntimePath; codex_executable_sha256=$codexHash
     publisher_identity_sid=$publisherSid; executor_identity_sid=$executorSid
     codex_executor_task=$executorTaskName; codex_executor_task_user=$executorName
     codex_executor_wscript_path=$wscript; codex_executor_launcher_path=$launcherPath
@@ -430,9 +536,11 @@ $runtimeHashes = [ordered]@{}
 foreach ($name in $sourceNames) {
     $runtimeHashes[$name] = (Get-FileHash -LiteralPath $runtimeSources[$name] -Algorithm SHA256).Hash.ToLowerInvariant()
 }
+foreach ($name in $codexCliBundleNames) { $runtimeHashes[$name] = $codexCliHashes[$name] }
 $runtimeHashes['executor-config.json'] = $configHash
 $installState = [ordered]@{
     schema='ptysd-codex-executor-install-state.v1'
+    execution_phase=$ExecutionPhase
     host=$env:COMPUTERNAME.ToUpperInvariant()
     publisher_sid=$publisherSid
     executor_sid=$executorSid
@@ -450,21 +558,40 @@ Assert-CodexExecutorInstallArtifacts -SpoolPath $spoolDir -RuntimePath $runtimeD
     -ExpectedRuntimeHashes $runtimeHashes
 Ensure-CodexExecutorInstallDirectories -SharedPath $sharedBase -SpoolPath $spoolDir -RuntimePath $runtimeDir `
     -SpoolDirectoryNames @('requests','bundles','claims','results','evidence','workspaces','locks')
-$readOnly = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute
-$modify = [System.Security.AccessControl.FileSystemRights]::Modify
-Set-RoleAcl $sharedBase $executorSid $readOnly
-Set-RoleAcl $spoolDir $executorSid $readOnly
-foreach ($name in @('requests','bundles')) {
-    Set-RoleAcl (Join-Path $spoolDir $name) $executorSid $readOnly
+if ($isTransition) {
+    foreach ($path in @($sharedBase,$spoolDir,$runtimeDir) + @(
+        'requests','bundles','claims','results','evidence','workspaces','locks' |
+            ForEach-Object { Join-Path $spoolDir $_ })) {
+        Assert-CodexExecutorTransitionAcl $path
+    }
 }
-foreach ($name in @('claims','results','evidence','workspaces','locks')) {
-    Set-RoleAcl (Join-Path $spoolDir $name) $executorSid $modify
+if (-not $isTransition) {
+    $readOnly = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+    $modify = [System.Security.AccessControl.FileSystemRights]::Modify
+    Set-RoleAcl $sharedBase $executorSid $readOnly
+    Set-RoleAcl $spoolDir $executorSid $readOnly
+    foreach ($name in @('requests','bundles')) {
+        Set-RoleAcl (Join-Path $spoolDir $name) $executorSid $readOnly
+    }
+    foreach ($name in @('claims','results','evidence','workspaces','locks')) {
+        Set-RoleAcl (Join-Path $spoolDir $name) $executorSid $modify
+    }
+    Set-RoleAcl $runtimeDir $executorSid $readOnly
 }
-Set-RoleAcl $runtimeDir $executorSid $readOnly
 
 foreach ($name in $sourceNames) {
     Copy-CodexExecutorInstallFile -SourcePath $runtimeSources[$name] `
         -DestinationPath (Join-Path $runtimeDir $name) -ExpectedSha256 $runtimeHashes[$name] | Out-Null
+}
+foreach ($name in $codexCliBundleNames) {
+    $destination = Join-Path $runtimeDir $name
+    Copy-CodexExecutorInstallFile -SourcePath $codexCliSources[$name] `
+        -DestinationPath $destination -ExpectedSha256 $runtimeHashes[$name] | Out-Null
+    $stagedSignature = Get-AuthenticodeSignature -FilePath $destination
+    if ($stagedSignature.Status -ne 'Valid' -or
+        $stagedSignature.SignerCertificate.Subject -notmatch 'OpenAI OpCo, LLC') {
+        throw ('CODEX_CLI_STAGED_SIGNATURE_NOT_QUALIFIED: ' + $name)
+    }
 }
 Write-CodexExecutorInstallBytes -Bytes $configBytes -DestinationPath $executorConfigPath `
     -ExpectedSha256 $runtimeHashes['executor-config.json'] | Out-Null
@@ -474,21 +601,27 @@ $actionArgs = ('//B //NoLogo "' + $launcherPath + '" "' + $nodePath + '" "' +
 $action = New-ScheduledTaskAction -Execute $wscript -Argument $actionArgs -WorkingDirectory $spoolDir
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -Hidden -DisallowHardTerminate
-$principal = New-ScheduledTaskPrincipal -UserId $executorName -LogonType Password -RunLevel Limited
+$scheduledLogonType = if ($isTransition) { 'Interactive' } else { 'Password' }
+$expectedReadbackLogonType = if ($isTransition) { 'Interactive' } else { 'Password' }
+$principal = New-ScheduledTaskPrincipal -UserId $executorName -LogonType $scheduledLogonType -RunLevel Limited
 $workerConfig = Get-Content -LiteralPath $workerConfigPath -Raw | ConvertFrom-Json
 $backupPath = Join-Path (Split-Path -Parent $workerConfigPath) ('config.codex-before-' + (Get-Date -Format 'yyyyMMddHHmmss') + '-' + [guid]::NewGuid().ToString('N') + '.json')
 Copy-Item -LiteralPath $workerConfigPath -Destination $backupPath
 
 try {
-    Register-ScheduledTask -TaskName $executorTaskName -TaskPath '\' -Action $action -Settings $settings `
-        -Principal $principal -User $executorName -Password $ExecutorCredential.GetNetworkCredential().Password `
-        -ErrorAction Stop | Out-Null
+    $registration = @{ TaskName=$executorTaskName; TaskPath='\'; Action=$action; Settings=$settings
+        Principal=$principal; ErrorAction='Stop' }
+    if (-not $isTransition) {
+        $registration.User = $executorName
+        $registration.Password = $ExecutorCredential.GetNetworkCredential().Password
+    }
+    Register-ScheduledTask @registration | Out-Null
     $registeredHere = $true
     $readback = Get-ScheduledTask -TaskName $executorTaskName -TaskPath '\' -ErrorAction Stop
     $timeLimit = [string]$readback.Settings.ExecutionTimeLimit
     $zeroLimit = ($readback.Settings.ExecutionTimeLimit -eq [TimeSpan]::Zero) -or
         ($timeLimit -eq 'PT0S') -or ($timeLimit -eq '00:00:00')
-    if ($readback.Principal.UserId -ne $executorName -or $readback.Principal.LogonType -ne 'Password' -or
+    if ($readback.Principal.UserId -ne $executorName -or $readback.Principal.LogonType -ne $expectedReadbackLogonType -or
         $readback.Principal.RunLevel -ne 'Limited' -or $readback.Settings.MultipleInstances -ne 'IgnoreNew' -or
         -not $zeroLimit -or $readback.Settings.Hidden -ne $true -or
         $readback.Settings.AllowHardTerminate -ne $false -or
@@ -500,6 +633,7 @@ try {
     }
     foreach ($property in @{
         codex_spool=$spoolDir; publisher_identity_sid=$publisherSid; executor_identity_sid=$executorSid
+        codex_executor_execution_phase=$ExecutionPhase
         codex_executor_task=$executorTaskName; codex_executor_task_user=$executorName
         codex_executor_wscript_path=$wscript; codex_executor_launcher_path=$launcherPath
         codex_executor_node_path=$nodePath; codex_executor_script_path=$executorScriptPath
@@ -522,17 +656,31 @@ try {
         $readWorkerConfig.codex_executor_script_path -ne $executorScriptPath -or
         $readWorkerConfig.codex_executor_config_path -ne $executorConfigPath -or
         $readWorkerConfig.codex_executor_working_directory -ne $spoolDir -or
+        $readWorkerConfig.codex_executor_execution_phase -ne $ExecutionPhase -or
         $readWorkerConfig.enable_codex_model_runs -ne $false -or
         $readWorkerConfig.codex_usage_authorized -ne $false) { throw 'WORKER_CONFIG_READBACK_MISMATCH' }
 Assert-CodexExecutorInstallArtifacts -SpoolPath $spoolDir -RuntimePath $runtimeDir `
     -SpoolDirectoryNames @('requests','bundles','claims','results','evidence','workspaces','locks') `
     -ExpectedRuntimeHashes $runtimeHashes -RequireComplete
+if ($isTransition) {
+    foreach ($path in @($workerConfigPath,$installStatePath,$executorConfigPath,$executorScriptPath,
+        $continuationScriptPath,$launcherPath,$NodeExecutable,$codexRuntimePath)) {
+        Assert-CodexExecutorTransitionAcl $path
+    }
+}
     Write-Output 'CODEX_EXECUTOR_REGISTERED_ON_DEMAND_ONLY'
-    Write-Output ('EXECUTOR_TASK=' + $executorTaskName + ';Logon=Password;RunLevel=Limited;Instances=IgnoreNew;ExecutionTimeLimit=PT0S')
+    Write-Output ('EXECUTION_PHASE=' + $ExecutionPhase)
+    Write-Output ('EXECUTOR_TASK=' + $executorTaskName + ';Logon=' + $expectedReadbackLogonType +
+        ';RunLevel=Limited;Instances=IgnoreNew;ExecutionTimeLimit=PT0S')
     Write-Output ('EXISTING_DISPATCHER=' + $dispatcherTaskName + ';ACTION_UNCHANGED')
     Write-Output ('WORKER_CONFIG_BACKUP=' + $backupPath)
+    Write-Output ('CODEX_CLI_PATH=' + $codexRuntimePath + ';CLI_COPY=' + (-not $isTransition))
     Write-Output 'MODEL_EXECUTION=DISABLED;COST_AUTHORIZATION=FALSE;SANDBOX_BOUNDARY=UNKNOWN'
-    Write-Output 'NEXT=Authenticate Codex only within the dedicated standard-user account; audit sandbox boundary before enabling any model run'
+    if ($isTransition) {
+        Write-Output 'NEXT=Qualify current-user Codex CLI and exact model/cost permissions; no model was invoked'
+    } else {
+        Write-Output 'NEXT=Authenticate Codex only within the dedicated standard-user account; audit sandbox boundary before enabling any model run'
+    }
 } catch {
     $failureMessage = $_.Exception.Message
     $rollbackProblems = New-Object System.Collections.Generic.List[string]

@@ -1,32 +1,36 @@
-# Native OpenCode executor isolation (candidate)
+# Native Windows on-demand executors (candidate)
 
-This candidate keeps the five-minute issue poller as the Publisher and starts long model work through a separate on-demand Task Scheduler task. The source includes an explicit registration path, but no host task is installed or registered by this candidate.
+The five-minute issue poller remains the Publisher. Long W1/W2 model work is handled by on-demand Task Scheduler executors. This source candidate does not register or start host tasks.
 
-## Required host contract
+## Execution phases
 
-- Create or designate a standard Windows account whose SID differs from the Publisher SID. Do not use `SYSTEM`, Administrators, or the Codex Publisher account.
-- Run the Executor task with `LogonType=Password`, `LeastPrivilege`, `IgnoreNew`, `ExecutionTimeLimit=PT0S`, hidden task metadata, and the exact `node.exe executor.mjs --config ... --manifest-dir ...` action. The password must be supplied through a secure Task Scheduler registration flow and must never be stored in this XML, source, or command logs. S4U is unsuitable because Windows gives S4U tasks no network access, which prevents OpenCode from reaching a model provider. Prefer the root task name `\PTYSD-OpenCode-Executor`, consistent with the existing Codex Executor; an existing `\PTYSD\OpenCodeExecutor` namespace remains supported when its folder is already provisioned.
-- Keep the Executor's provider authentication in that account's own profile. Do not copy the Publisher's `gh` authentication, Codex `auth.json`, or any Publisher token.
-- Set NTFS ACLs so the Executor can modify only its authorized workspace, one-slot manifest directory, and its own result directory. The Publisher can create/remove manifests and read terminal results. The Executor must not read the Publisher profile, other project credentials, canonical control, trusted verifier, or the Task Scheduler definition.
-- Validate the physical paths and ACLs under both actual Windows identities. A separate Git worktree is not an OS security boundary.
-- The task definition is a template. `buildExecutorTaskXml()` emits a Password/least-privilege/PT0S/IgnoreNew definition without credentials; secure registration must provide the account password and be read back from Task Scheduler. The source path does not create accounts, grant rights, install files, change ACLs, or change the existing five-minute task.
+Each lane descriptor and `executor_runtime` explicitly carries the same `execution_phase`:
+
+- `VM_ISOLATED` is the default. It requires a separate standard Windows SID from the Publisher, a password logon for network access, profile-contained writable workspace/state, and the existing role-separated ACL checks. Missing phase fields retain this strict behavior.
+- `WIN11_TRANSITION` is the Human-authorized temporary Win11 phase. It requires the Publisher and Executor SID to be the same current user and emits `LogonType=InteractiveToken`. Registration does not ask for or copy another account's password, and it does not change the W1/W2 model-run flags. It requires the current user profile to be loaded, all configured paths to exist as physical paths without reparse points, exact task/action/working-directory readback, and no broad-principal write or parent-replacement rights. Identity-specific Publisher-versus-Executor ACL checks cannot provide separation when both roles share one SID and are therefore deferred to `VM_ISOLATED`.
+
+The transition explicitly does not qualify VM isolation. `RunLevel=LeastPrivilege`, `IgnoreNew`, hidden task metadata, `ExecutionTimeLimit=PT0S`, no triggers, exact lane paths, attempt-pinned source bundles, and no automatic replay remain required in both phases. A phase mismatch between lane descriptor and runtime config fails closed.
 
 ## Registration source path
 
-`register-opencode-executor.ps1 -Mode Audit` is read-only. `-Mode Register` is an explicit operation that consumes the already configured `executor` descriptor and pre-provisioned executor runtime. It refuses an existing task, missing task folder, service identity, missing profile/runtime paths, broad write ACLs, writable executor runtime files, and any configuration that enables model execution. It uses `build-executor-task-xml.mjs` to call the same `windows-executor.mjs` task template used by the dispatcher, registers an on-demand task without triggers, then reads back identity, action, settings, and trigger count. It does not create an account or task folder, install files, alter ACLs, write publisher configuration, or start the task. An ambiguous registration result is left for OS readback and is never retried automatically.
+`register-opencode-executor.ps1 -Mode Audit` is read-only. `-Mode Register` refuses an existing task or missing pre-provisioned task folder and never starts the task. In `WIN11_TRANSITION`, it registers the XML principal using the current interactive token with no credential parameter. In `VM_ISOLATED`, it retains secure password registration for the separate standard account. Both paths read back the actual task identity SID, logon type, RunLevel, action, working directory, hidden setting, `IgnoreNew`, `PT0S`, and zero triggers. Ambiguous registration is left for OS readback and is never retried automatically.
 
-Source tests validate shared XML output, malformed-identity rejection, read-only Audit behavior, and the no-start/no-remove boundary. They are not Task Scheduler registration or live credential/ACL acceptance.
+The Codex continuation executor follows the same phase contract through `install-codex-executor.ps1`. Its transition runtime is under the current user's LocalAppData, uses the already-installed signed Codex CLI by absolute path and SHA-256, and does not copy the CLI bundle or accept a second-account password. It registers only an on-demand `Interactive`/Limited task, preserves the existing five-minute Publisher task, and leaves model execution and cost authorization disabled. Its phase-specific install record prevents an audit or uninstall operation from confusing a VM registration with a transition registration. This source path is not evidence that the Codex task is installed or that CLI/model/cost gates pass on the host.
+
+Registration itself does not invoke a model or mutate model authorization settings. Actual model execution remains controlled by the accepted task, exact lane configuration, pinned model and no-cost eligibility checks. The source registration tests do not count as a real Task Scheduler registration or a live model call.
+
+The registration script does not create accounts, install runtime files, grant ACLs, edit Publisher configuration, or alter the existing `PTYSD-Native-OpenCode` poller. A candidate phase descriptor must be installed and independently read back before any executor task can run.
 
 ## Attempt protocol
 
-1. Publisher checks the exact Task Scheduler XML, publisher SID, distinct Executor SID, and empty manifest slot.
+1. Publisher checks the exact Task Scheduler XML, current Publisher SID, phase-specific identity contract, and empty manifest slot.
 2. Publisher writes one exclusive-create `<attempt_id>.pending.json`, posts and reads back the STARTED receipt, then calls `schtasks /Run` once.
-3. Executor atomically renames that manifest to `.running.json`, checks request/source/spec hashes and its own SID, runs the pinned OpenCode task, streams stdout/stderr to local files, and writes one terminal result.
-4. A later Publisher poll re-hashes both output files and the combined evidence, reads the exact result, posts and reads back the terminal receipt, then removes only that attempt's manifest marker.
-5. A failed or ambiguous `schtasks /Run`, a leftover pending/running marker, a missing result, a result-write failure, or unconfirmed process-tree termination leaves the attempt unresolved and blocks another OpenCode plan. The Publisher does not post a misleading terminal receipt or remove the marker. Independent non-model work may continue. The attempt is never replayed automatically.
+3. Executor atomically renames that manifest to `.running.json`, checks request/source/spec hashes and its configured SID, runs only the pinned attempt workspace, streams stdout/stderr to local files, and writes one terminal result.
+4. A later Publisher poll re-hashes both output files and combined evidence, reads the exact result, posts and reads back the terminal receipt, then removes only that attempt's manifest marker.
+5. A failed or ambiguous `schtasks /Run`, leftover pending/running marker, missing result, result-write failure, or unconfirmed process-tree termination leaves the attempt unresolved and blocks another overlapping task. The Publisher does not post a misleading terminal receipt or remove the marker. Independent non-model work may continue. The attempt is never replayed automatically.
 
 `FINISHED` remains an attempt lifecycle state. `OPENCODE_V2_EXIT_0_UNTRUSTED` is not semantic acceptance, a code change, a Commit, or a PR.
 
-## Current host status
+## Acceptance boundary
 
-The live config has no Executor descriptor; no dedicated Executor account, task, NTFS ACL, provider profile, or model authorization has been verified. Therefore the candidate deliberately leaves authorized model jobs undispatched. This file and the synthetic tests do not constitute host isolation, a live Task Scheduler run, or a production deployment.
+Source tests can validate phase-specific descriptors, XML, no-start registration logic, and synthetic manifest handling. They do not prove live Task Scheduler registration, profile/OAuth readiness, model entitlement, zero additional charge, a real model session, file changes, VM isolation, or Production deployment. Those require separate same-host readback and accepted-source deployment.
