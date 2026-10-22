@@ -224,11 +224,14 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
   if (!result && manifest.source_bundle_sha256 !== undefined) {
     try {
       const antigravityProjectRoot = parsedJob.kind === 'antigravity_edit' ? config.workspace : null;
-      const workspaceBase = antigravityProjectRoot
-        ? join(antigravityProjectRoot, '.pty-native-executor') : runtime.results_dir;
-      const workspace = materializeCandidateWorkspace(manifestDir, workspaceBase, manifest, parsedJob,
-        antigravityProjectRoot);
-      executionConfig = { ...config, workspace };
+      // Keep attempt workspaces outside the registered project checkout. The
+      // CLI receives the exact candidate through --add-dir, while readback of
+      // the project root can then detect real escaped writes without treating
+      // the candidate directory itself as an untracked project change.
+      const workspace = materializeCandidateWorkspace(manifestDir, runtime.results_dir,
+        manifest, parsedJob);
+      executionConfig = { ...config, workspace,
+        ...(antigravityProjectRoot ? { antigravity_project_root: antigravityProjectRoot } : {}) };
     } catch (error) {
       const code = safeErrorCode(error, 'CANDIDATE_WORKSPACE_SETUP_UNKNOWN');
       result = { outcome: `CANDIDATE_WORKSPACE_SETUP_BLOCKED_${code}`,

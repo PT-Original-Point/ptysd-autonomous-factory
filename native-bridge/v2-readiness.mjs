@@ -540,7 +540,8 @@ export function runAntigravityV2Readiness(bin, directory, runner = runAntigravit
   const result = { status: 'READINESS_UNKNOWN', executable_path_valid: false,
     version: null, model: ANTIGRAVITY_V2_MODEL, model_catalog: null,
     headless_print_supported: null, stream_json_supported: null,
-    model_flag_supported: null, effort_flag_supported: null, sandbox_flag_supported: null,
+    model_flag_supported: null, effort_flag_supported: null, add_dir_flag_supported: null,
+    sandbox_flag_supported: null,
     mode_flag_supported: null, accept_edits_mode_supported: null,
     project_flag_supported: null, project_scope_evidence: 'PROJECT_ID_NOT_CONFIGURED',
     effective_config_evidence: 'EFFECTIVE_CONFIG_UNKNOWN',
@@ -612,6 +613,7 @@ export function runAntigravityV2Readiness(bin, directory, runner = runAntigravit
     result.stream_json_supported = help.includes('--output-format') && help.includes('stream-json');
     result.model_flag_supported = help.includes('--model');
     result.effort_flag_supported = help.includes('--effort');
+    result.add_dir_flag_supported = help.includes('--add-dir');
     result.sandbox_flag_supported = help.includes('--sandbox');
     result.mode_flag_supported = help.includes('--mode');
     result.accept_edits_mode_supported = result.mode_flag_supported &&
@@ -621,6 +623,7 @@ export function runAntigravityV2Readiness(bin, directory, runner = runAntigravit
       result.issues.push('PROJECT_FLAG_NOT_CONFIRMED');
     if (!result.headless_print_supported || !result.stream_json_supported ||
         !result.model_flag_supported ||
+        !result.add_dir_flag_supported ||
         !result.sandbox_flag_supported || !result.mode_flag_supported ||
         !result.accept_edits_mode_supported ||
         (projectId !== null && projectId !== undefined && !result.project_flag_supported))
@@ -675,7 +678,7 @@ export function runAntigravityV2Readiness(bin, directory, runner = runAntigravit
     } else result.issues.push('ANTIGRAVITY_USAGE_COMMAND_FAILED');
   }
   const flagsConfirmed = result.headless_print_supported && result.stream_json_supported &&
-    result.model_flag_supported && result.sandbox_flag_supported &&
+    result.model_flag_supported && result.add_dir_flag_supported && result.sandbox_flag_supported &&
     result.mode_flag_supported && result.accept_edits_mode_supported &&
     (!projectArgs.length || result.project_flag_supported);
   if (result.version && flagsConfirmed && result.model_catalog?.pinned_model_cataloged === true)
