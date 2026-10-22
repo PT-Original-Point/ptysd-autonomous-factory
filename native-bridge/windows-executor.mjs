@@ -392,6 +392,17 @@ export function createPinnedSourceBundle({ workspace, bundlePath, sourceSha, att
       'EXECUTOR_SOURCE_COMMIT_UNAVAILABLE').trim();
     if (available.toLowerCase() !== sourceSha.toLowerCase())
       fail('EXECUTOR_SOURCE_COMMIT_UNAVAILABLE');
+    const shallow = runGit(['rev-parse', '--is-shallow-repository'],
+      'EXECUTOR_SOURCE_SHALLOW_STATE_READ_FAILED').trim();
+    if (shallow === 'true') {
+      runGit(['fetch', '--unshallow', '--no-tags', 'origin'],
+        'EXECUTOR_SOURCE_HISTORY_UNSHALLOW_FAILED');
+      if (runGit(['rev-parse', '--is-shallow-repository'],
+        'EXECUTOR_SOURCE_SHALLOW_STATE_READ_FAILED').trim() !== 'false')
+        fail('EXECUTOR_SOURCE_HISTORY_REMAINS_SHALLOW');
+    } else if (shallow !== 'false') {
+      fail('EXECUTOR_SOURCE_SHALLOW_STATE_INVALID');
+    }
     runGit(['update-ref', temporaryRef, sourceSha, expectedMissingRef],
       'EXECUTOR_SOURCE_REF_CREATE_FAILED');
     temporaryRefCreated = true;
