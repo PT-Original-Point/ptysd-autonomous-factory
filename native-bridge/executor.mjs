@@ -165,7 +165,24 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
 
   let result;
   let executionConfig = config;
-  if (manifest.source_bundle_sha256 !== undefined) {
+  const editJobRequiresPinnedWorkspace = ['opencode_edit', 'antigravity_edit'].includes(parsedJob.kind);
+  if (editJobRequiresPinnedWorkspace && manifest.source_bundle_sha256 === undefined) {
+    const laneDisabled = parsedJob.kind === 'opencode_edit'
+      ? config.enable_v2_model_runs !== true : config.enable_antigravity_model_runs !== true;
+    if (laneDisabled) {
+      result = { outcome: parsedJob.kind === 'opencode_edit'
+        ? 'V2_MODEL_EXECUTION_NOT_YET_APPROVED' : 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED',
+      exit_code: 48, evidence_sha256: null, evidence_bytes: 0,
+      eligibility_state: 'WAITING', model_invoked: false, coding_state: 'NOT_STARTED' };
+    } else {
+      // Never let an edit executor fall back to its configured publisher/source
+      // workspace. The attempt-specific bundle is the only writable candidate.
+      result = { outcome: 'EXECUTOR_EDIT_SOURCE_BUNDLE_REQUIRED', exit_code: 46,
+        evidence_sha256: null, evidence_bytes: 0,
+        eligibility_state: 'BLOCKED', model_invoked: false, coding_state: 'NOT_STARTED' };
+    }
+  }
+  if (!result && manifest.source_bundle_sha256 !== undefined) {
     try {
       const workspace = materializeCandidateWorkspace(manifestDir, runtime.results_dir, manifest, parsedJob);
       executionConfig = { ...config, workspace };
