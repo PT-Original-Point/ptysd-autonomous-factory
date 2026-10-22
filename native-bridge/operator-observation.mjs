@@ -6,6 +6,7 @@ import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { platform } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { safeErrorCode } from './safe-error-code.mjs';
 
 export const OPERATOR_MARKER = 'PTYSD_OPERATOR_OBSERVATION_V1\n';
 export const OPERATOR_REPO = 'PT-Original-Point/ptysd-autonomous-factory';
@@ -115,6 +116,7 @@ export function findOperatorComment(comments, expectedLogin, expectedCommentId =
 
 export async function updateExistingOperatorComment({
   comments, expectedLogin, expectedCommentId = null, body, readComment, patchComment, readComments,
+  readCommentsFailureCode,
   now = Date.now,
 }) {
   const existing = findOperatorComment(comments, expectedLogin, expectedCommentId);
@@ -139,7 +141,13 @@ export async function updateExistingOperatorComment({
   await patchComment(existing.comment.id, body);
   let commentsAfterWrite;
   try { commentsAfterWrite = await readComments(); }
-  catch { return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN' }; }
+  catch (error) {
+    let failureCode = null;
+    try { failureCode = readCommentsFailureCode?.(error); } catch { /* retain safe fallback */ }
+    const safeCode = safeErrorCode({ code: failureCode }, 'UNKNOWN');
+    return { status: 'UNKNOWN', error: safeCode.startsWith('OPERATOR_COMMENT_UPDATE_READBACK_')
+      ? safeCode : 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN' };
+  }
   const fresh = findOperatorComment(commentsAfterWrite, expectedLogin, expectedCommentId);
   if (fresh.status !== 'OK' || fresh.comment.id !== existing.comment.id ||
       fresh.comment.body !== body)

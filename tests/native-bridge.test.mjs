@@ -134,6 +134,7 @@ test('model Executor routing isolates W1 and W2 identities, tasks, manifests and
 });
 
 function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservation = null,
+  readCommentFailure = null, readCommentsFailure = null, patchCommentFailure = null,
   seededObservation = true,
   goalComments = [], taskComments = [], candidatePulls = {}, configOverrides = {} } = {}) {
   const root = mkdtempSync(join(homedir(), '.ptysd-worker-observation-'));
@@ -144,6 +145,7 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
   const host = hostname().toUpperCase();
   const publisher = 'trusted-publisher';
   const observationId = OPERATOR_COMMENT_ID;
+  let pendingReadCommentsFailure = readCommentsFailure;
   const job = mkjob({ host, request_id: 'PTYSD_NATIVE_OBSERVE_PING_20261014' });
   const store = {
     next: 703,
@@ -188,8 +190,12 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
         identity_class: 'INTERACTIVE_LIMITED', multiple_instances: 'IGNORENEW',
         trigger_interval_minutes: 5 } }),
     readRunnerRegistration: () => ({ total_count: 0 }),
-    readComment: id => structuredClone(store.comments.find(c => c.id === id)),
+    readComment: id => {
+      if (readCommentFailure) throw readCommentFailure;
+      return structuredClone(store.comments.find(c => c.id === id));
+    },
     patchComment: (id, body) => {
+      if (patchCommentFailure) { store.patches++; throw patchCommentFailure; }
       const comment = store.comments.find(c => c.id === id);
       if (!comment) throw new Error('MOCK_COMMENT_MISSING');
       comment.body = body;
@@ -201,6 +207,11 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
       if (store.failReadback) {
         store.failReadback = false;
         throw new Error('MOCK_READBACK_UNAVAILABLE_AFTER_PATCH');
+      }
+      if (pendingReadCommentsFailure) {
+        const failure = pendingReadCommentsFailure;
+        pendingReadCommentsFailure = null;
+        throw failure;
       }
       return structuredClone(store.comments);
     },
@@ -316,7 +327,7 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
       ['error_code', 'observed_at', 'publisher_identity', 'schema', 'source_sha', 'status'].sort());
     assert.equal(diagnostic.status, 'UNKNOWN');
     assert.equal(diagnostic.source_sha, commit);
-    assert.equal(diagnostic.error_code, 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN');
+    assert.equal(diagnostic.error_code, 'OPERATOR_COMMENT_UPDATE_READBACK_FAILED');
     assert.deepEqual(diagnostic.publisher_identity, {
       publisher_login: 'trusted-publisher', comment_author_login: 'trusted-publisher',
     });
@@ -326,7 +337,7 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
     assert.equal(observations[0].id, ambiguous.observationId);
     assert.equal(ambiguous.store.patches, 1);
     assert.ok(ambiguous.logs.includes(
-      'OPERATOR_OBSERVATION_UPDATE_UNKNOWN_OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN'));
+      'OPERATOR_OBSERVATION_UPDATE_UNKNOWN_OPERATOR_COMMENT_UPDATE_READBACK_FAILED'));
     assert.ok(!ambiguous.logs.includes('OPERATOR_OBSERVATION_UPDATED'));
     assert.deepEqual(ambiguous.receiptWrites.map(x => x.state), ['STARTED', 'FINISHED'],
       'an ambiguous status readback must not block an otherwise valid ping dispatch');
@@ -360,6 +371,73 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
     assert.equal(diagnostic.error_code, 'OPERATOR_OBSERVATION_NOT_SEEDED');
     assert.equal(diagnostic.source_sha, commit);
   } finally { unseeded.cleanup(); }
+});
+
+test('Worker reports the failing observation API stage without persisting provider error text', async () => {
+  const readFailure = Object.assign(new Error('provider request failed'), {
+    stderr: Buffer.from('HTTP 403: Bearer must never be persisted'),
+  });
+  const prewrite = makeObservationWorkerFixture({ readCommentFailure: readFailure });
+  const prewritePath = join(prewrite.root, 'state', 'operator-observation-last-error.json');
+  try {
+    await prewrite.run();
+    const diagnostic = JSON.parse(readFileSync(prewritePath, 'utf8'));
+    assert.equal(diagnostic.error_code, 'OPERATOR_COMMENT_PREWRITE_READ_HTTP_403');
+    assert.equal(prewrite.store.patches, 0);
+    assert.equal(prewrite.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER)).length, 1);
+    assert.deepEqual(prewrite.receiptWrites.map(value => value.state), ['STARTED', 'FINISHED'],
+      'a publisher read failure does not block the independent ping task');
+    assert.ok(!JSON.stringify(diagnostic).includes('Bearer'));
+    assert.equal(prewrite.modelCalls.count, 0);
+  } finally { prewrite.cleanup(); }
+
+  const patchFailure = Object.assign(new Error('Bearer must never be persisted'), { status: 403 });
+  const patch = makeObservationWorkerFixture({ patchCommentFailure: patchFailure });
+  const patchPath = join(patch.root, 'state', 'operator-observation-last-error.json');
+  try {
+    await patch.run();
+    const diagnostic = JSON.parse(readFileSync(patchPath, 'utf8'));
+    assert.equal(diagnostic.error_code, 'OPERATOR_COMMENT_PATCH_HTTP_403');
+    assert.equal(patch.store.patches, 1);
+    assert.equal(patch.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER)).length, 1);
+    assert.equal(parseOperatorObservation(
+      patch.store.comments.find(c => c.body.startsWith(OPERATOR_MARKER)).body).sequence, 17,
+    'a rejected PATCH does not advance the authoritative observation');
+    assert.deepEqual(patch.receiptWrites.map(value => value.state), ['STARTED', 'FINISHED'],
+      'a publisher write failure does not block independent valid work');
+    assert.ok(!JSON.stringify(diagnostic).includes('Bearer'));
+    assert.equal(patch.modelCalls.count, 0);
+  } finally { patch.cleanup(); }
+
+  const readbackFailure = Object.assign(new Error('provider readback failed'), {
+    status: 403, stderr: Buffer.from('HTTP 403: Bearer must never be persisted'),
+  });
+  const readback = makeObservationWorkerFixture({ readCommentsFailure: readbackFailure });
+  const readbackPath = join(readback.root, 'state', 'operator-observation-last-error.json');
+  try {
+    await readback.run();
+    const diagnostic = JSON.parse(readFileSync(readbackPath, 'utf8'));
+    assert.equal(diagnostic.error_code, 'OPERATOR_COMMENT_UPDATE_READBACK_HTTP_403');
+    assert.equal(readback.store.patches, 1);
+    assert.equal(readback.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER)).length, 1);
+    assert.equal(parseOperatorObservation(
+      readback.store.comments.find(c => c.body.startsWith(OPERATOR_MARKER)).body).sequence, 18,
+    'a readback failure after PATCH does not erase the provider-side update');
+    assert.deepEqual(readback.receiptWrites.map(value => value.state), ['STARTED', 'FINISHED'],
+      'an observation readback failure does not block independent valid work');
+    assert.ok(!JSON.stringify(diagnostic).includes('Bearer'));
+    assert.equal(readback.modelCalls.count, 0);
+
+    readback.store.now += 60_000;
+    await readback.run();
+    assert.equal(readback.store.comments.filter(c => c.body.startsWith(OPERATOR_MARKER)).length, 1,
+      'retry reconciles the same comment instead of creating a duplicate');
+    assert.equal(parseOperatorObservation(
+      readback.store.comments.find(c => c.body.startsWith(OPERATOR_MARKER)).body).sequence, 19);
+    assert.deepEqual(readback.receiptWrites.map(value => value.state), ['STARTED', 'FINISHED'],
+      'recovery does not replay the already completed ping');
+    assert.equal(existsSync(readbackPath), false);
+  } finally { readback.cleanup(); }
 });
 
 test('Worker recognizes the two trusted Human R4 directive markers without starting a model', async () => {
