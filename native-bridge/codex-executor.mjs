@@ -42,14 +42,30 @@ function validateExecutorConfig(config, currentSid, environment = process.env) {
     enable_codex_model_runs: config?.enable_codex_model_runs,
     codex_usage_authorized: config?.codex_usage_authorized,
     codex_sandbox_boundary: config?.codex_sandbox_boundary,
+    codex_executor_execution_phase: config?.codex_executor_execution_phase,
     publisher_identity_sid: config?.publisher_identity_sid,
     executor_identity_sid: config?.executor_identity_sid,
     codex_executor_task: config?.codex_executor_task,
     allowed_codex_models: config?.allowed_codex_models,
   };
   const reasons = [];
-  if (!currentSid || currentSid !== config?.executor_identity_sid) reasons.push('EXECUTOR_SID_MISMATCH');
-  if (currentSid === config?.publisher_identity_sid) reasons.push('PUBLISHER_CREDENTIAL_IDENTITY_SHARED');
+  const phase = config?.codex_executor_execution_phase ?? 'VM_ISOLATED';
+  const current = typeof currentSid === 'string' ? currentSid.toUpperCase() : '';
+  const executor = typeof config?.executor_identity_sid === 'string'
+    ? config.executor_identity_sid.toUpperCase() : '';
+  const publisher = typeof config?.publisher_identity_sid === 'string'
+    ? config.publisher_identity_sid.toUpperCase() : '';
+  const validSids = /^S-1-(?:\d+-)+\d+$/i.test(current) &&
+    /^S-1-(?:\d+-)+\d+$/i.test(executor) &&
+    /^S-1-(?:\d+-)+\d+$/i.test(publisher);
+  if (!['WIN11_TRANSITION', 'VM_ISOLATED'].includes(phase))
+    reasons.push('EXECUTOR_EXECUTION_PHASE_INVALID');
+  if (!validSids || current !== executor) reasons.push('EXECUTOR_SID_MISMATCH');
+  const samePublisher = validSids && executor === publisher;
+  if ((phase === 'WIN11_TRANSITION' && !samePublisher) ||
+      (phase === 'VM_ISOLATED' && samePublisher))
+    reasons.push(phase === 'WIN11_TRANSITION'
+      ? 'EXECUTOR_TRANSITION_IDENTITY_MISMATCH' : 'PUBLISHER_CREDENTIAL_IDENTITY_SHARED');
   if (environment.GH_TOKEN || environment.GITHUB_TOKEN) reasons.push('GITHUB_TOKEN_ENV_PRESENT');
   if (typeof config?.spool_dir !== 'string' || !isAbsolute(config.spool_dir)) reasons.push('SPOOL_PATH_INVALID');
   if (typeof config?.workspace_root !== 'string' || !isAbsolute(config.workspace_root)) reasons.push('WORKSPACE_ROOT_INVALID');
@@ -233,11 +249,11 @@ export function buildCodexChildEnvironment(request, evidenceDir, source = proces
 
 export async function runCodex(request, config, worktree, evidenceDir, deps = {}) {
   // Validate the complete request before deriving any filesystem paths from
-  // request identifiers. buildCodexExecArgs validates the job only; attempt_id
-  // must also be checked before output and credential-isolation paths exist.
+  // request identifiers. The CLI permission profile is also bound to the
+  // validated attempt_id, before output and credential-isolation paths exist.
   const validatedRequest = validateCodexExecutorRequest(request);
   const job = validatedRequest.job;
-  const args = buildCodexExecArgs(job, worktree);
+  const args = buildCodexExecArgs(job, worktree, request.attempt_id);
   const outPath = join(evidenceDir, `${job.request_id}-${request.attempt_id}.stdout.jsonl`);
   const errPath = join(evidenceDir, `${job.request_id}-${request.attempt_id}.stderr.txt`);
   // Do not expose a Publisher's stored gh configuration to the model process.

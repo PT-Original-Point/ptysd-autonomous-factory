@@ -3,7 +3,7 @@
 // a Task Scheduler task, authenticate to GitHub, or invoke a model by itself.
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, openSync, writeFileSync, fsyncSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
-import { join, isAbsolute, win32 } from 'node:path';
+import { join, isAbsolute, relative, resolve, sep, win32 } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { buildHiddenWscriptArguments, getCurrentWindowsSid, validateWindowsTaskAction }
   from './windows-executor.mjs';
@@ -104,12 +104,23 @@ export function codexExecutionGate(job, config) {
     reasons.push('CODEX_CLI_AUTH_NOT_QUALIFIED');
   if (config?.enable_codex_model_runs !== true) reasons.push('MODEL_RUNS_NOT_ENABLED');
   if (config?.codex_usage_authorized !== true) reasons.push('USAGE_AUTHORIZATION_UNKNOWN');
-  if (config?.codex_sandbox_boundary !== 'VERIFIED_WORKSPACE_ONLY') reasons.push('SANDBOX_BOUNDARY_NOT_VERIFIED');
   const publisherSid = config?.publisher_identity_sid;
   const executorSid = config?.executor_identity_sid;
-  if (!/^S-1-(?:\d+-)+\d+$/i.test(publisherSid || '') ||
-      !/^S-1-(?:\d+-)+\d+$/i.test(executorSid || '') ||
-      publisherSid.toUpperCase() === executorSid.toUpperCase())
+  const phase = config?.codex_executor_execution_phase ?? 'VM_ISOLATED';
+  // The Win11 transition deliberately uses one interactive identity, so a
+  // second-SID exact-permission profile cannot exist there. Keep that stronger
+  // boundary mandatory for the final VM-isolated execution phase.
+  if (phase === 'VM_ISOLATED' &&
+      config?.codex_sandbox_boundary !== 'VERIFIED_EXACT_PATH_PERMISSION_PROFILE')
+    reasons.push('SANDBOX_BOUNDARY_NOT_VERIFIED');
+  const validSids = /^S-1-(?:\d+-)+\d+$/i.test(publisherSid || '') &&
+    /^S-1-(?:\d+-)+\d+$/i.test(executorSid || '');
+  const sameSid = validSids && publisherSid.toUpperCase() === executorSid.toUpperCase();
+  if (!['WIN11_TRANSITION', 'VM_ISOLATED'].includes(phase))
+    reasons.push('EXECUTOR_EXECUTION_PHASE_INVALID');
+  else if (!validSids ||
+      (phase === 'WIN11_TRANSITION' && !sameSid) ||
+      (phase === 'VM_ISOLATED' && sameSid))
     reasons.push('PUBLISHER_EXECUTOR_IDENTITY_NOT_SEPARATED');
   if (config?.codex_executor_task !== CODEX_EXECUTOR_TASK)
     reasons.push('DEDICATED_EXECUTOR_TASK_NOT_CONFIGURED');
@@ -120,12 +131,17 @@ export function codexExecutionGate(job, config) {
 }
 
 function codexExecutorTaskIdentityReady(config) {
+  const phase = config?.codex_executor_execution_phase ?? 'VM_ISOLATED';
+  const publisherSid = config?.publisher_identity_sid;
+  const executorSid = config?.executor_identity_sid;
+  const validSids = /^S-1-(?:\d+-)+\d+$/i.test(publisherSid || '') &&
+    /^S-1-(?:\d+-)+\d+$/i.test(executorSid || '');
+  const sameSid = validSids && publisherSid.toUpperCase() === executorSid.toUpperCase();
   return typeof config?.codex_executor_task_user === 'string' &&
     config.codex_executor_task_user.length > 0 && config.codex_executor_task_user.length <= 256 &&
     !/[\u0000-\u001f<>]/.test(config.codex_executor_task_user) &&
-    /^S-1-(?:\d+-)+\d+$/i.test(config?.publisher_identity_sid || '') &&
-    /^S-1-(?:\d+-)+\d+$/i.test(config?.executor_identity_sid || '') &&
-    config.publisher_identity_sid.toUpperCase() !== config.executor_identity_sid.toUpperCase();
+    validSids && ['WIN11_TRANSITION', 'VM_ISOLATED'].includes(phase) &&
+    (phase === 'WIN11_TRANSITION' ? sameSid : !sameSid);
 }
 
 function codexExecutorTaskDescriptorReady(config) {
@@ -153,6 +169,8 @@ export function validateCodexExecutorTaskXml(xml, config) {
     argumentsText: codexExecutorTaskArguments(config),
     workingDirectory: config.codex_executor_working_directory,
     errorPrefix: 'CODEX_EXECUTOR_TASK',
+    expectedLogonType: (config.codex_executor_execution_phase ?? 'VM_ISOLATED') === 'WIN11_TRANSITION'
+      ? 'InteractiveToken' : 'Password',
   });
   return { ready: true, task_name: CODEX_EXECUTOR_TASK,
     executor_user: config.codex_executor_task_user, run_level: 'LeastPrivilege',
@@ -229,14 +247,44 @@ export function releaseCodexAttempt(job, claimed) {
   return true;
 }
 
-export function buildCodexExecArgs(job, workspace) {
+export function buildCodexExecArgs(job, workspace, attemptId) {
   if (!parseCodexJob(`PTYSD_NATIVE_JOB_V1\n${JSON.stringify(job)}`)) throw new Error('INVALID_CODEX_JOB');
   if (typeof workspace !== 'string' || !workspace) throw new Error('WORKSPACE_REQUIRED');
-  return ['exec', '--json', '--sandbox', 'workspace-write', '--model', job.model,
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(attemptId || ''))
+    throw new Error('INVALID_ATTEMPT_ID');
+  const windowsPath = win32.isAbsolute(workspace);
+  const root = windowsPath ? win32.resolve(workspace) : resolve(workspace);
+  const resolvePath = windowsPath ? (...parts) => win32.resolve(...parts) : (...parts) => resolve(...parts);
+  const relativePath = windowsPath ? (from, to) => win32.relative(from, to) : relative;
+  const pathSeparator = windowsPath ? win32.sep : sep;
+  const isAbsolutePath = windowsPath ? value => win32.isAbsolute(value) : isAbsolute;
+  const scopedPaths = job.write_paths.map(repoPath => {
+    const fullPath = resolvePath(root, ...repoPath.split('/'));
+    const rel = relativePath(root, fullPath);
+    if (!rel || rel === '..' || rel.startsWith(`..${pathSeparator}`) || isAbsolutePath(rel))
+      throw new Error('CODEX_WRITE_SCOPE_PATH_INVALID');
+    return fullPath;
+  });
+  // Project config is loaded for trusted workspaces. Give each execution a
+  // fresh profile name so repository config cannot widen this attempt by
+  // contributing additional rules to a predictable shared profile.
+  const profile = `pty_exact_scope_${attemptId.replace(/-/g, '').toLowerCase()}`;
+  const filesystem = [
+    [':minimal', 'read'],
+    [root, 'read'],
+    ...scopedPaths.map(path => [path, 'write']),
+  ].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(',');
+  const config = [
+    `default_permissions=${JSON.stringify(profile)}`,
+    `permissions.${profile}.filesystem={${filesystem}}`,
+    `permissions.${profile}.network.enabled=false`,
+  ];
+  return ['exec', '--json', '--ignore-user-config', '--strict-config', '--model', job.model,
     // Scheduled execution cannot answer approval prompts. Keep the CLI inside
-    // its workspace-write sandbox and deny requests that would need elevation.
+    // its native exact-path permission profile and deny every undeclared write.
     '--config', 'approval_policy=never',
-    '--config', `model_reasoning_effort=${JSON.stringify(job.reasoning_effort)}`, '-C', workspace, '-'];
+    '--config', `model_reasoning_effort=${JSON.stringify(job.reasoning_effort)}`,
+    ...config.flatMap(value => ['--config', value]), '-C', root, '-'];
 }
 
 export function codexSessionFromJsonl(text) {

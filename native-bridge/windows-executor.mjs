@@ -40,7 +40,7 @@ export function buildHiddenWscriptArguments({ launcher_path, node_bin, script_pa
   return `//B //NoLogo ${paths.map(quoteWindowsArg).join(' ')}`;
 }
 function normalizedWindowsPath(value) {
-  return win32.normalize(value).replaceAll('/', '\\').toLocaleLowerCase('en-US');
+  return win32.resolve(value).replaceAll('/', '\\').toLocaleLowerCase('en-US');
 }
 function absoluteWindowsPath(value) {
   return typeof value === 'string' && win32.isAbsolute(value) && !/[\r\n"]/.test(value);
@@ -48,8 +48,11 @@ function absoluteWindowsPath(value) {
 
 export function validateWindowsTaskAction(xml, {
   taskName, userIds, command, argumentsText, workingDirectory, errorPrefix = 'TASK',
+  expectedLogonType = 'Password',
 } = {}) {
   const reject = code => fail(`${errorPrefix}_${code}`);
+  if (!['Password', 'InteractiveToken'].includes(expectedLogonType))
+    reject('EXPECTED_LOGON_TYPE_UNSAFE');
   if (!Array.isArray(userIds) || userIds.length === 0 || userIds.some(id => typeof id !== 'string' || !id) ||
       typeof taskName !== 'string' || !taskName || !absoluteWindowsPath(command) ||
       typeof argumentsText !== 'string' || /[\r\n]/.test(argumentsText) || !absoluteWindowsPath(workingDirectory))
@@ -66,7 +69,7 @@ export function validateWindowsTaskAction(xml, {
   const actualUser = oneTag(source, 'UserId', errorPrefix);
   if (!userIds.some(id => actualUser.toUpperCase() === id.toUpperCase())) reject('IDENTITY_MISMATCH');
   const logonType = oneTag(source, 'LogonType', errorPrefix);
-  if (logonType !== 'Password') reject('LOGON_TYPE_UNSAFE');
+  if (logonType !== expectedLogonType) reject('LOGON_TYPE_UNSAFE');
   const runLevel = oneTag(source, 'RunLevel', errorPrefix);
   if (runLevel !== 'LeastPrivilege') reject('RUNLEVEL_UNSAFE');
   const multipleInstances = oneTag(source, 'MultipleInstancesPolicy', errorPrefix);
@@ -104,7 +107,13 @@ export function validateExecutorDescriptor(value) {
   if (!SID.test(value.publisher_sid || '') || RESERVED_SIDS.has(value.publisher_sid.toUpperCase()) ||
       /^S-1-5-80-/i.test(value.publisher_sid))
     fail('PUBLISHER_USER_SID_INVALID');
-  if (value.user_sid.toUpperCase() === value.publisher_sid.toUpperCase())
+  const executionPhase = value.execution_phase ?? 'VM_ISOLATED';
+  if (!['WIN11_TRANSITION', 'VM_ISOLATED'].includes(executionPhase))
+    fail('EXECUTOR_EXECUTION_PHASE_INVALID');
+  const sameIdentity = value.user_sid.toUpperCase() === value.publisher_sid.toUpperCase();
+  if (executionPhase === 'WIN11_TRANSITION' && !sameIdentity)
+    fail('EXECUTOR_TRANSITION_IDENTITY_MISMATCH');
+  if (executionPhase === 'VM_ISOLATED' && sameIdentity)
     fail('EXECUTOR_IDENTITY_NOT_SEPARATE');
   if (value.source_bundle_per_attempt !== undefined && typeof value.source_bundle_per_attempt !== 'boolean')
     fail('EXECUTOR_SOURCE_BUNDLE_MODE_INVALID');
@@ -112,8 +121,63 @@ export function validateExecutorDescriptor(value) {
     'manifest_dir', 'results_dir', 'working_directory']) {
     if (!absoluteWindowsPath(value[key])) fail(`EXECUTOR_${key.toUpperCase()}_INVALID`);
   }
-  if (normalizedWindowsPath(value.manifest_dir) === normalizedWindowsPath(value.results_dir))
+  if (executorPathsOverlap(value.manifest_dir, value.results_dir))
     fail('EXECUTOR_MANIFEST_RESULT_DIR_COLLISION');
+  const executorWritableDirectories = [value.manifest_dir, value.results_dir];
+  const protectedFiles = ['wscript_path', 'launcher_path', 'node_bin', 'script_path', 'config_path'];
+  for (const key of protectedFiles) {
+    if (executorWritableDirectories.some(directory => windowsPathIsWithin(directory, value[key])))
+      fail('EXECUTOR_PROTECTED_FILE_IN_WRITABLE_DIRECTORY');
+  }
+  return value;
+}
+
+function executorPathsOverlap(left, right) {
+  const a = normalizedWindowsPath(left);
+  const b = normalizedWindowsPath(right);
+  const contains = (parent, child) => child.startsWith(parent.endsWith('\\') ? parent : `${parent}\\`);
+  return a === b || contains(a, b) || contains(b, a);
+}
+
+function windowsPathIsWithin(directory, path) {
+  const root = normalizedWindowsPath(directory);
+  const candidate = normalizedWindowsPath(path);
+  return candidate === root || candidate.startsWith(root.endsWith('\\') ? root : `${root}\\`);
+}
+
+export function validateExecutorRoutingMap(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('EXECUTOR_LANE_CONFIG_INVALID');
+  const entries = Object.entries(value);
+  if (!entries.length || entries.some(([lane]) => !['opencode', 'antigravity'].includes(lane)))
+    fail('EXECUTOR_LANE_CONFIG_INVALID');
+  const userSids = new Set();
+  const taskNames = new Set();
+  const isolatedPaths = [];
+  let publisherSid = null;
+  let executionPhase = null;
+  for (const [lane, descriptor] of entries) {
+    validateExecutorDescriptor(descriptor);
+    const userSid = descriptor.user_sid.toUpperCase();
+    const taskName = descriptor.task_name.toLocaleLowerCase('en-US');
+    const descriptorPhase = descriptor.execution_phase ?? 'VM_ISOLATED';
+    if (executionPhase && executionPhase !== descriptorPhase)
+      fail('EXECUTOR_LANE_EXECUTION_PHASE_MISMATCH');
+    executionPhase = descriptorPhase;
+    if (userSids.has(userSid) && descriptorPhase !== 'WIN11_TRANSITION')
+      fail('EXECUTOR_LANE_IDENTITY_COLLISION');
+    if (taskNames.has(taskName)) fail('EXECUTOR_LANE_TASK_COLLISION');
+    if (publisherSid && publisherSid !== descriptor.publisher_sid.toUpperCase())
+      fail('EXECUTOR_LANE_PUBLISHER_MISMATCH');
+    userSids.add(userSid);
+    taskNames.add(taskName);
+    publisherSid = descriptor.publisher_sid.toUpperCase();
+    for (const key of ['config_path', 'manifest_dir', 'results_dir', 'working_directory']) {
+      const path = { lane, value: descriptor[key] };
+      if (isolatedPaths.some(other => other.lane !== lane && executorPathsOverlap(path.value, other.value)))
+        fail('EXECUTOR_LANE_PATH_COLLISION');
+      isolatedPaths.push(path);
+    }
+  }
   return value;
 }
 
@@ -122,19 +186,21 @@ export function executorTaskArguments(descriptor) {
   return buildHiddenWscriptArguments(descriptor);
 }
 
-// This is a reviewable template only. Production registration requires the
-// dedicated standard account and its ACLs to be provisioned and read back.
+// This is a reviewable template only. VM_ISOLATED requires a separate standard
+// identity; WIN11_TRANSITION explicitly uses the current interactive identity.
 export function buildExecutorTaskXml(descriptor) {
   validateExecutorDescriptor(descriptor);
   const args = executorTaskArguments(descriptor);
+  const logonType = descriptor.execution_phase === 'WIN11_TRANSITION'
+    ? 'InteractiveToken' : 'Password';
   return `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">` +
     `<RegistrationInfo><URI>${xmlEscape(descriptor.task_name)}</URI></RegistrationInfo>` +
     `<Principals><Principal id="Author"><UserId>${xmlEscape(descriptor.user_sid)}</UserId>` +
-    // OpenCode requires network access; S4U tasks have no network credentials.
-    // The account password is supplied only during secure task registration,
-    // never embedded in this XML template.
-    `<LogonType>Password</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>` +
+    // Password logon keeps network access in VM_ISOLATED; transition uses the
+    // current interactive token. Credentials are never embedded in this XML.
+    '<LogonType>' + logonType +
+    '</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>' +
     `<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>` +
     `<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>` +
     `<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate>` +
@@ -148,15 +214,16 @@ export function buildExecutorTaskXml(descriptor) {
 
 export function validateExecutorTaskXml(xml, descriptor) {
   validateExecutorDescriptor(descriptor);
+  const expectedLogonType = descriptor.execution_phase === 'WIN11_TRANSITION'
+    ? 'InteractiveToken' : 'Password';
   const result = validateWindowsTaskAction(xml, { taskName: descriptor.task_name,
     userIds: [descriptor.user_sid], command: descriptor.wscript_path,
     argumentsText: executorTaskArguments(descriptor), workingDirectory: descriptor.working_directory,
-    errorPrefix: 'EXECUTOR_TASK' });
+    errorPrefix: 'EXECUTOR_TASK', expectedLogonType });
   return { ready: true, user_sid: descriptor.user_sid, logon_type: result.logon_type,
     run_level: result.run_level, execution_time_limit: result.execution_time_limit,
     multiple_instances: result.multiple_instances };
 }
-
 export function getCurrentWindowsSid({ execFile = execFileSync, systemRoot = process.env.SystemRoot } = {}) {
   if (process.platform !== 'win32' || !systemRoot) fail('EXECUTOR_WINDOWS_IDENTITY_UNAVAILABLE');
   const whoami = win32.join(systemRoot, 'System32', 'whoami.exe');
@@ -287,7 +354,6 @@ export function assertExecutorTaskReady(descriptor, {
   validateExecutorDescriptor(descriptor);
   const actualPublisherSid = currentSid().toUpperCase();
   if (actualPublisherSid !== descriptor.publisher_sid.toUpperCase()) fail('PUBLISHER_IDENTITY_READBACK_MISMATCH');
-  if (actualPublisherSid === descriptor.user_sid.toUpperCase()) fail('EXECUTOR_IDENTITY_NOT_SEPARATE');
   assertPhysicalDirectory(filesystemPath(descriptor.manifest_dir), 'EXECUTOR_MANIFEST_DIRECTORY_UNAVAILABLE');
   assertPhysicalDirectory(filesystemPath(descriptor.results_dir), 'EXECUTOR_RESULT_DIRECTORY_UNAVAILABLE');
   const xml = readTaskXml(descriptor.task_name);
@@ -362,8 +428,7 @@ export function triggerPendingExecutorAttempt(descriptor, attemptId, {
       Array.isArray(expectedJob) || !['opencode_edit', 'antigravity_edit'].includes(expectedJob.kind))
     fail('EXECUTOR_EXPECTED_PENDING_ATTEMPT_IDENTITY_INVALID');
   const actualPublisherSid = currentSid().toUpperCase();
-  if (actualPublisherSid !== descriptor.publisher_sid.toUpperCase() ||
-      actualPublisherSid === descriptor.user_sid.toUpperCase())
+  if (actualPublisherSid !== descriptor.publisher_sid.toUpperCase())
     fail('PUBLISHER_IDENTITY_READBACK_MISMATCH');
   const manifestDir = filesystemPath(descriptor.manifest_dir);
   const resultsDir = filesystemPath(descriptor.results_dir);

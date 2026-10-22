@@ -67,7 +67,7 @@ function readyConfig(overrides = {}) {
     codex_login_verified: true,
     enable_codex_model_runs: true,
     codex_usage_authorized: true,
-    codex_sandbox_boundary: 'VERIFIED_WORKSPACE_ONLY',
+    codex_sandbox_boundary: 'VERIFIED_EXACT_PATH_PERMISSION_PROFILE',
     publisher_identity_sid: 'S-1-5-21-1000',
     executor_identity_sid: 'S-1-5-21-2000',
     codex_executor_task: 'PTYSD-Codex-Executor',
@@ -86,7 +86,8 @@ function readyConfig(overrides = {}) {
 function codexTaskXml(config, overrides = {}) {
   const values = {
     uri: '\\PTYSD-Codex-Executor', user: config.codex_executor_task_user,
-    logon: 'Password', runLevel: 'LeastPrivilege', instances: 'IgnoreNew',
+    logon: config.codex_executor_execution_phase === 'WIN11_TRANSITION' ? 'InteractiveToken' : 'Password',
+    runLevel: 'LeastPrivilege', instances: 'IgnoreNew',
     timeLimit: 'PT0S', allowHardTerminate: 'false', enabled: 'true', hidden: 'true',
     command: config.codex_executor_wscript_path,
     arguments: codexExecutorTaskArguments(config),
@@ -143,6 +144,36 @@ test('Codex dispatch task must match live identity, privilege, launch action and
   assert.throws(() => assertCodexExecutorTaskReady(config, {
     platform: 'win32', currentSid: () => config.executor_identity_sid, readTaskXml: () => xml,
   }), /CODEX_EXECUTOR_PUBLISHER_SID_MISMATCH/);
+});
+
+test('WIN11_TRANSITION accepts only the current same-SID Codex executor and interactive task', () => {
+  const sid = 'S-1-5-21-1000';
+  const config = readyConfig({ publisher_identity_sid: sid, executor_identity_sid: sid,
+    codex_executor_execution_phase: 'WIN11_TRANSITION', codex_sandbox_boundary: 'UNKNOWN' });
+  assert.deepEqual(codexExecutionGate(job(), config), { allowed: true, reasons: [] });
+  const xml = codexTaskXml(config);
+  assert.equal(validateCodexExecutorTaskXml(xml, config).logon_type, 'InteractiveToken');
+  assert.equal(assertCodexExecutorTaskReady(config, {
+    platform: 'win32', currentSid: () => sid, readTaskXml: () => xml,
+  }).ready, true);
+  assert.equal(codexExecutionGate(job(), readyConfig({
+    publisher_identity_sid: sid, executor_identity_sid: sid,
+  })).allowed, false, 'same SID remains rejected without explicit transition phase');
+  assert.equal(codexExecutionGate(job(), readyConfig({ publisher_identity_sid: sid,
+    executor_identity_sid: 'S-1-5-21-2000', codex_executor_execution_phase: 'WIN11_TRANSITION' })).allowed,
+  false, 'transition mode cannot silently switch to a second identity');
+  assert.equal(codexExecutionGate(job(), readyConfig({ publisher_identity_sid: sid,
+    executor_identity_sid: sid, codex_executor_execution_phase: 'UNKNOWN' })).allowed,
+  false, 'unknown execution phase fails closed');
+  assert.ok(codexExecutionGate(job(), readyConfig({ codex_sandbox_boundary: 'UNKNOWN' }))
+    .reasons.includes('SANDBOX_BOUNDARY_NOT_VERIFIED'),
+  'the final VM_ISOLATED phase still requires the exact path-permission profile');
+  assert.ok(codexExecutionGate(job(), readyConfig({ publisher_identity_sid: sid,
+    executor_identity_sid: sid, codex_executor_execution_phase: 'WIN11_TRANSITION',
+    codex_sandbox_boundary: 'UNKNOWN', codex_usage_authorized: false }))
+    .reasons.includes('USAGE_AUTHORIZATION_UNKNOWN'),
+  'transition mode removes only the inapplicable profile gate, not usage authorization');
+  assert.throws(() => validateCodexExecutorTaskXml(codexTaskXml(config, { logon: 'Password' }), config));
 });
 
 test('executor scope inventory includes committed changes from source and ignored untracked files', () => {
@@ -295,6 +326,7 @@ test('execution gate fails closed on missing cost, identity, sandbox, provider o
   for (const config of [
     readyConfig({ enable_codex_model_runs: false }),
     readyConfig({ codex_usage_authorized: false }),
+    readyConfig({ codex_sandbox_boundary: 'VERIFIED_WORKSPACE_ONLY' }),
     readyConfig({ codex_sandbox_boundary: 'UNKNOWN' }),
     readyConfig({ executor_identity_sid: 'S-1-5-21-PUBLISHER' }),
     readyConfig({ codex_executor_task: 'PTYSD-Native-OpenCode' }),
@@ -342,13 +374,42 @@ test('claim can be released only for the exact attempt before publication', () =
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('Codex CLI args use noninteractive JSONL and workspace-write sandbox without shell or fallback', () => {
-  const args = buildCodexExecArgs(job(), 'C:\\isolated\\attempt');
-  assert.deepEqual(args, ['exec', '--json', '--sandbox', 'workspace-write', '--model', 'gpt-6.1-sol',
-    '--config', 'approval_policy=never', '--config', 'model_reasoning_effort="medium"',
-    '-C', 'C:\\isolated\\attempt', '-']);
-  assert.equal(buildCodexExecArgs(job({ reasoning_effort: 'model-defined-tier-7' }),
-    'C:\\isolated\\attempt')[9], 'model_reasoning_effort="model-defined-tier-7"');
+test('Codex CLI args bind writes to exact task paths with native permissions and no shell or fallback', () => {
+  const attemptId = '00000000-0000-0000-0000-000000000021';
+  const args = buildCodexExecArgs(job(), 'C:\\isolated\\attempt', attemptId);
+  const rawConfigs = args.flatMap((value, index) => value === '--config' ? [args[index + 1]] : []);
+  const configs = rawConfigs.map(value => value.replace(/pty_exact_scope_[0-9a-f]{32}/g, 'pty_exact_scope'));
+  assert.equal(args[0], 'exec');
+  assert.equal(args.includes('--json'), true);
+  assert.equal(args.includes('--ignore-user-config'), true,
+    'legacy user sandbox settings must not override the per-task permissions profile');
+  assert.equal(args.includes('--strict-config'), true,
+    'unsupported permission configuration must fail closed before execution');
+  assert.equal(args.includes('--sandbox'), false,
+    'workspace-write would widen the per-file permission profile');
+  assert.equal(configs.includes('default_permissions="pty_exact_scope"'), true);
+  assert.equal(rawConfigs.includes(`default_permissions="pty_exact_scope_${attemptId.replace(/-/g, '')}"`), true,
+    'the profile name must be derived from the exact validated attempt');
+  assert.equal(rawConfigs.includes('default_permissions="pty_exact_scope"'), false);
+  assert.equal(rawConfigs.some(value => value.includes('permissions.pty_exact_scope.filesystem')), false,
+    'the reusable profile name must never be selected for an execution');
+  assert.equal(configs.includes('permissions.pty_exact_scope.filesystem={":minimal"="read","C:\\\\isolated\\\\attempt"="read","C:\\\\isolated\\\\attempt\\\\native-bridge\\\\sample.mjs"="write"}'), true);
+  assert.equal(configs.includes('permissions.pty_exact_scope.network.enabled=false'), true);
+  assert.equal(configs.includes('permissions.pty_exact_scope.filesystem={":minimal"="read","C:\\\\isolated\\\\attempt"="write"}'), false,
+    'the workspace root must stay read-only');
+  const otherAttemptId = '00000000-0000-0000-0000-000000000022';
+  const otherConfigs = buildCodexExecArgs(job(), 'C:\\isolated\\attempt', otherAttemptId)
+    .flatMap((value, index, values) => value === '--config' ? [values[index + 1]] : []);
+  assert.equal(otherConfigs.includes(`default_permissions="pty_exact_scope_${otherAttemptId.replace(/-/g, '')}"`), true);
+  assert.equal(otherConfigs.includes(`default_permissions="pty_exact_scope_${attemptId.replace(/-/g, '')}"`), false,
+    'a different attempt must not reuse another attempt profile');
+  assert.throws(() => buildCodexExecArgs(job(), 'C:\\isolated\\attempt'), /INVALID_ATTEMPT_ID/);
+  assert.throws(() => buildCodexExecArgs(job(), 'C:\\isolated\\attempt', 'bad-profile'), /INVALID_ATTEMPT_ID/);
+  const reasoningArgs = buildCodexExecArgs(job({ reasoning_effort: 'model-defined-tier-7' }),
+    'C:\\isolated\\attempt', attemptId);
+  const reasoningConfigs = reasoningArgs.flatMap((value, index) =>
+    value === '--config' ? [reasoningArgs[index + 1]] : []);
+  assert.equal(reasoningConfigs.includes('model_reasoning_effort="model-defined-tier-7"'), true);
   assert.equal(args.includes('--approve-for-me'), false,
     'scheduled execution must not invoke an unapproved automatic review model');
   assert.equal(args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
@@ -1042,6 +1103,22 @@ test('executor keeps a no-effect request WAITING until identity and cost gates a
     assert.equal(existsSync(executorResultPath(dir, picked.request_id, request.attempt_id)), false);
     assert.equal(existsSync(join(dir, 'claims', `${picked.request_id}-${request.attempt_id}.json`)), false);
     assert.equal(existsSync(requestPath), true, 'policy unavailability also retains the same pending attempt');
+
+    const transitionSid = 'S-1-5-21-1000';
+    const transition = readyConfig({ publisher_identity_sid: transitionSid, executor_identity_sid: transitionSid,
+      codex_executor_execution_phase: 'WIN11_TRANSITION', enable_codex_model_runs: false,
+      codex_usage_authorized: false, codex_sandbox_boundary: 'UNKNOWN' });
+    Object.assign(transition, { spool_dir: dir, workspace_root: config.workspace_root,
+      codex_executable: config.codex_executable });
+    const transitionPreflight = await runExecutorOnce(transition, {
+      currentSid: transitionSid, environment: {},
+    });
+    assert.equal(transitionPreflight.state, 'WAITING');
+    assert.ok(!transitionPreflight.reasons.includes('EXECUTOR_SID_MISMATCH'));
+    assert.ok(!transitionPreflight.reasons.includes('PUBLISHER_CREDENTIAL_IDENTITY_SHARED'));
+    assert.ok(transitionPreflight.reasons.includes('MODEL_RUNS_NOT_ENABLED'));
+    assert.equal(transitionPreflight.model_invoked, false,
+      'same-SID transition resolves the identity gate without enabling an inference');
 
     const ready = readyConfig();
     Object.assign(ready, { spool_dir: dir, workspace_root: config.workspace_root,

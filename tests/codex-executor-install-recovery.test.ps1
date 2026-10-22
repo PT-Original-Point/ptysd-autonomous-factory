@@ -24,11 +24,15 @@ $global:MockTaskRegistered = $false
 $global:MockRegistration = $null
 $global:MockFailurePoint = ''
 $global:MockAclCalls = 0
+$global:MockGroupLookupCalls = 0
+$global:MockAclOverrides = @{}
+$global:MockTransitionAclReads = $false
 $global:MockRuntimeCopyCalls = 0
 $global:MockRegisterCalls = 0
 $global:MockFailureInjected = $false
 $global:MockAclStore = @{}
 $global:MockProgramDataAcl = New-Object System.Security.AccessControl.DirectorySecurity
+$global:MockBadSignaturePath = ''
 
 function Assert-Equal($Actual, $Expected, [string]$Message) {
     if ($Actual -cne $Expected) { throw ('ASSERT_EQUAL_FAILED: ' + $Message + ';actual=' + $Actual + ';expected=' + $Expected) }
@@ -65,12 +69,17 @@ function global:Get-ScheduledTask {
 function global:Get-LocalGroupMember {
     [CmdletBinding()]
     param([string]$Group)
+    $global:MockGroupLookupCalls++
     return @([pscustomobject]@{ SID = [pscustomobject]@{ Value = 'S-1-5-21-SYNTHETIC-NONADMIN' } })
 }
 
 function global:Get-AuthenticodeSignature {
     [CmdletBinding()]
     param([string]$FilePath)
+    if ($global:MockBadSignaturePath -and [string]::Equals([IO.Path]::GetFullPath($FilePath),
+        [IO.Path]::GetFullPath($global:MockBadSignaturePath), [StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Status = 'NotSigned'; SignerCertificate = $null }
+    }
     return [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=OpenAI OpCo, LLC' } }
 }
 
@@ -98,6 +107,8 @@ function global:Get-Acl {
         return $bad
     }
     $key = [IO.Path]::GetFullPath($LiteralPath).ToLowerInvariant()
+    if ($global:MockAclOverrides.ContainsKey($key)) { return $global:MockAclOverrides[$key] }
+    if ($global:MockTransitionAclReads) { return New-Object System.Security.AccessControl.DirectorySecurity }
     if (-not $global:MockAclStore.ContainsKey($key)) { throw 'ACL_READBACK_MISSING' }
     return $global:MockAclStore[$key]
 }
@@ -138,7 +149,8 @@ function global:Register-ScheduledTask {
     [CmdletBinding()]
     param([string]$TaskName, [string]$TaskPath, $Action, $Settings, $Principal, [string]$User, [string]$Password)
     $global:MockRegisterCalls++
-    $global:MockRegistration = [pscustomobject]@{ Action = $Action; Settings = $Settings; Principal = $Principal }
+    $global:MockRegistration = [pscustomobject]@{ Action = $Action; Settings = $Settings; Principal = $Principal
+        User = $User; Password = $Password; TaskPath = $TaskPath }
     $global:MockTaskRegistered = $true
     if ($global:MockFailurePoint -eq 'AfterRegister') { throw 'INJECTED_REGISTER_AMBIGUOUS' }
 }
@@ -149,15 +161,20 @@ function global:Unregister-ScheduledTask {
     if ($TaskName -eq 'PTYSD-Codex-Executor') { $global:MockTaskRegistered = $false }
 }
 
-function Invoke-InstallAttempt([string]$ExpectedError = '') {
-    $password = New-Object Security.SecureString
-    foreach ($character in 'synthetic-only'.ToCharArray()) { $password.AppendChar($character) }
-    $password.MakeReadOnly()
-    $credential = [Management.Automation.PSCredential]::new('NT AUTHORITY\LOCAL SERVICE', $password)
+function Invoke-InstallAttempt([string]$ExpectedError = '', [string]$CodexPath = '',
+    [string]$ExecutionPhase = 'VM_ISOLATED', [switch]$NoCredential) {
+    if (-not $CodexPath) { $CodexPath = $global:MockCodexPath }
+    $arguments = @{ Mode='Install'; ExecutionPhase=$ExecutionPhase
+        NodeExecutable=(Join-Path $programFiles 'Node\node.exe'); CodexExecutable=$CodexPath }
+    if (-not $NoCredential) {
+        $password = New-Object Security.SecureString
+        foreach ($character in 'synthetic-only'.ToCharArray()) { $password.AppendChar($character) }
+        $password.MakeReadOnly()
+        $arguments.ExecutorCredential = [Management.Automation.PSCredential]::new('NT AUTHORITY\LOCAL SERVICE', $password)
+    }
     $failure = $null
     try {
-        & $installerPath -Mode Install -ExecutorCredential $credential -NodeExecutable (Join-Path $programFiles 'Node\node.exe') `
-            -CodexExecutable (Join-Path $programFiles 'Codex\codex.exe') 2>$null | Out-Null
+        & $installerPath @arguments 2>$null | Out-Null
     } catch { $failure = $_.Exception.Message }
     if ($ExpectedError) {
         if ($null -eq $failure -or $failure -notlike ('*' + $ExpectedError + '*')) {
@@ -172,15 +189,20 @@ function Invoke-InstallAttempt([string]$ExpectedError = '') {
 try {
     New-Item -ItemType Directory -Path $local, $programData, $programFiles -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $local 'PTYSDNativeBridge') -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $programFiles 'Node'), (Join-Path $programFiles 'Codex') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $programFiles 'Node') -Force | Out-Null
+    $global:MockCodexSourceDirectory = Join-Path $local 'OpenAI\Codex\bin\synthetic-version'
+    New-Item -ItemType Directory -Path $global:MockCodexSourceDirectory -Force | Out-Null
     $env:COMPUTERNAME = 'DESKTOP-1B6PD2P'
     $env:LOCALAPPDATA = $local
     $env:ProgramData = $programData
     $env:ProgramFiles = $programFiles
     $nodePath = Join-Path $programFiles 'Node\node.exe'
-    $codexPath = Join-Path $programFiles 'Codex\codex.exe'
     [IO.File]::WriteAllText($nodePath, 'synthetic node executable')
-    [IO.File]::WriteAllText($codexPath, 'synthetic signed Codex executable')
+    $global:MockCodexPath = Join-Path $global:MockCodexSourceDirectory 'codex.exe'
+    foreach ($name in @('codex.exe','codex-code-mode-host.exe','codex-command-runner.exe',
+        'codex-windows-sandbox-setup.exe')) {
+        [IO.File]::WriteAllText((Join-Path $global:MockCodexSourceDirectory $name), ('synthetic signed Codex bundle ' + $name))
+    }
     $workerConfigPath = Join-Path $local 'PTYSDNativeBridge\config.json'
     $originalConfig = '{"existing":"preserve"}'
     [IO.File]::WriteAllText($workerConfigPath, $originalConfig)
@@ -188,6 +210,23 @@ try {
     $env:LOCALAPPDATA = [IO.Path]::GetFullPath($env:LOCALAPPDATA)
     $env:ProgramData = $programData
     $installerPath = Join-Path $repoRoot 'native-bridge\install-codex-executor.ps1'
+
+    $unapprovedCodexDirectory = Join-Path $local 'unapproved-cli'
+    New-Item -ItemType Directory -Path $unapprovedCodexDirectory -Force | Out-Null
+    $unapprovedCodexPath = Join-Path $unapprovedCodexDirectory 'codex.exe'
+    [IO.File]::WriteAllText($unapprovedCodexPath, 'unsigned unrelated executable')
+    $null = Invoke-InstallAttempt 'CODEX_EXECUTABLE_MUST_BE_PROGRAM_FILES_OR_OFFICIAL_LOCAL_CODEX' $unapprovedCodexPath
+    Assert-Equal $global:MockTaskRegistered $false 'unrelated per-user executable cannot become the Codex Executor'
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $local 'PTYSDNativeBridge\codex-executor-install-state-VM_ISOLATED.json')) `
+        $false 'unapproved executable is rejected before install state is written'
+
+    $global:MockBadSignaturePath = Join-Path $global:MockCodexSourceDirectory 'codex-command-runner.exe'
+    $null = Invoke-InstallAttempt 'CODEX_CLI_BUNDLE_SIGNATURE_NOT_QUALIFIED'
+    $global:MockBadSignaturePath = ''
+    Assert-Equal $global:MockTaskRegistered $false 'unsigned Codex sidecar prevents executor registration'
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $local 'PTYSDNativeBridge\codex-executor-install-state-VM_ISOLATED.json')) `
+        $false 'invalid Codex bundle signature is rejected before install state is written'
+
     $null = New-Item -ItemType Directory -Path $global:MockSpool
     $null = Invoke-InstallAttempt 'CODEX_EXECUTOR_PATH_ALREADY_EXISTS_REVIEW_REQUIRED_NO_OVERWRITE'
     Assert-Equal $global:MockTaskRegistered $false 'preexisting empty spool is not claimed'
@@ -208,7 +247,7 @@ try {
     $null = Invoke-InstallAttempt 'EXECUTOR_SHARED_PARENT_DELETE_CHILD_EXPOSED'
     Assert-Equal $global:MockTaskRegistered $false 'unsafe parent ACL prevents executor registration'
     Assert-Equal $global:MockAclCalls 0 'unsafe parent ACL stops before changing child ACLs'
-    Assert-Equal (Test-Path -LiteralPath (Join-Path $local 'PTYSDNativeBridge\codex-executor-install-state.json')) `
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $local 'PTYSDNativeBridge\codex-executor-install-state-VM_ISOLATED.json')) `
         $false 'unsafe parent ACL is detected before recording install state'
     Assert-Equal (Get-Content -LiteralPath $workerConfigPath -Raw) $originalConfig 'unsafe parent ACL leaves worker config unchanged'
     $global:MockProgramDataAcl = New-Object System.Security.AccessControl.DirectorySecurity
@@ -218,7 +257,7 @@ try {
     $null = Invoke-InstallAttempt 'INJECTED_AFTER_ACL'
     Assert-Equal $global:MockTaskRegistered $false 'task remains absent after ACL failure'
     Assert-Equal (Get-Content -LiteralPath $workerConfigPath -Raw) $originalConfig 'worker config unchanged after ACL failure'
-    $statePath = Join-Path $local 'PTYSDNativeBridge\codex-executor-install-state.json'
+    $statePath = Join-Path $local 'PTYSDNativeBridge\codex-executor-install-state-VM_ISOLATED.json'
     Assert-Equal (Test-Path -LiteralPath $statePath) $true 'install identity is retained for safe recovery after ACL failure'
     $stateText = Get-Content -LiteralPath $statePath -Raw
     if ($stateText -notlike '*"schema":"ptysd-codex-executor-install-state.v1"*') { throw 'INSTALL_STATE_SCHEMA_MISSING' }
@@ -272,6 +311,21 @@ try {
     $installedConfig = Get-Content -LiteralPath $workerConfigPath -Raw | ConvertFrom-Json
     Assert-Equal $installedConfig.enable_codex_model_runs $false 'model execution remains disabled'
     Assert-Equal $installedConfig.codex_usage_authorized $false 'usage authorization remains disabled'
+    $executorConfigReadback = Get-Content -LiteralPath (Join-Path $global:MockRuntime 'executor-config.json') -Raw | ConvertFrom-Json
+    Assert-Equal $executorConfigReadback.codex_executable (Join-Path $global:MockRuntime 'codex.exe') `
+        'executor uses the protected staged Codex CLI rather than publisher AppData'
+    Assert-Equal $executorConfigReadback.codex_executable_sha256 `
+        ((Get-FileHash -LiteralPath (Join-Path $global:MockCodexSourceDirectory 'codex.exe') -Algorithm SHA256).Hash.ToLowerInvariant()) `
+        'executor config binds the staged codex.exe by SHA-256'
+    $installState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+    foreach ($name in @('codex.exe','codex-code-mode-host.exe','codex-command-runner.exe',
+        'codex-windows-sandbox-setup.exe')) {
+        $sourceHash = (Get-FileHash -LiteralPath (Join-Path $global:MockCodexSourceDirectory $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+        $stagedHash = (Get-FileHash -LiteralPath (Join-Path $global:MockRuntime $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+        Assert-Equal $stagedHash $sourceHash ('signed Codex bundle staged byte-identically: ' + $name)
+        Assert-Equal $installState.runtime_sha256.PSObject.Properties[$name].Value $sourceHash `
+            ('Codex bundle hash is included in install readback: ' + $name)
+    }
 
     $successfulConfigBytes = Get-Content -LiteralPath $workerConfigPath -Raw
     & $installerPath -Mode Uninstall 2>$null | Out-Null
@@ -293,6 +347,81 @@ try {
     $null = Invoke-InstallAttempt 'INSTALL_SPOOL_DATA_REVIEW_REQUIRED'
     Assert-Equal (Get-Content -LiteralPath $preserved -Raw) 'do-not-delete' 'unknown spool data is preserved and blocks install'
     Assert-Equal $global:MockRegisterCalls $registerCountAfterAmbiguity 'ambiguous or preexisting side effects are not replayed'
+
+    $transitionRoot = Join-Path $local 'PTYSDNativeBridge\CodexExecutor'
+    $global:MockSpool = Join-Path $transitionRoot 'CodexSpool'
+    $global:MockRuntime = Join-Path $transitionRoot 'CodexRuntime'
+    $global:MockAclCalls = 0
+    $global:MockGroupLookupCalls = 0
+    $global:MockRuntimeCopyCalls = 0
+    $global:MockFailurePoint = ''
+    $global:MockRegistration = $null
+    $env:USERPROFILE = $local
+    $global:MockTransitionAclReads = $true
+    $transitionState = Join-Path $local 'PTYSDNativeBridge\codex-executor-install-state-WIN11_TRANSITION.json'
+    $null = Invoke-InstallAttempt -ExecutionPhase 'WIN11_TRANSITION' -NoCredential
+    Assert-Equal $global:MockTaskRegistered $true 'same-user transition registers the on-demand task'
+    Assert-Equal $global:MockRegistration.Principal.UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+        'transition uses the current Windows identity'
+    Assert-Equal $global:MockRegistration.Principal.LogonType 'Interactive' 'transition uses an interactive token'
+    Assert-Equal $global:MockRegistration.Principal.RunLevel 'Limited' 'transition does not elevate the task'
+    Assert-Equal $global:MockRegistration.Password '' 'transition passes no separate account password'
+    Assert-Equal $global:MockRegistration.User '' 'transition does not use password-logon registration'
+    Assert-Equal $global:MockAclCalls 0 'transition leaves ACLs unchanged'
+    Assert-Equal $global:MockGroupLookupCalls 0 'transition does not require standard-user membership'
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $global:MockRuntime 'codex.exe')) $false `
+        'transition does not copy the Codex CLI into its runtime'
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $global:MockRuntime 'codex-command-runner.exe')) $false `
+        'transition does not copy CLI sidecars'
+    Assert-Equal (Test-Path -LiteralPath $transitionState) $true 'transition records its own phase-bound install identity'
+    $transitionInstallState = Get-Content -LiteralPath $transitionState -Raw | ConvertFrom-Json
+    Assert-Equal $transitionInstallState.execution_phase 'WIN11_TRANSITION' 'install state records the selected phase'
+    $transitionExecutorConfig = Get-Content -LiteralPath (Join-Path $global:MockRuntime 'executor-config.json') -Raw | ConvertFrom-Json
+    Assert-Equal $transitionExecutorConfig.codex_executable $global:MockCodexPath `
+        'transition invokes the current-user official Codex CLI path directly'
+    Assert-Equal $transitionExecutorConfig.codex_executable_sha256 `
+        ((Get-FileHash -LiteralPath $global:MockCodexPath -Algorithm SHA256).Hash.ToLowerInvariant()) `
+        'transition binds the directly used CLI by SHA-256'
+    Assert-Equal $transitionExecutorConfig.codex_executor_execution_phase 'WIN11_TRANSITION' `
+        'executor config carries the same phase as the registered task'
+    $transitionWorkerConfig = Get-Content -LiteralPath $workerConfigPath -Raw | ConvertFrom-Json
+    Assert-Equal $transitionWorkerConfig.codex_executor_execution_phase 'WIN11_TRANSITION' `
+        'Publisher readback carries the same task phase'
+    & $installerPath -Mode Uninstall 2>$null | Out-Null
+    Assert-Equal $global:MockTaskRegistered $false 'transition task can be unregistered without deleting its evidence'
+    Assert-Equal (Test-Path -LiteralPath $global:MockSpool) $true 'transition uninstall preserves the spool and install evidence'
+
+    $broadAcl = New-Object System.Security.AccessControl.DirectorySecurity
+    $everyone = New-Object System.Security.Principal.SecurityIdentifier('S-1-1-0')
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $broadRule = New-Object System.Security.AccessControl.FileSystemAccessRule($everyone,
+        [System.Security.AccessControl.FileSystemRights]::Modify, $inheritance,
+        [System.Security.AccessControl.PropagationFlags]::None,
+        [System.Security.AccessControl.AccessControlType]::Allow)
+    $broadAcl.AddAccessRule($broadRule)
+    $runtimeKey = [IO.Path]::GetFullPath($global:MockRuntime).ToLowerInvariant()
+    $global:MockAclOverrides[$runtimeKey] = $broadAcl
+    $registersBeforeAclRejection = $global:MockRegisterCalls
+    $null = Invoke-InstallAttempt 'EXECUTOR_TRANSITION_ACL_BROAD_WRITE' `
+        -ExecutionPhase 'WIN11_TRANSITION' -NoCredential
+    Assert-Equal $global:MockRegisterCalls $registersBeforeAclRejection `
+        'broad-writable transition runtime is rejected before Task Scheduler registration'
+    $global:MockAclOverrides.Remove($runtimeKey)
+
+    $parentAcl = New-Object System.Security.AccessControl.DirectorySecurity
+    $parentRule = New-Object System.Security.AccessControl.FileSystemAccessRule($everyone,
+        [System.Security.AccessControl.FileSystemRights]::Modify, $inheritance,
+        [System.Security.AccessControl.PropagationFlags]::None,
+        [System.Security.AccessControl.AccessControlType]::Allow)
+    $parentAcl.AddAccessRule($parentRule)
+    $transitionParentKey = [IO.Path]::GetFullPath((Join-Path $local 'PTYSDNativeBridge')).ToLowerInvariant()
+    $global:MockAclOverrides[$transitionParentKey] = $parentAcl
+    $null = Invoke-InstallAttempt 'EXECUTOR_TRANSITION_ACL_BROAD_PARENT_REPLACEMENT' `
+        -ExecutionPhase 'WIN11_TRANSITION' -NoCredential
+    Assert-Equal $global:MockRegisterCalls $registersBeforeAclRejection `
+        'broad parent replacement access is rejected before Task Scheduler registration'
+    $global:MockAclOverrides.Remove($transitionParentKey)
     Write-Output 'INSTALL_RECOVERY_SYNTHETIC_TESTS=PASS;RECOVERY=FILE_HASH_AND_TASK_XML_READBACK;TASK_SCHEDULER=MOCKED;MODEL_EXECUTION=NOT_RUN'
 } finally {
     $resolvedRoot = [IO.Path]::GetFullPath($testRoot)

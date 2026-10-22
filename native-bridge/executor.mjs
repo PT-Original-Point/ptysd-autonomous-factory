@@ -129,9 +129,14 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
   if (process.platform !== 'win32') fail('EXECUTOR_WINDOWS_ONLY');
   const runtime = config?.executor_runtime;
   if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime)) fail('EXECUTOR_RUNTIME_CONFIG_REQUIRED');
+  const executionPhase = runtime.execution_phase ?? 'VM_ISOLATED';
+  const sameIdentity = SID.test(runtime.user_sid || '') && SID.test(runtime.publisher_sid || '') &&
+    runtime.user_sid.toUpperCase() === runtime.publisher_sid.toUpperCase();
   if (!SID.test(runtime.user_sid || '') || !SID.test(runtime.publisher_sid || '') ||
       RESERVED_SIDS.has(runtime.user_sid.toUpperCase()) || RESERVED_SIDS.has(runtime.publisher_sid.toUpperCase()) ||
-      runtime.user_sid.toUpperCase() === runtime.publisher_sid.toUpperCase())
+      !['WIN11_TRANSITION', 'VM_ISOLATED'].includes(executionPhase) ||
+      (executionPhase === 'WIN11_TRANSITION' && !sameIdentity) ||
+      (executionPhase === 'VM_ISOLATED' && sameIdentity))
     fail('EXECUTOR_RUNTIME_IDENTITY_INVALID');
   const actualSid = currentSid().toUpperCase();
   if (actualSid !== runtime.user_sid.toUpperCase()) fail('EXECUTOR_RUNTIME_IDENTITY_MISMATCH');
@@ -165,7 +170,24 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
 
   let result;
   let executionConfig = config;
-  if (manifest.source_bundle_sha256 !== undefined) {
+  const editJobRequiresPinnedWorkspace = ['opencode_edit', 'antigravity_edit'].includes(parsedJob.kind);
+  if (editJobRequiresPinnedWorkspace && manifest.source_bundle_sha256 === undefined) {
+    const laneDisabled = parsedJob.kind === 'opencode_edit'
+      ? config.enable_v2_model_runs !== true : config.enable_antigravity_model_runs !== true;
+    if (laneDisabled) {
+      result = { outcome: parsedJob.kind === 'opencode_edit'
+        ? 'V2_MODEL_EXECUTION_NOT_YET_APPROVED' : 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED',
+      exit_code: 48, evidence_sha256: null, evidence_bytes: 0,
+      eligibility_state: 'WAITING', model_invoked: false, coding_state: 'NOT_STARTED' };
+    } else {
+      // Never let an edit executor fall back to its configured publisher/source
+      // workspace. The attempt-specific bundle is the only writable candidate.
+      result = { outcome: 'EXECUTOR_EDIT_SOURCE_BUNDLE_REQUIRED', exit_code: 46,
+        evidence_sha256: null, evidence_bytes: 0,
+        eligibility_state: 'BLOCKED', model_invoked: false, coding_state: 'NOT_STARTED' };
+    }
+  }
+  if (!result && manifest.source_bundle_sha256 !== undefined) {
     try {
       const workspace = materializeCandidateWorkspace(manifestDir, runtime.results_dir, manifest, parsedJob);
       executionConfig = { ...config, workspace };

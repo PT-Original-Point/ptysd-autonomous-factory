@@ -58,6 +58,36 @@ function persistTerminalResult(f, readPersisted, result = TERMINAL_RESULT) {
   return { run, calls: () => calls };
 }
 
+test('WIN11_TRANSITION executes a synthetic pending manifest under the publisher SID without invoking a real model', async t => {
+  if (skipUnlessWindows(t)) return;
+  const f = fixture();
+  try {
+    f.config.executor_runtime = { ...f.config.executor_runtime,
+      user_sid: PUBLISHER_SID, execution_phase: 'WIN11_TRANSITION' };
+    let calls = 0;
+    const outcome = await executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => PUBLISHER_SID, config: f.config,
+      execute: async () => { calls++; return { ...TERMINAL_RESULT }; } });
+    assert.equal(calls, 1);
+    assert.equal(outcome.outcome, 'EXECUTOR_RESULT_PERSISTED_NOT_SEMANTIC_ACCEPTANCE');
+    assert.equal(outcome.terminal_state, 'FINISHED');
+  } finally { f.dispose(); }
+});
+
+test('VM_ISOLATED remains the default and rejects same-SID manifests before claiming them', async t => {
+  if (skipUnlessWindows(t)) return;
+  const f = fixture();
+  try {
+    f.config.executor_runtime = { ...f.config.executor_runtime, user_sid: PUBLISHER_SID };
+    let calls = 0;
+    await assert.rejects(executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => PUBLISHER_SID, config: f.config,
+      execute: async () => { calls++; return { ...TERMINAL_RESULT }; } }),
+    /EXECUTOR_RUNTIME_IDENTITY_INVALID/);
+    assert.equal(calls, 0);
+    assert.equal(existsSync(join(f.manifestDir, `${ATTEMPT}.pending.json`)), true);
+  } finally { f.dispose(); }
+});
 function skipUnlessWindows(t) {
   if (process.platform !== 'win32') {
     t.skip('Task Scheduler executor lifecycle is Windows-only');
