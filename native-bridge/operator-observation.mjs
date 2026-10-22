@@ -6,6 +6,7 @@ import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { platform } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { safeErrorCode } from './safe-error-code.mjs';
 
 export const OPERATOR_MARKER = 'PTYSD_OPERATOR_OBSERVATION_V1\n';
 export const OPERATOR_REPO = 'PT-Original-Point/ptysd-autonomous-factory';
@@ -20,6 +21,9 @@ const SENSITIVE_VALUE = /(?:\b[A-Z]:\\|\\\\[^\\\s]+\\|\bgh[pousr]_[A-Za-z0-9_]{2
 const DEPLOYED_RUNTIME_FILES = [
   'worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs', 'codex-continuation.mjs',
   'operator-observation.mjs', 'captured-process.mjs', 'safe-error-code.mjs', 'windows-executor.mjs',
+];
+const LEGACY_DEPLOYED_RUNTIME_FILES = [
+  'worker.mjs', 'operator-observation.mjs', 'codex-continuation.mjs', 'safe-error-code.mjs',
 ];
 const SHA1 = /^[a-f0-9]{40}$/i;
 const SHA256 = /^[a-f0-9]{64}$/i;
@@ -60,6 +64,28 @@ function validRuntimeDeployment(value) {
   return false;
 }
 
+function normalizeLegacyRuntimeDeployment(value) {
+  const deployment = value.runtime_deployment;
+  if (!object(deployment) || deployment.status !== 'MANIFEST_MATCHED' ||
+      !object(deployment.component_sha256)) return value;
+  const componentNames = Object.keys(deployment.component_sha256).sort();
+  const legacyNames = [...LEGACY_DEPLOYED_RUNTIME_FILES].sort();
+  if (componentNames.length !== legacyNames.length ||
+      componentNames.some((name, index) => name !== legacyNames[index]) ||
+      !validTime(deployment.observed_at) || !SHA256.test(deployment.bundle_sha256 || '') ||
+      !componentNames.every(name => SHA256.test(deployment.component_sha256[name] || '')) ||
+      !SHA1.test(deployment.source_main_sha || '') ||
+      !Number.isSafeInteger(deployment.deployment_pr) || deployment.deployment_pr < 1 ||
+      !SHA1.test(deployment.deployment_pr_head || '')) return value;
+  value.runtime_deployment = {
+    status: 'UNKNOWN', observed_at: deployment.observed_at,
+    bundle_sha256: deployment.bundle_sha256,
+    component_sha256: Object.fromEntries(DEPLOYED_RUNTIME_FILES.map(name => [name, null])),
+    reason_code: 'RUNTIME_FILES_UNAVAILABLE',
+  };
+  return value;
+}
+
 export function parseOperatorObservation(body) {
   if (typeof body !== 'string' || body.length > MAX_OPERATOR_COMMENT_BODY_LENGTH ||
       !body.startsWith(OPERATOR_MARKER))
@@ -67,13 +93,15 @@ export function parseOperatorObservation(body) {
   let value;
   try { value = JSON.parse(body.slice(OPERATOR_MARKER.length)); }
   catch { return null; }
+  if (object(value)) normalizeLegacyRuntimeDeployment(value);
   if (!object(value) || value.schema !== 1 ||
       value.project_id !== OPERATOR_PROJECT || value.repo !== OPERATOR_REPO ||
       value.issue !== OPERATOR_ISSUE || value.host_alias !== 'win11-primary' ||
       !SNAPSHOT_ID.test(value.snapshot_id || '') ||
       !Number.isSafeInteger(value.sequence) || value.sequence < 1 ||
       !validTime(value.observed_at) ||
-      (value.published_at !== undefined && !validTime(value.published_at)) ||
+      (value.published_at !== undefined && value.published_at !== null &&
+        !validTime(value.published_at)) ||
       (value.publisher_login !== undefined && !GITHUB_LOGIN.test(value.publisher_login || '')) ||
       (value.comment_author_login !== undefined && !GITHUB_LOGIN.test(value.comment_author_login || '')) ||
       (value.source?.comment_id !== undefined &&
@@ -82,7 +110,7 @@ export function parseOperatorObservation(body) {
       !validTime(value.expires_at) || containsForbiddenKey(value)) return null;
   const observed = Date.parse(value.observed_at);
   const expires = Date.parse(value.expires_at);
-  const legacyPublished = value.published_at === undefined ? null : Date.parse(value.published_at);
+  const legacyPublished = value.published_at == null ? null : Date.parse(value.published_at);
   if ((legacyPublished !== null && (legacyPublished < observed || legacyPublished >= expires)) ||
       expires <= observed || expires - observed > 15 * 60 * 1000) return null;
   return value;
@@ -107,7 +135,7 @@ export function findOperatorComment(comments, expectedLogin, expectedCommentId =
   if (comment.user?.login !== expectedLogin)
     return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_AUTHOR_MISMATCH' };
   const observation = parseOperatorObservation(comment.body);
-  if (!observation) return { status: 'UNKNOWN', error: 'INVALID_OPERATOR_OBSERVATION' };
+  if (!observation) return { status: 'UNKNOWN', error: 'OPERATOR_INVALID_OBSERVATION' };
   if (observation.source?.comment_id !== undefined && observation.source.comment_id !== comment.id)
     return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_ID_MISMATCH' };
   return { status: 'OK', comment, observation, error: null };
@@ -115,6 +143,7 @@ export function findOperatorComment(comments, expectedLogin, expectedCommentId =
 
 export async function updateExistingOperatorComment({
   comments, expectedLogin, expectedCommentId = null, body, readComment, patchComment, readComments,
+  readCommentsFailureCode,
   now = Date.now,
 }) {
   const existing = findOperatorComment(comments, expectedLogin, expectedCommentId);
@@ -139,7 +168,13 @@ export async function updateExistingOperatorComment({
   await patchComment(existing.comment.id, body);
   let commentsAfterWrite;
   try { commentsAfterWrite = await readComments(); }
-  catch { return { status: 'UNKNOWN', error: 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN' }; }
+  catch (error) {
+    let failureCode = null;
+    try { failureCode = readCommentsFailureCode?.(error); } catch { /* retain safe fallback */ }
+    const safeCode = safeErrorCode({ code: failureCode }, 'UNKNOWN');
+    return { status: 'UNKNOWN', error: safeCode.startsWith('OPERATOR_COMMENT_UPDATE_READBACK_')
+      ? safeCode : 'OPERATOR_COMMENT_UPDATE_READBACK_UNKNOWN' };
+  }
   const fresh = findOperatorComment(commentsAfterWrite, expectedLogin, expectedCommentId);
   if (fresh.status !== 'OK' || fresh.comment.id !== existing.comment.id ||
       fresh.comment.body !== body)

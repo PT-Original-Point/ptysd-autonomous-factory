@@ -704,6 +704,20 @@ function operatorPublisherError(code, identity) {
   error.operator_identity = identity;
   return error;
 }
+function operatorRequestFailureCode(stage, error) {
+  const status = [error?.status, error?.statusCode, error?.response?.status]
+    .find(value => Number.isSafeInteger(value) && value >= 400 && value <= 599);
+  if (status) return `OPERATOR_COMMENT_${stage}_HTTP_${status}`;
+  const text = [error?.stderr, error?.message]
+    .map(value => Buffer.isBuffer(value) ? value.toString('utf8') : String(value || ''))
+    .join('\n');
+  const match = text.match(/\b(?:HTTP(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*([45]\d{2})\b/i);
+  if (match) return `OPERATOR_COMMENT_${stage}_HTTP_${match[1]}`;
+  const systemCode = safeErrorCode(error, 'UNKNOWN');
+  return systemCode !== 'UNKNOWN'
+    ? `OPERATOR_COMMENT_${stage}_${systemCode}`
+    : `OPERATOR_COMMENT_${stage}_FAILED`;
+}
 export async function publishOperatorObservation(config, workerLogin, comments, mainSha,
   dependencies = {}, candidateSourceShas = new Map()) {
   const marked = comments.filter(c =>
@@ -794,21 +808,33 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
     incident: null,
   };
   const body = encodeOperatorObservation(snapshot);
+  const readComment = dependencies.readComment ||
+    (id => api('repos/' + OPERATOR_REPO + '/issues/comments/' + id));
+  const readComments = dependencies.readComments || (() => issueComments(config));
   try {
     const result = await updateExistingOperatorComment({
       comments, expectedLogin: commentAuthorLogin, expectedCommentId: OPERATOR_COMMENT_ID, body,
-      readComment: dependencies.readComment ||
-        (id => api('repos/' + OPERATOR_REPO + '/issues/comments/' + id)),
-      patchComment: (id, nextBody) => {
-        if (dependencies.patchComment) return dependencies.patchComment(id, nextBody);
-        const uri = 'repos/' + OPERATOR_REPO + '/issues/comments/' + id;
-        const temp = join(config.state_dir, 'operator-observation-' + randomUUID() + '.json');
-        writeFileSync(temp, JSON.stringify({ body: nextBody }),
-          { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-        try { gh(['api', uri, '--method', 'PATCH', '--input', temp]); }
-        finally { rmSync(temp, { force: true }); }
+      readComment: async id => {
+        try { return await readComment(id); }
+        catch (error) {
+          throw operatorPublisherError(operatorRequestFailureCode('PREWRITE_READ', error), publisherIdentity);
+        }
       },
-      readComments: dependencies.readComments || (() => issueComments(config)),
+      patchComment: async (id, nextBody) => {
+        try {
+          if (dependencies.patchComment) return await dependencies.patchComment(id, nextBody);
+          const uri = 'repos/' + OPERATOR_REPO + '/issues/comments/' + id;
+          const temp = join(config.state_dir, 'operator-observation-' + randomUUID() + '.json');
+          writeFileSync(temp, JSON.stringify({ body: nextBody }),
+            { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+          try { gh(['api', uri, '--method', 'PATCH', '--input', temp]); }
+          finally { rmSync(temp, { force: true }); }
+        } catch (error) {
+          throw operatorPublisherError(operatorRequestFailureCode('PATCH', error), publisherIdentity);
+        }
+      },
+      readComments,
+      readCommentsFailureCode: error => operatorRequestFailureCode('UPDATE_READBACK', error),
       now: dependencies.now || Date.now,
     });
     return { ...result, publisher_identity: publisherIdentity };
