@@ -408,6 +408,15 @@ foreach ($check in @(
         if ($_.Exception.Message -ne $check.Expected) { throw }
     }
 }
+$acl = [System.IO.Directory]::GetAccessControl($Target)
+$acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+    $usersSid, [System.Security.AccessControl.FileSystemRights]::Delete,
+    [System.Security.AccessControl.InheritanceFlags]::None,
+    [System.Security.AccessControl.PropagationFlags]::None,
+    [System.Security.AccessControl.AccessControlType]::Allow))
+ [System.IO.Directory]::SetAccessControl($Target, $acl)
+# DELETE on this parent applies to the parent itself; it does not grant DELETE_CHILD
+# on the protected runtime below it. The parent guard must allow this ACE.
 & $noBroadParentReplacement
 
 $acl = [System.IO.Directory]::GetAccessControl($Target)

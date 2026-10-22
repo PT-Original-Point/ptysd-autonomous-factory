@@ -116,12 +116,10 @@ function Get-ExecutorWriteRightsMask {
 }
 
 function Get-ExecutorParentReplacementRightsMask {
-    # Ancestors may grant broad child-creation rights without allowing an
-    # existing protected subtree to be removed or replaced. Reject only rights
-    # that can delete or take over that subtree; the protected leaf/parent still
-    # receives the full write-mask check.
-    return [int]([System.Security.AccessControl.FileSystemRights]::Delete -bor
-        [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+    # DELETE on an ancestor applies to that directory itself, not its children.
+    # DELETE_CHILD can remove a child subtree; permission/ownership changes can
+    # take it over. The protected path itself receives the full write-mask check.
+    return [int]([System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
         [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
 }
