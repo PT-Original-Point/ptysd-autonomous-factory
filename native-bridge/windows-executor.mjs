@@ -193,7 +193,10 @@ export function buildExecutorTaskXml(descriptor) {
   const args = executorTaskArguments(descriptor);
   const logonType = descriptor.execution_phase === 'WIN11_TRANSITION'
     ? 'InteractiveToken' : 'Password';
-  return `<?xml version="1.0" encoding="UTF-8"?>\n` +
+  // Register-ScheduledTask's -Xml parameter receives a .NET string, not UTF-8
+  // bytes. An encoding declaration here makes Task Scheduler reject the XML
+  // with ERROR_XML_ENCODING_SWITCH; the XML declaration is optional.
+  return `<?xml version="1.0"?>\n` +
     `<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">` +
     `<RegistrationInfo><URI>${xmlEscape(descriptor.task_name)}</URI></RegistrationInfo>` +
     `<Principals><Principal id="Author"><UserId>${xmlEscape(descriptor.user_sid)}</UserId>` +

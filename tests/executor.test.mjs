@@ -255,6 +255,15 @@ test('executor task descriptor rejects built-in and service identities', () => {
   } finally { f.dispose(); }
 });
 
+test('Task Scheduler XML string does not claim a byte encoding', () => {
+  const f = fixture();
+  try {
+    const xml = buildExecutorTaskXml(f.descriptor);
+    assert.doesNotMatch(xml, /^\s*<\?xml[^?]*\bencoding\s*=/i,
+      'Register-ScheduledTask receives a .NET string, so a UTF-8 byte declaration is invalid');
+  } finally { f.dispose(); }
+});
+
 test('WIN11_TRANSITION accepts the current publisher SID with an interactive token while VM mode remains isolated', () => {
   const f = fixture();
   try {
