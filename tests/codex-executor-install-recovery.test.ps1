@@ -29,6 +29,7 @@ $global:MockRegisterCalls = 0
 $global:MockFailureInjected = $false
 $global:MockAclStore = @{}
 $global:MockProgramDataAcl = New-Object System.Security.AccessControl.DirectorySecurity
+$global:MockBadSignaturePath = ''
 
 function Assert-Equal($Actual, $Expected, [string]$Message) {
     if ($Actual -cne $Expected) { throw ('ASSERT_EQUAL_FAILED: ' + $Message + ';actual=' + $Actual + ';expected=' + $Expected) }
@@ -71,6 +72,10 @@ function global:Get-LocalGroupMember {
 function global:Get-AuthenticodeSignature {
     [CmdletBinding()]
     param([string]$FilePath)
+    if ($global:MockBadSignaturePath -and [string]::Equals([IO.Path]::GetFullPath($FilePath),
+        [IO.Path]::GetFullPath($global:MockBadSignaturePath), [StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Status = 'NotSigned'; SignerCertificate = $null }
+    }
     return [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=OpenAI OpCo, LLC' } }
 }
 
@@ -149,7 +154,8 @@ function global:Unregister-ScheduledTask {
     if ($TaskName -eq 'PTYSD-Codex-Executor') { $global:MockTaskRegistered = $false }
 }
 
-function Invoke-InstallAttempt([string]$ExpectedError = '') {
+function Invoke-InstallAttempt([string]$ExpectedError = '', [string]$CodexPath = '') {
+    if (-not $CodexPath) { $CodexPath = $global:MockCodexPath }
     $password = New-Object Security.SecureString
     foreach ($character in 'synthetic-only'.ToCharArray()) { $password.AppendChar($character) }
     $password.MakeReadOnly()
@@ -157,7 +163,7 @@ function Invoke-InstallAttempt([string]$ExpectedError = '') {
     $failure = $null
     try {
         & $installerPath -Mode Install -ExecutorCredential $credential -NodeExecutable (Join-Path $programFiles 'Node\node.exe') `
-            -CodexExecutable (Join-Path $programFiles 'Codex\codex.exe') 2>$null | Out-Null
+            -CodexExecutable $CodexPath 2>$null | Out-Null
     } catch { $failure = $_.Exception.Message }
     if ($ExpectedError) {
         if ($null -eq $failure -or $failure -notlike ('*' + $ExpectedError + '*')) {
@@ -172,15 +178,20 @@ function Invoke-InstallAttempt([string]$ExpectedError = '') {
 try {
     New-Item -ItemType Directory -Path $local, $programData, $programFiles -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $local 'PTYSDNativeBridge') -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $programFiles 'Node'), (Join-Path $programFiles 'Codex') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $programFiles 'Node') -Force | Out-Null
+    $global:MockCodexSourceDirectory = Join-Path $local 'OpenAI\Codex\bin\synthetic-version'
+    New-Item -ItemType Directory -Path $global:MockCodexSourceDirectory -Force | Out-Null
     $env:COMPUTERNAME = 'DESKTOP-1B6PD2P'
     $env:LOCALAPPDATA = $local
     $env:ProgramData = $programData
     $env:ProgramFiles = $programFiles
     $nodePath = Join-Path $programFiles 'Node\node.exe'
-    $codexPath = Join-Path $programFiles 'Codex\codex.exe'
     [IO.File]::WriteAllText($nodePath, 'synthetic node executable')
-    [IO.File]::WriteAllText($codexPath, 'synthetic signed Codex executable')
+    $global:MockCodexPath = Join-Path $global:MockCodexSourceDirectory 'codex.exe'
+    foreach ($name in @('codex.exe','codex-code-mode-host.exe','codex-command-runner.exe',
+        'codex-windows-sandbox-setup.exe')) {
+        [IO.File]::WriteAllText((Join-Path $global:MockCodexSourceDirectory $name), ('synthetic signed Codex bundle ' + $name))
+    }
     $workerConfigPath = Join-Path $local 'PTYSDNativeBridge\config.json'
     $originalConfig = '{"existing":"preserve"}'
     [IO.File]::WriteAllText($workerConfigPath, $originalConfig)
@@ -188,6 +199,23 @@ try {
     $env:LOCALAPPDATA = [IO.Path]::GetFullPath($env:LOCALAPPDATA)
     $env:ProgramData = $programData
     $installerPath = Join-Path $repoRoot 'native-bridge\install-codex-executor.ps1'
+
+    $unapprovedCodexDirectory = Join-Path $local 'unapproved-cli'
+    New-Item -ItemType Directory -Path $unapprovedCodexDirectory -Force | Out-Null
+    $unapprovedCodexPath = Join-Path $unapprovedCodexDirectory 'codex.exe'
+    [IO.File]::WriteAllText($unapprovedCodexPath, 'unsigned unrelated executable')
+    $null = Invoke-InstallAttempt 'CODEX_EXECUTABLE_MUST_BE_PROGRAM_FILES_OR_OFFICIAL_LOCAL_CODEX' $unapprovedCodexPath
+    Assert-Equal $global:MockTaskRegistered $false 'unrelated per-user executable cannot become the Codex Executor'
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $local 'PTYSDNativeBridge\codex-executor-install-state.json')) `
+        $false 'unapproved executable is rejected before install state is written'
+
+    $global:MockBadSignaturePath = Join-Path $global:MockCodexSourceDirectory 'codex-command-runner.exe'
+    $null = Invoke-InstallAttempt 'CODEX_CLI_BUNDLE_SIGNATURE_NOT_QUALIFIED'
+    $global:MockBadSignaturePath = ''
+    Assert-Equal $global:MockTaskRegistered $false 'unsigned Codex sidecar prevents executor registration'
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $local 'PTYSDNativeBridge\codex-executor-install-state.json')) `
+        $false 'invalid Codex bundle signature is rejected before install state is written'
+
     $null = New-Item -ItemType Directory -Path $global:MockSpool
     $null = Invoke-InstallAttempt 'CODEX_EXECUTOR_PATH_ALREADY_EXISTS_REVIEW_REQUIRED_NO_OVERWRITE'
     Assert-Equal $global:MockTaskRegistered $false 'preexisting empty spool is not claimed'
@@ -272,6 +300,21 @@ try {
     $installedConfig = Get-Content -LiteralPath $workerConfigPath -Raw | ConvertFrom-Json
     Assert-Equal $installedConfig.enable_codex_model_runs $false 'model execution remains disabled'
     Assert-Equal $installedConfig.codex_usage_authorized $false 'usage authorization remains disabled'
+    $executorConfigReadback = Get-Content -LiteralPath (Join-Path $global:MockRuntime 'executor-config.json') -Raw | ConvertFrom-Json
+    Assert-Equal $executorConfigReadback.codex_executable (Join-Path $global:MockRuntime 'codex.exe') `
+        'executor uses the protected staged Codex CLI rather than publisher AppData'
+    Assert-Equal $executorConfigReadback.codex_executable_sha256 `
+        ((Get-FileHash -LiteralPath (Join-Path $global:MockCodexSourceDirectory 'codex.exe') -Algorithm SHA256).Hash.ToLowerInvariant()) `
+        'executor config binds the staged codex.exe by SHA-256'
+    $installState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+    foreach ($name in @('codex.exe','codex-code-mode-host.exe','codex-command-runner.exe',
+        'codex-windows-sandbox-setup.exe')) {
+        $sourceHash = (Get-FileHash -LiteralPath (Join-Path $global:MockCodexSourceDirectory $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+        $stagedHash = (Get-FileHash -LiteralPath (Join-Path $global:MockRuntime $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+        Assert-Equal $stagedHash $sourceHash ('signed Codex bundle staged byte-identically: ' + $name)
+        Assert-Equal $installState.runtime_sha256.PSObject.Properties[$name].Value $sourceHash `
+            ('Codex bundle hash is included in install readback: ' + $name)
+    }
 
     $successfulConfigBytes = Get-Content -LiteralPath $workerConfigPath -Raw
     & $installerPath -Mode Uninstall 2>$null | Out-Null

@@ -378,25 +378,63 @@ try {
     throw 'EXECUTOR_ADMIN_MEMBERSHIP_UNKNOWN_STOP'
 }
 
-foreach ($candidate in @($NodeExecutable, $CodexExecutable)) {
-    if (-not $candidate -or -not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-        throw 'MACHINE_ACCESSIBLE_NODE_AND_CODEX_PATHS_REQUIRED'
-    }
-    $fullCandidate = [IO.Path]::GetFullPath($candidate)
-    $programFilesRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
-    if (-not ($programFilesRoots | Where-Object {
-        $fullCandidate.StartsWith([IO.Path]::GetFullPath($_) + [IO.Path]::DirectorySeparatorChar,
-            [StringComparison]::OrdinalIgnoreCase) })) {
-        throw 'EXECUTABLE_MUST_BE_MACHINE_ACCESSIBLE_NOT_PUBLISHER_APPDATA'
-    }
-}
-$signature = Get-AuthenticodeSignature -FilePath $CodexExecutable
-if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'OpenAI OpCo, LLC') {
-    throw 'CODEX_EXECUTABLE_SIGNATURE_NOT_QUALIFIED'
+if (-not $NodeExecutable -or -not (Test-Path -LiteralPath $NodeExecutable -PathType Leaf)) {
+    throw 'MACHINE_ACCESSIBLE_NODE_PATH_REQUIRED'
 }
 $nodePath = [IO.Path]::GetFullPath($NodeExecutable)
-$codexPath = [IO.Path]::GetFullPath($CodexExecutable)
-$codexHash = (Get-FileHash -LiteralPath $codexPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$programFilesRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+if (-not ($programFilesRoots | Where-Object {
+    $nodePath.StartsWith([IO.Path]::GetFullPath($_) + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase) })) {
+    throw 'NODE_MUST_BE_MACHINE_ACCESSIBLE'
+}
+Assert-CodexExecutorInstallPathChain $nodePath
+
+if (-not $CodexExecutable -or -not (Test-Path -LiteralPath $CodexExecutable -PathType Leaf)) {
+    throw 'CODEX_EXECUTABLE_NOT_FOUND'
+}
+$codexSourcePath = [IO.Path]::GetFullPath($CodexExecutable)
+if ([IO.Path]::GetFileName($codexSourcePath) -ine 'codex.exe') {
+    throw 'CODEX_EXECUTABLE_PATH_NOT_QUALIFIED'
+}
+$codexProgramFilesInstall = @($programFilesRoots | Where-Object {
+    $codexSourcePath.StartsWith([IO.Path]::GetFullPath($_) + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+$localCodexBin = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'))
+$codexVersionDirectory = Split-Path -Parent $codexSourcePath
+$codexBinDirectory = Split-Path -Parent $codexVersionDirectory
+$officialUserCodexInstall = [string]::Equals([IO.Path]::GetFullPath($codexBinDirectory), $localCodexBin,
+    [StringComparison]::OrdinalIgnoreCase)
+if (-not ($codexProgramFilesInstall -or $officialUserCodexInstall)) {
+    throw 'CODEX_EXECUTABLE_MUST_BE_PROGRAM_FILES_OR_OFFICIAL_LOCAL_CODEX'
+}
+Assert-CodexExecutorInstallPathChain $codexSourcePath
+
+# The executor has a different SID from the interactive publisher and cannot
+# safely depend on the publisher's per-user AppData. Stage the complete, signed
+# official CLI bundle into the protected ProgramData runtime and bind every file
+# by SHA-256 in the install state.
+$codexCliBundleNames = @('codex.exe','codex-code-mode-host.exe','codex-command-runner.exe',
+    'codex-windows-sandbox-setup.exe')
+$codexCliSources = [ordered]@{}
+$codexCliHashes = [ordered]@{}
+$codexSourceDirectory = Split-Path -Parent $codexSourcePath
+foreach ($name in $codexCliBundleNames) {
+    $source = Join-Path $codexSourceDirectory $name
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw ('CODEX_CLI_BUNDLE_FILE_MISSING: ' + $name)
+    }
+    Assert-CodexExecutorInstallPathChain $source
+    $sourceSignature = Get-AuthenticodeSignature -FilePath $source
+    if ($sourceSignature.Status -ne 'Valid' -or
+        $sourceSignature.SignerCertificate.Subject -notmatch 'OpenAI OpCo, LLC') {
+        throw ('CODEX_CLI_BUNDLE_SIGNATURE_NOT_QUALIFIED: ' + $name)
+    }
+    $codexCliSources[$name] = $source
+    $codexCliHashes[$name] = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+$codexRuntimePath = Join-Path $runtimeDir 'codex.exe'
+$codexHash = $codexCliHashes['codex.exe']
 
 $sourceNames = @('codex-executor.mjs','codex-continuation.mjs','captured-process.mjs','safe-error-code.mjs',
     'windows-executor.mjs','HiddenCodexExecutor.vbs')
@@ -410,7 +448,7 @@ $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
 $executorConfig = [ordered]@{
     project_id=$project; repo=$repo; spool_dir=$spoolDir
     workspace_root=(Join-Path $spoolDir 'workspaces')
-    codex_executable=$codexPath; codex_executable_sha256=$codexHash
+    codex_executable=$codexRuntimePath; codex_executable_sha256=$codexHash
     publisher_identity_sid=$publisherSid; executor_identity_sid=$executorSid
     codex_executor_task=$executorTaskName; codex_executor_task_user=$executorName
     codex_executor_wscript_path=$wscript; codex_executor_launcher_path=$launcherPath
@@ -430,6 +468,7 @@ $runtimeHashes = [ordered]@{}
 foreach ($name in $sourceNames) {
     $runtimeHashes[$name] = (Get-FileHash -LiteralPath $runtimeSources[$name] -Algorithm SHA256).Hash.ToLowerInvariant()
 }
+foreach ($name in $codexCliBundleNames) { $runtimeHashes[$name] = $codexCliHashes[$name] }
 $runtimeHashes['executor-config.json'] = $configHash
 $installState = [ordered]@{
     schema='ptysd-codex-executor-install-state.v1'
@@ -465,6 +504,16 @@ Set-RoleAcl $runtimeDir $executorSid $readOnly
 foreach ($name in $sourceNames) {
     Copy-CodexExecutorInstallFile -SourcePath $runtimeSources[$name] `
         -DestinationPath (Join-Path $runtimeDir $name) -ExpectedSha256 $runtimeHashes[$name] | Out-Null
+}
+foreach ($name in $codexCliBundleNames) {
+    $destination = Join-Path $runtimeDir $name
+    Copy-CodexExecutorInstallFile -SourcePath $codexCliSources[$name] `
+        -DestinationPath $destination -ExpectedSha256 $runtimeHashes[$name] | Out-Null
+    $stagedSignature = Get-AuthenticodeSignature -FilePath $destination
+    if ($stagedSignature.Status -ne 'Valid' -or
+        $stagedSignature.SignerCertificate.Subject -notmatch 'OpenAI OpCo, LLC') {
+        throw ('CODEX_CLI_STAGED_SIGNATURE_NOT_QUALIFIED: ' + $name)
+    }
 }
 Write-CodexExecutorInstallBytes -Bytes $configBytes -DestinationPath $executorConfigPath `
     -ExpectedSha256 $runtimeHashes['executor-config.json'] | Out-Null
