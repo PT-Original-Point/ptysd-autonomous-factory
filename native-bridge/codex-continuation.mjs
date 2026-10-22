@@ -3,7 +3,7 @@
 // a Task Scheduler task, authenticate to GitHub, or invoke a model by itself.
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, openSync, writeFileSync, fsyncSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
-import { join, isAbsolute, win32 } from 'node:path';
+import { join, isAbsolute, relative, resolve, sep, win32 } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { buildHiddenWscriptArguments, getCurrentWindowsSid, validateWindowsTaskAction }
   from './windows-executor.mjs';
@@ -104,7 +104,8 @@ export function codexExecutionGate(job, config) {
     reasons.push('CODEX_CLI_AUTH_NOT_QUALIFIED');
   if (config?.enable_codex_model_runs !== true) reasons.push('MODEL_RUNS_NOT_ENABLED');
   if (config?.codex_usage_authorized !== true) reasons.push('USAGE_AUTHORIZATION_UNKNOWN');
-  if (config?.codex_sandbox_boundary !== 'VERIFIED_WORKSPACE_ONLY') reasons.push('SANDBOX_BOUNDARY_NOT_VERIFIED');
+  if (config?.codex_sandbox_boundary !== 'VERIFIED_EXACT_PATH_PERMISSION_PROFILE')
+    reasons.push('SANDBOX_BOUNDARY_NOT_VERIFIED');
   const publisherSid = config?.publisher_identity_sid;
   const executorSid = config?.executor_identity_sid;
   if (!/^S-1-(?:\d+-)+\d+$/i.test(publisherSid || '') ||
@@ -232,11 +233,36 @@ export function releaseCodexAttempt(job, claimed) {
 export function buildCodexExecArgs(job, workspace) {
   if (!parseCodexJob(`PTYSD_NATIVE_JOB_V1\n${JSON.stringify(job)}`)) throw new Error('INVALID_CODEX_JOB');
   if (typeof workspace !== 'string' || !workspace) throw new Error('WORKSPACE_REQUIRED');
-  return ['exec', '--json', '--sandbox', 'workspace-write', '--model', job.model,
+  const windowsPath = win32.isAbsolute(workspace);
+  const root = windowsPath ? win32.resolve(workspace) : resolve(workspace);
+  const resolvePath = windowsPath ? (...parts) => win32.resolve(...parts) : (...parts) => resolve(...parts);
+  const relativePath = windowsPath ? (from, to) => win32.relative(from, to) : relative;
+  const pathSeparator = windowsPath ? win32.sep : sep;
+  const isAbsolutePath = windowsPath ? value => win32.isAbsolute(value) : isAbsolute;
+  const scopedPaths = job.write_paths.map(repoPath => {
+    const fullPath = resolvePath(root, ...repoPath.split('/'));
+    const rel = relativePath(root, fullPath);
+    if (!rel || rel === '..' || rel.startsWith(`..${pathSeparator}`) || isAbsolutePath(rel))
+      throw new Error('CODEX_WRITE_SCOPE_PATH_INVALID');
+    return fullPath;
+  });
+  const profile = 'pty_exact_scope';
+  const filesystem = [
+    [':minimal', 'read'],
+    [root, 'read'],
+    ...scopedPaths.map(path => [path, 'write']),
+  ].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(',');
+  const config = [
+    `default_permissions=${JSON.stringify(profile)}`,
+    `permissions.${profile}.filesystem={${filesystem}}`,
+    `permissions.${profile}.network.enabled=false`,
+  ];
+  return ['exec', '--json', '--ignore-user-config', '--strict-config', '--model', job.model,
     // Scheduled execution cannot answer approval prompts. Keep the CLI inside
-    // its workspace-write sandbox and deny requests that would need elevation.
+    // its native exact-path permission profile and deny every undeclared write.
     '--config', 'approval_policy=never',
-    '--config', `model_reasoning_effort=${JSON.stringify(job.reasoning_effort)}`, '-C', workspace, '-'];
+    '--config', `model_reasoning_effort=${JSON.stringify(job.reasoning_effort)}`,
+    ...config.flatMap(value => ['--config', value]), '-C', root, '-'];
 }
 
 export function codexSessionFromJsonl(text) {
