@@ -29,7 +29,7 @@ import { runCapturedProcess, terminateProcessTree } from './captured-process.mjs
 import { safeErrorCode } from './safe-error-code.mjs';
 import { assertExecutorTaskReady, cleanupExecutorAttempt, createExecutorSourceBundle,
   createPinnedSourceBundle, dispatchToExecutor, executorResultPath, triggerPendingExecutorAttempt,
-  validateExecutorDescriptor } from './windows-executor.mjs';
+  validateExecutorRoutingMap, validateExecutorDescriptor } from './windows-executor.mjs';
 
 export const PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
 export const REPO = 'PT-Original-Point/ptysd-autonomous-factory';
@@ -111,6 +111,44 @@ function validEditPaths(paths) {
 function isOpenCodeExecutionKind(kind) { return OPENCODE_EXECUTION_KINDS.has(kind); }
 function isModelExecutionKind(kind) { return MODEL_EXECUTION_KINDS.has(kind); }
 function isEditExecutionKind(kind) { return EDIT_EXECUTION_KINDS.has(kind); }
+function executorLaneForJobKind(kind) {
+  if (isOpenCodeExecutionKind(kind)) return 'opencode';
+  if (ANTIGRAVITY_EXECUTION_KINDS.has(kind)) return 'antigravity';
+  return null;
+}
+export function executorForJobKind(config, kind) {
+  const lane = executorLaneForJobKind(kind);
+  if (!lane) return null;
+  if (config?.executors !== undefined) return config.executors?.[lane] ?? null;
+  if (config?.executor_lane !== undefined)
+    return config.executor_lane === lane ? config.executor ?? null : null;
+  // The legacy descriptor came from the OpenCode registrar; never infer that
+  // it is an Antigravity identity. W2 requires an explicit lane binding.
+  return lane === 'opencode' ? config?.executor ?? null : null;
+}
+function strictExecutorLaneRouting(config) {
+  return config.executors !== undefined || config.executor_lane !== undefined ||
+    config.executor !== undefined;
+}
+function executorRouteFailure(config, kind) {
+  const lane = executorLaneForJobKind(kind);
+  if (config.executors !== undefined || config.executor_lane !== undefined ||
+      (config.executor !== undefined && lane === 'antigravity'))
+    return 'EXECUTOR_NOT_CONFIGURED_FOR_' + lane.toUpperCase();
+  return 'EXECUTOR_NOT_CONFIGURED';
+}
+function validateExecutorRouting(config) {
+  if (config.executors === undefined) {
+    if (config.executor_lane !== undefined &&
+        (!['opencode', 'antigravity'].includes(config.executor_lane) || config.executor === undefined))
+      throw new Error('EXECUTOR_LANE_CONFIG_INVALID');
+    if (config.executor !== undefined) validateExecutorDescriptor(config.executor);
+    return;
+  }
+  if (config.executor !== undefined || config.executor_lane !== undefined)
+    throw new Error('EXECUTOR_ROUTING_CONFIG_AMBIGUOUS');
+  validateExecutorRoutingMap(config.executors);
+}
 function validJobModel(job) {
   return job?.kind === 'antigravity_edit'
     ? job.schema === 6 && job.model === ANTIGRAVITY_V2_MODEL && job.variant === 'high'
@@ -961,7 +999,7 @@ export function guardConfig(c) {
       (typeof c.antigravity_cli_project_id !== 'string' ||
        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(c.antigravity_cli_project_id)))
     throw new Error('ANTIGRAVITY_CLI_PROJECT_ID_INVALID');
-  if (c.executor !== undefined) validateExecutorDescriptor(c.executor);
+  validateExecutorRouting(c);
   mkdirSync(c.state_dir, { recursive: true });
   return c;
 }
@@ -986,13 +1024,6 @@ export function checkModelAuthorization(job, config) {
   const variants = config.allowed_models?.[job.model];
   return Array.isArray(variants) && variants.includes(job.variant);
 }
-function hasExplicitUnauthenticatedFreeModelAuthorization(job, config) {
-  return typeof job?.model === 'string' && job.model.split('/')[0]?.toLowerCase() === 'opencode' &&
-    Array.isArray(config?.unauthenticated_free_models) &&
-    config.unauthenticated_free_models.includes(job.model) &&
-    Array.isArray(config.allowed_models?.[job.model]) &&
-    config.allowed_models[job.model].includes(job.variant);
-}
 export function antigravityExecutionAuthorization(job, config, now = Date.now()) {
   if (job?.kind !== 'antigravity_edit' || job.schema !== 6 || !validJobModel(job))
     return 'ANTIGRAVITY_JOB_IDENTITY_INVALID';
@@ -1016,15 +1047,15 @@ export function antigravityExecutionAuthorization(job, config, now = Date.now())
   return null;
 }
 export function buildOpenCodeChildEnv(sourceEnv = process.env, hostPlatform = platform()) {
-  // The CLI reads its signed-in profile from the user's normal profile paths.
-  // Do not inherit ambient provider/Publisher credentials or Node startup
-  // injection: neither participates in the authorization decision for a job.
+  // Preserve the signed-in profile paths, but derive authorization from the
+  // exact job/profile readback; ambient provider/Publisher credentials and
+  // Node injection cannot change billing, auth, or child execution policy.
   const childEnv = buildNativeChildEnvironment(sourceEnv, hostPlatform);
   childEnv.OPENCODE_DISABLE_AUTOUPDATE = 'true';
   return childEnv;
 }
 async function captureGitStdout(workspace, stateDir, requestId, attemptId, label, args,
-  keepStdout = false, readProcessTree) {
+  keepStdout = false, readProcessTree, platformName = platform()) {
   const stem = `edit-git-${label}-${requestId}-${attemptId}`;
   const stdoutPath = join(stateDir, `${stem}.stdout.bin`);
   const stderrPath = join(stateDir, `${stem}.stderr.bin`);
@@ -1032,7 +1063,7 @@ async function captureGitStdout(workspace, stateDir, requestId, attemptId, label
   for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
     'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_EXTERNAL_DIFF', 'GIT_PAGER']) delete env[key];
   const result = await runCapturedProcess('git', ['-C', workspace, ...args], {
-    cwd: workspace, env, stdoutPath, stderrPath, terminate: terminateProcessTree,
+    cwd: workspace, env, stdoutPath, stderrPath, terminate: terminateProcessTree, platformName,
     ...(typeof readProcessTree === 'function' ? { readProcessTree } : {}),
   });
   const evidence = result.local_evidence || {};
@@ -1063,27 +1094,28 @@ function parseGitStatusPaths(bytes) {
     return { status: record.slice(0, 2), path: record.slice(3).replaceAll('\\', '/') };
   });
 }
-async function assertEditWorkspaceReady(config, job, attemptId, readProcessTree) {
+async function assertEditWorkspaceReady(config, job, attemptId, readProcessTree, platformName = platform()) {
   const head = await captureGitStdout(config.workspace, config.state_dir, job.request_id,
-    attemptId, 'head', ['rev-parse', 'HEAD'], false, readProcessTree);
+    attemptId, 'head', ['rev-parse', 'HEAD'], false, readProcessTree, platformName);
   if (head.output.toString('utf8').trim().toLowerCase() !== job.source_sha.toLowerCase())
     throw new Error('EDIT_WORKSPACE_SOURCE_SHA_MISMATCH');
   const status = await captureGitStdout(config.workspace, config.state_dir, job.request_id,
     attemptId, 'before', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'],
-    false, readProcessTree);
+    false, readProcessTree, platformName);
   if (status.output.length !== 0) throw new Error('EDIT_WORKSPACE_NOT_CLEAN');
 }
-export async function captureScopedEditDiff({ workspace, state_dir, job, attempt_id, readProcessTree }) {
+export async function captureScopedEditDiff({ workspace, state_dir, job, attempt_id, readProcessTree,
+  platformName = platform() }) {
   if (!workspace || !state_dir || !job || !isEditExecutionKind(job.kind) ||
       !validEditPaths(job.edit_paths) || !/^[a-f0-9-]{36}$/i.test(attempt_id || ''))
     throw new Error('EDIT_DIFF_CAPTURE_INPUT_INVALID');
   const head = await captureGitStdout(workspace, state_dir, job.request_id,
-    attempt_id, 'after-head', ['rev-parse', 'HEAD'], false, readProcessTree);
+    attempt_id, 'after-head', ['rev-parse', 'HEAD'], false, readProcessTree, platformName);
   if (head.output.toString('utf8').trim().toLowerCase() !== job.source_sha.toLowerCase())
     throw new Error('EDIT_WORKSPACE_SOURCE_SHA_CHANGED');
   const status = await captureGitStdout(workspace, state_dir, job.request_id,
     attempt_id, 'after', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'],
-    false, readProcessTree);
+    false, readProcessTree, platformName);
   const changes = parseGitStatusPaths(status.output);
   const changedFiles = [...new Set(changes.map(change => change.path))].sort();
   const allowed = new Set(job.edit_paths.map(path => process.platform === 'win32' ? path.toLowerCase() : path));
@@ -1098,7 +1130,7 @@ export async function captureScopedEditDiff({ workspace, state_dir, job, attempt
   const diffPath = join(state_dir, `edit-diff-${job.request_id}-${attempt_id}.patch`);
   const diff = await captureGitStdout(workspace, state_dir, job.request_id, attempt_id,
     'diff', ['diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames', 'HEAD'],
-    true, readProcessTree);
+    true, readProcessTree, platformName);
   if (diff.stdoutPath.toLowerCase() !== diffPath.toLowerCase()) {
     // Capture into the unique attempt artifact name without buffering the patch.
     renameSync(diff.stdoutPath, diffPath);
@@ -1154,6 +1186,8 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
   // --print alias here can consume the next option as a positional prompt.
   const args = ['--input-format', 'stream-json', '--output-format', 'stream-json',
     `--project=${projectId}`,
+    // The exact model ID pins Gemini 3.8 Flash High. A separate --effort
+    // override previously failed for this model, so keep it out of the command.
     '--model', ANTIGRAVITY_V2_MODEL,
     // This selects the documented agent execution mode. The stream's
     // permission_mode is a separate headless tool-policy value and may be
@@ -1411,14 +1445,10 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
   try {
     providerAuth = readProviderAuth(cli.bin, job.model.split('/')[0], config.workspace);
   } catch { providerAuth = { status: 'AUTH_PROVIDER_METADATA_UNKNOWN' }; }
-  // `auth list` absence is recoverable for a model explicitly approved in the
-  // local no-cost allowlist; unknown auth metadata remains WAITING. The model
-  // stays pinned in the CLI args, so no paid fallback is possible.
-  const explicitlyApprovedUnauthenticatedFreeModel =
-    providerAuth?.status === 'AUTH_PROVIDER_RECORD_ABSENT' &&
-    hasExplicitUnauthenticatedFreeModelAuthorization(job, config);
-  if (providerAuth?.status !== 'AUTH_PROVIDER_RECORD_PRESENT' &&
-      !explicitlyApprovedUnauthenticatedFreeModel)
+  // A model catalog entry or legacy local allowlist does not establish provider
+  // authentication, account entitlement, or current no-cost terms. Keep the
+  // task WAITING until the selected provider has a saved auth record.
+  if (providerAuth?.status !== 'AUTH_PROVIDER_RECORD_PRESENT')
     return waiting(providerAuth?.status === 'AUTH_PROVIDER_RECORD_ABSENT'
       ? 'OPENCODE_V2_AUTH_NOT_READY' : 'OPENCODE_V2_AUTH_METADATA_UNKNOWN', 48);
   // V2, not V1: ordered permissions, shell/subagent, provider/model#variant.
@@ -1428,7 +1458,8 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
     const policy = editMode ?
       buildV2ScopedEditConfig(config.workspace, job.edit_paths) : buildV2ReadOnlyConfig();
     safePolicy = JSON.stringify(policy);
-    if (editMode) await assertEditWorkspaceReady(config, job, attemptId);
+    if (editMode) await assertEditWorkspaceReady(config, job, attemptId,
+      dependencies.readGitProcessTree, dependencies.gitPlatform ?? platform());
   } catch (error) {
     return { outcome: `V2_EDIT_SCOPE_OR_SOURCE_${safeErrorCode(error, 'INVALID')}`, exit_code: 46,
       evidence_sha256: null, evidence_bytes: 0, coding_state: 'NOT_STARTED',
@@ -1480,9 +1511,7 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
     file_change_tool_failed_count: runEvidence.file_change_tool_failed_count,
     file_change_tool_incomplete_count: runEvidence.file_change_tool_incomplete_count,
     local_evidence: { ...processResult.local_evidence,
-      provider_authorization: explicitlyApprovedUnauthenticatedFreeModel
-        ? 'EXPLICIT_LOCAL_UNAUTHENTICATED_FREE_MODEL_ALLOWLIST'
-        : 'SAVED_PROVIDER_RECORD_PRESENT',
+      provider_authorization: 'SAVED_PROVIDER_RECORD_PRESENT',
       opencode_run: { valid: runEvidence.valid, reason: runEvidence.reason,
         event_count: runEvidence.event_count, stdout_bytes: runEvidence.stdout_bytes ?? 0 } },
   };
@@ -1500,7 +1529,9 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
   } catch { policyChanged = true; }
   let diff;
   try { diff = await captureScopedEditDiff({ workspace: config.workspace,
-    state_dir: config.state_dir, job, attempt_id: attemptId }); }
+    state_dir: config.state_dir, job, attempt_id: attemptId,
+    readProcessTree: dependencies.readGitProcessTree,
+    platformName: dependencies.gitPlatform ?? platform() }); }
   catch (error) {
     return { ...evidencedResult,
       outcome: `V2_EDIT_DIFF_CAPTURE_FAILED_${safeErrorCode(error)}`,
@@ -1951,6 +1982,13 @@ export async function runWorker(configInput, adapters = {}) {
     if (!s || s.state !== 'STARTED' || s.host.toUpperCase() !== config.host.toUpperCase()) continue;
     const resolutionState = resolvedAttemptState(comments, s, me);
     const hasResolution = resolutionState !== null;
+    const executor = isModelExecutionKind(s.kind) ? executorForJobKind(config, s.kind) : null;
+    if (isModelExecutionKind(s.kind) && strictExecutorLaneRouting(config) && !executor) {
+      if (!hasResolution || resolutionState === 'WAITING') blockedKinds.add(s.kind);
+      log(`EXECUTOR_LANE_DESCRIPTOR_MISSING_${executorLaneForJobKind(s.kind)?.toUpperCase()}_` +
+        `${s.request_id}_NO_REPLAY`);
+      continue;
+    }
     if (s.kind === 'codex_plan') {
       if (hasResolution) continue;
       const recovery = await reconcileCodexExecutorResult(s, config, me, blockedKinds, {
@@ -1974,13 +2012,13 @@ export async function runWorker(configInput, adapters = {}) {
       else log(`CODEX_EXECUTOR_RESULT_${recovery.reason}_${s.request_id}_UNKNOWN_NO_REPLAY`);
       continue;
     }
-    const resultDir = isModelExecutionKind(s.kind) && config.executor ?
-      resolveExecutorResultsDir(config.executor) : config.state_dir;
-    const path = isModelExecutionKind(s.kind) && config.executor ?
+    const resultDir = isModelExecutionKind(s.kind) && executor ?
+      resolveExecutorResultsDir(executor) : config.state_dir;
+    const path = isModelExecutionKind(s.kind) && executor ?
       resolveExecutorResultPath(resultDir, s.request_id, s.attempt_id) :
       join(resultDir, `result-${s.request_id}-${s.attempt_id}.json`);
     if (hasResolution) {
-      if (isModelExecutionKind(s.kind) && config.executor) {
+      if (isModelExecutionKind(s.kind) && executor) {
         if (existsSync(path)) {
           let result;
           try { result = JSON.parse(readFileSync(path, 'utf8')); }
@@ -2001,7 +2039,7 @@ export async function runWorker(configInput, adapters = {}) {
             continue;
           }
         }
-        try { cleanupExecutorAttempt(config.executor, s.attempt_id); }
+        try { cleanupExecutorAttempt(executor, s.attempt_id); }
         catch (error) {
           if (resolutionState === 'WAITING') {
             blockedKinds.add(s.kind);
@@ -2038,8 +2076,8 @@ export async function runWorker(configInput, adapters = {}) {
           `${safeErrorCode(error)}_NO_REPLAY`);
         continue;
       }
-      if (isModelExecutionKind(s.kind) && config.executor) {
-        try { cleanupExecutorAttempt(config.executor, s.attempt_id); } catch { /* exact result and receipt remain durable */ }
+      if (isModelExecutionKind(s.kind) && executor) {
+        try { cleanupExecutorAttempt(executor, s.attempt_id); } catch { /* exact result and receipt remain durable */ }
       }
       log(`RECOVERED_EXECUTOR_RESULT_${result.terminal.state}_${s.request_id}`);
       blockedKinds.add(s.kind);
@@ -2047,7 +2085,7 @@ export async function runWorker(configInput, adapters = {}) {
     }
     if (isModelExecutionKind(s.kind)) {
       blockedKinds.add(s.kind);
-      if (isEditExecutionKind(s.kind) && config.executor) {
+      if (isEditExecutionKind(s.kind) && executor) {
         const sources = comments.filter(comment => config.dispatchers.includes(comment.user?.login))
           .map(comment => ({ comment, job: parseJob(comment.body) }))
           .filter(item => item.job?.request_id === s.request_id && item.job.kind === s.kind &&
@@ -2081,7 +2119,7 @@ export async function runWorker(configInput, adapters = {}) {
           continue;
         }
         try {
-          const triggered = triggerPendingExecutor(config.executor, s.attempt_id, { expectedJob });
+          const triggered = triggerPendingExecutor(executor, s.attempt_id, { expectedJob });
           if (triggered?.outcome === 'EXECUTOR_PENDING_ATTEMPT_TRIGGERED_NOT_ACCEPTANCE')
             log(`PENDING_EXECUTOR_RETRIGGERED_${s.request_id}_${s.attempt_id}_NO_NEW_RECEIPT`);
           else log(`PENDING_EXECUTOR_RETRIGGER_NOT_CONFIRMED_${s.request_id}_NO_REPLAY`);
@@ -2205,8 +2243,10 @@ export async function runWorker(configInput, adapters = {}) {
   }
   let waitingEligibility = null;
   let preparedSourceBundle = null;
+  let preparedExecutor = null;
   while (next) {
     preparedSourceBundle = null;
+    preparedExecutor = null;
     if (next.job.kind === 'codex_plan') {
       const gate = codexExecutionGate(next.job, config);
       let reason = null;
@@ -2235,28 +2275,14 @@ export async function runWorker(configInput, adapters = {}) {
       }
     } else if (isModelExecutionKind(next.job.kind)) {
       let reason = null;
+      preparedExecutor = executorForJobKind(config, next.job.kind);
+      if (next.job.kind === 'antigravity_edit' && !preparedExecutor)
+        reason = executorRouteFailure(config, next.job.kind);
       if (next.job.kind === 'antigravity_edit') {
-        reason = antigravityExecutionAuthorization(next.job, config);
-        if (!reason) {
-          const baseEnv = adapters.baseEnv ?? process.env;
-          const localAppData = adapters.localAppData ?? baseEnv.LOCALAPPDATA;
-          const cliPath = typeof localAppData === 'string' && isAbsolute(localAppData)
-            ? join(localAppData, 'agy', 'bin', 'agy.exe') : '';
-          let projectId = config.antigravity_cli_project_id;
-          if (projectId === undefined || projectId === null) {
-            const binding = (adapters.resolveAntigravityProjectId ?? resolveAntigravityProjectId)(
-              config.workspace, baseEnv);
-            if (binding?.projectScopeEvidence !== 'PROJECT_WORKSPACE_MATCHED' ||
-                typeof binding.projectId !== 'string') reason = 'ANTIGRAVITY_PROJECT_SCOPE_UNVERIFIED';
-            else projectId = binding.projectId;
-          }
-          if (!reason) {
-            const readiness = (adapters.runAntigravityV2Readiness ?? runAntigravityV2Readiness)(
-              cliPath, config.workspace, adapters.runAntigravityMetadata, baseEnv,
-              adapters.verifyAntigravitySignature, projectId);
-            reason = antigravityV2ReadinessExecutionFailure(readiness);
-          }
-        }
+        if (!reason) reason = antigravityExecutionAuthorization(next.job, config);
+        // CLI identity, OAuth, quota, project binding, and CLI settings belong
+        // to the W2 Executor's Windows profile. Publisher-side preflight would
+        // inspect the wrong SID and can falsely block an otherwise eligible lane.
       } else if (config.enable_v2_model_runs !== true) reason = 'MODEL_RUNS_NOT_ENABLED';
       if (!reason && !checkModelAuthorization(next.job, config)) reason = 'MODEL_NOT_EXPLICITLY_ALLOWED';
       else if (!reason && next.job.kind === 'opencode_edit') {
@@ -2265,21 +2291,24 @@ export async function runWorker(configInput, adapters = {}) {
           reason = `EDIT_SCOPE_${safeErrorCode(error, 'INVALID')}`;
         }
       }
-      if (!reason && !config.executor) reason = 'EXECUTOR_NOT_CONFIGURED';
+      if (!reason && !preparedExecutor) reason = executorRouteFailure(config, next.job.kind);
       else if (!reason) {
         try {
           // The OpenCode verifier's contract is throw-on-failure and return the
           // validated Task Scheduler readback on success; unlike the Codex
           // verifier, it does not expose a `ready` boolean.
-          verifyExecutor(config.executor);
+          verifyExecutor(preparedExecutor);
         } catch (error) {
           reason = `EXECUTOR_TASK_${safeErrorCode(error)}`;
         }
       }
-      if (!reason && config.executor.source_bundle_per_attempt === true) {
+      if (!reason && isEditExecutionKind(next.job.kind) &&
+          preparedExecutor.source_bundle_per_attempt !== true)
+        reason = 'EXECUTOR_SOURCE_BUNDLE_PER_ATTEMPT_REQUIRED';
+      if (!reason && preparedExecutor.source_bundle_per_attempt === true) {
         try {
           const bundle = createSourceBundle({ workspace: config.workspace,
-            descriptor: config.executor, job: next.job, attemptId: randomUUID() });
+            descriptor: preparedExecutor, job: next.job, attemptId: randomUUID() });
           if (bundle.source_sha !== next.job.source_sha || !HASH.test(bundle.sha256 || ''))
             throw new Error('EXECUTOR_SOURCE_BUNDLE_IDENTITY_MISMATCH');
           preparedSourceBundle = { attempt_id: bundle.attempt_id, sha256: bundle.sha256 };
@@ -2316,7 +2345,7 @@ export async function runWorker(configInput, adapters = {}) {
   const job = next.job;
   const discardPreparedSourceBundle = () => {
     if (!preparedSourceBundle) return;
-    try { cleanupExecutorAttempt(config.executor, preparedSourceBundle.attempt_id); }
+    try { cleanupExecutorAttempt(preparedExecutor, preparedSourceBundle.attempt_id); }
     catch { log(`EXECUTOR_SOURCE_BUNDLE_CLEANUP_UNKNOWN_${job.request_id}`); }
   };
   if (job.source_pr === undefined && job.source_sha !== head) {
@@ -2429,7 +2458,7 @@ export async function runWorker(configInput, adapters = {}) {
   const start = receipt(job.request_id, attemptId, 'STARTED', job);
   postReceipt(config, start, me);
   if (executorDispatch) {
-    const dispatched = dispatchExecutor(config.executor, {
+    const dispatched = dispatchExecutor(preparedExecutor, {
       request_id: job.request_id, attempt_id: attemptId, source_sha: job.source_sha, job, spec,
       ...(preparedSourceBundle ? { source_bundle_sha256: preparedSourceBundle.sha256 } : {}),
     });
