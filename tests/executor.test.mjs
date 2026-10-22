@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JOB_MARKER, PROJECT, RECEIPT_MARKER, REPO, parseReceipt, receipt, runWorker,
   verifyCapturedEvidence } from '../native-bridge/worker.mjs';
 import { executePendingManifest } from '../native-bridge/executor.mjs';
@@ -483,6 +483,53 @@ test('attempt source bundle pins one exact commit and is attached to the Task Sc
     assert.equal(editPending.job.kind,'opencode_edit');
     assert.deepEqual(editPending.job.edit_paths,['README.md']);
     assert.equal(editPending.source_bundle_sha256,editBundle.sha256);
+  } finally { f.dispose(); }
+});
+
+test('source bundle from a shallow workspace is made portable before executor dispatch', () => {
+  const f = fixture();
+  try {
+    const full = sourceRepository(f.root, 'complete-source');
+    for (let index = 1; index <= 3; index++) {
+      writeFileSync(join(full.workspace, 'README.md'), 'source history ' + index + '\n');
+      full.git(['add', 'README.md']);
+      full.git(['commit', '--quiet', '-m', 'source history ' + index]);
+    }
+    const bare = join(f.root, 'source-origin.git');
+    execFileSync('git', ['init', '--bare', '--quiet', bare], { encoding: 'utf8', windowsHide: true });
+    full.git(['branch', '-M', 'main']);
+    full.git(['remote', 'add', 'origin', pathToFileURL(bare).href]);
+    full.git(['push', '--quiet', '--set-upstream', 'origin', 'main']);
+
+    const shallowWorkspace = join(f.root, 'shallow-source');
+    execFileSync('git', ['clone', '--quiet', '--depth=1', '--branch', 'main',
+      pathToFileURL(bare).href, shallowWorkspace], { encoding: 'utf8', windowsHide: true });
+    const shallowGit = args => execFileSync('git', ['-C', shallowWorkspace, ...args], {
+      encoding: 'utf8', windowsHide: true, shell: false, timeout: 30000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    assert.equal(shallowGit(['rev-parse', '--is-shallow-repository']), 'true');
+
+    const spec = 'Create an isolated source snapshot for a test; do not invoke a model.';
+    const job = { ...modelJob(spec, 'antigravity_edit'), source_sha: shallowGit(['rev-parse', 'HEAD']) };
+    const bundle = createExecutorSourceBundle({ workspace: shallowWorkspace,
+      descriptor: f.descriptor, job, attemptId: ATTEMPT, filesystemPath: localPathMap(f) });
+    assert.equal(shallowGit(['rev-parse', '--is-shallow-repository']), 'false',
+      'the source history must be complete before a standalone bundle is created');
+
+    const consumer = join(f.root, 'empty-executor-repository');
+    execFileSync('git', ['init', '--quiet', consumer], { encoding: 'utf8', windowsHide: true });
+    const ref = 'refs/pty-native/executor-bundles/' + ATTEMPT;
+    execFileSync('git', ['-C', consumer, 'fetch', '--quiet', '--no-tags', bundle.bundle_path,
+      ref + ':' + ref], { encoding: 'utf8', windowsHide: true, shell: false, timeout: 30000 });
+    execFileSync('git', ['-C', consumer, 'checkout', '--quiet', '--detach', job.source_sha], {
+      encoding: 'utf8', windowsHide: true, shell: false, timeout: 30000,
+    });
+    assert.equal(execFileSync('git', ['-C', consumer, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8', windowsHide: true,
+    }).trim(), job.source_sha);
+    assert.equal(readFileSync(join(consumer, 'README.md'), 'utf8').replaceAll('\r\n', '\n'),
+      'source history 3\n');
   } finally { f.dispose(); }
 });
 
