@@ -5,6 +5,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Audit','Register')][string]$Mode = 'Audit',
+    [ValidateSet('opencode','antigravity')][string]$ExecutorLane = 'opencode',
     [PSCredential]$ExecutorCredential,
     [string]$PublisherConfigPath = (Join-Path $env:LOCALAPPDATA 'PTYSDNativeBridge\config.json'),
     [string]$NodeExecutable = (Join-Path $env:ProgramFiles 'nodejs\node.exe')
@@ -14,9 +15,17 @@ $ErrorActionPreference = 'Stop'
 
 $expectedRepo = 'PT-Original-Point/ptysd-autonomous-factory'
 $expectedProject = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE'
+$laneUpper = $ExecutorLane.ToUpperInvariant()
 $builderPath = Join-Path $PSScriptRoot 'build-executor-task-xml.mjs'
 
 function Fail([string]$Code) { throw $Code }
+
+function Assert-ModelExecutionDisabled($Config) {
+    if ((Get-Field $Config 'enable_v2_model_runs') -eq $true -or
+        (Get-Field $Config 'enable_antigravity_model_runs') -eq $true) {
+        Fail 'MODEL_EXECUTION_MUST_REMAIN_DISABLED_FOR_REGISTRATION'
+    }
+}
 
 function Get-Field($Object, [string]$Name) {
     if ($null -eq $Object) { return $null }
@@ -95,15 +104,32 @@ function Assert-ExplicitRole([string]$Path, [string]$Sid,
     if (-not $found) { Fail 'EXECUTOR_ACL_REQUIRED_ROLE_MISSING' }
 }
 
-function Assert-NoBroadWrite([string]$Path) {
-    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
-    $broadSids = @('S-1-1-0','S-1-5-11','S-1-5-32-545')
-    $writeMask = [int]([System.Security.AccessControl.FileSystemRights]::Write -bor
-        [System.Security.AccessControl.FileSystemRights]::Modify -bor
+function Get-ExecutorWriteRightsMask {
+    # Modify includes ReadAndExecute bits; testing the composite flag therefore
+    # misclassifies ordinary read-only ACLs as writable. Keep only write/delete
+    # rights so inherited Users/Authenticated Users read ACEs remain admissible.
+    return [int]([System.Security.AccessControl.FileSystemRights]::Write -bor
         [System.Security.AccessControl.FileSystemRights]::Delete -bor
         [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
         [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+}
+
+function Get-ExecutorParentReplacementRightsMask {
+    # Ancestors may grant broad child-creation rights without allowing an
+    # existing protected subtree to be removed or replaced. Reject only rights
+    # that can delete or take over that subtree; the protected leaf/parent still
+    # receives the full write-mask check.
+    return [int]([System.Security.AccessControl.FileSystemRights]::Delete -bor
+        [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+}
+
+function Assert-NoBroadWrite([string]$Path) {
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $broadSids = @('S-1-1-0','S-1-5-11','S-1-5-32-545')
+    $writeMask = Get-ExecutorWriteRightsMask
     foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
         if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
         if ($rule.IdentityReference.Value -notin $broadSids) { continue }
@@ -113,20 +139,42 @@ function Assert-NoBroadWrite([string]$Path) {
     }
 }
 
+function Assert-NoBroadParentReplacement([string]$Path) {
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $broadSids = @('S-1-1-0','S-1-5-11','S-1-5-32-545')
+    $replacementMask = Get-ExecutorParentReplacementRightsMask
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.IdentityReference.Value -notin $broadSids) { continue }
+        if (([int]$rule.FileSystemRights -band $replacementMask) -ne 0) {
+            Fail 'EXECUTOR_ACL_BROAD_PARENT_REPLACEMENT'
+        }
+    }
+}
+
 function Assert-RoleReadOnly([string]$Path, [string]$Sid) {
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
-    $writeMask = [int]([System.Security.AccessControl.FileSystemRights]::Write -bor
-        [System.Security.AccessControl.FileSystemRights]::Modify -bor
-        [System.Security.AccessControl.FileSystemRights]::Delete -bor
-        [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-        [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+    $writeMask = Get-ExecutorWriteRightsMask
     foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
         if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
             $rule.IdentityReference.Value -ine $Sid) { continue }
         if (([int]$rule.FileSystemRights -band $writeMask) -ne 0) {
             Fail 'EXECUTOR_RUNTIME_MUST_BE_READ_ONLY'
         }
+    }
+}
+
+function Assert-ExecutorPathParentsReadOnly([string]$Path, [string]$ExecutorSid) {
+    # The caller checks the leaf file ACL separately. A read-only file can still
+    # be replaced when a parent allows deleting or taking over that subtree.
+    # Check each existing ancestor before task registration.
+    $cursor = Split-Path -Parent ([IO.Path]::GetFullPath($Path))
+    while ($cursor) {
+        Assert-NoBroadParentReplacement $cursor
+        Assert-RoleReadOnly $cursor $ExecutorSid
+        $parent = Split-Path -Parent $cursor
+        if (-not $parent -or $parent -eq $cursor) { break }
+        $cursor = $parent
     }
 }
 
@@ -140,11 +188,7 @@ function Assert-ExecutorConfig($Config, $Descriptor, [string]$ExecutorSid, [stri
         -not ($dispatchers -is [System.Array]) -or $dispatchers.Count -lt 1) {
         Fail 'EXECUTOR_CONFIG_IDENTITY_INVALID'
     }
-    $allowedModels = Get-Field $Config 'allowed_models'
-    if ((Get-Field $Config 'enable_v2_model_runs') -eq $true -or
-        ($null -ne $allowedModels -and @($allowedModels.PSObject.Properties).Count -gt 0)) {
-        Fail 'MODEL_EXECUTION_MUST_REMAIN_DISABLED_FOR_REGISTRATION'
-    }
+    Assert-ModelExecutionDisabled $Config
     $runtime = Get-Field $Config 'executor_runtime'
     if ($null -eq $runtime -or (Get-Field $runtime 'user_sid') -ine $ExecutorSid -or
         (Get-Field $runtime 'publisher_sid') -ine $PublisherSid -or
@@ -167,13 +211,39 @@ if (-not (Test-Path -LiteralPath $PublisherConfigPath -PathType Leaf)) {
 }
 
 $publisherConfig = Get-Content -LiteralPath $PublisherConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
-$descriptor = Get-Field $publisherConfig 'executor'
+$executorMap = Get-Field $publisherConfig 'executors'
+$legacyDescriptor = Get-Field $publisherConfig 'executor'
+$configuredLaneProperty = $publisherConfig.PSObject.Properties['executor_lane']
+$configuredLaneConfigured = $null -ne $configuredLaneProperty
+$configuredLane = $null
+if ($configuredLaneConfigured) { $configuredLane = $configuredLaneProperty.Value }
+if (($null -ne $executorMap -and $null -ne $legacyDescriptor) -or
+    ($null -ne $executorMap -and $configuredLaneConfigured)) {
+    Fail 'EXECUTOR_ROUTING_CONFIG_AMBIGUOUS'
+}
+if ($null -ne $executorMap) {
+    $descriptor = Get-Field $executorMap $ExecutorLane
+} elseif ($configuredLaneConfigured) {
+    if ($configuredLane -isnot [string] -or
+        $configuredLane -cnotin @('opencode', 'antigravity') -or
+        $null -eq $legacyDescriptor) {
+        Fail 'EXECUTOR_LANE_CONFIG_INVALID'
+    }
+    if ($configuredLane -ceq $ExecutorLane) { $descriptor = $legacyDescriptor }
+    else { $descriptor = $null }
+} elseif ($ExecutorLane -eq 'opencode') {
+    # Compatibility for existing single-OpenCode configurations. Antigravity
+    # always requires an explicit lane entry and cannot inherit the W1 task.
+    $descriptor = $legacyDescriptor
+} else {
+    $descriptor = $null
+}
 if ($null -eq $descriptor) {
     if ($Mode -eq 'Audit') {
-        Write-Output 'OPENCODE_EXECUTOR_DESCRIPTOR=NOT_CONFIGURED;TASK_REGISTRATION=NOT_ATTEMPTED;MODEL_EXECUTION=NOT_TESTED'
+        Write-Output ($laneUpper + '_EXECUTOR_DESCRIPTOR=NOT_CONFIGURED;TASK_REGISTRATION=NOT_ATTEMPTED;MODEL_EXECUTION=NOT_TESTED')
         return
     }
-    Fail 'EXECUTOR_DESCRIPTOR_NOT_CONFIGURED'
+    Fail ('EXECUTOR_NOT_CONFIGURED_FOR_' + $laneUpper)
 }
 
 if (-not (Test-Path -LiteralPath $NodeExecutable -PathType Leaf) -or
@@ -200,14 +270,14 @@ $taskFolderExists = ($taskPath -eq '\') -or (Test-TaskFolder $taskPath)
 $existing = Get-TaskOptional $taskName $taskPath
 if ($Mode -eq 'Audit') {
     if (-not $taskFolderExists) {
-        Write-Output ('OPENCODE_EXECUTOR_TASK_FOLDER=ABSENT;DESCRIPTOR=' + $taskNameFull + ';TASK_REGISTRATION=NOT_ATTEMPTED')
+        Write-Output ($laneUpper + '_EXECUTOR_TASK_FOLDER=ABSENT;DESCRIPTOR=' + $taskNameFull + ';TASK_REGISTRATION=NOT_ATTEMPTED')
         return
     }
     if ($null -eq $existing) {
-        Write-Output ('OPENCODE_EXECUTOR_TASK=ABSENT;DESCRIPTOR=' + $taskNameFull + ';MODEL_EXECUTION=NOT_TESTED')
+        Write-Output ($laneUpper + '_EXECUTOR_TASK=ABSENT;DESCRIPTOR=' + $taskNameFull + ';MODEL_EXECUTION=NOT_TESTED')
         return
     }
-    Write-Output ('OPENCODE_EXECUTOR_TASK=' + $existing.State + ';DESCRIPTOR=' + $taskNameFull + ';MODEL_EXECUTION=NOT_TESTED')
+    Write-Output ($laneUpper + '_EXECUTOR_TASK=' + $existing.State + ';DESCRIPTOR=' + $taskNameFull + ';MODEL_EXECUTION=NOT_TESTED')
     return
 }
 if (-not $taskFolderExists) { Fail 'EXECUTOR_TASK_FOLDER_NOT_FOUND_NO_CREATE' }
@@ -249,6 +319,9 @@ foreach ($entry in $descriptorPaths.GetEnumerator()) {
     if ($entry.Key -in @('launcher_path','script_path','config_path')) {
         Assert-RoleReadOnly $path $executorSid
     }
+    if ($entry.Key -in @('wscript_path','launcher_path','node_bin','script_path','config_path')) {
+        Assert-ExecutorPathParentsReadOnly $path $executorSid
+    }
 }
 Assert-ExplicitRole ([string](Get-Field $descriptor 'manifest_dir')) $publisherSid `
     ([System.Security.AccessControl.FileSystemRights]::Modify) -Protected
@@ -269,15 +342,11 @@ foreach ($profileField in @('workspace','state_dir')) {
     }
     $null = Assert-PhysicalPath $profilePath -Directory
 }
-$publisherAllowedModels = Get-Field $publisherConfig 'allowed_models'
-if ((Get-Field $publisherConfig 'enable_v2_model_runs') -eq $true -or
-    ($null -ne $publisherAllowedModels -and @($publisherAllowedModels.PSObject.Properties).Count -gt 0)) {
-    Fail 'MODEL_EXECUTION_MUST_REMAIN_DISABLED_FOR_REGISTRATION'
-}
+Assert-ModelExecutionDisabled $publisherConfig
 
 # The shared JS template is the sole source for Task Scheduler XML. The helper
 # validates the descriptor again and emits no configuration or credential data.
-$xmlOutput = & $NodeExecutable $builderPath $PublisherConfigPath
+$xmlOutput = & $NodeExecutable $builderPath $PublisherConfigPath $ExecutorLane
 if ($LASTEXITCODE -ne 0 -or -not $xmlOutput) { Fail 'EXECUTOR_TASK_XML_BUILD_FAILED' }
 $xmlText = $xmlOutput -join [Environment]::NewLine
 [xml]$taskDefinition = $xmlText
@@ -310,5 +379,5 @@ if ([int]$readback.State -ne 3 -or
     $readback.Actions[0].WorkingDirectory -ine [string](Get-Field $descriptor 'working_directory')) {
     Fail 'EXECUTOR_TASK_READBACK_MISMATCH'
 }
-Write-Output ('OPENCODE_EXECUTOR_TASK_REGISTERED=' + $taskNameFull + ';Logon=Password;RunLevel=Limited;Instances=IgnoreNew;ExecutionTimeLimit=PT0S;Triggers=0')
+Write-Output ($laneUpper + '_EXECUTOR_TASK_REGISTERED=' + $taskNameFull + ';Logon=Password;RunLevel=Limited;Instances=IgnoreNew;ExecutionTimeLimit=PT0S;Triggers=0')
 Write-Output 'MODEL_EXECUTION=UNCHANGED;NO_TASK_START_PERFORMED'

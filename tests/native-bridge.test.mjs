@@ -9,7 +9,7 @@ import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
   RECEIPT_MARKER, checkModelAuthorization, terminalStateForResult,
   runWorker as runWorkerImplementation, main as runWorker, writeReceipt, ISSUE_TITLE, guardConfig,
   runPlan as executeOpenCodeTask, verifyCapturedEvidence, antigravityExecutionAuthorization,
-  codexTerminalReceipt, selectNextWithCodexClaim, readPinnedCandidateSources,
+  codexTerminalReceipt, selectNextWithCodexClaim, readPinnedCandidateSources, executorForJobKind,
   publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight } from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, OPERATOR_COMMENT_ID, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
@@ -58,6 +58,80 @@ function seededOperatorObservation(commentId, sequence, mainSha, at = Date.now()
     monitor_candidate: null, incident: null,
   };
 }
+
+function executorDescriptorForLane(lane, userSuffix) {
+  const root = `C:\\PTYSD\\${lane}`;
+  return {
+    task_name: `\\PTYSD\\${lane}Executor`,
+    user_sid: `S-1-5-21-100-200-300-${userSuffix}`,
+    publisher_sid: 'S-1-5-21-100-200-300-1002',
+    wscript_path: 'C:\\Windows\\System32\\wscript.exe',
+    launcher_path: 'C:\\PTYSD\\HiddenExecutor.vbs',
+    node_bin: 'C:\\Node\\node.exe',
+    script_path: 'C:\\PTYSD\\executor.mjs',
+    config_path: `${root}\\executor.json`,
+    manifest_dir: `${root}\\manifests`,
+    results_dir: `${root}\\results`,
+    working_directory: `${root}\\work`,
+    source_bundle_per_attempt: true,
+  };
+}
+
+test('model Executor routing isolates W1 and W2 identities, tasks, manifests and workspaces', () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-executor-lane-routing-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const stateDir = join(root, 'state');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(stateDir, { recursive: true });
+    const opencode = executorDescriptorForLane('OpenCode', 1001);
+    const antigravity = executorDescriptorForLane('Antigravity', 1003);
+    const base = { repo: REPO, project_id: PROJECT, host: hostname().toUpperCase(), issue: 407,
+      workspace, state_dir: stateDir, dispatchers: ['t14210184'] };
+    const config = guardConfig({ ...base, executors: { opencode, antigravity } });
+
+    assert.equal(executorForJobKind(config, 'opencode_plan'), opencode);
+    assert.equal(executorForJobKind(config, 'opencode_edit'), opencode);
+    assert.equal(executorForJobKind(config, 'antigravity_edit'), antigravity);
+    assert.equal(executorForJobKind({ executors: { opencode } }, 'antigravity_edit'), null,
+      'an explicit but missing W2 route must not fall back to W1');
+    assert.equal(executorForJobKind({ executor: opencode }, 'opencode_edit'), opencode,
+      'the unmarked legacy descriptor remains assigned to OpenCode');
+    assert.equal(executorForJobKind({ executor: opencode }, 'antigravity_edit'), null,
+      'an unmarked legacy descriptor is never assumed to be a W2 executor');
+    assert.equal(executorForJobKind({ executor: opencode, enable_antigravity_model_runs: true },
+      'antigravity_edit'), null,
+    'enabling W2 does not infer that a legacy W1 identity is safe for W2');
+    assert.equal(executorForJobKind({ executor: opencode, executor_lane: 'antigravity' },
+      'antigravity_edit'), opencode,
+    'a legacy descriptor can serve W2 only when explicitly lane-bound');
+    assert.equal(executorForJobKind({ executor: opencode, executor_lane: 'antigravity' },
+      'opencode_edit'), null);
+    assert.equal(executorForJobKind({ executor: opencode, executor_lane: 'opencode' }, 'antigravity_edit'), null,
+      'a legacy descriptor explicitly assigned to W1 cannot execute W2 jobs');
+    assert.equal(executorForJobKind({ executor: opencode, executor_lane: 'opencode' }, 'opencode_edit'), opencode);
+    assert.equal(executorForJobKind({ executor: opencode, enable_v2_model_runs: true,
+      enable_antigravity_model_runs: true }, 'antigravity_edit'), null,
+    'a shared legacy descriptor cannot serve both enabled Worker lanes');
+    assert.equal(executorForJobKind(config, 'ping'), null);
+
+    assert.throws(() => guardConfig({ ...base, executor: opencode,
+      executors: { opencode, antigravity } }), /EXECUTOR_ROUTING_CONFIG_AMBIGUOUS/);
+    assert.throws(() => guardConfig({ ...base, executor: opencode, executor_lane: 'codex' }),
+      /EXECUTOR_LANE_CONFIG_INVALID/);
+    assert.throws(() => guardConfig({ ...base, executor: opencode, executor_lane: 'opencode',
+      executors: { opencode, antigravity } }), /EXECUTOR_ROUTING_CONFIG_AMBIGUOUS/);
+    assert.throws(() => guardConfig({ ...base, executors: { opencode,
+      antigravity: { ...antigravity, user_sid: opencode.user_sid } } }),
+    /EXECUTOR_LANE_IDENTITY_COLLISION/);
+    assert.throws(() => guardConfig({ ...base, executors: { opencode,
+      antigravity: { ...antigravity, manifest_dir: opencode.results_dir } } }),
+    /EXECUTOR_LANE_PATH_COLLISION/);
+    assert.throws(() => guardConfig({ ...base, executors: { opencode,
+      antigravity: { ...antigravity, task_name: opencode.task_name } } }),
+    /EXECUTOR_LANE_TASK_COLLISION/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservation = null,
   seededObservation = true,
@@ -882,7 +956,8 @@ test('Issue #310 structured candidate task dispatches through the existing Execu
       manifest_dir:join(root,'manifests'),results_dir:join(root,'results'),
       working_directory:root,source_bundle_per_attempt:true};
     const config={repo:REPO,project_id:PROJECT,host,issue:407,workspace,state_dir:stateDir,
-      dispatchers:['t14210184'],executor,enable_v2_model_runs:true,
+      dispatchers:['t14210184'],executors:{opencode:executor,
+        antigravity:executorDescriptorForLane('Antigravity',1003)},enable_v2_model_runs:true,
       allowed_models:{'opencode/spark':['high']}};
     let bundleCalls=0,dispatchCalls=0,modelCalls=0,candidatePrReads=0,posted=[];
     const result=await executeWorker(config,{
@@ -900,12 +975,14 @@ test('Issue #310 structured candidate task dispatches through the existing Execu
         throw new Error(`UNEXPECTED_TEST_API_${uri}`);
       },
       commentsRead:()=>receiptComments,
-      assertExecutorTaskReady:()=>({ready:true}),
-      createExecutorSourceBundle:({job:sourceJob,attemptId})=>{
+      assertExecutorTaskReady:descriptor=>{assert.equal(descriptor,executor);return {ready:true};},
+      createExecutorSourceBundle:({descriptor,job:sourceJob,attemptId})=>{
+        assert.equal(descriptor,executor,'W1 source bundles must use the OpenCode descriptor');
         bundleCalls++; assert.equal(sourceJob.kind,'opencode_edit'); assert.equal(sourceJob.source_pr,437);
         return {attempt_id:attemptId,source_sha:sourceJob.source_sha,sha256:'c'.repeat(64)};
       },
-      dispatchToExecutor:(_descriptor,manifest)=>{
+      dispatchToExecutor:(descriptor,manifest)=>{
+        assert.equal(descriptor,executor,'W1 dispatch must not cross into the W2 task or SID');
         dispatchCalls++; assert.equal(manifest.job.kind,'opencode_edit'); assert.equal(manifest.job.source_pr,437);
         assert.deepEqual(manifest.job.edit_paths,['src/worker.mjs']);
         assert.equal(manifest.source_bundle_sha256,'c'.repeat(64));
@@ -993,17 +1070,12 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
       antigravity_execution_attestation:{...attestation,observed_at:new Date(Date.now()+60_000).toISOString()}},
     Date.now()),'ANTIGRAVITY_EXECUTION_ATTESTATION_UNKNOWN',
     'future-dated policy evidence remains invalid');
-    const executor={task_name:'\\PTYSD\\OpenCodeExecutor',user_sid:'S-1-5-21-100-200-300-1001',
-      publisher_sid:'S-1-5-21-100-200-300-1002',wscript_path:'C:\\Windows\\System32\\wscript.exe',
-      launcher_path:'C:\\PTYSD\\HiddenCodexExecutor.vbs',node_bin:'C:\\Node\\node.exe',
-      script_path:'C:\\PTYSD\\executor.mjs',config_path:'C:\\PTYSD\\executor.json',
-      manifest_dir:join(root,'manifests'),results_dir:join(root,'results'),
-      working_directory:root,source_bundle_per_attempt:true};
+    const executor=executorDescriptorForLane('Antigravity',1003);
     const config={repo:REPO,project_id:PROJECT,host,issue:407,workspace,state_dir:stateDir,
-      dispatchers:['t14210184'],executor,enable_antigravity_model_runs:false,
+      dispatchers:['t14210184'],executors:{opencode:executorDescriptorForLane('OpenCode',1001),
+        antigravity:executor},enable_antigravity_model_runs:false,
       antigravity_cli_project_id:undefined};
     let bundles=0,dispatches=0,inlineRuns=0,prReads=0,readinessCalls=0,nextReceiptId=420;
-    let readinessCreditSetting='SETTINGS_FILE_MISSING';
     const posted=[],logs=[];
     const adapters={
       goalCommentsRead:()=>[humanGoalComment(),...comments],
@@ -1021,7 +1093,10 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
           return {encoding:'base64',content:Buffer.from(spec).toString('base64')};
         throw new Error(`UNEXPECTED_W2_TEST_API_${uri}`);
       },
-      commentsRead:()=>comments,assertExecutorTaskReady:()=>({ready:true}),
+      commentsRead:()=>comments,assertExecutorTaskReady(descriptor){
+        assert.equal(descriptor,executor,'W2 readiness must check the W2 Task Scheduler identity');
+        return {ready:true};
+      },
       localAppData:root,
       resolveAntigravityProjectId(directory){
         assert.equal(directory,workspace);
@@ -1033,23 +1108,26 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
         assert.equal(bin,join(root,'agy','bin','agy.exe'));
         assert.equal(cwd,workspace);
         assert.equal(projectId,'b8fbf647-6c41-4932-9d0a-8a7af257a27a');
+        // The Publisher's profile is deliberately not logged in. Only the
+        // separately scheduled W2 Executor may inspect its own CLI identity.
         return {status:'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH',
           model:ANTIGRAVITY_V2_MODEL,signature_verified:true,issues:[],
           project_scope_evidence:'PROJECT_WORKSPACE_MATCHED',
-          effective_config_evidence:readinessCreditSetting === 'SETTINGS_FILE_MISSING'
-            ? 'EFFECTIVE_CONFIG_UNKNOWN' : 'EFFECTIVE_CONFIG_VERIFIED_NO_MODEL',
+          effective_config_evidence:'EFFECTIVE_CONFIG_VERIFIED_NO_MODEL',
           tool_policy_evidence:'W2_NONFILE_ACTIONS_DENIED',
-          credit_fallback_setting:readinessCreditSetting,authentication_checked:true,
-          authentication_evidence:'AUTHENTICATED_QUOTA_READ',
+          credit_fallback_setting:'CREDIT_FALLBACK_DISABLED',authentication_checked:true,
+          authentication_evidence:'LOGIN_REQUIRED',
           gemini_aggregate_quota:{status:'GEMINI_AGGREGATE_QUOTA_READ',
             source:'GEMINI_MODELS_AGGREGATE',weekly_remaining_percent:95,five_hour_remaining_percent:99}};
       },
-      createExecutorSourceBundle({job:sourceJob,attemptId}){
+      createExecutorSourceBundle({descriptor,job:sourceJob,attemptId}){
+        assert.equal(descriptor,executor,'W2 source bundles must use the W2 manifest root');
         bundles++; assert.equal(sourceJob.kind,'antigravity_edit');
         assert.equal(sourceJob.model,ANTIGRAVITY_V2_MODEL); assert.equal(sourceJob.variant,'high');
         return {attempt_id:attemptId,source_sha:sourceJob.source_sha,sha256:'d'.repeat(64)};
       },
-      dispatchToExecutor(_descriptor,manifest){
+      dispatchToExecutor(descriptor,manifest){
+        assert.equal(descriptor,executor,'W2 dispatch must not use the W1 task or SID');
         dispatches++; assert.equal(manifest.job.kind,'antigravity_edit');
         assert.equal(manifest.job.source_pr,448); assert.equal(manifest.source_bundle_sha256,'d'.repeat(64));
         return {outcome:'SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION'};
@@ -1088,7 +1166,25 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
 
     Object.assign(config,{enable_antigravity_model_runs:true,
       antigravity_execution_attestation:attestation,allowed_models:{[ANTIGRAVITY_V2_MODEL]:['high']}});
-    readinessCreditSetting='CREDIT_FALLBACK_DISABLED';
+    const w2Executor=config.executors.antigravity;
+    const w1Executor=config.executors.opencode;
+    delete config.executors;
+    config.executor=w1Executor;
+    const independentPing=mkjob({host,request_id:'PTYSD_PING_WITHOUT_W2_EXECUTOR_20261018'});
+    comments.push({...com(412,encoded(independentPing),'t14210184'),
+      issue_url:`https://api.github.com/repos/${REPO}/issues/310`});
+    const missingW2Executor=await executeWorker(config,adapters);
+    assert.equal(missingW2Executor.state,'FINISHED');
+    assert.equal(missingW2Executor.request_id,independentPing.request_id,
+      'missing W2 identity does not starve an independent authorized ping');
+    assert.ok(logs.some(value=>value.includes('ANTIGRAVITY_LANE_WAITING_ELIGIBILITY_EXECUTOR_NOT_CONFIGURED_FOR_ANTIGRAVITY')),
+      logs.join('\n'));
+    assert.equal(posted.filter(item=>item.request_id===job.request_id).length,0,
+      'missing lane routing must not publish STARTED or claim the W2 task');
+    assert.equal(bundles,0); assert.equal(dispatches,0); assert.equal(readinessCalls,0);
+    delete config.executor;
+    config.executors={opencode:w1Executor,antigravity:w2Executor};
+
     const authorizedPrReadsBefore=prReads;
     const result=await executeWorker(config,adapters);
     assert.equal(result.state,'DISPATCHED');
@@ -1096,8 +1192,8 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
     assert.equal(bundles,1); assert.equal(dispatches,1); assert.equal(inlineRuns,0);
     assert.equal(prReads-authorizedPrReadsBefore,2,
       'the authorized attempt verifies its pinned candidate before dispatch and at final readback');
-    assert.equal(readinessCalls,1,
-      'W2 dispatch requires the explicitly disabled G1 setting from current settings');
+    assert.equal(readinessCalls,0,
+      'Publisher must not inspect Antigravity login, quota, or settings under its own Windows identity');
     const w2Receipts=posted.filter(item=>item.request_id===job.request_id);
     assert.equal(w2Receipts.length,1); assert.equal(w2Receipts[0].state,'STARTED');
     assert.equal(w2Receipts[0].kind,'antigravity_edit');
@@ -1536,11 +1632,17 @@ test('OpenCode V2 edit intake captures exact scoped diff without treating exit z
       request_id,kind:'opencode_edit',source_sha:sourceSha,
       spec_path:'native-bridge/tasks/review.md',spec_sha256:hash,
       model:'opencode/spark',variant:'high',edit_paths:['src/worker.mjs']});
+    let processTreeState='DEAD',modelLaunches=0;
     const execute=async (request_id,target,content,resultOverrides={})=>executeOpenCodeTask('Make the assigned source edit.',
       config,makeJob(request_id),randomUUID(),{
         qualifyOpenCodeV2:()=>({ready:true,bin:'fake-opencode-v2.exe',version:'2.0.27'}),
         readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_RECORD_PRESENT'}),
+        gitPlatform:'win32',
+        readGitProcessTree:pid=>({state:processTreeState,root_pid:pid,
+          process_ids:processTreeState==='DEAD'?[]:[pid],census_complete:processTreeState==='DEAD',
+          observed_at:new Date().toISOString(),error:processTreeState==='UNKNOWN'?'TEST_CENSUS_UNKNOWN':null}),
         async runCapturedProcess(_bin,args,options){
+          modelLaunches++;
           assert.equal(args[args.indexOf('--agent')+1],'ptysd-scoped-write');
           assert.equal(args[args.indexOf('--model')+1],'opencode/spark#high');
           assert.equal(args.includes('--shell'),false);
@@ -1615,6 +1717,18 @@ test('OpenCode V2 edit intake captures exact scoped diff without treating exit z
       'scope violations retain verifiable diff evidence but remain blocked');
 
     git('restore','--worktree','--','README.md');
+    const launchesBeforeUnknownTree=modelLaunches;
+    processTreeState='UNKNOWN';
+    const unknownTree=await execute('PTYSD_OPEN_EDIT_GIT_TREE_UNKNOWN_20261016','src/worker.mjs',
+      'export const state = "must not be written";\n');
+    assert.match(unknownTree.outcome,/V2_EDIT_SCOPE_OR_SOURCE_EDIT_GIT_.*TERMINATION_UNCONFIRMED/);
+    assert.equal(unknownTree.eligibility_state,'BLOCKED');
+    assert.equal(unknownTree.model_invoked,false);
+    assert.equal(modelLaunches,launchesBeforeUnknownTree,'unknown Git process census blocks before model launch');
+    assert.equal(readFileSync(join(workspace,'src','worker.mjs'),'utf8').replaceAll('\r\n','\n'),
+      'export const state = "base";\n');
+    processTreeState='DEAD';
+
     const noDiff=await execute('PTYSD_OPEN_EDIT_NO_DIFF_20261016','src/worker.mjs',null);
     assert.equal(noDiff.cli_exit_code,0);
     assert.equal(noDiff.outcome,'V2_EDIT_NO_DIFF');
@@ -2208,57 +2322,28 @@ test('free model catalog entry alone never bypasses missing OpenCode provider au
     assert.equal(result.model_invoked,false);
   } finally {rmSync(root,{recursive:true,force:true});}
 });
-test('explicitly approved no-auth free OpenCode model reaches only its pinned CLI route', async () => {
+test('runPlan rejects a no-auth allowlist entry for a different free model', async () => {
   const root=mkdtempSync(join(homedir(),'.ptysd-v2-free-model-approved-'));
   const workspace=join(root,'workspace'),stateDir=join(root,'state');
   const model='opencode/deepseek-v4.1-flash-free';
   mkdirSync(workspace); mkdirSync(stateDir);
-  const job={schema:2,kind:'opencode_plan',request_id:'PTYSD_FREE_MODEL_APPROVED_20261019',
+  const job={schema:2,kind:'opencode_plan',request_id:'PTYSD_FREE_MODEL_WRONG_ALLOWLIST_TEST_20261022',
     model,variant:null,host:hostname().toUpperCase()};
   const config={workspace,state_dir:stateDir,enable_v2_model_runs:true,
-    allowed_models:{[model]:[null]},unauthenticated_free_models:[model]};
+    allowed_models:{[model]:[null]},unauthenticated_free_models:['opencode/another-free-model']};
   let launches=0;
   try {
     const result=await executeOpenCodeTask('Synthetic bounded free-model route check.',config,job,
       '00000000-0000-4000-8000-000000000042',{
         qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2'}),
         readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_RECORD_ABSENT'}),
-        runCapturedProcess:async(_bin,args,options)=>{
+        runCapturedProcess:async()=>{
           launches++;
-          assert.equal(args[args.indexOf('--model')+1],model,'the exact no-cost model stays pinned');
-          assert.equal(options.cwd,workspace);
-          assert.equal(options.env.GITHUB_TOKEN,undefined);
-          assert.equal(options.env.GH_TOKEN,undefined);
-          return {outcome:'OPENCODE_V2_CLI_EXIT_1_UNVERIFIED',exit_code:1,local_evidence:{}};
+          throw new Error('MODEL_MUST_NOT_LAUNCH_WITH_WRONG_FREE_MODEL_ALLOWLIST');
         },
       });
-    assert.equal(launches,1,'an exact local no-auth free-model authorization must reach the CLI');
-    assert.equal(result.outcome,'OPENCODE_V2_CLI_EXIT_1_UNVERIFIED');
-    assert.equal(result.exit_code,1,'the CLI result remains distinct from task acceptance');
-    assert.equal(result.local_evidence.provider_authorization,
-      'EXPLICIT_LOCAL_UNAUTHENTICATED_FREE_MODEL_ALLOWLIST');
-  } finally {rmSync(root,{recursive:true,force:true});}
-});
-
-test('explicit free-model authorization does not bypass unknown OpenCode auth metadata', async () => {
-  const root=mkdtempSync(join(homedir(),'.ptysd-v2-free-model-auth-unknown-'));
-  const workspace=join(root,'workspace'),stateDir=join(root,'state');
-  const model='opencode/deepseek-v4.1-flash-free';
-  mkdirSync(workspace); mkdirSync(stateDir);
-  const job={schema:2,kind:'opencode_plan',request_id:'PTYSD_FREE_MODEL_AUTH_UNKNOWN_20261019',
-    model,variant:null,host:hostname().toUpperCase()};
-  const config={workspace,state_dir:stateDir,enable_v2_model_runs:true,
-    allowed_models:{[model]:[null]},unauthenticated_free_models:[model]};
-  let launches=0;
-  try {
-    const result=await executeOpenCodeTask('Unknown auth metadata must remain WAITING.',config,job,
-      '00000000-0000-4000-8000-000000000043',{
-        qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2'}),
-        readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_METADATA_UNKNOWN'}),
-        runCapturedProcess(){launches++;throw new Error('MODEL_LAUNCH_FORBIDDEN_WHEN_AUTH_IS_UNKNOWN');},
-      });
-    assert.equal(launches,0,'an allowlist cannot convert unknown auth evidence into a launch');
-    assert.equal(result.outcome,'OPENCODE_V2_AUTH_METADATA_UNKNOWN');
+    assert.equal(launches,0,'legacy no-auth configuration must not authorize a model call');
+    assert.equal(result.outcome,'OPENCODE_V2_AUTH_NOT_READY');
     assert.equal(result.eligibility_state,'WAITING');
     assert.equal(result.model_invoked,false);
   } finally {rmSync(root,{recursive:true,force:true});}
@@ -2283,6 +2368,30 @@ test('worker config accepts only no-auth free models already pinned in the OpenC
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
+test('legacy no-auth free-model allowlist cannot bypass unknown OpenCode auth metadata', async () => {
+  const root=mkdtempSync(join(homedir(),'.ptysd-v2-free-model-auth-unknown-'));
+  const workspace=join(root,'workspace'),stateDir=join(root,'state');
+  const model='opencode/deepseek-v4.1-flash-free';
+  mkdirSync(workspace); mkdirSync(stateDir);
+  const job={schema:2,kind:'opencode_plan',request_id:'PTYSD_FREE_MODEL_AUTH_UNKNOWN_20261019',
+    model,variant:null,host:hostname().toUpperCase()};
+  const config={workspace,state_dir:stateDir,enable_v2_model_runs:true,
+    allowed_models:{[model]:[null]},unauthenticated_free_models:[model]};
+  let launches=0;
+  try {
+    const result=await executeOpenCodeTask('Unknown auth metadata must remain WAITING.',config,job,
+      '00000000-0000-4000-8000-000000000043',{
+        qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2'}),
+        readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_METADATA_UNKNOWN'}),
+        runCapturedProcess(){launches++;throw new Error('MODEL_LAUNCH_FORBIDDEN_WHEN_AUTH_IS_UNKNOWN');},
+      });
+    assert.equal(launches,0,'an allowlist cannot convert unknown auth evidence into a launch');
+    assert.equal(result.outcome,'OPENCODE_V2_AUTH_METADATA_UNKNOWN');
+    assert.equal(result.eligibility_state,'WAITING');
+    assert.equal(result.model_invoked,false);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
 test('OpenCode child keeps profile authentication but strips ambient credentials and runtime overrides', () => {
   const base={PATH:'C:\\Windows\\System32',USERPROFILE:'C:\\worker',
     APPDATA:'C:\\worker\\AppData\\Roaming',LOCALAPPDATA:'C:\\worker\\AppData\\Local',
@@ -2296,7 +2405,8 @@ test('OpenCode child keeps profile authentication but strips ambient credentials
     GITHUB_TOKEN:'synthetic-github-token',GH_TOKEN:'synthetic-gh-token',
     GH_ENTERPRISE_TOKEN:'synthetic-enterprise-token',OPENCODE_CONFIG_DIR:'unsafe-config-dir',
     OPENCODE_CONFIG_CONTENT:'unsafe override',OPENCODE_PERMISSION:'unsafe permissions',
-    NODE_OPTIONS:'--require synthetic-hook',NODE_PATH:'C:\\untrusted-node-modules'};
+    NODE_OPTIONS:'--require synthetic-hook',NODE_PATH:'C:\\untrusted-node-modules',
+    CUSTOM_PRIVATE_ENV:'must-not-pass'};
   const child=buildOpenCodeChildEnv(base,'win32');
   assert.equal(child.PATH,base.PATH);
   assert.equal(child.USERPROFILE,base.USERPROFILE);
@@ -2307,9 +2417,11 @@ test('OpenCode child keeps profile authentication but strips ambient credentials
     'GOOGLE_APPLICATION_CREDENTIALS','GOOGLE_API_KEY','AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY',
     'AWS_SESSION_TOKEN','AZURE_CLIENT_SECRET','CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE',
     'GITHUB_TOKEN','GH_TOKEN','GH_ENTERPRISE_TOKEN','OPENCODE_CONFIG_DIR',
-    'OPENCODE_CONFIG_CONTENT','OPENCODE_PERMISSION','NODE_OPTIONS','NODE_PATH'])
+    'OPENCODE_CONFIG_CONTENT','OPENCODE_PERMISSION','NODE_OPTIONS','NODE_PATH','CUSTOM_PRIVATE_ENV'])
     assert.equal(child[key],undefined,`${key} cannot reach the model process`);
   assert.equal(child.OPENCODE_DISABLE_AUTOUPDATE,'true');
+  assert.deepEqual(Object.keys(child).sort(),
+    ['APPDATA','HOME','LOCALAPPDATA','OPENCODE_DISABLE_AUTOUPDATE','PATH','USERPROFILE'].sort());
 });
 test('Antigravity child keeps the signed-in profile, strips ambient secrets and disables auto-update', () => {
   const base={PATH:'C:\\Windows\\System32',USERPROFILE:'C:\\worker',
@@ -2442,7 +2554,8 @@ test('publisher records executor WAITING, continues a ping, then re-dispatches t
       wscript_path: 'C:\\Windows\\System32\\wscript.exe',
       launcher_path: 'C:\\PTYSD\\HiddenCodexExecutor.vbs', node_bin: 'C:\\Node\\node.exe',
       script_path: 'C:\\PTYSD\\executor.mjs', config_path: 'C:\\PTYSD\\executor.json',
-      manifest_dir: manifestDir, results_dir: resultsDir, working_directory: workspace };
+      manifest_dir: manifestDir, results_dir: resultsDir, working_directory: workspace,
+      source_bundle_per_attempt: true };
     const config = { repo: REPO, project_id: PROJECT, host, issue: 101, workspace, state_dir: stateDir,
       dispatchers: ['t14210184'], enable_v2_model_runs: true,
       allowed_models: { 'opencode/spark': ['high'] }, executor };
@@ -2469,7 +2582,10 @@ test('publisher records executor WAITING, continues a ping, then re-dispatches t
       commentsRead: () => comments,
       executorResultsDir: () => resultsDir,
       executorResultPath: (_dir, request, attempt) => join(resultsDir, `result-${request}-${attempt}.json`),
-      assertExecutorTaskReady: () => ({ ready: true }),
+      assertExecutorTaskReady: () => ({ ready: true, source_bundle_per_attempt: true }),
+      createExecutorSourceBundle: ({ job, attemptId: nextAttemptId }) => ({
+        attempt_id: nextAttemptId, source_sha: job.source_sha, sha256: 'd'.repeat(64),
+      }),
       writeReceipt(_config, data, login) {
         if (data.request_id === requestId && data.state === 'WAITING' && failWaitingPublication) {
           failWaitingPublication = false;
@@ -3394,7 +3510,8 @@ test('an ineligible OpenCode edit does not starve a later independent edit reque
       launcher_path: 'C:\\PTYSD\\HiddenCodexExecutor.vbs',
       node_bin: 'C:\\Node\\node.exe', script_path: 'C:\\PTYSD\\executor.mjs',
       config_path: 'C:\\PTYSD\\executor.json', manifest_dir: join(root, 'manifests'),
-      results_dir: join(root, 'results'), working_directory: root };
+      results_dir: join(root, 'results'), working_directory: root,
+      source_bundle_per_attempt: true };
     const config = { repo: REPO, project_id: PROJECT, host, issue: 407, workspace,
       state_dir: stateDir, dispatchers: ['t14210184'], enable_v2_model_runs: true,
       allowed_models: { 'opencode/spark': ['high'] }, executor };
@@ -3412,7 +3529,10 @@ test('an ineligible OpenCode edit does not starve a later independent edit reque
         throw new Error(`UNEXPECTED_TEST_API:${uri}`);
       },
       commentsRead: () => comments,
-      assertExecutorTaskReady: () => ({ ready: true }),
+      assertExecutorTaskReady: () => ({ ready: true, source_bundle_per_attempt: true }),
+      createExecutorSourceBundle: ({ job, attemptId }) => ({
+        attempt_id: attemptId, source_sha: job.source_sha, sha256: 'e'.repeat(64),
+      }),
       writeReceipt(_config, data, login) {
         writes.push(data);
         comments.push(com(nextId++, RECEIPT_MARKER + JSON.stringify(data), login));

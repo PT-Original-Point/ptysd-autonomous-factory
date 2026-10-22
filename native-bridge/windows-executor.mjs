@@ -40,7 +40,7 @@ export function buildHiddenWscriptArguments({ launcher_path, node_bin, script_pa
   return `//B //NoLogo ${paths.map(quoteWindowsArg).join(' ')}`;
 }
 function normalizedWindowsPath(value) {
-  return win32.normalize(value).replaceAll('/', '\\').toLocaleLowerCase('en-US');
+  return win32.resolve(value).replaceAll('/', '\\').toLocaleLowerCase('en-US');
 }
 function absoluteWindowsPath(value) {
   return typeof value === 'string' && win32.isAbsolute(value) && !/[\r\n"]/.test(value);
@@ -112,8 +112,57 @@ export function validateExecutorDescriptor(value) {
     'manifest_dir', 'results_dir', 'working_directory']) {
     if (!absoluteWindowsPath(value[key])) fail(`EXECUTOR_${key.toUpperCase()}_INVALID`);
   }
-  if (normalizedWindowsPath(value.manifest_dir) === normalizedWindowsPath(value.results_dir))
+  if (executorPathsOverlap(value.manifest_dir, value.results_dir))
     fail('EXECUTOR_MANIFEST_RESULT_DIR_COLLISION');
+  const executorWritableDirectories = [value.manifest_dir, value.results_dir];
+  const protectedFiles = ['wscript_path', 'launcher_path', 'node_bin', 'script_path', 'config_path'];
+  for (const key of protectedFiles) {
+    if (executorWritableDirectories.some(directory => windowsPathIsWithin(directory, value[key])))
+      fail('EXECUTOR_PROTECTED_FILE_IN_WRITABLE_DIRECTORY');
+  }
+  return value;
+}
+
+function executorPathsOverlap(left, right) {
+  const a = normalizedWindowsPath(left);
+  const b = normalizedWindowsPath(right);
+  const contains = (parent, child) => child.startsWith(parent.endsWith('\\') ? parent : `${parent}\\`);
+  return a === b || contains(a, b) || contains(b, a);
+}
+
+function windowsPathIsWithin(directory, path) {
+  const root = normalizedWindowsPath(directory);
+  const candidate = normalizedWindowsPath(path);
+  return candidate === root || candidate.startsWith(root.endsWith('\\') ? root : `${root}\\`);
+}
+
+export function validateExecutorRoutingMap(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('EXECUTOR_LANE_CONFIG_INVALID');
+  const entries = Object.entries(value);
+  if (!entries.length || entries.some(([lane]) => !['opencode', 'antigravity'].includes(lane)))
+    fail('EXECUTOR_LANE_CONFIG_INVALID');
+  const userSids = new Set();
+  const taskNames = new Set();
+  const isolatedPaths = [];
+  let publisherSid = null;
+  for (const [lane, descriptor] of entries) {
+    validateExecutorDescriptor(descriptor);
+    const userSid = descriptor.user_sid.toUpperCase();
+    const taskName = descriptor.task_name.toLocaleLowerCase('en-US');
+    if (userSids.has(userSid)) fail('EXECUTOR_LANE_IDENTITY_COLLISION');
+    if (taskNames.has(taskName)) fail('EXECUTOR_LANE_TASK_COLLISION');
+    if (publisherSid && publisherSid !== descriptor.publisher_sid.toUpperCase())
+      fail('EXECUTOR_LANE_PUBLISHER_MISMATCH');
+    userSids.add(userSid);
+    taskNames.add(taskName);
+    publisherSid = descriptor.publisher_sid.toUpperCase();
+    for (const key of ['config_path', 'manifest_dir', 'results_dir', 'working_directory']) {
+      const path = { lane, value: descriptor[key] };
+      if (isolatedPaths.some(other => other.lane !== lane && executorPathsOverlap(path.value, other.value)))
+        fail('EXECUTOR_LANE_PATH_COLLISION');
+      isolatedPaths.push(path);
+    }
+  }
   return value;
 }
 
