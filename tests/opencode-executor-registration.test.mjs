@@ -285,6 +285,14 @@ $config = [pscustomobject]@{
         results_dir = $resultsDir
     }
 }
+$singleDispatcherConfig = $config | Select-Object *
+$singleDispatcherConfig.dispatchers = @('t14210184')
+Assert-ExecutorConfig $singleDispatcherConfig $descriptor $publisherSid $publisherSid 'antigravity'
+$scalarDispatcherConfig = $config | Select-Object *
+$scalarDispatcherConfig.dispatchers = 't14210184'
+Assert-Failure 'EXECUTOR_CONFIG_IDENTITY_INVALID' {
+    Assert-ExecutorConfig $scalarDispatcherConfig $descriptor $publisherSid $publisherSid 'antigravity'
+}
 Assert-ExecutorConfig $config $descriptor $publisherSid $publisherSid 'opencode'
 if (-not $config.enable_v2_model_runs -or -not $config.enable_antigravity_model_runs) {
     throw 'PHASE_TEST_MODEL_FLAGS_CHANGED'
