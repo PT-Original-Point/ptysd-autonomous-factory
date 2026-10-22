@@ -191,7 +191,11 @@ function Assert-ExecutorPathParentsReadOnly([string]$Path, [string]$ExecutorSid,
 }
 function Assert-ExecutorConfig($Config, $Descriptor, [string]$ExecutorSid, [string]$PublisherSid, [string]$ExecutorLane) {
     $issue = [string](Get-Field $Config 'issue')
-    $dispatchers = Get-Field $Config 'dispatchers'
+    # Get-Field intentionally unwraps singleton arrays; preserve dispatchers as
+    # an array because this identity field is validated as a list.
+    $dispatchersProperty = $Config.PSObject.Properties['dispatchers']
+    if ($null -eq $dispatchersProperty) { $dispatchers = $null }
+    else { $dispatchers = $dispatchersProperty.Value }
     if ((Get-Field $Config 'repo') -cne $expectedRepo -or
         (Get-Field $Config 'project_id') -cne $expectedProject -or
         [string](Get-Field $Config 'host') -ine $env:COMPUTERNAME -or
