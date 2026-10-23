@@ -459,8 +459,135 @@ function writeResult(path, result, { statResultFile = lstatSync,
     throw new Error('CODEX_RESULT_READBACK_MISMATCH');
 }
 
-function persistPreModelBlockResult(config, picked, request, reasons, releaseReason, deps = {}) {
-  if (releaseReason !== 'PREFLIGHT_WORKTREE_EFFECT_UNKNOWN') return null;
+function stripTomlComments(text) {
+  let output = '';
+  let quote = null;
+  let multiline = false;
+  let skippingComment = false;
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index];
+    if (skippingComment) {
+      if (character === '\n') { skippingComment = false; output += '\n'; }
+      else output += ' ';
+      continue;
+    }
+    if (quote) {
+      if (multiline && quote === '"' && character === '\\') {
+        output += '  ';
+        index++;
+        continue;
+      }
+      if (multiline && text.startsWith(quote.repeat(3), index)) {
+        output += '   ';
+        index += 2;
+        quote = null;
+        multiline = false;
+        continue;
+      }
+      if (!multiline) {
+        if (quote === '"' && character === '\\') {
+          output += character;
+          if (index + 1 < text.length) output += text[++index];
+          continue;
+        }
+        if (character === quote) quote = null;
+        output += character;
+        continue;
+      }
+      output += character === '\n' ? '\n' : ' ';
+      continue;
+    }
+    if (character === '#') { skippingComment = true; output += ' '; continue; }
+    if ((character === '"' || character === "'") && text.startsWith(character.repeat(3), index)) {
+      quote = character;
+      multiline = true;
+      output += '   ';
+      index += 2;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      output += character;
+      continue;
+    }
+    output += character;
+  }
+  return output;
+}
+
+function tomlKeyParts(text) {
+  const parts = [];
+  let part = '';
+  let quote = null;
+  for (const character of text) {
+    if (quote) {
+      part += character;
+      if (character === quote) quote = null;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+      part += character;
+    } else if (character === '.') {
+      parts.push(part.trim());
+      part = '';
+    } else {
+      part += character;
+    }
+  }
+  parts.push(part.trim());
+  return parts.map(value => value.length >= 2 &&
+    ((value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))) ? value.slice(1, -1) : value);
+}
+
+function tomlHasLegacySandboxKey(text) {
+  const sensitive = new Set(['sandbox_mode', 'sandbox_workspace_write']);
+  for (const rawLine of stripTomlComments(text).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line.startsWith('[') && line.endsWith(']')) {
+      const table = line.startsWith('[[') && line.endsWith(']]') ? line.slice(2, -2) : line.slice(1, -1);
+      if (tomlKeyParts(table).some(key => sensitive.has(key))) return true;
+      continue;
+    }
+    let quote = null;
+    let equals = -1;
+    for (let index = 0; index < line.length; index++) {
+      const character = line[index];
+      if (quote) {
+        if (character === quote) quote = null;
+        else if (character === '\\' && quote === '"') index++;
+      } else if (character === '"' || character === "'") quote = character;
+      else if (character === '=') { equals = index; break; }
+    }
+    if (equals >= 0 && tomlKeyParts(line.slice(0, equals)).some(key => sensitive.has(key))) return true;
+  }
+  return false;
+}
+
+function codexProjectConfigPermissionIssue(worktree) {
+  const projectConfigDir = join(worktree, '.codex');
+  let directory;
+  try { directory = lstatSync(projectConfigDir); }
+  catch (error) {
+    if (error.code === 'ENOENT') return null;
+    return 'CODEX_PROJECT_CONFIG_READBACK_UNKNOWN';
+  }
+  if (!directory.isDirectory() || directory.isSymbolicLink()) return 'CODEX_PROJECT_CONFIG_PATH_UNSAFE';
+  const configPath = join(projectConfigDir, 'config.toml');
+  let info;
+  try { info = lstatSync(configPath); }
+  catch (error) {
+    if (error.code === 'ENOENT') return null;
+    return 'CODEX_PROJECT_CONFIG_READBACK_UNKNOWN';
+  }
+  if (!info.isFile() || info.isSymbolicLink()) return 'CODEX_PROJECT_CONFIG_PATH_UNSAFE';
+  let contents;
+  try { contents = readFileSync(configPath, 'utf8'); }
+  catch { return 'CODEX_PROJECT_CONFIG_READBACK_UNKNOWN'; }
+  return tomlHasLegacySandboxKey(contents) ? 'CODEX_PROJECT_CONFIG_LEGACY_SANDBOX_SETTING' : null;
+}
+
+function persistNoModelResult(config, picked, request, outcome, reasons, deps = {}) {
   const requestId = request?.job?.request_id;
   const attemptId = request?.attempt_id;
   const requestPath = join(config.spool_dir, 'requests', `${requestId}-${attemptId}.json`);
@@ -485,13 +612,17 @@ function persistPreModelBlockResult(config, picked, request, reasons, releaseRea
   const workspaceRoot = resolve(config.workspace_root);
   const worktree = resolve(workspaceRoot, attemptId);
   const rel = relative(workspaceRoot, worktree);
-  if (rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel) || !existsSync(worktree)) return null;
+  if (rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) return null;
+  let worktreeInfo;
+  try { worktreeInfo = lstatSync(worktree); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  if (!worktreeInfo.isDirectory() || worktreeInfo.isSymbolicLink()) return null;
 
   const emptyOutputHash = createHash('sha256').update('').digest('hex');
   writeResult(resultPath, {
     schema: 1, kind: 'codex_plan', request_id: requestId, attempt_id: attemptId,
     source_sha: request.job.source_sha, fingerprint: request.fingerprint,
-    exit_code: -1, outcome: 'PREFLIGHT_EFFECT_UNKNOWN_NO_REPLAY', session_id: null,
+    exit_code: -1, outcome, session_id: null,
     diff_sha256: null, changed_paths: [], out_of_scope_paths: [],
     stdout_sha256: emptyOutputHash, stderr_sha256: emptyOutputHash,
     stdout_bytes: 0, stderr_bytes: 0, session_started: false,
@@ -499,13 +630,19 @@ function persistPreModelBlockResult(config, picked, request, reasons, releaseRea
     token_usage: null, tool_execution_evidence: 'UNKNOWN', tool_execution_count: 0,
     file_change_tool_evidence: 'UNKNOWN', file_change_tool_completed_count: 0,
     file_change_tool_failed_count: 0, file_change_tool_incomplete_count: 0,
-    preflight_block_reasons: [...reasons, releaseReason],
+    preflight_block_reasons: reasons,
     input_error: null, capture_error: null, storage_error: null,
     termination_state: 'NOT_STARTED', termination_error: null,
     tests: 'NOT_RUN', pr_url: null, observed_at: new Date().toISOString(),
   }, { statResultFile: deps.statResultFile || lstatSync,
     readResultFile: deps.readResultFile || readFileSync });
   return resultPath;
+}
+
+function persistPreModelBlockResult(config, picked, request, reasons, releaseReason, deps = {}) {
+  if (releaseReason !== 'PREFLIGHT_WORKTREE_EFFECT_UNKNOWN') return null;
+  return persistNoModelResult(config, picked, request, 'PREFLIGHT_EFFECT_UNKNOWN_NO_REPLAY',
+    [...reasons, releaseReason], deps);
 }
 
 export async function runExecutorOnce(config, deps = {}) {
@@ -587,6 +724,24 @@ export async function runExecutorOnce(config, deps = {}) {
       encoding: 'utf8', windowsHide: true, shell: false, timeout: 30000, maxBuffer: 32768,
     }).trim();
     if (actualHead !== verified.job.source_sha) throw new Error('WORKTREE_SOURCE_SHA_MISMATCH');
+    const permissionIssue = codexProjectConfigPermissionIssue(worktree);
+    if (permissionIssue) {
+      const outcome = permissionIssue === 'CODEX_PROJECT_CONFIG_LEGACY_SANDBOX_SETTING' ?
+        'CODEX_PROJECT_CONFIG_INCOMPATIBLE_NO_MODEL' : 'CODEX_PROJECT_CONFIG_READBACK_UNKNOWN_NO_MODEL';
+      let blockedResultPath = null;
+      try { blockedResultPath = persistNoModelResult(config, picked, request, outcome, [permissionIssue], deps); }
+      catch (error) {
+        return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+          attempt_id: request.attempt_id,
+          reasons: [permissionIssue, safeErrorCode(error, 'PREFLIGHT_RESULT_WRITE_FAILED')] };
+      }
+      if (!blockedResultPath)
+        return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+          attempt_id: request.attempt_id, reasons: [permissionIssue, 'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED'] };
+      updateActiveLock(activeLock, 'RESULT_SAVED', request);
+      return { state: 'RESULT_SAVED', model_invoked: false, request_id: request.job.request_id,
+        attempt_id: request.attempt_id, outcome, result_path: blockedResultPath };
+    }
     const evidenceDir = join(config.spool_dir, 'evidence');
     mkdirSync(evidenceDir, { recursive: true });
     updateActiveLock(activeLock, 'MODEL_RUNNING', request);

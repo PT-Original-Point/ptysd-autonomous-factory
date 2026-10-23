@@ -417,6 +417,80 @@ test('Codex CLI args bind writes to exact task paths with native permissions and
   assert.equal(args.includes('cmd.exe'), false);
 });
 
+test('legacy project sandbox settings block Codex before the model runner and save a no-model terminal result', async t => {
+  const configurations = [
+    ['sandbox_mode assignment', 'sandbox_mode = "workspace-write"\n'],
+    ['quoted sandbox_mode assignment', '"sandbox_mode" = "workspace-write"\n'],
+    ['profile sandbox_mode assignment', '[profiles.task]\nsandbox_mode = "workspace-write"\n'],
+    ['sandbox_workspace_write table', '[sandbox_workspace_write]\nwritable_roots = ["."]\n'],
+    ['dotted sandbox_workspace_write assignment', 'sandbox_workspace_write.writable_roots = ["."]\n'],
+  ];
+  for (const [label, projectConfig] of configurations) {
+    await t.test(label, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'pty-codex-legacy-sandbox-'));
+      try {
+        const source = join(dir, 'source');
+        mkdirSync(join(source, '.codex'), { recursive: true });
+        writeFileSync(join(source, '.codex', 'config.toml'), projectConfig);
+        writeFileSync(join(source, 'sample.mjs'), 'export const ready = true;\n');
+        execFileSync('git', ['-C', source, 'init', '-q'], { windowsHide: true, shell: false });
+        execFileSync('git', ['-C', source, 'config', 'user.name', 'PTYSD test'], {
+          windowsHide: true, shell: false,
+        });
+        execFileSync('git', ['-C', source, 'config', 'user.email', 'ptysd-test@example.invalid'], {
+          windowsHide: true, shell: false,
+        });
+        execFileSync('git', ['-C', source, 'add', '.'], { windowsHide: true, shell: false });
+        execFileSync('git', ['-C', source, 'commit', '-q', '-m', 'legacy sandbox config'], {
+          windowsHide: true, shell: false,
+        });
+        const sourceSha = execFileSync('git', ['-C', source, 'rev-parse', 'HEAD'], {
+          encoding: 'utf8', windowsHide: true, shell: false,
+        }).trim();
+        const spec = '# Synthetic exact-scope permission regression. No model invocation.\n';
+        const picked = job({ request_id: 'PTYSD_CODEX_LEGACY_SANDBOX_20261023', source_sha: sourceSha,
+          spec_sha256: createHash('sha256').update(spec).digest('hex') });
+        const spool = join(dir, 'spool'), state = join(dir, 'publisher-state');
+        mkdirSync(spool); mkdirSync(state);
+        const dispatched = await dispatchCodexJob({
+          config: { codex_spool: spool, state_dir: state, workspace: source },
+          job: picked, spec, workerLogin: worker,
+          attemptId: '00000000-0000-0000-0000-000000000523',
+          createBundle: async path => execFileSync('git', ['-C', source, 'bundle', 'create', path, '--all'], {
+            windowsHide: true, shell: false,
+          }),
+          publishStarted: async () => {},
+          trigger: async () => {},
+        });
+        assert.equal(dispatched.state, 'CODEX_EXECUTOR_REQUESTED');
+
+        const executorConfig = readyConfig();
+        Object.assign(executorConfig, { spool_dir: spool, workspace_root: join(dir, 'workspaces'),
+          codex_executable: join(dir, 'codex.exe') });
+        let modelRunnerCalls = 0;
+        const result = await runExecutorOnce(executorConfig, {
+          currentSid: executorConfig.executor_identity_sid,
+          environment: {},
+          qualifyCodex: async () => {},
+          runCodex: async () => { modelRunnerCalls++; throw new Error('MODEL_MUST_NOT_START'); },
+        });
+
+        assert.equal(result.state, 'RESULT_SAVED');
+        assert.equal(result.model_invoked, false);
+        assert.equal(result.outcome, 'CODEX_PROJECT_CONFIG_INCOMPATIBLE_NO_MODEL');
+        assert.equal(modelRunnerCalls, 0, 'legacy project config is rejected before the model runner');
+        const saved = JSON.parse(readFileSync(result.result_path, 'utf8'));
+        assert.equal(saved.exit_code, -1);
+        assert.equal(saved.session_id, null);
+        assert.equal(saved.model_invoked, false);
+        assert.deepEqual(saved.preflight_block_reasons, ['CODEX_PROJECT_CONFIG_LEGACY_SANDBOX_SETTING']);
+        assert.equal(terminalStateForResult(saved), 'BLOCKED');
+        assert.equal(takeNextRequest(spool), null, 'the terminal blocked attempt is not automatically replayed');
+      } finally { rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+});
+
 test('Codex child gets no token environment or inherited GitHub CLI config', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pty-codex-child-env-'));
   try {
