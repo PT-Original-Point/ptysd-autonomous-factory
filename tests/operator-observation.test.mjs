@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,9 +8,13 @@ import vm from 'node:vm';
 import './native-worker-install-bundle.test.mjs';
 import {
   OPERATOR_MARKER, encodeOperatorObservation, parseOperatorObservation,
-  findOperatorComment, updateExistingOperatorComment, observationFreshness,
+  OPERATOR_COMMENT_ID, findOperatorComment, updateExistingOperatorComment, observationFreshness,
   collectWindowsObservation, collectRuntimeDeployment,
 } from '../native-bridge/operator-observation.mjs';
+import {
+  JOB_MARKER, RECEIPT_MARKER, PROJECT, REPO,
+  publishOperatorObservation, receipt as workerReceipt,
+} from '../native-bridge/worker.mjs';
 
 const now = Date.parse('2026-10-13T10:00:00.000Z');
 const observation = (overrides = {}) => ({
@@ -531,6 +535,12 @@ test('dashboard starts dark and worker states require role-bound recent evidence
   assert.equal(api.classifyWorker({ worker_id:'W2', status:'IDLE',
     activity_observed_at:live, evidence_kind:'NO_ACTIVE_WORK' }, 'FRESH', now).status, 'UNKNOWN');
   assert.equal(api.workerRecord({workers:[{worker_id:'W1'}]},'W2'), null);
+  assert.match(api.workerChangeLabel('W1', { code_changes:'DIFF_CAPTURED_UNVERIFIED',
+    changed_files_count:2 }, {}), /收據記錄 2 個檔案.*尚未由 Codex 驗證或接受/);
+  assert.match(api.workerChangeLabel('W2', { code_changes:'DIFF_CAPTURED_UNVERIFIED',
+    changed_files_count:null }, {}), /檔案數未確認.*尚未由 Codex 驗證或接受/);
+  assert.equal(api.workerChangeLabel('W1', { code_changes:'UNPROVEN', files_modified:'UNPROVEN' }, {}),
+    '尚未證實有同任務程式修改。');
   assert.match(html, /snapshot\.publisher_login/);
   assert.match(html, /snapshot\.comment_author_login/);
 });
@@ -1078,4 +1088,118 @@ test('browser shows the shared rate-limit pause, recovery countdown, and histori
   assert.equal(elements.get('w1-badge').textContent,'狀態未確認');
   assert.equal(elements.get('w2-badge').textContent,'狀態未確認');
   assert.equal(elements.get('w3-badge').textContent,'狀態未確認');
+});
+
+async function publishReceiptProjection(rows) {
+  const at = Date.now();
+  const host = 'DESKTOP-1B6PD2P';
+  const mainSha = 'e'.repeat(40);
+  const goalBody = '<!-- PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015 -->';
+  const goalBodySha = createHash('sha256').update(goalBody).digest('hex');
+  const comments = [];
+  const heads = new Map();
+  rows.forEach((row, index) => {
+    const job = {
+      schema: 6, project_id: PROJECT, host, request_id: row.requestId,
+      kind: row.kind, source_sha: row.sourceSha,
+      spec_path: 'native-bridge/tasks/projection-receipt.md', spec_sha256: 'a'.repeat(64),
+      model: row.kind === 'opencode_edit' ? 'opencode/deepseek-v4.1-flash-free' : 'gemini-3.8-flash-high',
+      variant: row.kind === 'opencode_edit' ? null : 'high',
+      edit_paths: ['native-bridge/v2-readiness.mjs'], source_pr: row.sourcePr,
+      goal_comment_id: 6188322050, goal_body_sha256: goalBodySha,
+    };
+    const changedFiles = row.files;
+    const terminal = workerReceipt(job.request_id, row.attemptId, row.state, job, {
+      outcome: row.outcome, exit_code: row.state === 'BLOCKED' ? -1 : 0,
+      diff_sha256: row.diffSha, diff_bytes: row.bytes, changed_files: changedFiles,
+      coding_state: 'DIFF_CAPTURED_UNVERIFIED', scope_valid: row.scopeValid,
+    });
+    const jobId = 700 + index * 2;
+    comments.push({ id: jobId, user: { login: 't14210184' }, body: JOB_MARKER + JSON.stringify(job) });
+    comments.push({ id: jobId + 1, user: { login: 't14210184' }, body: RECEIPT_MARKER + JSON.stringify(terminal) });
+    heads.set(row.sourcePr, row.sourceSha);
+  });
+  const prior = observation({
+    snapshot_id: randomUUID(), sequence: 7,
+    observed_at: new Date(at - 60_000).toISOString(),
+    expires_at: new Date(at + 60_000).toISOString(),
+    source: { ...observation().source, comment_id: OPERATOR_COMMENT_ID, main_sha: mainSha },
+  });
+  const obsComment = { id: OPERATOR_COMMENT_ID, user: { login: 'wfvupu1212' },
+    body: encodeOperatorObservation(prior), updated_at: new Date(at - 30_000).toISOString() };
+  comments.unshift(obsComment);
+  const runtimeFiles = ['worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs',
+    'codex-continuation.mjs', 'operator-observation.mjs', 'captured-process.mjs',
+    'safe-error-code.mjs', 'windows-executor.mjs'];
+  const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
+    dispatchers: ['t14210184'], state_dir: 'unused' };
+  const dependencies = {
+    now: () => new Date(at),
+    collectWindowsObservation: () => ({ status: 'FRESH', observed_at: new Date(at).toISOString(),
+      native_task: { registered: true, enabled: true, state: 'READY' },
+      opencode_process_count: 0, runner_service_count: 0, runner_service_running: false }),
+    collectRuntimeDeployment: () => ({ status: 'UNKNOWN', observed_at: new Date(at).toISOString(),
+      bundle_sha256: '3'.repeat(64), component_sha256: Object.fromEntries(runtimeFiles.map(name => [name, null])),
+      reason_code: 'RUNTIME_FILES_UNAVAILABLE' }),
+    readRunnerRegistration: () => ({ total_count: 0 }),
+    readComment: id => structuredClone(comments.find(item => item.id === id)),
+    patchComment: (id, body) => {
+      const target = comments.find(item => item.id === id);
+      target.body = body;
+      target.updated_at = new Date(at + 1_000).toISOString();
+    },
+    readComments: () => structuredClone(comments),
+  };
+  return publishOperatorObservation(config, 't14210184', comments, mainSha,
+    dependencies, heads);
+}
+
+test('worker observation reports captured W1 and blocked W2 diffs as unverified, never active or accepted', async () => {
+  const result = await publishReceiptProjection([
+    { kind: 'opencode_edit', requestId: 'W1_PROJECTION_CAPTURED_20261023',
+      sourceSha: 'b'.repeat(40), sourcePr: 505, attemptId: '3f9246cd-f968-4290-9c76-0514bb7775b5',
+      state: 'FINISHED', outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED', scopeValid: true,
+      diffSha: '1'.repeat(64), bytes: 12151,
+      files: ['native-bridge/v2-readiness.mjs', 'tests/v2-readiness.test.mjs'] },
+    { kind: 'antigravity_edit', requestId: 'W2_PROJECTION_CAPTURED_20261023',
+      sourceSha: 'c'.repeat(40), sourcePr: 461, attemptId: '24331e45-62db-4f55-ad40-87776a799c5d',
+      state: 'BLOCKED', outcome: 'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED', scopeValid: true,
+      diffSha: '2'.repeat(64), bytes: 23710,
+      files: ['native-bridge/antigravity-quota.mjs', 'tests/antigravity-quota.test.mjs', 'package.json'] },
+  ]);
+  assert.equal(result.status, 'UPDATED');
+  assert.equal(result.observation.workers.filter(item => item.worker_id === 'W1' || item.worker_id === 'W2').length, 2);
+  const w1 = result.observation.workers.find(item => item.worker_id === 'W1');
+  assert.equal(w1.status, 'UNKNOWN', 'a finished receipt is not live activity');
+  assert.equal(w1.task_state, 'FINISHED_NOT_ACCEPTANCE');
+  assert.equal(w1.delivery_status, 'FINISHED_UNVERIFIED');
+  assert.equal(w1.code_changes, 'DIFF_CAPTURED_UNVERIFIED');
+  assert.equal(w1.files_modified, 'COUNT_REPORTED_UNVERIFIED');
+  assert.equal(w1.changed_files_count, 2);
+  assert.equal(w1.diff_sha256, '1'.repeat(64));
+  assert.equal(w1.diff_bytes, 12151);
+  assert.equal(w1.scope_valid, true, 'this is only the Worker receipt claim');
+  const w2 = result.observation.workers.find(item => item.worker_id === 'W2');
+  assert.equal(w2.status, 'BLOCKED');
+  assert.equal(w2.task_state, 'BLOCKED');
+  assert.equal(w2.blocker_code, 'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED');
+  assert.equal(w2.code_changes, 'DIFF_CAPTURED_UNVERIFIED');
+  assert.equal(w2.files_modified, 'COUNT_REPORTED_UNVERIFIED');
+  assert.equal(w2.changed_files_count, 3);
+  assert.equal(w2.delivery_status, 'BLOCKED_DIFF_CAPTURED_UNVERIFIED');
+});
+
+test('worker observation rejects invalid diff digest or scope claims and keeps changes unproven', async () => {
+  const result = await publishReceiptProjection([
+    { kind: 'opencode_edit', requestId: 'W1_PROJECTION_INVALID_20261023',
+      sourceSha: 'b'.repeat(40), sourcePr: 505, attemptId: '3f9246cd-f968-4290-9c76-0514bb7775b5',
+      state: 'FINISHED', outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED', scopeValid: false,
+      diffSha: 'not-a-digest', bytes: 12151, files: ['native-bridge/v2-readiness.mjs'] },
+  ]);
+  const w1 = result.observation.workers.find(item => item.worker_id === 'W1');
+  assert.equal(w1.status, 'UNKNOWN');
+  assert.equal(w1.task_state, 'FINISHED_NOT_ACCEPTANCE');
+  assert.equal(w1.code_changes, 'UNPROVEN');
+  assert.equal(w1.files_modified, 'UNPROVEN');
+  assert.equal(Object.hasOwn(w1, 'diff_sha256'), false);
 });

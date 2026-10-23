@@ -1141,11 +1141,7 @@
       ? classification.reason : id === 'W3'
         ? '需 Codex 有效 request_id、Human 手動轉送及 Zero Risk 真實工具回傳。'
         : '未回報受信任阻擋代碼。');
-    const modified = record?.code_changes === 'PROVEN' || record?.files_modified === 'PROVEN'
-      ? '已有同任務檔案修改證據；公開資料不列私人路徑。'
-      : id === 'W1' && oc.code_changes === 'PROVEN'
-        ? 'OpenCode 快照標記 PROVEN；仍需同任務來源與遠端核對。'
-        : '尚未證實有同任務程式修改。';
+    const modified = workerChangeLabel(id, record, oc);
     const commit = safeSha(record?.commit_sha || (id === 'W1' ? nativeWorker.remote_commit || oc.remote_commit : null));
     const pr = Number.isSafeInteger(record?.pr_number) && record.pr_number > 0 ? '#' + record.pr_number : null;
     const deliveryParts = [];
@@ -1166,6 +1162,18 @@
         id === 'W1' ? 'Issue #407 opencode_v2／native_worker · ' + classification.status
           : 'Issue #407 未提供此角色的當前證據 · UNKNOWN',
     };
+  }
+  function workerChangeLabel(id, record, opencode) {
+    if (record?.code_changes === 'DIFF_CAPTURED_UNVERIFIED') {
+      const count = Number.isSafeInteger(record.changed_files_count) && record.changed_files_count > 0
+        ? `收據記錄 ${record.changed_files_count} 個檔案` : '檔案數未確認';
+      return `Worker 收據回報已擷取差異（${count}）；尚未由 Codex 驗證或接受。`;
+    }
+    if (record?.code_changes === 'PROVEN' || record?.files_modified === 'PROVEN')
+      return '已有同任務檔案修改證據；公開資料不列私人路徑。';
+    if (id === 'W1' && opencode?.code_changes === 'PROVEN')
+      return 'OpenCode 快照標記 PROVEN；仍需同任務來源與遠端核對。';
+    return '尚未證實有同任務程式修改。';
   }
   function classifyRecentEvents(comments, snapshot, checkSummary) {
     const events = [];
@@ -1558,7 +1566,7 @@
   const testApi = {
     parseSnapshot, findSnapshot, latestTask, summarizeChecks, fieldFreshness, validJob,
     candidatePrPin, candidatePullIdentityMatches,
-    classifyWorker, classifyW1, workerRecord, normalizeFormalTask, classifyRecentEvents,
+    classifyWorker, classifyW1, workerRecord, workerChangeLabel, normalizeFormalTask, classifyRecentEvents,
     freshnessOfSnapshot, createApiClient, createResourceStore, renderRateStatus,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
     constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS,
