@@ -102,12 +102,10 @@ function validateCredits(val) {
   return val;
 }
 
-export function parseAntigravityQuotaSnapshot(usageEnvelopeInput, creditsEnvelopeInput) {
+function parseAntigravityUsageQuota(usageEnvelopeInput) {
   const usageEnvelope = parseEnvelopeJson(usageEnvelopeInput);
-  const creditsEnvelope = parseEnvelopeJson(creditsEnvelopeInput);
 
   assertSuccessEnvelope(usageEnvelope, 'usage');
-  assertSuccessEnvelope(creditsEnvelope, 'credits');
 
   const groups = usageEnvelope.command.data.groups;
   if (!groups || typeof groups !== 'object') {
@@ -150,16 +148,18 @@ export function parseAntigravityQuotaSnapshot(usageEnvelopeInput, creditsEnvelop
     for (const b of rawBuckets) {
       if (!b || typeof b !== 'object') continue;
       const id = b.id ?? b.name ?? b.bucket ?? b.bucket_id ?? b.key;
-      if (id === 'gemini-weekly' || id === 'gemini_weekly') {
+      if (id === 'gemini-weekly' || id === 'gemini_weekly' ||
+          id === 'Weekly Limit Remaining') {
         weeklyMatches.push(b);
-      } else if (id === 'gemini-5h' || id === 'gemini_5h') {
+      } else if (id === 'gemini-5h' || id === 'gemini_5h' ||
+          id === 'Five Hour Limit Remaining') {
         fiveHourMatches.push(b);
       }
     }
   } else if (rawBuckets && typeof rawBuckets === 'object') {
-    const weeklyKeys = ['gemini-weekly', 'gemini_weekly']
+    const weeklyKeys = ['gemini-weekly', 'gemini_weekly', 'Weekly Limit Remaining']
       .filter(key => Object.hasOwn(rawBuckets, key));
-    const fiveHourKeys = ['gemini-5h', 'gemini_5h']
+    const fiveHourKeys = ['gemini-5h', 'gemini_5h', 'Five Hour Limit Remaining']
       .filter(key => Object.hasOwn(rawBuckets, key));
     weeklyMatches.push(...weeklyKeys.map(key => rawBuckets[key]));
     fiveHourMatches.push(...fiveHourKeys.map(key => rawBuckets[key]));
@@ -183,14 +183,25 @@ export function parseAntigravityQuotaSnapshot(usageEnvelopeInput, creditsEnvelop
   const fiveHourRemainingFraction = validateFraction(fiveHourBucket.remaining_fraction);
   const fiveHourResetTime = normalizeUtcTimestamp(fiveHourBucket.reset_time);
 
-  const credits = validateCredits(creditsEnvelope.command.data.remaining_credits);
-
   return {
     schema: 1,
     gemini_weekly_remaining_fraction: weeklyRemainingFraction,
     gemini_weekly_reset_time: weeklyResetTime,
     gemini_5h_remaining_fraction: fiveHourRemainingFraction,
     gemini_5h_reset_time: fiveHourResetTime,
-    g1_credits_remaining: credits,
+  };
+}
+
+export function parseAntigravityUsageQuotaSnapshot(usageEnvelopeInput) {
+  return parseAntigravityUsageQuota(usageEnvelopeInput);
+}
+
+export function parseAntigravityQuotaSnapshot(usageEnvelopeInput, creditsEnvelopeInput) {
+  const quota = parseAntigravityUsageQuota(usageEnvelopeInput);
+  const creditsEnvelope = parseEnvelopeJson(creditsEnvelopeInput);
+  assertSuccessEnvelope(creditsEnvelope, 'credits');
+  return {
+    ...quota,
+    g1_credits_remaining: validateCredits(creditsEnvelope.command.data.remaining_credits),
   };
 }

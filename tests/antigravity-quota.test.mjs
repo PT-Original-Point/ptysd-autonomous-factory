@@ -482,3 +482,47 @@ test('negative: error messages use stable short codes and never leak raw input o
     assert.equal(error.message.includes('-999'), false);
   }
 });
+
+test('official Antigravity JSON usage bucket labels parse with absent nested command status', () => {
+  const usage = {
+    status: 'SUCCESS',
+    command: {
+      name: 'usage',
+      data: {
+        groups: [{
+          name: 'Gemini Models',
+          buckets: [
+            { name: 'Weekly Limit Remaining', remaining_fraction: 0.8941181898117065,
+              reset_time: '2026-10-23T22:50:38Z' },
+            { name: 'Five Hour Limit Remaining', remaining_fraction: 0.9974105358123779,
+              reset_time: '2026-10-23T18:43:08Z' },
+          ],
+        }],
+      },
+    },
+  };
+  const credits = {
+    status: 'SUCCESS',
+    command: { name: 'credits', data: { remaining_credits: 0 } },
+  };
+
+  assert.deepEqual(parseAntigravityQuotaSnapshot(JSON.stringify(usage), JSON.stringify(credits)), {
+    schema: 1,
+    gemini_weekly_remaining_fraction: 0.8941181898117065,
+    gemini_weekly_reset_time: '2026-10-23T22:50:38.000Z',
+    gemini_5h_remaining_fraction: 0.9974105358123779,
+    gemini_5h_reset_time: '2026-10-23T18:43:08.000Z',
+    g1_credits_remaining: 0,
+  });
+
+  const duplicateWeeklyAlias = structuredClone(usage);
+  duplicateWeeklyAlias.command.data.groups[0].buckets.push({
+    id: 'gemini-weekly',
+    remaining_fraction: 0.9,
+    reset_time: '2026-10-23T22:50:38Z',
+  });
+  assert.throws(
+    () => parseAntigravityQuotaSnapshot(duplicateWeeklyAlias, credits),
+    err => err.code === 'DUPLICATE_REQUIRED_BUCKET',
+  );
+});

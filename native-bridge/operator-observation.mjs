@@ -20,6 +20,11 @@ const SNAPSHOT_ID = /^[a-f0-9-]{36}$/i;
 const SENSITIVE_VALUE = /(?:\b[A-Z]:\\|\\\\[^\\\s]+\\|\bgh[pousr]_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bBearer\s+[A-Za-z0-9._~-]{16,})/i;
 const DEPLOYED_RUNTIME_FILES = [
   'worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs', 'codex-continuation.mjs',
+  'antigravity-quota.mjs',
+  'operator-observation.mjs', 'captured-process.mjs', 'safe-error-code.mjs', 'windows-executor.mjs',
+];
+const PREVIOUS_DEPLOYED_RUNTIME_FILES = [
+  'worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs', 'codex-continuation.mjs',
   'operator-observation.mjs', 'captured-process.mjs', 'safe-error-code.mjs', 'windows-executor.mjs',
 ];
 const LEGACY_DEPLOYED_RUNTIME_FILES = [
@@ -66,17 +71,25 @@ function validRuntimeDeployment(value) {
 
 function normalizeLegacyRuntimeDeployment(value) {
   const deployment = value.runtime_deployment;
-  if (!object(deployment) || deployment.status !== 'MANIFEST_MATCHED' ||
-      !object(deployment.component_sha256)) return value;
+  if (!object(deployment) || !object(deployment.component_sha256)) return value;
   const componentNames = Object.keys(deployment.component_sha256).sort();
-  const legacyNames = [...LEGACY_DEPLOYED_RUNTIME_FILES].sort();
-  if (componentNames.length !== legacyNames.length ||
-      componentNames.some((name, index) => name !== legacyNames[index]) ||
-      !validTime(deployment.observed_at) || !SHA256.test(deployment.bundle_sha256 || '') ||
-      !componentNames.every(name => SHA256.test(deployment.component_sha256[name] || '')) ||
-      !SHA1.test(deployment.source_main_sha || '') ||
-      !Number.isSafeInteger(deployment.deployment_pr) || deployment.deployment_pr < 1 ||
-      !SHA1.test(deployment.deployment_pr_head || '')) return value;
+  const previousSets = [PREVIOUS_DEPLOYED_RUNTIME_FILES, LEGACY_DEPLOYED_RUNTIME_FILES]
+    .map(names => [...names].sort());
+  const isPreviousSet = previousSets.some(names => componentNames.length === names.length &&
+    componentNames.every((name, index) => name === names[index]));
+  if (!isPreviousSet || !validTime(deployment.observed_at) ||
+      !SHA256.test(deployment.bundle_sha256 || '')) return value;
+  if (deployment.status === 'MANIFEST_MATCHED') {
+    if (!componentNames.every(name => SHA256.test(deployment.component_sha256[name] || '')) ||
+        !SHA1.test(deployment.source_main_sha || '') ||
+        !Number.isSafeInteger(deployment.deployment_pr) || deployment.deployment_pr < 1 ||
+        !SHA1.test(deployment.deployment_pr_head || '')) return value;
+  } else if (deployment.status === 'UNKNOWN') {
+    if (componentNames.some(name => deployment.component_sha256[name] !== null &&
+        !SHA256.test(deployment.component_sha256[name] || '')) ||
+        !['DEPLOYMENT_MANIFEST_NOT_MATCHED', 'DEPLOYMENT_MANIFEST_AMBIGUOUS',
+          'RUNTIME_FILES_UNAVAILABLE'].includes(deployment.reason_code)) return value;
+  } else return value;
   value.runtime_deployment = {
     status: 'UNKNOWN', observed_at: deployment.observed_at,
     bundle_sha256: deployment.bundle_sha256,

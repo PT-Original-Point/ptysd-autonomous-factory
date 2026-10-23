@@ -36,6 +36,7 @@ $runtimeFiles = @(
     'worker.mjs',
     'opencode-v2.mjs',
     'v2-readiness.mjs',
+    'antigravity-quota.mjs',
     'codex-continuation.mjs',
     'operator-observation.mjs',
     'captured-process.mjs',
