@@ -1077,3 +1077,167 @@ test('Antigravity ERROR tool events preserve failed-write evidence without claim
     assert.equal(truncated.external_effects, 'UNKNOWN');
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+// Synthetic, redacted stream readers for the `edit_file` telemetry regression.
+// No model call, network access, or real user data is involved.
+function writeAntigravityStdout(directory, events) {
+  const stdoutPath = join(directory, 'stdout.jsonl');
+  const bytes = Buffer.from(events.map(event => JSON.stringify(event)).join('\n') + '\n');
+  writeFileSync(stdoutPath, bytes);
+  return { stdoutPath, bytes };
+}
+
+// Exact 31-tool-event shape: 28 read_file (25 DONE, 3 ERROR) + 2 write_file
+// DONE + 1 edit_file DONE, wrapped in the init/result framing a real capture has.
+function editFileTelemetryStream() {
+  const session = '31e0c0de-0000-4000-8000-000000000031';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  const events = [{ event: 'init', conversation_id: session,
+    init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } }];
+  let step = 0;
+  const pushTool = (tool_name, state, tool_info) => events.push({ event: 'step_update',
+    step_update: { conversation_id: session, step_index: step++, state, step_type: 'tool',
+      tool_name, ...(tool_info ? { tool_info } : {}) } });
+  for (let i = 0; i < 25; i += 1) pushTool('read_file', 'DONE');
+  for (let i = 0; i < 3; i += 1) pushTool('read_file', 'ERROR', { error: { code: 'ENOENT' } });
+  pushTool('write_file', 'DONE');
+  pushTool('write_file', 'DONE');
+  pushTool('edit_file', 'DONE');
+  events.push({ event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+    usage: { input_tokens: 100, output_tokens: 20, thinking_tokens: 0,
+      cache_read_tokens: 0, total_tokens: 120 } } });
+  return { session, cwd, events };
+}
+
+test('Antigravity edit_file is a completed file change in both stream evidence paths', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-edit-file-'));
+  try {
+    const { session, cwd, events } = editFileTelemetryStream();
+    const { stdoutPath, bytes } = writeAntigravityStdout(directory, events);
+    const result = await readAntigravityV2RunEvidence(stdoutPath,
+      createHash('sha256').update(bytes).digest('hex'), cwd);
+    assert.equal(result.valid, true);
+    assert.equal(result.session_id, session);
+    assert.equal(result.tool_execution_count, 31);
+    assert.equal(result.tool_execution_failed_count, 3);
+    assert.equal(result.tool_execution_incomplete_count, 0);
+    assert.equal(result.file_change_tool_evidence, 'OBSERVED');
+    assert.equal(result.file_change_tool_completed_count, 3);
+    assert.equal(result.file_change_tool_failed_count, 0,
+      'ENOENT read failures must not be attributed to successful writes');
+    assert.equal(result.file_change_tool_incomplete_count, 0);
+    // Tool success is evidence only; it is never a captured diff or acceptance.
+    assert.equal(result.source_diff_evidence, 'NOT_INSPECTED');
+    assert.equal(result.task_acceptance, 'UNKNOWN');
+    assert.equal(result.external_effects, 'UNKNOWN');
+
+    // The invalid-capture classification path recomputes the same tool counts.
+    const invalid = await readAntigravityV2RunEvidence(stdoutPath, '0'.repeat(64), cwd);
+    assert.equal(invalid.valid, false);
+    assert.equal(invalid.reason, 'ANTIGRAVITY_CAPTURE_HASH_MISMATCH');
+    for (const key of ['tool_execution_count', 'tool_execution_failed_count',
+      'tool_execution_incomplete_count', 'file_change_tool_completed_count',
+      'file_change_tool_failed_count', 'file_change_tool_incomplete_count'])
+      assert.equal(invalid[key], result[key], `${key} must agree across both parser paths`);
+    assert.equal(invalid.file_change_tool_evidence, 'OBSERVED');
+    assert.equal(invalid.task_acceptance, 'UNKNOWN');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity failed or unfinished edit_file stays distinct from completed writes', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-edit-file-negative-'));
+  const session = '31e0c0de-0000-4000-8000-000000000032';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  const init = { event: 'init', conversation_id: session,
+    init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } };
+  const terminal = { event: 'result', result: { conversation_id: session, status: 'SUCCESS',
+    response: '', usage: { input_tokens: 1, output_tokens: 1, thinking_tokens: 0,
+      cache_read_tokens: 0, total_tokens: 2 } } };
+  try {
+    const { stdoutPath } = writeAntigravityStdout(directory, [
+      init,
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'ACTIVE', step_type: 'tool', tool_name: 'edit_file' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'ERROR', step_type: 'tool', tool_name: 'edit_file',
+        tool_info: { error: { code: 'EDIT_DENIED' } } } },
+      terminal,
+    ]);
+    const failed = await readAntigravityV2RunEvidence(stdoutPath, null, cwd);
+    assert.equal(failed.valid, true);
+    assert.equal(failed.tool_execution_failed_count, 1);
+    assert.equal(failed.file_change_tool_evidence, 'OBSERVED');
+    assert.equal(failed.file_change_tool_completed_count, 0);
+    assert.equal(failed.file_change_tool_failed_count, 1);
+    assert.equal(failed.file_change_tool_incomplete_count, 0);
+    assert.equal(failed.task_acceptance, 'UNKNOWN');
+
+    writeAntigravityStdout(directory, [
+      init,
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'ACTIVE', step_type: 'tool', tool_name: 'edit_file' } },
+      terminal,
+    ]);
+    const incomplete = await readAntigravityV2RunEvidence(stdoutPath, null, cwd);
+    assert.equal(incomplete.valid, true);
+    assert.equal(incomplete.tool_execution_incomplete_count, 1);
+    assert.equal(incomplete.file_change_tool_completed_count, 0);
+    assert.equal(incomplete.file_change_tool_failed_count, 0);
+    assert.equal(incomplete.file_change_tool_incomplete_count, 1);
+    assert.equal(incomplete.task_acceptance, 'UNKNOWN');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity rejects a missing or malformed tool status without counting a write', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-tool-status-'));
+  const session = '31e0c0de-0000-4000-8000-000000000033';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  const init = { event: 'init', conversation_id: session,
+    init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } };
+  const terminal = { event: 'result', result: { conversation_id: session, status: 'SUCCESS',
+    response: '', usage: { input_tokens: 1, output_tokens: 1, thinking_tokens: 0,
+      cache_read_tokens: 0, total_tokens: 2 } } };
+  try {
+    for (const toolEvent of [
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        step_type: 'tool', tool_name: 'edit_file' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'FINISHED', step_type: 'tool', tool_name: 'edit_file' } },
+    ]) {
+      const { stdoutPath } = writeAntigravityStdout(directory, [init, toolEvent, terminal]);
+      const parsed = await readAntigravityV2RunEvidence(stdoutPath, null, cwd);
+      assert.equal(parsed.valid, false);
+      assert.equal(parsed.reason, 'ANTIGRAVITY_JSONL_INVALID');
+      assert.equal(parsed.file_change_tool_completed_count, 0);
+      assert.equal(parsed.file_change_tool_failed_count, 0);
+      assert.equal(parsed.file_change_tool_incomplete_count, 0);
+      assert.equal(parsed.task_acceptance, 'UNKNOWN');
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity read-only stream reports no file change without weakening acceptance', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-no-file-change-'));
+  try {
+    const session = '31e0c0de-0000-4000-8000-000000000034';
+    const cwd = 'C:\\Users\\worker\\candidate';
+    const { stdoutPath } = writeAntigravityStdout(directory, [
+      { event: 'init', conversation_id: session,
+        init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'DONE', step_type: 'tool', tool_name: 'read_file' } },
+      { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+        usage: { input_tokens: 2, output_tokens: 1, thinking_tokens: 0,
+          cache_read_tokens: 0, total_tokens: 3 } } },
+    ]);
+    const parsed = await readAntigravityV2RunEvidence(stdoutPath, null, cwd);
+    assert.equal(parsed.valid, true);
+    assert.equal(parsed.tool_execution_count, 1);
+    assert.equal(parsed.file_change_tool_evidence, 'NO_FILE_CHANGE_TOOL_OBSERVED');
+    assert.equal(parsed.file_change_tool_completed_count, 0);
+    assert.equal(parsed.file_change_tool_failed_count, 0);
+    assert.equal(parsed.file_change_tool_incomplete_count, 0);
+    assert.equal(parsed.source_diff_evidence, 'NOT_INSPECTED');
+    assert.equal(parsed.task_acceptance, 'UNKNOWN');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
