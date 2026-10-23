@@ -63,6 +63,21 @@ test('operator snapshot rejects malformed source main SHA but keeps legacy snaps
   assert.equal(parseOperatorObservation(OPERATOR_MARKER + JSON.stringify(
     observation({ source: 'malformed' }))), null);
 
+  const priorRuntimeFiles = ['worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs',
+    'codex-continuation.mjs', 'operator-observation.mjs', 'captured-process.mjs',
+    'safe-error-code.mjs', 'windows-executor.mjs'];
+  const priorRuntime = observation({ runtime_deployment: {
+    status: 'MANIFEST_MATCHED', observed_at: new Date(now).toISOString(),
+    source_main_sha: 'a'.repeat(40), deployment_pr: 462, deployment_pr_head: 'b'.repeat(40),
+    bundle_sha256: 'c'.repeat(64),
+    component_sha256: Object.fromEntries(priorRuntimeFiles.map(name => [name, 'd'.repeat(64)])),
+  } });
+  const migratedRuntime = parseOperatorObservation(OPERATOR_MARKER + JSON.stringify(priorRuntime));
+  assert.equal(migratedRuntime.runtime_deployment.status, 'UNKNOWN',
+    'a prior manifest without the newly required quota module cannot attest the new runtime');
+  assert.equal(migratedRuntime.runtime_deployment.reason_code, 'RUNTIME_FILES_UNAVAILABLE');
+  assert.equal(migratedRuntime.runtime_deployment.component_sha256['antigravity-quota.mjs'], null);
+
   const legacySource = { ...observation().source };
   delete legacySource.main_sha;
   const legacy = observation({ source: legacySource });
@@ -974,6 +989,7 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
       component_sha256:{'worker.mjs':'d'.repeat(64),'operator-observation.mjs':'e'.repeat(64),
         'codex-continuation.mjs':'f'.repeat(64),'safe-error-code.mjs':'1'.repeat(64),
         'opencode-v2.mjs':'2'.repeat(64),'v2-readiness.mjs':'3'.repeat(64),
+        'antigravity-quota.mjs':'6'.repeat(64),
         'captured-process.mjs':'4'.repeat(64),'windows-executor.mjs':'5'.repeat(64)}},
   });
   const comments=[{id:42,body:encodeOperatorObservation(snapshot),
@@ -1129,7 +1145,7 @@ async function publishReceiptProjection(rows) {
     body: encodeOperatorObservation(prior), updated_at: new Date(at - 30_000).toISOString() };
   comments.unshift(obsComment);
   const runtimeFiles = ['worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs',
-    'codex-continuation.mjs', 'operator-observation.mjs', 'captured-process.mjs',
+    'antigravity-quota.mjs', 'codex-continuation.mjs', 'operator-observation.mjs', 'captured-process.mjs',
     'safe-error-code.mjs', 'windows-executor.mjs'];
   const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
     dispatchers: ['t14210184'], state_dir: 'unused' };

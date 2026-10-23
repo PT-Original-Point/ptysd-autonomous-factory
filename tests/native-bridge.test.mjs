@@ -327,7 +327,7 @@ test('Worker repairs an existing observation with null published_at in place', a
   assert.equal(parsedLegacy.runtime_deployment.status, 'UNKNOWN');
   assert.equal(parsedLegacy.runtime_deployment.reason_code, 'RUNTIME_FILES_UNAVAILABLE');
   assert.deepEqual(Object.values(parsedLegacy.runtime_deployment.component_sha256),
-    Array(8).fill(null), 'a legacy four-file manifest cannot claim the current eight-file runtime');
+    Array(9).fill(null), 'a legacy four-file manifest cannot claim the current nine-file runtime');
   const fixture = makeObservationWorkerFixture({
     priorObservationBody: priorBody,
   });
