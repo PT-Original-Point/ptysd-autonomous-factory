@@ -603,6 +603,23 @@ function issueCommentsFor(issueNumber) {
   return raw.flat().filter(c => typeof c?.id === 'number').sort((a, b) => a.id - b.id);
 }
 function issueComments(config) { return issueCommentsFor(config.issue); }
+function capturedDiffReceiptSummary(receipt) {
+  if (!receipt || !['FINISHED', 'BLOCKED'].includes(receipt.state) ||
+      receipt.coding_state !== 'DIFF_CAPTURED_UNVERIFIED' || receipt.scope_valid !== true ||
+      !/^[a-f0-9]{64}$/i.test(receipt.diff_sha256 || '') ||
+      !Number.isSafeInteger(receipt.diff_bytes) || receipt.diff_bytes < 1 ||
+      !/^[a-f0-9]{64}$/i.test(receipt.changed_files_sha256 || '') ||
+      !Number.isSafeInteger(receipt.changed_files_count) || receipt.changed_files_count < 1)
+    return null;
+  return {
+    coding_state: 'DIFF_CAPTURED_UNVERIFIED',
+    diff_sha256: receipt.diff_sha256.toLowerCase(),
+    diff_bytes: receipt.diff_bytes,
+    changed_files_sha256: receipt.changed_files_sha256.toLowerCase(),
+    changed_files_count: receipt.changed_files_count,
+    scope_valid: true,
+  };
+}
 function latestOperatorJob(comments, config, workerLogin, mainSha, candidateSourceShas = new Map(),
   allowedKinds = null) {
   const allJobs = comments.filter(c => config.dispatchers.includes(c.user?.login))
@@ -646,12 +663,14 @@ function latestOperatorJob(comments, config, workerLogin, mainSha, candidateSour
   else if (last?.state === 'BLOCKED') state = 'BLOCKED';
   else if (!candidateHeadKnown) state = 'SOURCE_UNKNOWN';
   else if (!sourceCurrent) state = 'STALE_SOURCE';
+  const capturedDiff = capturedDiffReceiptSummary(last);
   return { request_id: job.request_id, attempt_id: attemptId, kind: job.kind,
     job_comment_id: selected.id,
     source_sha: job.source_sha, ...(job.source_pr !== undefined ? { source_pr: job.source_pr } : {}), state,
     outcome: typeof last?.outcome === 'string' && /^[A-Z0-9_-]{1,80}$/.test(last.outcome)
       ? last.outcome : 'UNKNOWN',
-    exit_code: Number.isSafeInteger(last?.exit_code) ? last.exit_code : null };
+    exit_code: Number.isSafeInteger(last?.exit_code) ? last.exit_code : null,
+    ...(capturedDiff || {}) };
 }
 function observationWorkerRecords(comments, config, workerLogin, mainSha, candidateSourceShas) {
   const records = [];
@@ -678,14 +697,23 @@ function observationWorkerRecords(comments, config, workerLogin, mainSha, candid
               ? task.outcome : undefined;
     const taskSource = `Issue #310 comment ${task.job_comment_id}` +
       (task.source_pr ? `; PR #${task.source_pr}@${task.source_sha}` : `; main@${task.source_sha}`);
+    const hasCapturedDiff = task.coding_state === 'DIFF_CAPTURED_UNVERIFIED';
     records.push({ worker_id: workerId, status, task_id: task.request_id,
       task_kind: task.kind, task_source: taskSource, task_source_sha: task.source_sha,
       task_comment_id: task.job_comment_id, ...(task.source_pr ? { source_pr: task.source_pr } : {}),
       ...(task.attempt_id ? { attempt_id: task.attempt_id } : {}), task_state: task.state,
       model_eligibility: task.state === 'WAITING_ELIGIBILITY' ? 'WAITING' : 'UNKNOWN',
-      code_changes: 'UNPROVEN', files_modified: 'UNPROVEN',
+      code_changes: hasCapturedDiff ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNPROVEN',
+      files_modified: hasCapturedDiff ? 'COUNT_REPORTED_UNVERIFIED' : 'UNPROVEN',
+      ...(hasCapturedDiff ? { coding_state: task.coding_state,
+        diff_sha256: task.diff_sha256, diff_bytes: task.diff_bytes,
+        changed_files_sha256: task.changed_files_sha256,
+        changed_files_count: task.changed_files_count,
+        scope_valid: task.scope_valid } : {}),
       ...(task.state === 'FINISHED_NOT_ACCEPTANCE'
-        ? { delivery_status: 'FINISHED_UNVERIFIED' } : {}),
+        ? { delivery_status: 'FINISHED_UNVERIFIED' }
+        : task.state === 'BLOCKED' && hasCapturedDiff
+          ? { delivery_status: 'BLOCKED_DIFF_CAPTURED_UNVERIFIED' } : {}),
       ...(blocker ? { blocker_code: blocker } : {}),
       evidence_ref: task.job_comment_id
         ? `https://github.com/${REPO}/issues/310#issuecomment-${task.job_comment_id}` : undefined,
