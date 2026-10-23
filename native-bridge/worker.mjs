@@ -3,7 +3,7 @@
 // Public GitHub issue comments are only pointers to immutable, reviewed source.
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync,
+import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync, renameSync, rmSync, statSync,
   openSync, closeSync, fsyncSync } from 'node:fs';
 import { homedir, hostname, platform } from 'node:os';
 import { basename, join, resolve, relative, isAbsolute, delimiter } from 'node:path';
@@ -704,6 +704,20 @@ function operatorPublisherError(code, identity) {
   error.operator_identity = identity;
   return error;
 }
+function operatorRequestFailureCode(stage, error) {
+  const status = [error?.status, error?.statusCode, error?.response?.status]
+    .find(value => Number.isSafeInteger(value) && value >= 400 && value <= 599);
+  if (status) return `OPERATOR_COMMENT_${stage}_HTTP_${status}`;
+  const text = [error?.stderr, error?.message]
+    .map(value => Buffer.isBuffer(value) ? value.toString('utf8') : String(value || ''))
+    .join('\n');
+  const match = text.match(/\b(?:HTTP(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*([45]\d{2})\b/i);
+  if (match) return `OPERATOR_COMMENT_${stage}_HTTP_${match[1]}`;
+  const systemCode = safeErrorCode(error, 'UNKNOWN');
+  return systemCode !== 'UNKNOWN'
+    ? `OPERATOR_COMMENT_${stage}_${systemCode}`
+    : `OPERATOR_COMMENT_${stage}_FAILED`;
+}
 export async function publishOperatorObservation(config, workerLogin, comments, mainSha,
   dependencies = {}, candidateSourceShas = new Map()) {
   const marked = comments.filter(c =>
@@ -794,21 +808,33 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
     incident: null,
   };
   const body = encodeOperatorObservation(snapshot);
+  const readComment = dependencies.readComment ||
+    (id => api('repos/' + OPERATOR_REPO + '/issues/comments/' + id));
+  const readComments = dependencies.readComments || (() => issueComments(config));
   try {
     const result = await updateExistingOperatorComment({
       comments, expectedLogin: commentAuthorLogin, expectedCommentId: OPERATOR_COMMENT_ID, body,
-      readComment: dependencies.readComment ||
-        (id => api('repos/' + OPERATOR_REPO + '/issues/comments/' + id)),
-      patchComment: (id, nextBody) => {
-        if (dependencies.patchComment) return dependencies.patchComment(id, nextBody);
-        const uri = 'repos/' + OPERATOR_REPO + '/issues/comments/' + id;
-        const temp = join(config.state_dir, 'operator-observation-' + randomUUID() + '.json');
-        writeFileSync(temp, JSON.stringify({ body: nextBody }),
-          { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-        try { gh(['api', uri, '--method', 'PATCH', '--input', temp]); }
-        finally { rmSync(temp, { force: true }); }
+      readComment: async id => {
+        try { return await readComment(id); }
+        catch (error) {
+          throw operatorPublisherError(operatorRequestFailureCode('PREWRITE_READ', error), publisherIdentity);
+        }
       },
-      readComments: dependencies.readComments || (() => issueComments(config)),
+      patchComment: async (id, nextBody) => {
+        try {
+          if (dependencies.patchComment) return await dependencies.patchComment(id, nextBody);
+          const uri = 'repos/' + OPERATOR_REPO + '/issues/comments/' + id;
+          const temp = join(config.state_dir, 'operator-observation-' + randomUUID() + '.json');
+          writeFileSync(temp, JSON.stringify({ body: nextBody }),
+            { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+          try { gh(['api', uri, '--method', 'PATCH', '--input', temp]); }
+          finally { rmSync(temp, { force: true }); }
+        } catch (error) {
+          throw operatorPublisherError(operatorRequestFailureCode('PATCH', error), publisherIdentity);
+        }
+      },
+      readComments,
+      readCommentsFailureCode: error => operatorRequestFailureCode('UPDATE_READBACK', error),
       now: dependencies.now || Date.now,
     });
     return { ...result, publisher_identity: publisherIdentity };
@@ -1128,6 +1154,29 @@ async function captureAntigravityProjectRootSnapshot(config, job, attemptId, lab
   return { head_sha: beforeSha, status_bytes: status.output,
     changes: parseGitStatusPaths(status.output) };
 }
+function antigravityProjectRootBindingFailure(config) {
+  const projectRoot = config?.antigravity_project_root;
+  const candidateRoot = config?.workspace;
+  if (typeof projectRoot !== 'string' || !isAbsolute(projectRoot) ||
+      typeof candidateRoot !== 'string' || !isAbsolute(candidateRoot))
+    return 'ANTIGRAVITY_EDIT_PROJECT_ROOT_NOT_CONFIGURED';
+  let projectStat, candidateStat, projectReal, candidateReal;
+  try {
+    projectStat = lstatSync(projectRoot);
+    candidateStat = lstatSync(candidateRoot);
+    if (!projectStat.isDirectory() || projectStat.isSymbolicLink() ||
+        !candidateStat.isDirectory() || candidateStat.isSymbolicLink())
+      return 'ANTIGRAVITY_EDIT_PROJECT_ROOT_NOT_PHYSICAL';
+    projectReal = realpathSync.native(projectRoot);
+    candidateReal = realpathSync.native(candidateRoot);
+  } catch (error) {
+    return `ANTIGRAVITY_EDIT_PROJECT_ROOT_READBACK_UNKNOWN_${safeErrorCode(error, 'UNKNOWN')}`;
+  }
+  const samePhysicalRoot = platform() === 'win32'
+    ? projectReal.toLowerCase() === candidateReal.toLowerCase()
+    : projectReal === candidateReal;
+  return samePhysicalRoot ? 'ANTIGRAVITY_EDIT_PROJECT_ROOT_SAME_AS_CANDIDATE' : null;
+}
 export async function captureScopedEditDiff({ workspace, state_dir, job, attempt_id, readProcessTree,
   platformName = platform() }) {
   if (!workspace || !state_dir || !job || !isEditExecutionKind(job.kind) ||
@@ -1169,6 +1218,16 @@ export async function captureScopedEditDiff({ workspace, state_dir, job, attempt
 async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {}) {
   const wait = outcome => ({ outcome, exit_code: 48, evidence_sha256: null, evidence_bytes: 0,
     eligibility_state: 'WAITING', model_invoked: false });
+  const projectRootFailure = antigravityProjectRootBindingFailure(config);
+  if (projectRootFailure) return {
+    outcome: projectRootFailure, exit_code: 46, evidence_sha256: null, evidence_bytes: 0,
+    eligibility_state: 'BLOCKED', coding_state: 'NOT_STARTED', model_invoked: false,
+    scope_valid: false, external_effects: 'NONE',
+    local_evidence: { antigravity_project_root_check: {
+      status: projectRootFailure.includes('READBACK_UNKNOWN') ? 'READBACK_UNKNOWN' : 'REJECTED',
+      reason: projectRootFailure,
+    } },
+  };
   const authorizationFailure = antigravityExecutionAuthorization(job, config,
     typeof dependencies.now === 'function' ? dependencies.now() : Date.now());
   if (authorizationFailure) return wait(authorizationFailure);
