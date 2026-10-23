@@ -512,6 +512,7 @@ function stripTomlComments(text) {
     }
     output += character;
   }
+  if (quote !== null) return null;
   return output;
 }
 
@@ -580,12 +581,14 @@ function tomlKeyParts(text) {
 
 function tomlHasLegacySandboxKey(text) {
   const sensitive = new Set(['sandbox_mode', 'sandbox_workspace_write']);
+  const stripped = stripTomlComments(text);
+  if (stripped === null) return null;
   const containsLegacyKey = parts => {
     if (parts.includes(null)) return null;
     return parts.some((key, index) =>
       sensitive.has(key) && !(index === 1 && parts[0] === 'profiles'));
   };
-  for (const rawLine of stripTomlComments(text).split(/\r?\n/)) {
+  for (const rawLine of stripped.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line) continue;
     if (line.startsWith('[') && line.endsWith(']')) {
