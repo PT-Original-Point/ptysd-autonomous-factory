@@ -1144,11 +1144,57 @@ function parseGitStatusPaths(bytes) {
     return { status: record.slice(0, 2), path: record.slice(3).replaceAll('\\', '/') };
   });
 }
+function editPathPhysicalScope(workspace, editPaths) {
+  let workspaceStat, physicalRoot;
+  try {
+    workspaceStat = lstatSync(workspace);
+    if (!workspaceStat.isDirectory() || workspaceStat.isSymbolicLink())
+      return { status: 'UNKNOWN', failure: 'EDIT_WORKSPACE_NOT_PHYSICAL' };
+    physicalRoot = realpathSync.native(workspace);
+  } catch (error) {
+    return { status: 'UNKNOWN', failure: `EDIT_PATH_PHYSICAL_ROOT_READBACK_${safeErrorCode(error)}` };
+  }
+  for (const editPath of editPaths) {
+    let current = physicalRoot;
+    for (const component of editPath.split('/')) {
+      current = resolve(current, component);
+      let componentStat;
+      try { componentStat = lstatSync(current); }
+      catch (error) {
+        if (error?.code === 'ENOENT') break;
+        return { status: 'UNKNOWN', failure:
+          `EDIT_PATH_PHYSICAL_COMPONENT_READBACK_${safeErrorCode(error)}` };
+      }
+      let physicalComponent;
+      try { physicalComponent = realpathSync.native(current); }
+      catch (error) {
+        return { status: 'UNKNOWN', failure:
+          `EDIT_PATH_PHYSICAL_COMPONENT_READBACK_${safeErrorCode(error)}` };
+      }
+      const relativeComponent = relative(physicalRoot, physicalComponent);
+      const firstRelativeComponent = relativeComponent.split(/[\\/]/, 1)[0];
+      if (relativeComponent && (firstRelativeComponent === '..' || isAbsolute(relativeComponent)))
+        return { status: 'ESCAPED', failure: 'EDIT_PATH_PHYSICAL_ROOT_ESCAPE' };
+      if (componentStat.isSymbolicLink() && !relativeComponent)
+        return { status: 'UNKNOWN', failure: 'EDIT_PATH_PHYSICAL_ALIAS_AMBIGUOUS' };
+    }
+  }
+  return { status: 'PASS', failure: null };
+}
+function assertEditPathsPhysicallyScoped(workspace, editPaths) {
+  const result = editPathPhysicalScope(workspace, editPaths);
+  if (result.status !== 'PASS') {
+    const error = new Error(result.failure);
+    error.code = result.failure;
+    throw error;
+  }
+}
 async function assertEditWorkspaceReady(config, job, attemptId, readProcessTree, platformName = platform()) {
   const head = await captureGitStdout(config.workspace, config.state_dir, job.request_id,
     attemptId, 'head', ['rev-parse', 'HEAD'], false, readProcessTree, platformName);
   if (head.output.toString('utf8').trim().toLowerCase() !== job.source_sha.toLowerCase())
     throw new Error('EDIT_WORKSPACE_SOURCE_SHA_MISMATCH');
+  assertEditPathsPhysicallyScoped(config.workspace, job.edit_paths);
   const status = await captureGitStdout(config.workspace, config.state_dir, job.request_id,
     attemptId, 'before', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'],
     false, readProcessTree, platformName);
@@ -1199,6 +1245,13 @@ export async function captureScopedEditDiff({ workspace, state_dir, job, attempt
   if (!workspace || !state_dir || !job || !isEditExecutionKind(job.kind) ||
       !validEditPaths(job.edit_paths) || !/^[a-f0-9-]{36}$/i.test(attempt_id || ''))
     throw new Error('EDIT_DIFF_CAPTURE_INPUT_INVALID');
+  const physicalScope = editPathPhysicalScope(workspace, job.edit_paths);
+  if (physicalScope.status !== 'PASS') return {
+    file: null, sha256: null, bytes: null, changed_files: [], allowed_paths: job.edit_paths,
+    scope_valid: false, physical_scope_status: physicalScope.status,
+    physical_scope_failure: physicalScope.failure,
+    diff_capture_status: 'NOT_CAPTURED_PHYSICAL_SCOPE_UNVERIFIED',
+  };
   const head = await captureGitStdout(workspace, state_dir, job.request_id,
     attempt_id, 'after-head', ['rev-parse', 'HEAD'], false, readProcessTree, platformName);
   if (head.output.toString('utf8').trim().toLowerCase() !== job.source_sha.toLowerCase())
@@ -1276,7 +1329,8 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
   catch (error) {
     return { outcome: `ANTIGRAVITY_EDIT_SOURCE_${safeErrorCode(error, 'UNKNOWN')}`,
       exit_code: 46, evidence_sha256: null, evidence_bytes: 0,
-      eligibility_state: 'BLOCKED', model_invoked: false, coding_state: 'NOT_STARTED' };
+      eligibility_state: 'BLOCKED', model_invoked: false, coding_state: 'NOT_STARTED',
+      scope_valid: false, external_effects: 'NONE' };
   }
   let projectRootBefore = null;
   if (typeof config.antigravity_project_root === 'string') {
@@ -1427,11 +1481,28 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
       state_dir: config.state_dir, job, attempt_id: attemptId,
       readProcessTree: dependencies.readGitProcessTree }); }
     catch (error) {
+      const errorCode = safeErrorCode(error);
+      const physicalScopeFailure = errorCode.startsWith('EDIT_PATH_PHYSICAL_');
       return { ...evidencedResult,
-        outcome: `ANTIGRAVITY_STREAM_EVIDENCE_${runEvidence.reason || 'UNKNOWN'}_DIFF_CAPTURE_FAILED_${safeErrorCode(error)}`,
+        outcome: physicalScopeFailure ? 'ANTIGRAVITY_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN'
+          : `ANTIGRAVITY_STREAM_EVIDENCE_${runEvidence.reason || 'UNKNOWN'}_DIFF_CAPTURE_FAILED_${errorCode}`,
         exit_code: -1, coding_state: 'UNKNOWN', model_invoked: runEvidence.model_invoked,
-        local_evidence: { ...evidencedResult.local_evidence, edit_diff_error: 'CAPTURE_FAILED' } };
+        ...(physicalScopeFailure ? { scope_valid: false, external_effects: 'UNKNOWN',
+          source_diff_evidence: 'UNKNOWN' } : {}),
+        local_evidence: { ...evidencedResult.local_evidence,
+          ...(physicalScopeFailure ? { antigravity_run: { ...evidencedResult.local_evidence.antigravity_run,
+            source_diff_evidence: 'UNKNOWN' } } : {}),
+          edit_diff_error: physicalScopeFailure ? errorCode : 'CAPTURE_FAILED' } };
     }
+    if (diff.diff_capture_status === 'NOT_CAPTURED_PHYSICAL_SCOPE_UNVERIFIED')
+      return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN',
+        exit_code: -1, coding_state: 'UNKNOWN', scope_valid: false, external_effects: 'UNKNOWN',
+        source_diff_evidence: 'UNKNOWN',
+        diff_sha256: null, diff_bytes: null, ...diff,
+        local_evidence: { ...evidencedResult.local_evidence,
+          antigravity_run: { ...evidencedResult.local_evidence.antigravity_run,
+            source_diff_evidence: 'UNKNOWN' },
+          source_diff_evidence: 'UNKNOWN', edit_diff: diff } };
     const localEvidence = { ...evidencedResult.local_evidence,
       antigravity_run: { ...evidencedResult.local_evidence.antigravity_run,
         source_diff_evidence: 'CAPTURED' }, edit_diff: diff };
@@ -1458,10 +1529,28 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     state_dir: config.state_dir, job, attempt_id: attemptId,
     readProcessTree: dependencies.readGitProcessTree }); }
   catch (error) {
-    return { ...evidencedResult, outcome: `ANTIGRAVITY_EDIT_DIFF_CAPTURE_FAILED_${safeErrorCode(error)}`,
+    const errorCode = safeErrorCode(error);
+    const physicalScopeFailure = errorCode.startsWith('EDIT_PATH_PHYSICAL_');
+    return { ...evidencedResult,
+      outcome: physicalScopeFailure ? 'ANTIGRAVITY_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN'
+        : `ANTIGRAVITY_EDIT_DIFF_CAPTURE_FAILED_${errorCode}`,
+      ...(physicalScopeFailure ? { scope_valid: false, external_effects: 'UNKNOWN',
+        source_diff_evidence: 'UNKNOWN' } : {}),
       exit_code: -1, coding_state: 'UNKNOWN',
-      local_evidence: { ...evidencedResult.local_evidence, edit_diff_error: 'CAPTURE_FAILED' } };
+      local_evidence: { ...evidencedResult.local_evidence,
+        ...(physicalScopeFailure ? { antigravity_run: { ...evidencedResult.local_evidence.antigravity_run,
+          source_diff_evidence: 'UNKNOWN' } } : {}),
+        edit_diff_error: physicalScopeFailure ? errorCode : 'CAPTURE_FAILED' } };
   }
+  if (diff.diff_capture_status === 'NOT_CAPTURED_PHYSICAL_SCOPE_UNVERIFIED')
+    return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN',
+      exit_code: -1, coding_state: 'UNKNOWN', scope_valid: false, external_effects: 'UNKNOWN',
+      source_diff_evidence: 'UNKNOWN',
+      diff_sha256: null, diff_bytes: null, ...diff,
+      local_evidence: { ...evidencedResult.local_evidence,
+        antigravity_run: { ...evidencedResult.local_evidence.antigravity_run,
+          source_diff_evidence: 'UNKNOWN' },
+        source_diff_evidence: 'UNKNOWN', edit_diff: diff } };
   const localEvidence = { ...evidencedResult.local_evidence,
     antigravity_run: { ...evidencedResult.local_evidence.antigravity_run,
       source_diff_evidence: 'CAPTURED' }, edit_diff: diff };
@@ -1626,7 +1715,7 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
   } catch (error) {
     return { outcome: `V2_EDIT_SCOPE_OR_SOURCE_${safeErrorCode(error, 'INVALID')}`, exit_code: 46,
       evidence_sha256: null, evidence_bytes: 0, coding_state: 'NOT_STARTED',
-      eligibility_state: 'BLOCKED', model_invoked: false };
+      eligibility_state: 'BLOCKED', model_invoked: false, scope_valid: false, external_effects: 'NONE' };
   }
   // V2 beta builds have ignored OPENCODE_CONFIG[_CONTENT] in some execution paths.
   // The documented project-local opencode.json is the authoritative V2 policy input.
@@ -1698,11 +1787,22 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
     readProcessTree: dependencies.readGitProcessTree,
     platformName: dependencies.gitPlatform ?? platform() }); }
   catch (error) {
+    const errorCode = safeErrorCode(error);
     return { ...evidencedResult,
-      outcome: `V2_EDIT_DIFF_CAPTURE_FAILED_${safeErrorCode(error)}`,
+      outcome: errorCode.startsWith('EDIT_PATH_PHYSICAL_')
+        ? 'V2_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN' : `V2_EDIT_DIFF_CAPTURE_FAILED_${errorCode}`,
       exit_code: -1, coding_state: 'UNKNOWN',
-      local_evidence: { ...evidencedResult.local_evidence, edit_diff_error: 'CAPTURE_FAILED' } };
+      ...(errorCode.startsWith('EDIT_PATH_PHYSICAL_') ? { scope_valid: false, external_effects: 'UNKNOWN' } : {}),
+      local_evidence: { ...evidencedResult.local_evidence,
+        edit_diff_error: errorCode.startsWith('EDIT_PATH_PHYSICAL_') ? errorCode : 'CAPTURE_FAILED' } };
   }
+  if (diff.diff_capture_status === 'NOT_CAPTURED_PHYSICAL_SCOPE_UNVERIFIED')
+    return { ...evidencedResult, outcome: 'V2_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN',
+      exit_code: -1, coding_state: 'UNKNOWN', scope_valid: false, external_effects: 'UNKNOWN',
+      source_diff_evidence: 'UNKNOWN',
+      diff_sha256: null, diff_bytes: null, ...diff,
+      local_evidence: { ...evidencedResult.local_evidence,
+        source_diff_evidence: 'UNKNOWN', edit_diff: diff } };
   const localEvidence = { ...evidencedResult.local_evidence, edit_diff: diff };
   if (policyChanged || !diff.scope_valid)
     return { ...evidencedResult, outcome: policyChanged ? 'V2_EDIT_POLICY_CHANGED' : 'V2_EDIT_SCOPE_VIOLATION',
