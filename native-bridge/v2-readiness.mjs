@@ -750,6 +750,12 @@ function isForbiddenAntigravityToolName(value) {
     'screenshot', 'desktop', 'playwright', 'cua', 'mcp'].includes(token));
 }
 
+// File-change tools are evidence of an attempted/completed write only. They do
+// not prove a captured diff, source equality, or semantic acceptance.
+const ANTIGRAVITY_FILE_CHANGE_TOOL_NAMES = Object.freeze([
+  'replace_file_content', 'edit_file', 'write_file', 'write_to_file',
+]);
+
 // Parse and hash the official Antigravity stream-json protocol without retaining
 // model text or tool payloads in the returned receipt. `SUCCESS` is CLI state,
 // never semantic or source acceptance.
@@ -852,8 +858,8 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
     const toolValues = [...tools.values()];
     const failedTools = toolValues.filter(tool => tool.failed);
     const incompleteTools = toolValues.filter(tool => tool.state === 'ACTIVE');
-    const fileTools = toolValues.filter(tool => ['replace_file_content', 'write_file', 'write_to_file']
-      .includes(tool.name));
+    const fileTools = toolValues.filter(tool =>
+      ANTIGRAVITY_FILE_CHANGE_TOOL_NAMES.includes(tool.name));
     const completedFileTools = fileTools.filter(tool => tool.state === 'DONE');
     const failedFileTools = fileTools.filter(tool => tool.failed);
     const incompleteFileTools = fileTools.filter(tool => tool.state === 'ACTIVE');
@@ -906,8 +912,8 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
   const toolValues = [...tools.values()];
   const failedTools = toolValues.filter(tool => tool.failed);
   const incompleteTools = toolValues.filter(tool => tool.state === 'ACTIVE');
-  const fileTools = toolValues.filter(tool => ['replace_file_content', 'write_file', 'write_to_file']
-    .includes(tool.name));
+  const fileTools = toolValues.filter(tool =>
+    ANTIGRAVITY_FILE_CHANGE_TOOL_NAMES.includes(tool.name));
   const completedFileTools = fileTools.filter(tool => tool.state === 'DONE');
   const failedFileTools = fileTools.filter(tool => tool.failed);
   const incompleteFileTools = fileTools.filter(tool => tool.state === 'ACTIVE');
