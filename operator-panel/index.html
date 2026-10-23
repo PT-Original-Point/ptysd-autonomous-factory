@@ -315,7 +315,10 @@
         !Number.isFinite(Date.parse(s.observed_at)) ||
         !Number.isFinite(Date.parse(s.expires_at)) ||
         Date.parse(s.expires_at) <= Date.parse(s.observed_at) ||
-        Date.parse(s.expires_at) - Date.parse(s.observed_at) > 15 * 60 * 1000) return null;
+        Date.parse(s.expires_at) - Date.parse(s.observed_at) > 15 * 60 * 1000 ||
+        (s.source !== undefined && !object(s.source)) ||
+        (s.source?.main_sha !== undefined &&
+          (typeof s.source.main_sha !== 'string' || !/^[a-f0-9]{40}$/i.test(s.source.main_sha)))) return null;
     const future = Date.parse(s.observed_at) > now + 5 * 60 * 1000;
     return { snapshot:s, freshness:future ? 'UNKNOWN' : Date.parse(s.expires_at) <= now ? 'STALE' : 'FRESH' };
   }

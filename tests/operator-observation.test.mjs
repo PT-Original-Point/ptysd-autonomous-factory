@@ -51,6 +51,21 @@ test('operator snapshot requires exact project identity, time bounds, and de-ide
     /INVALID_OPERATOR_OBSERVATION/);
 });
 
+test('operator snapshot rejects malformed source main SHA but keeps legacy snapshots without it readable', () => {
+  for (const main_sha of ['not-a-git-sha', 'g'.repeat(40), 'a'.repeat(39)]) {
+    const malformed = observation({ source: { ...observation().source, main_sha } });
+    assert.equal(parseOperatorObservation(OPERATOR_MARKER + JSON.stringify(malformed)), null);
+  }
+  assert.equal(parseOperatorObservation(OPERATOR_MARKER + JSON.stringify(
+    observation({ source: 'malformed' }))), null);
+
+  const legacySource = { ...observation().source };
+  delete legacySource.main_sha;
+  const legacy = observation({ source: legacySource });
+  assert.equal(parseOperatorObservation(OPERATOR_MARKER + JSON.stringify(legacy))?.source.main_sha,
+    undefined);
+});
+
 test('operator snapshot accepts the GitHub-supported body range beyond the old local ceiling', () => {
   const base = observation({
     windows: { status: 'FRESH', native_task: { enabled: false }, summary: '' },
@@ -364,6 +379,10 @@ test('single-page renderer classifies receipts, expiry, and missing status witho
   const updatedAt = new Date(Date.parse(valid.observed_at) + 1000).toISOString();
   assert.equal(api.findSnapshot([{ id:1, body, updated_at:updatedAt,
     user: { login: 'wfvupu1212' } }], now).status, 'FRESH');
+  const malformedSourceBody = OPERATOR_MARKER + JSON.stringify({ ...valid,
+    source: { ...valid.source, main_sha: 'g'.repeat(40) } });
+  assert.equal(api.findSnapshot([{ id:1, body:malformedSourceBody, updated_at:updatedAt,
+    user: { login: 'wfvupu1212' } }], now).error, 'AUTHOR_OR_SCHEMA_MISMATCH');
   assert.equal(api.findSnapshot([{ id:2, body, updated_at:updatedAt,
     user: { login: 'wfvupu1212' } }], now).error,
     'OBSERVATION_COMMENT_ID_MISMATCH');
