@@ -419,6 +419,8 @@ test('Codex CLI args bind writes to exact task paths with native permissions and
 
 test('legacy project sandbox settings block Codex before the model runner and save a no-model terminal result', async t => {
   const configurations = [
+    ['unterminated multiline basic string masks sandbox key', 'opaque = """unterminated\nsandbox_mode = "workspace-write"\n', 'CODEX_PROJECT_CONFIG_READBACK_UNKNOWN_NO_MODEL', 'CODEX_PROJECT_CONFIG_PARSE_UNKNOWN'],
+    ['unterminated multiline literal string masks sandbox key', "opaque = '''unterminated\nsandbox_mode = \"workspace-write\"\n", 'CODEX_PROJECT_CONFIG_READBACK_UNKNOWN_NO_MODEL', 'CODEX_PROJECT_CONFIG_PARSE_UNKNOWN'],
     ['sandbox_mode assignment', 'sandbox_mode = "workspace-write"\n'],
     ['quoted sandbox_mode assignment', '"sandbox_mode" = "workspace-write"\n'],
     ['escaped quoted sandbox_mode assignment', '"\\u0073andbox_mode" = "workspace-write"\n'],
