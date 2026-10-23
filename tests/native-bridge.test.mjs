@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync, readdirSync, existsSync,
+  symlinkSync, unlinkSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -1950,6 +1951,80 @@ test('OpenCode V2 edit intake captures exact scoped diff without treating exit z
   } finally { rmSync(home,{recursive:true,force:true}); }
 });
 
+test('OpenCode V2 edit preserves UNKNOWN when a junction appears during execution and never reports a zero diff', async () => {
+  const home=mkdtempSync(join(homedir(),'.ptysd-opencode-junction-race-test-'));
+  try {
+    const workspace=join(home,'workspace'),stateDir=join(home,'state'),outside=join(home,'outside');
+    const junction=join(workspace,'escape');
+    mkdirSync(join(workspace,'src'),{recursive:true}); mkdirSync(join(workspace,'escape'));
+    mkdirSync(stateDir); mkdirSync(outside);
+    const git=(...args)=>{
+      const result=spawnSync('git',['-C',workspace,...args],{encoding:'utf8',windowsHide:true});
+      assert.equal(result.status,0,result.stderr); return result.stdout.trim();
+    };
+    git('init','--quiet'); git('config','user.name','PTYSD test'); git('config','user.email','test@example.invalid');
+    writeFileSync(join(workspace,'src','worker.mjs'),'export const state = "base";\n');
+    git('add','src/worker.mjs'); git('commit','--quiet','-m','synthetic OpenCode source');
+    const sourceSha=git('rev-parse','HEAD');
+    const config={workspace,state_dir:stateDir,enable_v2_model_runs:true,
+      allowed_models:{'opencode/spark':['high']}};
+    const job={schema:4,project_id:PROJECT,host:hostname().toUpperCase(),
+      request_id:'PTYSD_OPENCODE_JUNCTION_RACE_20261023',kind:'opencode_edit',source_sha:sourceSha,
+      spec_path:'native-bridge/tasks/review.md',spec_sha256:hash,
+      model:'opencode/spark',variant:'high',edit_paths:['escape/worker.mjs']};
+    const launchedModels=[];
+    const outsideFile=join(outside,'worker.mjs');
+    const result=await executeOpenCodeTask('Synthetic junction race; no real model invocation.',
+      config,job,randomUUID(),{
+        qualifyOpenCodeV2:()=>({ready:true,bin:'synthetic-opencode-v2.exe',version:'2.0.test'}),
+        readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_RECORD_PRESENT'}),
+        gitPlatform:'win32',
+        readGitProcessTree:pid=>({state:'DEAD',root_pid:pid,process_ids:[],census_complete:true,
+          observed_at:new Date().toISOString(),error:null}),
+        runCapturedProcess(_bin,args,options){
+          launchedModels.push(args[args.indexOf('--model')+1]);
+          rmSync(junction,{recursive:true});
+          symlinkSync(outside,junction,'junction');
+          writeFileSync(outsideFile,'export const state = "written outside workspace";\n');
+          const sessionID='synthetic-opencode-junction-session';
+          const events=[
+            {type:'step_start',sessionID},
+            {type:'tool_use',sessionID,part:{type:'tool',tool:'edit',callID:'junction-race-edit',
+              state:{status:'completed'}}},
+            {type:'step_finish',sessionID,part:{type:'step-finish',tokens:{input:1,output:1,
+              reasoning:0,cache:{read:0}}}},
+          ];
+          const stdout=Buffer.from(`${events.map(event=>JSON.stringify(event)).join('\n')}\n`);
+          const stderr=Buffer.alloc(0);
+          writeFileSync(options.stdoutPath,stdout,{flag:'wx'});
+          writeFileSync(options.stderrPath,stderr,{flag:'wx'});
+          return {outcome:'SYNTHETIC_PROCESS_EXITED',exit_code:0,
+            local_evidence:{stdout_file:basename(options.stdoutPath),
+              stdout_sha256:createHash('sha256').update(stdout).digest('hex'),stdout_bytes:stdout.length,
+              stderr_file:basename(options.stderrPath),stderr_sha256:createHash('sha256').update(stderr).digest('hex'),
+              stderr_bytes:0,termination_state:'NOT_REQUESTED'}};
+        },
+      });
+
+    assert.equal(result.model_invoked,true,JSON.stringify(result));
+    assert.deepEqual(launchedModels,['opencode/spark#high'],
+      'the pinned OpenCode model is launched once; no fallback model is attempted');
+    assert.equal(result.outcome,'V2_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN');
+    assert.equal(result.coding_state,'UNKNOWN');
+    assert.equal(result.scope_valid,false);
+    assert.equal(result.external_effects,'UNKNOWN');
+    assert.equal(result.source_diff_evidence,'UNKNOWN');
+    assert.equal(result.diff_bytes,null,'physical scope uncertainty cannot be reported as zero bytes');
+    assert.equal(result.diff_sha256,null);
+    assert.equal(result.physical_scope_failure,'EDIT_PATH_PHYSICAL_ROOT_ESCAPE');
+    assert.equal(readFileSync(outsideFile,'utf8'),'export const state = "written outside workspace";\n',
+      'the externally written file remains preserved for reconciliation');
+    assert.equal(readFileSync(join(workspace,'src','worker.mjs'),'utf8'),'export const state = "base";\n');
+    assert.equal(existsSync(join(workspace,'opencode.json')),false,
+      'the temporary scoped policy is removed after normal process termination and exact readback');
+  } finally { rmSync(home,{recursive:true,force:true}); }
+});
+
 test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage authorization and preserves an unverified scoped diff', async () => {
   const home=mkdtempSync(join(homedir(),'.ptysd-antigravity-edit-test-'));
   try {
@@ -2087,6 +2162,69 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
       assert.equal(rootReadinessCalls,0);
       assert.equal(rootModelCalls,0);
     }
+
+    const escapedRoot=join(home,'outside-edit-target');
+    const escapedFile=join(escapedRoot,'worker.mjs');
+    const escapedJunction=join(workspace,'escape');
+    mkdirSync(escapedRoot,{recursive:true});
+    writeFileSync(escapedFile,'export const value = "before";\n');
+    symlinkSync(escapedRoot,escapedJunction,'junction');
+    let junctionModelCalls=0;
+    try {
+      const escapedJob={...job,edit_paths:['escape/worker.mjs']};
+      const preflight=await executeOpenCodeTask('Synthetic junction escape; no inference.',config,
+        escapedJob,randomUUID(),{now:()=>now,localAppData,
+          runAntigravityV2Readiness:()=>readiness,
+          runCapturedProcess(){junctionModelCalls++;throw new Error('MODEL_MUST_NOT_RUN');}});
+      assert.equal(preflight.outcome,'ANTIGRAVITY_EDIT_SOURCE_EDIT_PATH_PHYSICAL_ROOT_ESCAPE');
+      assert.equal(preflight.model_invoked,false);
+      assert.equal(preflight.scope_valid,false);
+      assert.equal(preflight.external_effects,'NONE');
+      assert.equal(junctionModelCalls,0,'a pre-existing junction escape must be rejected before model launch');
+      assert.equal(readFileSync(escapedFile,'utf8'),'export const value = "before";\n');
+    } finally { unlinkSync(escapedJunction); }
+
+    const racedJunction=join(workspace,'race');
+    const racedFile=join(escapedRoot,'raced-worker.mjs');
+    let racedModelCalls=0;
+    const racedResult=await executeOpenCodeTask('Synthetic junction inserted during model execution.',config,
+      {...job,edit_paths:['race/raced-worker.mjs']},randomUUID(),{
+        now:()=>now,localAppData,runAntigravityV2Readiness:()=>readiness,
+        readAntigravityV2RunEvidence:()=>({valid:true,reason:null,session_id:'synthetic-session',
+          session_started:true,cli_status:'SUCCESS',run_disposition:'MODEL_ACTIVITY_OBSERVED',
+          external_effects:'OBSERVED',source_diff_evidence:'CAPTURED',task_acceptance:'UNVERIFIED',
+          permission_mode_evidence:'REQUEST_REVIEW',model_invoked:true,
+          provider_usage_evidence:'OBSERVED',model_activity_evidence:'OBSERVED',
+          token_usage:{input_tokens:1,output_tokens:1,thinking_tokens:0,cache_read_tokens:0,total_tokens:2},
+          tool_execution_evidence:'OBSERVED',tool_execution_count:1,tool_execution_failed_count:0,
+          tool_execution_incomplete_count:0,file_change_tool_evidence:'OBSERVED',
+          file_change_tool_completed_count:1,file_change_tool_failed_count:0,
+          file_change_tool_incomplete_count:0,forbidden_tool_execution_evidence:'NONE',
+          event_count:2,stdout_bytes:10}),
+        runCapturedProcess(_bin,_args,options){
+          racedModelCalls++;
+          symlinkSync(escapedRoot,racedJunction,'junction');
+          writeFileSync(racedFile,'export const value = "escaped";\n');
+          writeFileSync(options.stdoutPath,'synthetic stream evidence\n');
+          return {outcome:'SYNTHETIC_PROCESS_EXITED',exit_code:0,
+            local_evidence:{stdout_file:basename(options.stdoutPath),
+              stdout_sha256:h('synthetic stream evidence\n'),stdout_bytes:26,
+              stderr_file:basename(options.stderrPath),stderr_sha256:h(''),stderr_bytes:0,
+              termination_state:'NOT_REQUESTED'}};
+        },
+      });
+    try {
+      assert.equal(racedModelCalls,1,'the synthetic executor alone created this post-preflight race');
+      assert.equal(racedResult.outcome,'ANTIGRAVITY_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN');
+      assert.equal(racedResult.coding_state,'UNKNOWN');
+      assert.equal(racedResult.scope_valid,false);
+      assert.equal(racedResult.external_effects,'UNKNOWN');
+      assert.equal(racedResult.source_diff_evidence,'UNKNOWN');
+      assert.equal(racedResult.diff_bytes,null,'an escaped write is never reported as a zero-byte diff');
+      assert.equal(racedResult.physical_scope_failure,'EDIT_PATH_PHYSICAL_ROOT_ESCAPE');
+      assert.equal(readFileSync(racedFile,'utf8'),'export const value = "escaped";\n',
+        'the test preserves and reads back the external effect instead of deleting or replaying it');
+    } finally { if (existsSync(racedJunction)) unlinkSync(racedJunction); }
 
     const toolPolicyBlocked=await executeOpenCodeTask('Synthetic; no inference.',config,job,randomUUID(),{
       now:()=>now,localAppData,
