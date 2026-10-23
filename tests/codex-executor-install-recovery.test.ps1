@@ -6,8 +6,14 @@ $modulePath = Join-Path $repoRoot 'native-bridge\codex-executor-install-state.ps
 
 $parseTokens = $null
 $parseErrors = $null
-[System.Management.Automation.Language.Parser]::ParseFile($installerPath, [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+$installerAst = [System.Management.Automation.Language.Parser]::ParseFile($installerPath, [ref]$parseTokens, [ref]$parseErrors)
 if ($parseErrors.Count -gt 0) { throw ('POWERSHELL_PARSE_FAILED: ' + $installerPath + ': ' + $parseErrors[0].Message) }
+$transitionAclFunction = $installerAst.Find({ param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Assert-CodexExecutorTransitionAcl'
+}, $true)
+if ($null -eq $transitionAclFunction) { throw 'TRANSITION_ACL_FUNCTION_MISSING' }
+Invoke-Expression $transitionAclFunction.Extent.Text
 if (Test-Path -LiteralPath $modulePath) { throw 'REDUNDANT_PRIVATE_INSTALL_STATE_MODULE_STILL_PRESENT' }
 
 $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
@@ -189,6 +195,39 @@ function Invoke-InstallAttempt([string]$ExpectedError = '', [string]$CodexPath =
 try {
     New-Item -ItemType Directory -Path $local, $programData, $programFiles -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $local 'PTYSDNativeBridge') -Force | Out-Null
+    $aclTestParent = Join-Path $testRoot 'acl-inherit-only-parent'
+    $aclTestTarget = Join-Path $aclTestParent 'target'
+    New-Item -ItemType Directory -Path $aclTestTarget -Force | Out-Null
+    $everyoneSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-1-0')
+    $aclInheritFlags = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $inheritOnlyAcl = New-Object System.Security.AccessControl.DirectorySecurity
+    $inheritOnlyRule = New-Object System.Security.AccessControl.FileSystemAccessRule($everyoneSid,
+        [System.Security.AccessControl.FileSystemRights]::Modify, $aclInheritFlags,
+        [System.Security.AccessControl.PropagationFlags]::InheritOnly,
+        [System.Security.AccessControl.AccessControlType]::Allow)
+    $inheritOnlyAcl.AddAccessRule($inheritOnlyRule)
+    $global:MockTransitionAclReads = $true
+    $inheritOnlyParentKey = [IO.Path]::GetFullPath($aclTestParent).ToLowerInvariant()
+    $global:MockAclOverrides[$inheritOnlyParentKey] = $inheritOnlyAcl
+    Assert-CodexExecutorTransitionAcl $aclTestTarget
+    $global:MockAclOverrides.Remove($inheritOnlyParentKey)
+    $effectiveAcl = New-Object System.Security.AccessControl.DirectorySecurity
+    $effectiveRule = New-Object System.Security.AccessControl.FileSystemAccessRule($everyoneSid,
+        [System.Security.AccessControl.FileSystemRights]::Modify, $aclInheritFlags,
+        [System.Security.AccessControl.PropagationFlags]::None,
+        [System.Security.AccessControl.AccessControlType]::Allow)
+    $effectiveAcl.AddAccessRule($effectiveRule)
+    $effectiveTargetKey = [IO.Path]::GetFullPath($aclTestTarget).ToLowerInvariant()
+    $global:MockAclOverrides[$effectiveTargetKey] = $effectiveAcl
+    $effectiveAceRejected = $false
+    try { Assert-CodexExecutorTransitionAcl $aclTestTarget }
+    catch { $effectiveAceRejected = $_.Exception.Message -eq 'EXECUTOR_TRANSITION_ACL_BROAD_WRITE' }
+    Assert-Equal $effectiveAceRejected $true 'an effective broad-write ACE remains rejected'
+    $global:MockAclOverrides.Remove($effectiveTargetKey)
+    $global:MockTransitionAclReads = $false
+    Remove-Item -LiteralPath $aclTestParent -Recurse -Force
+
     New-Item -ItemType Directory -Path (Join-Path $programFiles 'Node') -Force | Out-Null
     $global:MockCodexSourceDirectory = Join-Path $local 'OpenAI\Codex\bin\synthetic-version'
     New-Item -ItemType Directory -Path $global:MockCodexSourceDirectory -Force | Out-Null

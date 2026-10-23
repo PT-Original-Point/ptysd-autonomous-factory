@@ -89,6 +89,11 @@ function Assert-CodexExecutorTransitionAcl([string]$Path) {
                 [System.Security.Principal.SecurityIdentifier]))) {
                 if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
                     $rule.IdentityReference.Value -notin $broadSids) { continue }
+                # This ACE does not apply to the directory whose ACL is being
+                # checked. If inherited by a descendant where it is effective,
+                # that descendant is checked separately while walking the path.
+                if (([int]$rule.PropagationFlags -band
+                    [int][System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
                 if (([int]$rule.FileSystemRights -band $deniedRights) -ne 0) {
                     if ($isTarget) { throw 'EXECUTOR_TRANSITION_ACL_BROAD_WRITE' }
                     throw 'EXECUTOR_TRANSITION_ACL_BROAD_PARENT_REPLACEMENT'
