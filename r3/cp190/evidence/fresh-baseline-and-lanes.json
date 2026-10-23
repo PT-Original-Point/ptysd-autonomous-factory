@@ -1,0 +1,60 @@
+{
+  "classification": "READ_ONLY_FRESH_READ_NONCANONICAL",
+  "read_at": "2026-09-25",
+  "overall_goal_status": "ACTIVE",
+  "repository": "PT-Original-Point/ptysd-vnext42-governance-sandbox",
+  "repository_id": 1352411536,
+  "remote_refs": {
+    "main": "1dcec5ea8124e4d1b69b53652c657df8b65eb3ef",
+    "v49/accepted-source": "7189c7ca43d52887d0ede16cd2cc70a35bb7e238",
+    "governance/project-directory": "f22a9eb9e75d6b2d89dc9b950109910af8d290bb",
+    "v45/factory-control": "209e0ad9040a08965a49109e18f783cfd9c7c7f4"
+  },
+  "remote_prs": [
+    {
+      "number": 297,
+      "state": "open",
+      "draft": true,
+      "merged": false,
+      "base_sha": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+      "head_sha": "137518035f9c3c7f89176b20b12b9db548d3f79c"
+    },
+    {
+      "number": 298,
+      "state": "open",
+      "draft": true,
+      "merged": false,
+      "base_sha": "1dcec5ea8124e4d1b69b53652c657df8b65eb3ef",
+      "head_sha": "29953c802b22be70869f350a56d21501a68de5b1"
+    },
+    {
+      "number": 299,
+      "state": "open",
+      "draft": true,
+      "merged": false,
+      "base_sha": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+      "head_sha": "f849a81ab017c795f359b189b4e0726a44a5fe54"
+    }
+  ],
+  "operation025": "UNKNOWN",
+  "provider_admin_route": "UNAVAILABLE_IN_CURRENT_CODEX_ENVIRONMENT",
+  "blocked_lanes": [
+    "SEMANTIC_PROVIDER_REQUIRED_CHECK",
+    "PR297_CANONICAL_ACCEPTANCE",
+    "OP025_HOST_READBACK"
+  ],
+  "ready_lanes": [],
+  "frozen_candidates_not_reopened": [
+    "R3-P0-WORKLOG-STALE-DERIVATION-GUARD-CANDIDATE",
+    "R3-P0-EP72-R3-ACTIVE-PROFILE-DRAFT",
+    "R3-P0-SEMANTIC-GATE-DESIGN-CANDIDATE",
+    "PR297-R3-07-RECOVERY-FIXES",
+    "CSG-09B-BASELINE-EQUIVALENT-MAINTENANCE-CANDIDATE"
+  ],
+  "current_atomic_unit": "R3-P0-CP190-LEGACY-CHECKPOINT-SCHEMA-COMPATIBILITY",
+  "atomic_unit_result": "LOCAL_NONCANONICAL_CANDIDATE_FROZEN_AND_RESTORE_REHEARSAL_PASS",
+  "next_single_action": "WAIT_FOR_A_NEW_AUTHORIZED_PROVIDER_ADMIN_ROUTE_OR_LEGAL_OP025_HOST_READBACK_ROUTE; do not retry without changed route, permission, receipt, or target evidence",
+  "remote_or_canonical_writes": false,
+  "cp192_jit_fence_created": false,
+  "operation027_dispatched": false
+}

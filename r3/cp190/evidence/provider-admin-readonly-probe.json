@@ -1,0 +1,37 @@
+{
+  "probe": "R3-P0-PROVIDER-ADMIN-CAPABILITY-READONLY-PROBE",
+  "observed_at": "2026-09-25",
+  "mutations_performed": false,
+  "gh_exists": false,
+  "gh_auth_status": "unavailable: gh executable not found; no token output was produced",
+  "connector_identity": "t14210184",
+  "connector_user_id": 259907265,
+  "repository_permission": "admin",
+  "authenticated_scopes": "unavailable in current Codex connector/tool surface",
+  "branch_metadata": {
+    "v45/factory-control": {
+      "head": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+      "protected": true,
+      "protection_endpoint": "403 Resource not accessible by integration"
+    },
+    "main": {
+      "head": "1dcec5ea8124e4d1b69b53652c657df8b65eb3ef",
+      "protected": false,
+      "protection_endpoint": "403 Resource not accessible by integration"
+    },
+    "v49/accepted-source": {
+      "head": "7189c7ca43d52887d0ede16cd2cc70a35bb7e238",
+      "protected": false,
+      "protection_endpoint": "403 Resource not accessible by integration"
+    },
+    "governance/project-directory": {
+      "head": "f22a9eb9e75d6b2d89dc9b950109910af8d290bb",
+      "protected": false,
+      "protection_endpoint": "403 Resource not accessible by integration"
+    }
+  },
+  "repository_rulesets": [],
+  "inherited_rulesets": [],
+  "provider_admin_route": "UNAVAILABLE_IN_CURRENT_CODEX_ENVIRONMENT",
+  "scope_note": "This connector limitation does not prove that no external provider-admin route exists."
+}

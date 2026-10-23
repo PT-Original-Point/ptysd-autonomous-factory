@@ -1,0 +1,7 @@
+{
+  "path": "governance/csg/checkpoints/000191.json",
+  "source_commit": "137518035f9c3c7f89176b20b12b9db548d3f79c",
+  "source": "PR297 head exact file read",
+  "repository": "PT-Original-Point/ptysd-vnext42-governance-sandbox",
+  "git_blob_oid": "0180e5eb9c65342675f4e4dd743c5a1a04430da1"
+}
