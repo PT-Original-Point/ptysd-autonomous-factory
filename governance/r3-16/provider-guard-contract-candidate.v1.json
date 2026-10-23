@@ -1,0 +1,36 @@
+{
+  "schema": "vnext5.r3.provider-guard-contract-candidate.v1",
+  "classification": "LOCAL_NONCANONICAL_PREPRODUCTION_CANDIDATE",
+  "dispatch_enabled": false,
+  "provider_api_enabled": false,
+  "trusted_verifier": false,
+  "canonical_acceptance": false,
+  "host_or_production_qualification": false,
+  "evidence_policy": {
+    "candidate_input_is_untrusted": true,
+    "expected_policy_requires_external_immutable_pin": true,
+    "provider_authentication_performed_by_candidate": false,
+    "provider_readback_required_for_later_publication": true,
+    "exact_candidate_commit_tree_and_direct_parent_required": true,
+    "exact_workflow_job_app_and_run_attempt_required": true,
+    "exact_branch_protection_digest_and_required_check_required": true,
+    "same_repository_resource_ref_pre_and_post_readback_required": true,
+    "single_active_sender_and_single_attempt_required": true
+  },
+  "acknowledgement_loss": {
+    "resend_allowed": false,
+    "exact_candidate_poststate": "OBSERVE_ONLY_RECONCILE_NO_RETRY",
+    "unchanged_prestate": "UNKNOWN_NO_RETRY",
+    "conflicting_poststate": "CONFLICT_NO_RETRY",
+    "missing_poststate": "UNKNOWN_NO_RETRY"
+  },
+  "isolated_ci_recipe": {
+    "activation_state": "DOCUMENTATION_ONLY_NOT_A_GITHUB_WORKFLOW",
+    "runner": "EPHEMERAL_PROTECTED_RUNNER_REQUIRED",
+    "permissions": "READ_ONLY_REPOSITORY_CONTENTS",
+    "candidate_credentials": "NONE",
+    "source_recipe_expected_set": "PINNED_OUTSIDE_CANDIDATE_CONTROL",
+    "checkout": "EXACT_IMMUTABLE_CANDIDATE_HEAD_SHA",
+    "candidate_owned_tests_define_acceptance": false
+  }
+}
