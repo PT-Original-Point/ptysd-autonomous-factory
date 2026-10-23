@@ -2958,6 +2958,48 @@ test('a recoverable WAITING receipt makes the same OpenCode task eligible for re
   assert.equal(selectNext(comments, ['t14210184'], 'worker', job.host, job.source_sha), null,
     'a true terminal attempt remains non-replayable');
 });
+test('an unresolved edit attempt blocks only overlapping paths across model lanes', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = 'c'.repeat(40);
+  const makeEdit = (requestId, kind, editPaths) => withHumanGoal(mkjob({
+    request_id: requestId, kind, source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/overlap-test.md', spec_sha256: hash,
+    model: kind === 'antigravity_edit' ? ANTIGRAVITY_V2_MODEL : 'opencode/deepseek-v4.1-flash-free',
+    variant: kind === 'antigravity_edit' ? 'high' : 'free',
+    edit_paths: editPaths, source_pr: 461,
+  }));
+  const active = makeEdit('PTYSD_ACTIVE_W2_SHARED_PATH', 'antigravity_edit', ['src/shared.mjs']);
+  const overlapping = makeEdit('PTYSD_READY_W1_SHARED_PATH', 'opencode_edit', ['src/shared.mjs']);
+  const independent = makeEdit('PTYSD_READY_W1_INDEPENDENT_PATH', 'opencode_edit', ['docs/independent.md']);
+  const attemptId = '44444444-4444-4444-8444-444444444444';
+  const jobComment = (id, job) => ({ ...com(id, encoded(job)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` });
+  const started = receipt(active.request_id, attemptId, 'STARTED', active, {
+    model_invoked: true, external_effects: 'UNKNOWN',
+  });
+  const comments = [
+    jobComment(801, active), jobComment(802, overlapping), jobComment(803, independent),
+    com(804, RECEIPT_MARKER + JSON.stringify(started), 'worker'),
+  ];
+  const heads = new Map([[461, sourceSha]]);
+  assert.equal(selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [], heads)?.id, 803,
+    'an unresolved W2 effect must not starve a non-overlapping W1 task');
+  assert.equal(selectNext([comments[0], comments[1], comments[3]],
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'the same uncertain attempt must protect its overlapping path from another writer');
+  const blocked = receipt(active.request_id, attemptId, 'BLOCKED', active, {
+    outcome: 'EXECUTOR_EDIT_WORKSPACE_READBACK_UNKNOWN', exit_code: 46,
+    model_invoked: true, external_effects: 'UNKNOWN', source_diff_evidence: 'NOT_INSPECTED',
+  });
+  const blockedComments = [comments[0], comments[1], comments[2],
+    com(805, RECEIPT_MARKER + JSON.stringify(blocked), 'worker')];
+  assert.equal(selectNext(blockedComments, ['t14210184'], 'worker', host,
+    sourceSha, [], heads)?.id, 803,
+  'a terminal W2 receipt with unknown effects must still permit independent paths');
+  assert.equal(selectNext([blockedComments[0], blockedComments[1], blockedComments[3]],
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'a terminal W2 receipt with unknown effects must protect overlapping paths');
+});
 test('publisher records executor WAITING, continues a ping, then re-dispatches the same task after readiness', async () => {
   const root = mkdtempSync(join(homedir(), '.ptysd-opencode-waiting-reconcile-'));
   try {
