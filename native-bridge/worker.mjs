@@ -212,12 +212,12 @@ export function parseReceipt(body) {
            !Object.values(ANTIGRAVITY_RUN_DISPOSITIONS).includes(o.run_disposition) ||
            o.cli_status === undefined ||
            ANTIGRAVITY_RUN_DISPOSITIONS[o.cli_status] !== o.run_disposition) ||
-         o.external_effects !== undefined && (o.kind !== 'antigravity_edit' ||
-           o.external_effects !== 'UNKNOWN') ||
-         o.source_diff_evidence !== undefined && (o.kind !== 'antigravity_edit' ||
-           !['NOT_INSPECTED', 'CAPTURED'].includes(o.source_diff_evidence)) ||
-         o.task_acceptance !== undefined && (o.kind !== 'antigravity_edit' ||
-           o.task_acceptance !== 'UNKNOWN') ||
+          o.external_effects !== undefined && (!MODEL_EXECUTION_KINDS.has(o.kind) ||
+            !['NONE', 'UNKNOWN', 'OBSERVED'].includes(o.external_effects)) ||
+          o.source_diff_evidence !== undefined && (!MODEL_EXECUTION_KINDS.has(o.kind) ||
+            !['NOT_INSPECTED', 'CAPTURED', 'UNKNOWN'].includes(o.source_diff_evidence)) ||
+          o.task_acceptance !== undefined && (!MODEL_EXECUTION_KINDS.has(o.kind) ||
+            !['UNKNOWN', 'UNVERIFIED'].includes(o.task_acceptance)) ||
          o.cli_version !== undefined && (o.kind !== 'antigravity_edit' ||
            o.cli_version !== null && (typeof o.cli_version !== 'string' || !/^\d+\.\d+\.\d+$/.test(o.cli_version))) ||
          o.cli_binary_sha256 !== undefined && (o.kind !== 'antigravity_edit' ||
@@ -269,6 +269,33 @@ function hasBlockingRequestReceipt(entries) {
     if (last !== 'WAITING' || !states.includes('STARTED')) return true;
   }
   return false;
+}
+function unresolvedEditAttempt(job, entries) {
+  if (!validEditPaths(job?.edit_paths)) return true;
+  const matching = entries.filter(entry => entry.receipt.host.toUpperCase() === job.host.toUpperCase() &&
+    entry.receipt.kind === job.kind && entry.receipt.source_sha === job.source_sha);
+  if (matching.some(entry => !Number.isSafeInteger(entry.id) || entry.id < 1)) return true;
+  const attempts = new Map();
+  for (const entry of matching) {
+    const attemptId = entry.receipt.attempt_id;
+    if (!attempts.has(attemptId)) attempts.set(attemptId, []);
+    attempts.get(attemptId).push(entry);
+  }
+  for (const attemptEntries of attempts.values()) {
+    attemptEntries.sort((a, b) => a.id - b.id);
+    const last = attemptEntries.at(-1)?.receipt;
+    if (last?.state === 'STARTED' || (terminalStates.has(last?.state) &&
+        last.external_effects !== 'NONE' && last.model_invoked !== false)) return true;
+  }
+  return false;
+}
+function editPathsOverlap(left, right) {
+  const normalize = value => (process.platform === 'win32' ? value.toLowerCase() : value)
+    .replaceAll('\\', '/').replace(/\/+$/, '');
+  return left.some(a => right.some(b => {
+    const x = normalize(a), y = normalize(b);
+    return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
+  }));
 }
 function resolvedAttemptState(comments, started, workerLogin) {
   const entries = comments.filter(comment => comment.user?.login === workerLogin)
@@ -577,6 +604,10 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     if (v.job.source_pr !== undefined) {
       if (candidateSourceShas.get(v.job.source_pr)?.toLowerCase() !== v.job.source_sha.toLowerCase()) continue;
     } else if (liveMainSha !== null && v.job.source_sha !== liveMainSha) continue;
+    if (isEditExecutionKind(v.job.kind) && [...jobs.values()].some(owner =>
+      owner.job.request_id !== v.job.request_id && isEditExecutionKind(owner.job.kind) &&
+      editPathsOverlap(v.job.edit_paths, owner.job.edit_paths) &&
+      unresolvedEditAttempt(owner.job, receipts.get(owner.job.request_id) || []))) continue;
     return { job: v.job, id: v.id, originalBody: v.content };
   }
   return null;
@@ -1949,6 +1980,9 @@ export function receipt(requestId, attemptId, state, job, result = null) {
     ...(isModelExecutionKind(job.kind) ? { model: job.model, variant: job.variant,
       session_id: result?.session_id ?? null, session_started: result?.session_started ?? null,
       model_invoked: state === 'WAITING' ? false : result?.model_invoked ?? null,
+      external_effects: result?.external_effects ?? 'UNKNOWN',
+      source_diff_evidence: result?.source_diff_evidence ?? 'NOT_INSPECTED',
+      task_acceptance: result?.task_acceptance ?? 'UNKNOWN',
       ...(job.kind === 'antigravity_edit' ? {
         permission_mode_evidence: result?.permission_mode_evidence ?? 'UNKNOWN',
         cli_version: result?.cli_version ?? null,
@@ -1964,10 +1998,7 @@ export function receipt(requestId, attemptId, state, job, result = null) {
         } : {}),
         ...(Object.hasOwn(ANTIGRAVITY_RUN_DISPOSITIONS, result?.cli_status) ? {
           cli_status: result.cli_status,
-          run_disposition: result.run_disposition,
-          external_effects: result.external_effects ?? 'UNKNOWN',
-          source_diff_evidence: result.source_diff_evidence ?? 'NOT_INSPECTED',
-          task_acceptance: result.task_acceptance ?? 'UNKNOWN' } : {}) } : {}),
+           run_disposition: result.run_disposition } : {}) } : {}),
       provider_usage_evidence: result?.provider_usage_evidence ?? 'UNKNOWN',
       model_activity_evidence: result?.model_activity_evidence ?? 'UNKNOWN',
       token_usage: result?.token_usage ?? null,

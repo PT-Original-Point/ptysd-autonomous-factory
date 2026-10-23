@@ -8,7 +8,7 @@ import { homedir, hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JOB_MARKER, PROJECT, RECEIPT_MARKER, REPO, parseReceipt, receipt, runWorker,
-  verifyCapturedEvidence } from '../native-bridge/worker.mjs';
+  captureScopedEditDiff, verifyCapturedEvidence } from '../native-bridge/worker.mjs';
 import { executePendingManifest } from '../native-bridge/executor.mjs';
 import { buildCodexChildEnvironment } from '../native-bridge/codex-executor.mjs';
 import { safeErrorCode } from '../native-bridge/safe-error-code.mjs';
@@ -1217,5 +1217,353 @@ test('pending OpenCode recovery triggers only the exact same attempt and refuses
     assert.throws(() => triggerPendingExecutorAttempt(f.descriptor, ATTEMPT, dependencies),
       /EXECUTOR_ATTEMPT_NOT_EXACT_PENDING/);
     assert.equal(starts, 1, 'an attempt already claimed by the executor is never started again');
+  } finally { f.dispose(); }
+});
+
+test('executor rejects registered project root writes when the attempt candidate has no diff', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root, 'registered-root-mismatch');
+    const spec = 'Synthetic root mismatch; no provider or model is invoked by this test.';
+    const job = { ...modelJob(spec), schema: 6, project_id: PROJECT,
+      host: hostname().toUpperCase(), kind: 'antigravity_edit',
+      request_id: 'PTYSD_ANTIGRAVITY_REGISTERED_ROOT_MISMATCH',
+      source_sha: source.sourceSha, spec_path: 'native-bridge/tasks/w2-review.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gemini-3.8-flash-high', variant: 'high', edit_paths: ['README.md'],
+      source_pr: 461, goal_comment_id: 6188322050, goal_body_sha256: 'c'.repeat(64) };
+    const bundle = createExecutorSourceBundle({ workspace: source.workspace,
+      descriptor: f.descriptor, job, attemptId: ATTEMPT_EDIT,
+      filesystemPath: localPathMap(f) });
+    writeFileSync(join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`), JSON.stringify(
+      makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)), { flag: 'wx' });
+    let executeCalls = 0;
+    const result = await executePendingManifest({ manifestDir: f.descriptor.manifest_dir,
+      currentSid: () => EXECUTOR_SID,
+      config: { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
+        executor_runtime: { user_sid: EXECUTOR_SID, publisher_sid: PUBLISHER_SID,
+          manifest_dir: f.descriptor.manifest_dir, results_dir: f.descriptor.results_dir },
+        workspace: source.workspace, state_dir: f.descriptor.results_dir,
+        enable_antigravity_model_runs: true },
+      execute: async (_receivedSpec, executionConfig) => {
+        executeCalls++;
+        assert.notEqual(executionConfig.workspace, source.workspace);
+        writeFileSync(join(source.workspace, 'README.md'), 'written to registered project root\n');
+        return { outcome: 'SYNTHETIC_ZERO_CANDIDATE_DIFF', exit_code: 0,
+          scope_valid: true, external_effects: 'NONE', diff_bytes: 0,
+          changed_files_count: 0, model_invoked: true };
+      },
+    });
+    const saved = JSON.parse(readFileSync(executorResultPath(f.resultsDir,
+      job.request_id, ATTEMPT_EDIT), 'utf8'));
+    assert.equal(executeCalls, 1);
+    assert.equal(saved.terminal.outcome, 'EXECUTOR_EDIT_REGISTERED_ROOT_CHANGED');
+    assert.equal(saved.terminal.scope_valid, false);
+    assert.equal(saved.terminal.external_effects, 'UNKNOWN');
+    assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(saved.terminal)),
+      'the scope-failure receipt remains valid under the published schema');
+    assert.equal(saved.terminal.diff_bytes, null,
+      'a zero candidate diff must not hide writes to the configured project root');
+    assert.equal(readFileSync(join(source.workspace, 'README.md'), 'utf8'),
+      'written to registered project root\n', 'unexpected effects are preserved for recovery');
+    assert.equal(result.terminal_state, 'BLOCKED');
+  } finally { f.dispose(); }
+});
+
+test('executor blocks a dirty registered-root path before starting a scoped attempt', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root, 'registered-root-dirty-conflict');
+    writeFileSync(join(source.workspace, 'README.md'), 'preserved pre-existing W2 work\n');
+    const spec = 'Synthetic dirty-root conflict; no provider or model is invoked.';
+    const job = { ...modelJob(spec), schema: 6, project_id: PROJECT,
+      host: hostname().toUpperCase(), kind: 'antigravity_edit',
+      request_id: 'PTYSD_ANTIGRAVITY_DIRTY_ROOT_SCOPE_CONFLICT', source_sha: source.sourceSha,
+      spec_path: 'native-bridge/tasks/w2-review.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gemini-3.8-flash-high', variant: 'high', edit_paths: ['README.md'],
+      source_pr: 461, goal_comment_id: 6188322050, goal_body_sha256: 'c'.repeat(64) };
+    const bundle = createExecutorSourceBundle({ workspace: source.workspace,
+      descriptor: f.descriptor, job, attemptId: ATTEMPT_EDIT,
+      filesystemPath: localPathMap(f) });
+    writeFileSync(join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`), JSON.stringify(
+      makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)), { flag: 'wx' });
+    let executeCalls = 0;
+    const result = await executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID,
+      config: { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
+        executor_runtime: { user_sid: EXECUTOR_SID, publisher_sid: PUBLISHER_SID,
+          manifest_dir: f.manifestDir, results_dir: f.resultsDir },
+        workspace: source.workspace, state_dir: f.resultsDir,
+        enable_antigravity_model_runs: true },
+      execute: async () => { executeCalls++; throw new Error('must not start a conflicted write'); },
+    });
+    const saved = JSON.parse(readFileSync(executorResultPath(f.resultsDir,
+      job.request_id, ATTEMPT_EDIT), 'utf8'));
+    assert.equal(executeCalls, 0);
+    assert.equal(result.terminal_state, 'BLOCKED');
+    assert.equal(saved.terminal.outcome, 'EXECUTOR_EDIT_WORKSPACE_PRECHECK_BLOCKED');
+    assert.equal(saved.local_evidence.executor_workspace_guard.error,
+      'EXECUTOR_EDIT_REGISTERED_ROOT_DIRTY_SCOPE_CONFLICT');
+    assert.equal(saved.terminal.model_invoked, false);
+    assert.equal(readFileSync(join(source.workspace, 'README.md'), 'utf8'),
+      'preserved pre-existing W2 work\n');
+  } finally { f.dispose(); }
+});
+
+test('executor reconciles tracked and untracked candidate changes against the captured diff', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root, 'candidate-three-file-diff');
+    writeFileSync(join(source.workspace, 'package.json'), '{"name":"pinned"}\n');
+    source.git(['add', 'package.json']);
+    source.git(['commit', '--quiet', '-m', 'add tracked package fixture']);
+    const sourceSha = source.git(['rev-parse', 'HEAD']).trim();
+    const spec = 'Synthetic candidate diff; provider and model are not invoked.';
+    const paths = ['package.json', 'src/w2-first.mjs', 'tests/w2-second.test.mjs'];
+    const job = { ...modelJob(spec), schema: 6, project_id: PROJECT,
+      host: hostname().toUpperCase(), kind: 'antigravity_edit',
+      request_id: 'PTYSD_ANTIGRAVITY_CANDIDATE_THREE_FILE_DIFF', source_sha: sourceSha,
+      spec_path: 'native-bridge/tasks/w2-review.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gemini-3.8-flash-high', variant: 'high', edit_paths: paths,
+      source_pr: 461, goal_comment_id: 6188322050, goal_body_sha256: 'c'.repeat(64) };
+    const bundle = createExecutorSourceBundle({ workspace: source.workspace,
+      descriptor: f.descriptor, job, attemptId: ATTEMPT_EDIT,
+      filesystemPath: localPathMap(f) });
+    writeFileSync(join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`), JSON.stringify(
+      makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)), { flag: 'wx' });
+    let captured;
+    const result = await executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID,
+      config: { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
+        executor_runtime: { user_sid: EXECUTOR_SID, publisher_sid: PUBLISHER_SID,
+          manifest_dir: f.manifestDir, results_dir: f.resultsDir },
+        workspace: source.workspace, state_dir: f.resultsDir,
+        enable_antigravity_model_runs: true },
+      execute: async (_receivedSpec, executionConfig) => {
+        mkdirSync(join(executionConfig.workspace, 'src'));
+        mkdirSync(join(executionConfig.workspace, 'tests'));
+        writeFileSync(join(executionConfig.workspace, 'package.json'), '{"name":"edited"}\n');
+        writeFileSync(join(executionConfig.workspace, paths[1]), 'export const w2 = true;\n');
+        writeFileSync(join(executionConfig.workspace, paths[2]), 'import test from "node:test";\n');
+        captured = await captureScopedEditDiff({ workspace: executionConfig.workspace,
+          state_dir: f.resultsDir, job, attempt_id: ATTEMPT_EDIT });
+        return { outcome: 'SYNTHETIC_SCOPED_DIFF_UNVERIFIED', exit_code: 0,
+          scope_valid: captured.scope_valid, diff_sha256: captured.sha256,
+          diff_bytes: captured.bytes, changed_files: captured.changed_files,
+          local_evidence: { edit_diff: { file: captured.file, sha256: captured.sha256,
+            bytes: captured.bytes, changed_files: captured.changed_files,
+            allowed_paths: paths, scope_valid: captured.scope_valid } } };
+      },
+    });
+    const saved = JSON.parse(readFileSync(executorResultPath(f.resultsDir,
+      job.request_id, ATTEMPT_EDIT), 'utf8'));
+    assert.equal(result.terminal_state, 'FINISHED');
+    assert.equal(captured.scope_valid, true);
+    assert.equal(saved.terminal.scope_valid, true);
+    assert.equal(saved.terminal.diff_sha256, captured.sha256);
+    assert.equal(saved.terminal.diff_bytes, captured.bytes);
+    assert.equal(saved.terminal.changed_files_count, 3);
+    assert.deepEqual(saved.local_evidence.edit_diff.changed_files.slice().sort(), paths.slice().sort());
+    assert.equal(saved.local_evidence.executor_workspace_guard.readback, 'COMPLETE');
+    assert.equal(saved.local_evidence.executor_workspace_guard.registered_root_state_sha256,
+      saved.local_evidence.executor_workspace_guard.registered_root_after_sha256);
+    assert.equal(saved.terminal.task_acceptance, 'UNKNOWN',
+      'captured source diff is not semantic or CI acceptance');
+    cleanupExecutorAttempt({ ...f.descriptor, manifest_dir: f.manifestDir,
+      results_dir: f.resultsDir }, ATTEMPT_EDIT);
+  } finally { f.dispose(); }
+});
+
+test('executor fails closed when a candidate write traverses a junction outside its physical root', async t => {
+  if (process.platform !== 'win32') return t.skip('NTFS junction verification is Windows-only');
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root, 'candidate-junction-escape');
+    const spec = 'Synthetic junction escape; no provider or model is invoked.';
+    const job = { ...modelJob(spec), schema: 6, project_id: PROJECT,
+      host: hostname().toUpperCase(), kind: 'antigravity_edit',
+      request_id: 'PTYSD_ANTIGRAVITY_JUNCTION_ESCAPE', source_sha: source.sourceSha,
+      spec_path: 'native-bridge/tasks/w2-review.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gemini-3.8-flash-high', variant: 'high', edit_paths: ['README.md'],
+      source_pr: 461, goal_comment_id: 6188322050, goal_body_sha256: 'c'.repeat(64) };
+    const bundle = createExecutorSourceBundle({ workspace: source.workspace,
+      descriptor: f.descriptor, job, attemptId: ATTEMPT_EDIT,
+      filesystemPath: localPathMap(f) });
+    writeFileSync(join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`), JSON.stringify(
+      makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)), { flag: 'wx' });
+    let junctionCreated = false;
+    const outside = join(f.root, 'outside-root');
+    mkdirSync(outside);
+    const result = await executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID,
+      config: { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
+        executor_runtime: { user_sid: EXECUTOR_SID, publisher_sid: PUBLISHER_SID,
+          manifest_dir: f.manifestDir, results_dir: f.resultsDir },
+        workspace: source.workspace, state_dir: f.resultsDir,
+        enable_antigravity_model_runs: true },
+      execute: async (_receivedSpec, executionConfig) => {
+        const junction = join(executionConfig.workspace, 'escape');
+        try {
+          symlinkSync(outside, junction, 'junction');
+          junctionCreated = true;
+        } catch { return { outcome: 'SYNTHETIC_JUNCTION_UNAVAILABLE', exit_code: 0,
+          scope_valid: true, diff_bytes: 0, changed_files: [] }; }
+        writeFileSync(join(junction, 'escaped.mjs'), 'export const escaped = true;\n');
+        return { outcome: 'SYNTHETIC_FALSE_ZERO_DIFF', exit_code: 0,
+          scope_valid: true, external_effects: 'NONE', diff_bytes: 0,
+          changed_files: [], model_invoked: true };
+      },
+    });
+    if (!junctionCreated) return t.skip('the current Windows identity cannot create a synthetic junction');
+    const saved = JSON.parse(readFileSync(executorResultPath(f.resultsDir,
+      job.request_id, ATTEMPT_EDIT), 'utf8'));
+    assert.notEqual(saved.terminal.scope_valid, true,
+      'a lexical path inside the candidate must not authorize an external physical target');
+    assert.equal(saved.terminal.external_effects, 'UNKNOWN');
+    assert.notEqual(result.terminal_state, 'FINISHED');
+    assert.equal(readFileSync(join(outside, 'escaped.mjs'), 'utf8'),
+      'export const escaped = true;\n', 'the unexpected external write is preserved');
+  } finally { f.dispose(); }
+});
+
+test('executor preserves ambiguity when the candidate workspace disappears before readback', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root, 'candidate-disappears');
+    const spec = 'Synthetic lost workspace; provider and model are not invoked.';
+    const job = { ...modelJob(spec), schema: 6, project_id: PROJECT,
+      host: hostname().toUpperCase(), kind: 'antigravity_edit',
+      request_id: 'PTYSD_ANTIGRAVITY_CANDIDATE_DISAPPEARS', source_sha: source.sourceSha,
+      spec_path: 'native-bridge/tasks/w2-review.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gemini-3.8-flash-high', variant: 'high', edit_paths: ['README.md'],
+      source_pr: 461, goal_comment_id: 6188322050, goal_body_sha256: 'c'.repeat(64) };
+    const bundle = createExecutorSourceBundle({ workspace: source.workspace,
+      descriptor: f.descriptor, job, attemptId: ATTEMPT_EDIT,
+      filesystemPath: localPathMap(f) });
+    writeFileSync(join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`), JSON.stringify(
+      makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)), { flag: 'wx' });
+    let executeCalls = 0;
+    const config = { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
+      executor_runtime: { user_sid: EXECUTOR_SID, publisher_sid: PUBLISHER_SID,
+        manifest_dir: f.manifestDir, results_dir: f.resultsDir },
+      workspace: source.workspace, state_dir: f.resultsDir, enable_antigravity_model_runs: true };
+    const result = await executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID, config,
+      execute: async (_receivedSpec, executionConfig) => {
+        executeCalls++;
+        rmSync(executionConfig.workspace, { recursive: true, force: false });
+        return { outcome: 'SYNTHETIC_CANDIDATE_REMOVED', exit_code: 0,
+          scope_valid: true, diff_bytes: 0, changed_files: [], model_invoked: true,
+          local_evidence: { termination_state: 'NOT_REQUESTED' } };
+      },
+    });
+    const saved = JSON.parse(readFileSync(executorResultPath(f.resultsDir,
+      job.request_id, ATTEMPT_EDIT), 'utf8'));
+    assert.equal(result.terminal_state, 'BLOCKED');
+    assert.equal(saved.terminal.outcome, 'EXECUTOR_EDIT_WORKSPACE_READBACK_UNKNOWN');
+    assert.equal(saved.terminal.scope_valid, false);
+    assert.equal(saved.terminal.external_effects, 'UNKNOWN');
+    assert.equal(saved.terminal.diff_bytes, null);
+    assert.equal(existsSync(candidateWorkspacePath(f.resultsDir, ATTEMPT_EDIT)), false,
+      'Executor does not fabricate or recreate the missing attempt workspace');
+    await assert.rejects(executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID, config,
+      execute: async () => { executeCalls++; throw new Error('must not replay'); },
+    }), /EXECUTOR_ATTEMPT_ALREADY_RUNNING/);
+    assert.equal(executeCalls, 1);
+  } finally { f.dispose(); }
+});
+
+test('executor leaves an attempt unresolved when its process tree may still write', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root, 'candidate-orphan-possible');
+    const spec = 'Synthetic orphan; no real provider or model is invoked.';
+    const job = { ...modelJob(spec), schema: 6, project_id: PROJECT,
+      host: hostname().toUpperCase(), kind: 'antigravity_edit',
+      request_id: 'PTYSD_ANTIGRAVITY_CANDIDATE_ORPHAN', source_sha: source.sourceSha,
+      spec_path: 'native-bridge/tasks/w2-review.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gemini-3.8-flash-high', variant: 'high', edit_paths: ['README.md'],
+      source_pr: 461, goal_comment_id: 6188322050, goal_body_sha256: 'c'.repeat(64) };
+    const bundle = createExecutorSourceBundle({ workspace: source.workspace,
+      descriptor: f.descriptor, job, attemptId: ATTEMPT_EDIT,
+      filesystemPath: localPathMap(f) });
+    writeFileSync(join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`), JSON.stringify(
+      makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)), { flag: 'wx' });
+    const result = await executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID,
+      config: { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
+        executor_runtime: { user_sid: EXECUTOR_SID, publisher_sid: PUBLISHER_SID,
+          manifest_dir: f.manifestDir, results_dir: f.resultsDir },
+        workspace: source.workspace, state_dir: f.resultsDir,
+        enable_antigravity_model_runs: true },
+      execute: async (_receivedSpec, executionConfig) => {
+        writeFileSync(join(executionConfig.workspace, 'README.md'), 'possibly still being written\n');
+        return { outcome: 'SYNTHETIC_ORPHAN', exit_code: -1, scope_valid: true,
+          diff_bytes: 0, changed_files: [], model_invoked: true,
+          local_evidence: { termination_state: 'ORPHAN_POSSIBLE' } };
+      },
+    });
+    const saved = JSON.parse(readFileSync(executorResultPath(f.resultsDir,
+      job.request_id, ATTEMPT_EDIT), 'utf8'));
+    assert.equal(result.terminal_state, 'BLOCKED');
+    assert.equal(saved.terminal.outcome,
+      'EXECUTOR_EDIT_WORKSPACE_READBACK_SKIPPED_PROCESS_UNCONFIRMED');
+    assert.equal(saved.terminal.external_effects, 'UNKNOWN');
+    assert.equal(saved.terminal.scope_valid, false);
+    assert.equal(readFileSync(join(candidateWorkspacePath(f.resultsDir, ATTEMPT_EDIT),
+      'README.md'), 'utf8'), 'possibly still being written\n');
+    assert.equal(existsSync(join(f.manifestDir, `${ATTEMPT_EDIT}.running.json`)), true,
+      'unconfirmed model attempt is not converted into a retryable pending manifest');
+  } finally { f.dispose(); }
+});
+
+test('executor result readback failure preserves the running attempt and prevents replay', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root, 'candidate-result-readback-fails');
+    const spec = 'Synthetic result readback failure; no provider is invoked.';
+    const job = { ...modelJob(spec), schema: 6, project_id: PROJECT,
+      host: hostname().toUpperCase(), kind: 'antigravity_edit',
+      request_id: 'PTYSD_ANTIGRAVITY_RESULT_READBACK_FAILS', source_sha: source.sourceSha,
+      spec_path: 'native-bridge/tasks/w2-review.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gemini-3.8-flash-high', variant: 'high', edit_paths: ['README.md'],
+      source_pr: 461, goal_comment_id: 6188322050, goal_body_sha256: 'c'.repeat(64) };
+    const bundle = createExecutorSourceBundle({ workspace: source.workspace,
+      descriptor: f.descriptor, job, attemptId: ATTEMPT_EDIT,
+      filesystemPath: localPathMap(f) });
+    writeFileSync(join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`), JSON.stringify(
+      makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)), { flag: 'wx' });
+    let executeCalls = 0;
+    const config = { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
+      executor_runtime: { user_sid: EXECUTOR_SID, publisher_sid: PUBLISHER_SID,
+        manifest_dir: f.manifestDir, results_dir: f.resultsDir },
+      workspace: source.workspace, state_dir: f.resultsDir, enable_antigravity_model_runs: true };
+    await assert.rejects(executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID, config,
+      readPersisted: () => { throw new Error('synthetic readback denial'); },
+      execute: async () => { executeCalls++; return { outcome: 'SYNTHETIC_TERMINAL',
+        exit_code: 0, model_invoked: false, local_evidence: { termination_state: 'NOT_REQUESTED' } }; },
+    }), /EXECUTOR_RESULT_READBACK_FAILED/);
+    assert.equal(executeCalls, 1);
+    assert.equal(existsSync(join(f.manifestDir, `${ATTEMPT_EDIT}.running.json`)), true);
+    assert.equal(existsSync(executorResultPath(f.resultsDir, job.request_id, ATTEMPT_EDIT)), true);
+    await assert.rejects(executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID, config,
+      execute: async () => { executeCalls++; throw new Error('must not replay'); },
+    }), /EXECUTOR_ATTEMPT_ALREADY_RUNNING/);
+    assert.equal(executeCalls, 1);
   } finally { f.dispose(); }
 });
