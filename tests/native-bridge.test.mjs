@@ -1852,6 +1852,7 @@ test('OpenCode V2 edit intake captures exact scoped diff without treating exit z
     assert.equal(allowed.session_id,'ses_ptysd_open_edit_allowed_20261016');
     assert.equal(allowed.session_started,true);
     assert.equal(allowed.model_invoked,true);
+    assert.equal(allowed.source_diff_evidence,'CAPTURED');
     assert.equal(allowed.provider_usage_evidence,'CONFIRMED');
     assert.equal(allowed.model_activity_evidence,'CONFIRMED');
     assert.equal(allowed.tool_execution_count,1);
@@ -1864,6 +1865,7 @@ test('OpenCode V2 edit intake captures exact scoped diff without treating exit z
     assert.equal(allowedReceipt.session_id,allowed.session_id);
     assert.equal(allowedReceipt.session_started,true);
     assert.equal(allowedReceipt.model_invoked,true);
+    assert.equal(allowedReceipt.source_diff_evidence,'CAPTURED');
     assert.equal(allowedReceipt.provider_usage_evidence,'CONFIRMED');
     assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(allowedReceipt)).session_id,allowed.session_id);
     assert.equal(await verifyCapturedEvidence(stateDir,{terminal:allowedReceipt,
@@ -2957,6 +2959,91 @@ test('a recoverable WAITING receipt makes the same OpenCode task eligible for re
     outcome: 'MODEL_RUN_FAILED' }), 'worker'));
   assert.equal(selectNext(comments, ['t14210184'], 'worker', job.host, job.source_sha), null,
     'a true terminal attempt remains non-replayable');
+});
+test('an unresolved edit attempt blocks only overlapping paths across model lanes', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = 'c'.repeat(40);
+  const makeEdit = (requestId, kind, editPaths) => withHumanGoal(mkjob({
+    request_id: requestId, kind, source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/overlap-test.md', spec_sha256: hash,
+    model: kind === 'antigravity_edit' ? ANTIGRAVITY_V2_MODEL : 'opencode/deepseek-v4.1-flash-free',
+    variant: kind === 'antigravity_edit' ? 'high' : 'free',
+    edit_paths: editPaths, source_pr: 461,
+  }));
+  const active = makeEdit('PTYSD_ACTIVE_W2_SHARED_PATH', 'antigravity_edit', ['src/shared.mjs']);
+  const overlapping = makeEdit('PTYSD_READY_W1_SHARED_PATH', 'opencode_edit', ['src/shared.mjs']);
+  const independent = makeEdit('PTYSD_READY_W1_INDEPENDENT_PATH', 'opencode_edit', ['docs/independent.md']);
+  const attemptId = '44444444-4444-4444-8444-444444444444';
+  const jobComment = (id, job) => ({ ...com(id, encoded(job)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` });
+  const started = receipt(active.request_id, attemptId, 'STARTED', active, {
+    model_invoked: true, external_effects: 'UNKNOWN',
+  });
+  const comments = [
+    jobComment(801, active), jobComment(802, overlapping), jobComment(803, independent),
+    com(804, RECEIPT_MARKER + JSON.stringify(started), 'worker'),
+  ];
+  const heads = new Map([[461, sourceSha]]);
+  assert.equal(selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [], heads)?.id, 803,
+    'an unresolved W2 effect must not starve a non-overlapping W1 task');
+  assert.equal(selectNext([comments[0], comments[1], comments[3]],
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'the same uncertain attempt must protect its overlapping path from another writer');
+  const blocked = receipt(active.request_id, attemptId, 'BLOCKED', active, {
+    outcome: 'EXECUTOR_EDIT_WORKSPACE_READBACK_UNKNOWN', exit_code: 46,
+    model_invoked: true, external_effects: 'UNKNOWN', source_diff_evidence: 'NOT_INSPECTED',
+  });
+  const blockedComments = [comments[0], comments[1], comments[2],
+    com(805, RECEIPT_MARKER + JSON.stringify(blocked), 'worker')];
+  assert.equal(selectNext(blockedComments, ['t14210184'], 'worker', host,
+    sourceSha, [], heads)?.id, 803,
+  'a terminal W2 receipt with unknown effects must still permit independent paths');
+  assert.equal(selectNext([blockedComments[0], blockedComments[1], blockedComments[3]],
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'a terminal W2 receipt with unknown effects must protect overlapping paths');
+});
+test('captured terminal edit evidence releases its path lease for a later exact source', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const oldSha = 'c'.repeat(40), nextSha = 'd'.repeat(40);
+  const makeEdit = (requestId, sourceSha) => withHumanGoal(mkjob({
+    request_id: requestId, kind: 'opencode_edit', source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/overlap-test.md', spec_sha256: hash,
+    model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+    edit_paths: ['native-bridge/v2-readiness.mjs'], source_pr: 461,
+  }));
+  const prior = makeEdit('PTYSD_FINISHED_CAPTURED_W1', oldSha);
+  const next = makeEdit('PTYSD_NEXT_CAPTURED_W1', nextSha);
+  const attemptId = '55555555-5555-4555-8555-555555555555';
+  const completed = receipt(prior.request_id, attemptId, 'FINISHED', prior, {
+    outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED', exit_code: 0, model_invoked: true,
+    external_effects: 'UNKNOWN', source_diff_evidence: 'CAPTURED',
+    coding_state: 'DIFF_CAPTURED_UNVERIFIED', task_acceptance: 'UNVERIFIED', scope_valid: true,
+    diff_sha256: 'e'.repeat(64), diff_bytes: 128,
+    changed_files: ['native-bridge/v2-readiness.mjs'],
+  });
+  const jobComment = (id, job) => ({ ...com(id, encoded(job)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` });
+  const comments = [jobComment(901, prior), jobComment(902, next),
+    com(903, RECEIPT_MARKER + JSON.stringify(completed), 'worker')];
+  const heads = new Map([[461, nextSha]]);
+
+  assert.ok(parseJob(comments[0].body), 'the previous request must be a valid schema-6 edit job');
+  assert.ok(parseJob(comments[1].body), 'the new request must be a valid schema-6 edit job');
+  assert.equal(parseReceipt(comments[2].body)?.source_diff_evidence, 'CAPTURED');
+  assert.equal(selectNext(comments, ['t14210184'], 'worker', host, nextSha, [], heads)?.id, 902,
+    'a FINISHED attempt with a complete, scope-valid diff releases its path lease even when the broader effect field remains UNKNOWN');
+
+  for (const unsafe of [
+    { ...completed, scope_valid: false },
+    { ...completed, diff_sha256: null },
+    { ...completed, edit_paths_sha256: '0'.repeat(64) },
+    { ...completed, state: 'BLOCKED' },
+  ]) {
+    const unsafeComments = [jobComment(901, prior), jobComment(902, next),
+      com(903, RECEIPT_MARKER + JSON.stringify(unsafe), 'worker')];
+    assert.equal(selectNext(unsafeComments, ['t14210184'], 'worker', host, nextSha, [], heads), null,
+      'incomplete, out-of-scope, or blocked terminal evidence must retain the path lease');
+  }
 });
 test('publisher records executor WAITING, continues a ping, then re-dispatches the same task after readiness', async () => {
   const root = mkdtempSync(join(homedir(), '.ptysd-opencode-waiting-reconcile-'));

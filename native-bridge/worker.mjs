@@ -212,12 +212,12 @@ export function parseReceipt(body) {
            !Object.values(ANTIGRAVITY_RUN_DISPOSITIONS).includes(o.run_disposition) ||
            o.cli_status === undefined ||
            ANTIGRAVITY_RUN_DISPOSITIONS[o.cli_status] !== o.run_disposition) ||
-         o.external_effects !== undefined && (o.kind !== 'antigravity_edit' ||
-           o.external_effects !== 'UNKNOWN') ||
-         o.source_diff_evidence !== undefined && (o.kind !== 'antigravity_edit' ||
-           !['NOT_INSPECTED', 'CAPTURED'].includes(o.source_diff_evidence)) ||
-         o.task_acceptance !== undefined && (o.kind !== 'antigravity_edit' ||
-           o.task_acceptance !== 'UNKNOWN') ||
+          o.external_effects !== undefined && (!MODEL_EXECUTION_KINDS.has(o.kind) ||
+            !['NONE', 'UNKNOWN', 'OBSERVED'].includes(o.external_effects)) ||
+          o.source_diff_evidence !== undefined && (!MODEL_EXECUTION_KINDS.has(o.kind) ||
+            !['NOT_INSPECTED', 'CAPTURED', 'UNKNOWN'].includes(o.source_diff_evidence)) ||
+          o.task_acceptance !== undefined && (!MODEL_EXECUTION_KINDS.has(o.kind) ||
+            !['UNKNOWN', 'UNVERIFIED'].includes(o.task_acceptance)) ||
          o.cli_version !== undefined && (o.kind !== 'antigravity_edit' ||
            o.cli_version !== null && (typeof o.cli_version !== 'string' || !/^\d+\.\d+\.\d+$/.test(o.cli_version))) ||
          o.cli_binary_sha256 !== undefined && (o.kind !== 'antigravity_edit' ||
@@ -269,6 +269,48 @@ function hasBlockingRequestReceipt(entries) {
     if (last !== 'WAITING' || !states.includes('STARTED')) return true;
   }
   return false;
+}
+// This releases only the same-path writer lease after the executor has returned
+// and captured a complete, request-bound diff. It does not accept the task.
+function hasCompletedScopedEditDiff(receipt, job) {
+  return receipt?.state === 'FINISHED' && receipt.model_invoked === true &&
+    receipt.coding_state === 'DIFF_CAPTURED_UNVERIFIED' && receipt.scope_valid === true &&
+    receipt.source_diff_evidence === 'CAPTURED' &&
+    receipt.source_pr === job.source_pr && receipt.goal_comment_id === job.goal_comment_id &&
+    receipt.goal_body_sha256 === job.goal_body_sha256 &&
+    receipt.edit_paths_sha256 === digest(Buffer.from(JSON.stringify(job.edit_paths), 'utf8')) &&
+    /^[a-f0-9]{64}$/i.test(receipt.diff_sha256 || '') &&
+    Number.isSafeInteger(receipt.diff_bytes) && receipt.diff_bytes > 0 &&
+    /^[a-f0-9]{64}$/i.test(receipt.changed_files_sha256 || '') &&
+    Number.isSafeInteger(receipt.changed_files_count) && receipt.changed_files_count > 0;
+}
+function unresolvedEditAttempt(job, entries) {
+  if (!validEditPaths(job?.edit_paths)) return true;
+  const matching = entries.filter(entry => entry.receipt.host.toUpperCase() === job.host.toUpperCase() &&
+    entry.receipt.kind === job.kind && entry.receipt.source_sha === job.source_sha);
+  if (matching.some(entry => !Number.isSafeInteger(entry.id) || entry.id < 1)) return true;
+  const attempts = new Map();
+  for (const entry of matching) {
+    const attemptId = entry.receipt.attempt_id;
+    if (!attempts.has(attemptId)) attempts.set(attemptId, []);
+    attempts.get(attemptId).push(entry);
+  }
+  for (const attemptEntries of attempts.values()) {
+    attemptEntries.sort((a, b) => a.id - b.id);
+    const last = attemptEntries.at(-1)?.receipt;
+    if (last?.state === 'STARTED' || (terminalStates.has(last?.state) &&
+        last.external_effects !== 'NONE' && last.model_invoked !== false &&
+        !hasCompletedScopedEditDiff(last, job))) return true;
+  }
+  return false;
+}
+function editPathsOverlap(left, right) {
+  const normalize = value => (process.platform === 'win32' ? value.toLowerCase() : value)
+    .replaceAll('\\', '/').replace(/\/+$/, '');
+  return left.some(a => right.some(b => {
+    const x = normalize(a), y = normalize(b);
+    return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
+  }));
 }
 function resolvedAttemptState(comments, started, workerLogin) {
   const entries = comments.filter(comment => comment.user?.login === workerLogin)
@@ -577,6 +619,10 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     if (v.job.source_pr !== undefined) {
       if (candidateSourceShas.get(v.job.source_pr)?.toLowerCase() !== v.job.source_sha.toLowerCase()) continue;
     } else if (liveMainSha !== null && v.job.source_sha !== liveMainSha) continue;
+    if (isEditExecutionKind(v.job.kind) && [...jobs.values()].some(owner =>
+      owner.job.request_id !== v.job.request_id && isEditExecutionKind(owner.job.kind) &&
+      editPathsOverlap(v.job.edit_paths, owner.job.edit_paths) &&
+      unresolvedEditAttempt(owner.job, receipts.get(owner.job.request_id) || []))) continue;
     return { job: v.job, id: v.id, originalBody: v.content };
   }
   return null;
@@ -1287,14 +1333,26 @@ export async function captureScopedEditDiff({ workspace, state_dir, job, attempt
   const status = await captureGitStdout(workspace, state_dir, job.request_id,
     attempt_id, 'after', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'],
     false, readProcessTree, platformName);
-  const changes = parseGitStatusPaths(status.output);
+  const ignored = await captureGitStdout(workspace, state_dir, job.request_id,
+    attempt_id, 'after-ignored', ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
+    false, readProcessTree, platformName);
+  const changesByPath = new Map(parseGitStatusPaths(status.output).map(change => [
+    process.platform === 'win32' ? change.path.toLowerCase() : change.path, change,
+  ]));
+  for (const rawPath of ignored.output.toString('utf8').split('\0').filter(Boolean)) {
+    const path = rawPath.replaceAll('\\', '/');
+    const key = process.platform === 'win32' ? path.toLowerCase() : path;
+    if (!changesByPath.has(key)) changesByPath.set(key, { status: '!!', path });
+  }
+  const changes = [...changesByPath.values()];
   const changedFiles = [...new Set(changes.map(change => change.path))].sort();
   const allowed = new Set(job.edit_paths.map(path => process.platform === 'win32' ? path.toLowerCase() : path));
   const scopeValid = changedFiles.every(path => allowed.has(
     process.platform === 'win32' ? path.toLowerCase() : path));
-  const untracked = changes.filter(change => change.status === '??').map(change => change.path);
+  const untracked = changes.filter(change => change.status === '??' || change.status === '!!')
+    .map(change => change.path);
   if (scopeValid && untracked.length) {
-    execFileSync('git', ['-C', workspace, 'add', '--intent-to-add', '--', ...untracked], {
+    execFileSync('git', ['-C', workspace, 'add', '--intent-to-add', '--force', '--', ...untracked], {
       windowsHide: true, shell: false, stdio: ['ignore', 'ignore', 'pipe'],
     });
   }
@@ -1819,6 +1877,7 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
     return { ...evidencedResult,
       outcome: errorCode.startsWith('EDIT_PATH_PHYSICAL_')
         ? 'V2_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN' : `V2_EDIT_DIFF_CAPTURE_FAILED_${errorCode}`,
+      source_diff_evidence: 'UNKNOWN',
       exit_code: -1, coding_state: 'UNKNOWN',
       ...(errorCode.startsWith('EDIT_PATH_PHYSICAL_') ? { scope_valid: false, external_effects: 'UNKNOWN' } : {}),
       local_evidence: { ...evidencedResult.local_evidence,
@@ -1835,7 +1894,8 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
   if (policyChanged || !diff.scope_valid)
     return { ...evidencedResult, outcome: policyChanged ? 'V2_EDIT_POLICY_CHANGED' : 'V2_EDIT_SCOPE_VIOLATION',
       cli_exit_code: processResult.exit_code, exit_code: 46, coding_state: 'REJECTED_SCOPE',
-      scope_valid: false, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
+      scope_valid: false, source_diff_evidence: 'CAPTURED',
+      diff_sha256: diff.sha256, diff_bytes: diff.bytes,
       ...diff, local_evidence: localEvidence };
   if (localEvidence.storage_error || localEvidence.capture_error || localEvidence.spawn_error ||
       localEvidence.process_error || localEvidence.stdin_error)
@@ -1844,20 +1904,22 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
         'V2_EDIT_EVIDENCE_CAPTURE_FAILED_NO_DIFF',
       cli_exit_code: processResult.exit_code, exit_code: -1,
       coding_state: diff.changed_files.length ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNKNOWN',
-      scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
+      scope_valid: true, source_diff_evidence: 'CAPTURED',
+      diff_sha256: diff.sha256, diff_bytes: diff.bytes,
       ...diff, local_evidence: localEvidence };
   if (!diff.changed_files.length || diff.bytes === 0)
     return { ...evidencedResult, outcome: 'V2_EDIT_NO_DIFF', cli_exit_code: evidencedResult.exit_code,
       exit_code: 47, coding_state: 'NO_DIFF', scope_valid: true,
-      diff_sha256: diff.sha256, diff_bytes: diff.bytes, ...diff,
+      source_diff_evidence: 'CAPTURED', diff_sha256: diff.sha256, diff_bytes: diff.bytes, ...diff,
       local_evidence: localEvidence };
   if (evidencedResult.exit_code !== 0)
     return { ...evidencedResult, outcome: 'V2_EDIT_PROCESS_FAILED_DIFF_PRESERVED',
       cli_exit_code: evidencedResult.exit_code, coding_state: 'DIFF_CAPTURED_UNVERIFIED',
-      scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
+      scope_valid: true, source_diff_evidence: 'CAPTURED',
+      diff_sha256: diff.sha256, diff_bytes: diff.bytes,
       ...diff, local_evidence: localEvidence };
   return { ...evidencedResult, outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED',
-    coding_state: 'DIFF_CAPTURED_UNVERIFIED', scope_valid: true,
+    coding_state: 'DIFF_CAPTURED_UNVERIFIED', scope_valid: true, source_diff_evidence: 'CAPTURED',
     diff_sha256: diff.sha256, diff_bytes: diff.bytes,
     ...diff, local_evidence: localEvidence };
 }
@@ -1949,6 +2011,9 @@ export function receipt(requestId, attemptId, state, job, result = null) {
     ...(isModelExecutionKind(job.kind) ? { model: job.model, variant: job.variant,
       session_id: result?.session_id ?? null, session_started: result?.session_started ?? null,
       model_invoked: state === 'WAITING' ? false : result?.model_invoked ?? null,
+      external_effects: result?.external_effects ?? 'UNKNOWN',
+      source_diff_evidence: result?.source_diff_evidence ?? 'NOT_INSPECTED',
+      task_acceptance: result?.task_acceptance ?? 'UNKNOWN',
       ...(job.kind === 'antigravity_edit' ? {
         permission_mode_evidence: result?.permission_mode_evidence ?? 'UNKNOWN',
         cli_version: result?.cli_version ?? null,
@@ -1964,10 +2029,7 @@ export function receipt(requestId, attemptId, state, job, result = null) {
         } : {}),
         ...(Object.hasOwn(ANTIGRAVITY_RUN_DISPOSITIONS, result?.cli_status) ? {
           cli_status: result.cli_status,
-          run_disposition: result.run_disposition,
-          external_effects: result.external_effects ?? 'UNKNOWN',
-          source_diff_evidence: result.source_diff_evidence ?? 'NOT_INSPECTED',
-          task_acceptance: result.task_acceptance ?? 'UNKNOWN' } : {}) } : {}),
+           run_disposition: result.run_disposition } : {}) } : {}),
       provider_usage_evidence: result?.provider_usage_evidence ?? 'UNKNOWN',
       model_activity_evidence: result?.model_activity_evidence ?? 'UNKNOWN',
       token_usage: result?.token_usage ?? null,

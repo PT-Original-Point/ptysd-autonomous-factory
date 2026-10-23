@@ -2,7 +2,8 @@
 // Dedicated Task Scheduler entrypoint. It has no GitHub publisher API calls.
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync,
+  renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { guardConfig, isRecoverableModelPreflightWait, JOB_MARKER, parseJob,
@@ -19,6 +20,188 @@ function fail(code) { const error = new Error(code); error.code = code; throw er
 function runGit(args, code, options) {
   try { return execFileSync('git', args, options); }
   catch (cause) { const error = new Error(code, { cause }); error.code = code; throw error; }
+}
+
+function hashFile(path) {
+  return new Promise((resolveHash, reject) => {
+    const hash = createHash('sha256');
+    const input = createReadStream(path);
+    input.on('data', chunk => hash.update(chunk));
+    input.once('error', reject);
+    input.once('end', () => resolveHash(hash.digest('hex')));
+  });
+}
+
+function physicalDirectoryIdentity(path) {
+  if (typeof path !== 'string' || !path) fail('EXECUTOR_EDIT_ROOT_PATH_UNAVAILABLE');
+  assertPhysicalDirectory(path, 'EXECUTOR_EDIT_ROOT_NOT_PHYSICAL_DIRECTORY');
+  let physicalPath;
+  let info;
+  try {
+    physicalPath = realpathSync.native(path);
+    info = statSync(physicalPath, { bigint: true });
+  } catch { fail('EXECUTOR_EDIT_ROOT_IDENTITY_UNAVAILABLE'); }
+  if (!info.isDirectory()) fail('EXECUTOR_EDIT_ROOT_NOT_DIRECTORY');
+  const identity = { physical_path: physicalPath.replaceAll('\\', '/'),
+    volume_id: info.dev.toString(), file_id: info.ino.toString() };
+  return { ...identity, sha256: digest(Buffer.from(JSON.stringify(identity), 'utf8')) };
+}
+
+function statusRecords(statusBytes) {
+  return statusBytes.toString('utf8').split('\0').filter(Boolean).map(record => {
+    if (record.length < 4 || record[2] !== ' ')
+      fail('EXECUTOR_EDIT_ROOT_STATUS_FORMAT_INVALID');
+    return { status: record.slice(0, 2), path: record.slice(3).replaceAll('\\', '/') };
+  });
+}
+
+function isInsidePhysicalRoot(root, path) {
+  const rel = relative(root, path);
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+async function captureWorkspaceSnapshot(workspace) {
+  const identity = physicalDirectoryIdentity(workspace);
+  const head = runGit(['-C', workspace, 'rev-parse', 'HEAD'],
+    'EXECUTOR_EDIT_ROOT_HEAD_READBACK_FAILED', {
+      encoding: 'utf8', windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  const statusBytes = runGit(['-C', workspace, 'status', '--porcelain=v1', '-z',
+    '--untracked-files=all', '--no-renames'], 'EXECUTOR_EDIT_ROOT_STATUS_READBACK_FAILED', {
+    windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const records = statusRecords(statusBytes);
+  const ignoredBytes = runGit(['-C', workspace, 'ls-files', '--others', '--ignored',
+    '--exclude-standard', '-z'], 'EXECUTOR_EDIT_ROOT_IGNORED_READBACK_FAILED', {
+    windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const seenPaths = new Set(records.map(record => process.platform === 'win32'
+    ? record.path.toLowerCase() : record.path));
+  for (const rawPath of ignoredBytes.toString('utf8').split('\0').filter(Boolean)) {
+    const path = rawPath.replaceAll('\\', '/');
+    const key = process.platform === 'win32' ? path.toLowerCase() : path;
+    if (!seenPaths.has(key)) records.push({ status: '!!', path });
+  }
+  const changedFiles = [];
+  for (const record of records) {
+    const path = resolve(workspace, record.path);
+    if (!isInsidePhysicalRoot(identity.physical_path, path))
+      fail('EXECUTOR_EDIT_ROOT_STATUS_PATH_ESCAPED');
+    let info;
+    try { info = lstatSync(path); }
+    catch (error) {
+      if (error?.code === 'ENOENT') {
+        changedFiles.push({ status: record.status, path: record.path, state: 'MISSING' });
+        continue;
+      }
+      fail('EXECUTOR_EDIT_ROOT_FILE_READBACK_FAILED');
+    }
+    if (info.isSymbolicLink() || !info.isFile())
+      fail('EXECUTOR_EDIT_ROOT_REPARSE_OR_NONFILE_UNVERIFIED');
+    let physicalFile;
+    try { physicalFile = realpathSync.native(path); }
+    catch { fail('EXECUTOR_EDIT_ROOT_FILE_REALPATH_UNAVAILABLE'); }
+    if (!isInsidePhysicalRoot(identity.physical_path, physicalFile))
+      fail('EXECUTOR_EDIT_ROOT_FILE_ESCAPED');
+    changedFiles.push({ status: record.status, path: record.path, bytes: info.size,
+      sha256: await hashFile(physicalFile) });
+  }
+  const stagedBytes = runGit(['-C', workspace, 'diff', '--cached', '--raw',
+    '--no-abbrev', 'HEAD', '--'], 'EXECUTOR_EDIT_ROOT_INDEX_READBACK_FAILED', {
+    windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const state = { identity_sha256: identity.sha256, head,
+    status_b64: statusBytes.toString('base64'), staged_b64: stagedBytes.toString('base64'),
+    changed_files: changedFiles };
+  return { identity, identity_sha256: identity.sha256,
+    state_sha256: digest(Buffer.from(JSON.stringify(state), 'utf8')),
+    changed_paths: changedFiles.map(file => file.path).sort(), changed: records.length > 0,
+    changed_files: changedFiles };
+}
+
+function samePhysicalDirectory(left, right) {
+  const normalizePath = value => process.platform === 'win32' ? value.toLowerCase() : value;
+  if (normalizePath(left.physical_path) === normalizePath(right.physical_path)) return true;
+  const reliableFileIds = left.volume_id !== '0' && left.file_id !== '0' &&
+    right.volume_id !== '0' && right.file_id !== '0';
+  return reliableFileIds && left.volume_id === right.volume_id && left.file_id === right.file_id;
+}
+
+function editScopesOverlap(left, right) {
+  const normalize = value => (process.platform === 'win32' ? value.toLowerCase() : value)
+    .replaceAll('\\', '/').replace(/\/+$/, '');
+  return left.some(a => right.some(b => {
+    const x = normalize(a), y = normalize(b);
+    return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
+  }));
+}
+
+function guardedResult(result, outcome, evidence) {
+  return { ...result, outcome, exit_code: 46, scope_valid: false,
+    cli_exit_code: result?.cli_exit_code ?? result?.exit_code ?? null,
+    external_effects: 'UNKNOWN', source_diff_evidence: 'NOT_INSPECTED',
+    task_acceptance: 'UNKNOWN', coding_state: 'SCOPE_VIOLATION_OR_ROOT_MISMATCH',
+    diff_sha256: null, diff_bytes: null, changed_files: null,
+    local_evidence: { ...result?.local_evidence, executor_workspace_guard: evidence } };
+}
+
+async function reconcileEditWorkspace(result, job, guard) {
+  const before = {
+    registered_root_identity_sha256: guard.registered_before.identity_sha256,
+    registered_root_state_sha256: guard.registered_before.state_sha256,
+    candidate_root_identity_sha256: guard.candidate_before.identity_sha256,
+    candidate_root_state_sha256: guard.candidate_before.state_sha256,
+  };
+  const terminationState = result?.local_evidence?.termination_state;
+  if (['ORPHAN_POSSIBLE', 'TERMINATION_UNCONFIRMED', 'TERMINATION_REQUESTED']
+    .includes(terminationState))
+    return guardedResult(result, 'EXECUTOR_EDIT_WORKSPACE_READBACK_SKIPPED_PROCESS_UNCONFIRMED',
+      { ...before, readback: 'UNKNOWN_PROCESS_MAY_STILL_WRITE' });
+
+  let registeredAfter;
+  let candidateAfter;
+  try {
+    registeredAfter = await captureWorkspaceSnapshot(guard.registered_path);
+    candidateAfter = await captureWorkspaceSnapshot(guard.candidate_path);
+  } catch (error) {
+    return guardedResult(result, 'EXECUTOR_EDIT_WORKSPACE_READBACK_UNKNOWN',
+      { ...before, readback: 'FAILED', readback_error: safeErrorCode(error) });
+  }
+  const evidence = { ...before,
+    registered_root_after_sha256: registeredAfter.state_sha256,
+    candidate_root_after_sha256: candidateAfter.state_sha256,
+    readback: 'COMPLETE',
+    registered_root_changed_paths: registeredAfter.changed_paths.length,
+    candidate_root_changed_paths: candidateAfter.changed_paths.length };
+  if (registeredAfter.identity_sha256 !== guard.registered_before.identity_sha256 ||
+      registeredAfter.state_sha256 !== guard.registered_before.state_sha256)
+    return guardedResult(result, 'EXECUTOR_EDIT_REGISTERED_ROOT_CHANGED', evidence);
+
+  const allowed = new Set((job.edit_paths ?? []).map(path =>
+    process.platform === 'win32' ? path.toLowerCase() : path));
+  const candidatePaths = candidateAfter.changed_paths.map(path =>
+    process.platform === 'win32' ? path.toLowerCase() : path);
+  if (candidatePaths.some(path => !allowed.has(path)))
+    return guardedResult(result, 'EXECUTOR_EDIT_CANDIDATE_SCOPE_MISMATCH', evidence);
+
+  const reportedPaths = Array.isArray(result?.changed_files)
+    ? result.changed_files.map(path => process.platform === 'win32'
+      ? String(path).replaceAll('\\', '/').toLowerCase() : String(path).replaceAll('\\', '/')).sort()
+    : null;
+  const actualPaths = candidatePaths.slice().sort();
+  const reportedDiffBytes = result?.diff_bytes;
+  const reportedDiffHash = result?.diff_sha256;
+  const candidateDiffConsistent = candidatePaths.length
+    ? result?.scope_valid === true && Number.isSafeInteger(reportedDiffBytes) && reportedDiffBytes > 0 &&
+      HASH.test(reportedDiffHash || '') && reportedPaths !== null &&
+      JSON.stringify(reportedPaths) === JSON.stringify(actualPaths)
+    : (!Number.isSafeInteger(reportedDiffBytes) || reportedDiffBytes === 0) &&
+      (!reportedPaths || reportedPaths.length === 0);
+  if (!candidateDiffConsistent)
+    return guardedResult(result, 'EXECUTOR_EDIT_CANDIDATE_DIFF_UNRECONCILED', evidence);
+
+  return { ...result,
+    local_evidence: { ...result?.local_evidence, executor_workspace_guard: evidence } };
 }
 
 function ensurePhysicalChildDirectory(parent, name, code) {
@@ -204,6 +387,7 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
 
   let result;
   let executionConfig = config;
+  let workspaceGuard = null;
   const editJobRequiresPinnedWorkspace = ['opencode_edit', 'antigravity_edit'].includes(parsedJob.kind);
   if (editJobRequiresPinnedWorkspace && manifest.source_bundle_sha256 === undefined) {
     const laneDisabled = parsedJob.kind === 'opencode_edit'
@@ -238,12 +422,34 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
         exit_code: -1, evidence_sha256: null, evidence_bytes: 0 };
     }
   }
+  if (!result && editJobRequiresPinnedWorkspace) {
+    try {
+      const registeredBefore = await captureWorkspaceSnapshot(config.workspace);
+      const candidateBefore = await captureWorkspaceSnapshot(executionConfig.workspace);
+      if (samePhysicalDirectory(registeredBefore.identity, candidateBefore.identity))
+        fail('EXECUTOR_EDIT_WORKSPACES_NOT_PHYSICALLY_SEPARATE');
+      if (registeredBefore.changed && editScopesOverlap(registeredBefore.changed_paths,
+          parsedJob.edit_paths))
+        fail('EXECUTOR_EDIT_REGISTERED_ROOT_DIRTY_SCOPE_CONFLICT');
+      if (candidateBefore.changed) fail('EXECUTOR_EDIT_CANDIDATE_WORKSPACE_NOT_CLEAN');
+      workspaceGuard = { registered_path: config.workspace,
+        candidate_path: executionConfig.workspace, registered_before: registeredBefore,
+        candidate_before: candidateBefore };
+    } catch (error) {
+      result = { outcome: 'EXECUTOR_EDIT_WORKSPACE_PRECHECK_BLOCKED', exit_code: 46,
+        evidence_sha256: null, evidence_bytes: 0, model_invoked: false,
+        external_effects: 'NONE', scope_valid: false, coding_state: 'NOT_STARTED',
+        local_evidence: { executor_workspace_guard: {
+          readback: 'PRECHECK_FAILED', error: safeErrorCode(error) } } };
+    }
+  }
   if (!result) {
     try { result = await execute(manifest.spec, executionConfig, parsedJob, manifest.attempt_id); }
     catch (error) {
       result = { outcome: `EXECUTION_ERROR_${safeErrorCode(error)}`,
         exit_code: -1, evidence_sha256: null, evidence_bytes: 0 };
     }
+    if (workspaceGuard) result = await reconcileEditWorkspace(result, parsedJob, workspaceGuard);
   }
   if (isRecoverableModelPreflightWait(result, parsedJob)) {
     const waiting = receipt(parsedJob.request_id, manifest.attempt_id, 'WAITING', parsedJob, result);
