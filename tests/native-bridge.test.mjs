@@ -139,7 +139,8 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
   priorObservationBody = null,
   readCommentFailure = null, readCommentsFailure = null, patchCommentFailure = null,
   seededObservation = true,
-  collectWindowsFailure = null, windowsObservation = null, goalComments = [], taskComments = [], candidatePulls = {}, configOverrides = {} } = {}) {
+  collectWindowsFailure = null, windowsObservation = null, goalComments = [], taskComments = [], candidatePulls = {},
+  issueCommentsCount = null, configOverrides = {} } = {}) {
   const root = mkdtempSync(join(homedir(), '.ptysd-worker-observation-'));
   const workspace = join(root, 'workspace');
   const stateDir = join(root, 'state');
@@ -169,7 +170,7 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
   const api = uri => {
     if (uri === 'user') return { login: publisher };
     if (uri === `repos/${REPO}/issues/407`)
-      return { title: ISSUE_TITLE, state: 'open' };
+      return { title: ISSUE_TITLE, state: 'open', comments: issueCommentsCount ?? store.comments.length };
     if (uri === `repos/${REPO}/git/ref/heads/main`)
       return { object: { sha: commit } };
     const pullMatch = uri.match(new RegExp(`^repos/${REPO}/pulls/(\\d+)$`));
@@ -594,12 +595,27 @@ test('stale W2 candidate source is reported with both SHAs while an independent 
   });
   try {
     const result = await fixture.run();
+    const observation = parseOperatorObservation(
+      fixture.store.comments.find(comment => comment.body.startsWith(OPERATOR_MARKER)).body);
+    assert.equal(observation.github.issue_comments_count, 2,
+      'Issue #407 count must exclude the schema-6 candidate read separately from Issue #310');
     assert.equal(result.state, 'FINISHED', 'the independent zero-model ping remains runnable');
     assert.ok(fixture.logs.includes(`STALE_CANDIDATE_SOURCE_${w2Job.request_id}_PR_461_` +
       `EXPECTED_SHA_${expectedSha}_OBSERVED_SHA_${observedSha}_NO_DISPATCH`));
     assert.deepEqual(fixture.receiptWrites.map(value => value.kind), ['ping', 'ping']);
     assert.equal(fixture.modelCalls.count, 0);
     assert.equal(fixture.codexDispatchCalls.count, 0);
+  } finally { fixture.cleanup(); }
+});
+
+test('operator observation uses the authoritative GitHub issue comment count, not the fetched page length', async () => {
+  const fixture = makeObservationWorkerFixture({ issueCommentsCount: 58 });
+  try {
+    const result = await fixture.run();
+    const observation = parseOperatorObservation(
+      fixture.store.comments.find(comment => comment.body.startsWith(OPERATOR_MARKER)).body);
+    assert.equal(result.state, 'FINISHED');
+    assert.equal(observation.github.issue_comments_count, 58);
   } finally { fixture.cleanup(); }
 });
 
@@ -645,6 +661,36 @@ test('an unresolved W2 STARTED attempt is not replayed after its pinned source d
     new Map([[461, 'd'.repeat(40)]]));
   assert.equal(next?.id, ping.id,
     'unknown W2 external effects remain protected while an unrelated READY job proceeds');
+});
+
+test('active edit scopes exclude a second writer on overlapping paths but leave independent paths ready', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = 'c'.repeat(40);
+  const makeEdit = (requestId, kind, editPaths) => withHumanGoal({ schema: 6,
+    project_id: PROJECT, host, request_id: requestId, kind, source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/conflict-test.md', spec_sha256: hash,
+    ...(kind === 'antigravity_edit'
+      ? { model: ANTIGRAVITY_V2_MODEL, variant: 'high' }
+      : { model: 'opencode/deepseek-v4.1-flash-free', variant: 'free' }),
+    edit_paths: editPaths, source_pr: 461 });
+  const active = makeEdit('PTYSD_ACTIVE_W2_SHARED_PATH', 'antigravity_edit', ['src/shared.mjs']);
+  const overlapping = makeEdit('PTYSD_READY_W1_SHARED_PATH', 'opencode_edit', ['src/shared.mjs']);
+  const independent = makeEdit('PTYSD_READY_W1_INDEPENDENT_PATH', 'opencode_edit', ['docs/independent.md']);
+  assert.ok(parseJob(encoded(active)));
+  assert.ok(parseJob(encoded(overlapping)));
+  assert.ok(parseJob(encoded(independent)));
+  const attemptId = '44444444-4444-4444-8444-444444444444';
+  const comments = [
+    { ...com(801, encoded(active)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    { ...com(802, encoded(overlapping)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    { ...com(803, encoded(independent)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(804, RECEIPT_MARKER + JSON.stringify(receipt(active.request_id, attemptId,
+      'STARTED', active)), 'worker'),
+  ];
+  const next = selectNext(comments, ['t14210184'], 'worker', host, commit, [],
+    new Map([[461, sourceSha]]));
+  assert.equal(next?.id, 803,
+    'the shared file remains owned by the active W2 attempt while another path can proceed');
 });
 
 test('fresh OS publication does not carry stale W1 activity or incident state into the new snapshot', async () => {
