@@ -801,7 +801,7 @@ function operatorPublisherStageValue(stage, read, identity) {
   catch (error) { throw operatorPublisherStageError(stage, error, identity); }
 }
 export async function publishOperatorObservation(config, workerLogin, comments, mainSha,
-  dependencies = {}, candidateSourceShas = new Map()) {
+  dependencies = {}, candidateSourceShas = new Map(), issueCommentsCount = null) {
   const marked = comments.filter(c =>
     typeof c?.body === 'string' && c.body.startsWith('PTYSD_OPERATOR_OBSERVATION_V1\n'));
   if (!marked.length) return { status: 'NOT_SEEDED' };
@@ -888,7 +888,8 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
       publisherIdentity),
     github: {
       observed_at: observedAt, main_sha: mainSha,
-      issue_comments_count: comments.length,
+      issue_comments_count: Number.isSafeInteger(issueCommentsCount) && issueCommentsCount >= 0
+        ? issueCommentsCount : null,
       runner_registration: repositoryRunner,
       organization_runner_registration: 'UNKNOWN_ORG_SCOPE_NOT_AVAILABLE',
       runner_service_count: windows.runner_service_count,
@@ -2570,6 +2571,7 @@ export async function runWorker(configInput, adapters = {}) {
   try {
     observation = await publishOperatorObservation(
       config, me, comments, head, adapters.observationDependencies, candidateSourceShas,
+      Number.isSafeInteger(issue.comments) && issue.comments >= 0 ? issue.comments : null,
     );
   } catch (error) {
     // Status publishing failure must not block a valid queued task.

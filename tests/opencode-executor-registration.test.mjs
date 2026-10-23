@@ -554,6 +554,28 @@ test('scheduler parents retain broad replacement protection in both phases', () 
   assert.match(source, /if\s*\(\$entry\.Key\s+-eq\s+'working_directory'\)\s*\{[\s\S]*?Assert-ExecutorWorkingDirectoryReadOnlyOrMailbox/s,
     'VM path checks remain mailbox-aware');
 });
+
+test('executor identity has no write access to launch binaries or executor config', () => {
+  const source = readFileSync(registrationScript, 'utf8');
+  const guard = source.match(/if\s*\(\$entry\.Key\s+-in\s+@\(([^)]*)\)\)\s*\{\s*Assert-RoleReadOnly\s+\$path\s+\$executorSid/s);
+  assert.ok(guard, 'registration must apply the executor read-only ACL guard to protected files');
+  const guardedPaths = [...guard[1].matchAll(/'([^']+)'/g)].map(match => match[1]).sort();
+  assert.deepEqual(guardedPaths, [
+    'config_path', 'launcher_path', 'node_bin', 'script_path', 'wscript_path',
+  ].sort(), 'the executor must not be able to replace either process-launching binary');
+});
+
+test('scheduler working directory is read-only unless it aliases an explicitly writable mailbox', () => {
+  const source = readFileSync(registrationScript, 'utf8');
+  const parentGuard = source.match(/if\s*\(\$entry\.Key\s+-in\s+@\(([^)]*)\)\)\s*\{\s*Assert-ExecutorPathParentsReadOnly\s+\$path\s+\$executorSid/s);
+  assert.match(source, /if\s*\(\$entry\.Key\s+-eq\s+'working_directory'\)\s*\{\s*Assert-ExecutorWorkingDirectoryReadOnlyOrMailbox\s+\$path\s+\$descriptor\s+\$executorSid/s,
+    'the scheduler working directory must use the mailbox-aware ACL check');
+  assert.ok(parentGuard, 'registration must reject executor replacement rights on protected runtime parents');
+  const parentPaths = [...parentGuard[1].matchAll(/'([^']+)'/g)].map(result => result[1]);
+  assert.ok(parentPaths.includes('working_directory'),
+    'the scheduler working directory parents must remain protected against replacement');
+});
+
 test('working-directory ACL permits its exact writable mailbox but rejects an unrelated writable directory', {
   skip: process.platform !== 'win32',
 }, () => {
