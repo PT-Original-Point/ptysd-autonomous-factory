@@ -1,0 +1,79 @@
+{
+  "schema": "vnext5.r3.next-action-gate-recompute.v1",
+  "recorded_at_utc": "2026-09-25T02:38:49Z",
+  "overall_goal_status": "ACTIVE",
+  "current_atomic_unit": "R3-P0-OP027-JIT-DESIGN-SEMANTIC-RECONCILIATION",
+  "ready_lanes_after_this_unit": [
+    "R3-P0-PUBLISH-JIT-DESIGN-CORRECTION-TO-PR300"
+  ],
+  "blocked_lanes": [
+    {
+      "lane": "SEMANTIC_PROVIDER_REQUIRED_CHECK",
+      "reason": "No independent provider-enforced semantic result for the exact current PR297 head."
+    },
+    {
+      "lane": "PR297_CANONICAL_ACCEPTANCE",
+      "reason": "PR297 remains draft and unmerged; independent semantic gate is absent."
+    },
+    {
+      "lane": "OP025_HOST_READBACK",
+      "reason": "Historical outcome remains UNKNOWN; no current authorized Host historical readback route was used or established."
+    },
+    {
+      "lane": "DIRECTORY_ACTIVE_RUN_REF_LIVE_RESOLUTION",
+      "reason": "Exact current Directory ref f22a9eb9e75d6b2d89dc9b950109910af8d290bb lacks active_run_ref; local candidate remains noncanonical."
+    },
+    {
+      "lane": "PR298_TRUST_ROOT_SOURCE_TRANSITION",
+      "reason": "Protected verifier rejects modification of its own trusted root; independent authorized trust-root transition is absent."
+    },
+    {
+      "lane": "HISTORICAL_PAYLOAD_PROFILE",
+      "reason": "Immutable writer or invocation recipe is not available; mismatches remain fail-closed."
+    },
+    {
+      "lane": "HISTORICAL_CHECKPOINT_LINK_PROFILES",
+      "reason": "Required historical edge digest-kind source evidence is absent; malformed CP47 remains unchanged."
+    }
+  ],
+  "completed_or_frozen_candidates": [
+    "R3-P0-PROVIDER-ADMIN-CAPABILITY-READONLY-PROBE",
+    "R3-P0-CP190-LEGACY-CHECKPOINT-SCHEMA-COMPATIBILITY",
+    "R3-P0-DIRECTORY-ACTIVE-RUN-REF-CP190-LEGACY-COMPATIBILITY-CANDIDATE",
+    "R3-P0-WORKLOG-STALE-DERIVATION-GUARD-CANDIDATE",
+    "R3-P0-EP72-R3-ACTIVE-PROFILE-DRAFT",
+    "R3-P0-SEMANTIC-GATE-DESIGN-CANDIDATE",
+    "R3-07-PR297-RECOVERY-CANDIDATE",
+    "R3-CSG-09B-MAINTENANCE-CANDIDATE",
+    "R3-P0-OP027-JIT-FENCE-PREPARATION-DESIGN"
+  ],
+  "next_single_action": "R3-P0-PUBLISH-JIT-DESIGN-CORRECTION-TO-PR300",
+  "reentry_conditions": [
+    "Authorized provider-admin route can read exact branch protection and establish independent protected semantic identity.",
+    "A provider-enforced independent semantic result appears for the exact PR297 head.",
+    "An authorized canonical Directory governance/CAS gate permits active_run_ref change.",
+    "A legal Host readback route provides exact OP025 receipt identity and execution result.",
+    "An independently authorized trust-root source-transition process is established for PR298.",
+    "Immutable historical writer/invocation or explicit historical edge profile evidence becomes available."
+  ],
+  "no_new_scan_or_retry_without_changed_evidence": true,
+  "operation025_outcome": "UNKNOWN",
+  "operation025_redispatched": false,
+  "cp192_fence_created_or_armed": false,
+  "operation027_dispatched": false,
+  "background_continuation_verified": false,
+  "publication_target": {
+    "repository": "PT-Original-Point/ptysd-vnext42-governance-sandbox",
+    "base_ref": "main",
+    "base_commit": "1dcec5ea8124e4d1b69b53652c657df8b65eb3ef",
+    "branch": "codex/r3-op027-jit-preparation-20260925",
+    "draft": true,
+    "canonical_acceptance": false
+  },
+  "exact_head_reconciliation": {
+    "pr_number": 300,
+    "previous_head": "516754b778470b37b6819244e661fbfb8a5ea17d",
+    "issue": "Clarify that no authorized Host receipt readback occurred in this unit; package omission does not prove receipt absence.",
+    "required_status_after_correction": "OP025_UNKNOWN"
+  }
+}
