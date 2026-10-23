@@ -302,7 +302,7 @@ test('Antigravity W2 readiness uses documented CLI settings and never probes int
       [`--project=${testProjectId}`, '--version'],
       ['--help'],
       [`--project=${testProjectId}`, 'models'],
-      [`--project=${testProjectId}`, '--print', '/usage'],
+      [`--project=${testProjectId}`, '--print', '/usage', '--output-format', 'json'],
     ]);
     assert.ok(calls.every(call => call.options.windowsHide === true && call.options.shell === false));
     assert.ok(calls.every(call => call.options.env.GITHUB_TOKEN === undefined));
@@ -574,7 +574,8 @@ test('Antigravity readiness qualifies the pinned model and CLI auth through no-i
     assert.equal(r.entitlement,'UNKNOWN');
     assert.equal(r.cost,'UNKNOWN');
     assert.equal(r.write_scope,'UNKNOWN');
-    assert.deepEqual(calls.map(c=>c.args),[['--version'],['--help'],['models'],['--print','/usage']]);
+    assert.deepEqual(calls.map(c=>c.args),[['--version'],['--help'],['models'],
+      ['--print','/usage','--output-format','json']]);
     assert.ok(calls.every(c=>c.options.shell===false && c.options.windowsHide===true));
     assert.ok(calls.slice(0,3).every(c=>c.options.timeout===12000));
     assert.equal(calls[3].options.timeout,15000);
@@ -1240,4 +1241,43 @@ test('Antigravity read-only stream reports no file change without weakening acce
     assert.equal(parsed.source_diff_evidence, 'NOT_INSPECTED');
     assert.equal(parsed.task_acceptance, 'UNKNOWN');
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity readiness requests JSON usage and parses the official envelope without inference', () => {
+  const usage = JSON.stringify({
+    status: 'SUCCESS',
+    command: {
+      name: 'usage',
+      data: {
+        groups: [{
+          name: 'Gemini Models',
+          buckets: [
+            { name: 'Weekly Limit Remaining', remaining_fraction: 0.8941181898117065,
+              reset_time: '2026-10-23T22:50:38Z' },
+            { name: 'Five Hour Limit Remaining', remaining_fraction: 0.9974105358123779,
+              reset_time: '2026-10-23T18:43:08Z' },
+          ],
+        }],
+      },
+    },
+  });
+  const calls = [];
+  const help = '--print --output-format (text, json, stream-json) --model --sandbox --mode accept-edits';
+  const runner = (_bin, args) => {
+    calls.push([...args]);
+    if (args[0] === '--version') return '1.4.6';
+    if (args[0] === '--help') return help;
+    if (args[0] === 'models') return 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n';
+    if (args[0] === '--print' && args[1] === '/usage') return usage;
+    throw new Error('Unexpected metadata command');
+  };
+
+  const readiness = runAntigravityV2Readiness(process.execPath, process.cwd(), runner,
+    { USERPROFILE: process.env.USERPROFILE, PATH: 'clean' }, () => true);
+  assert.equal(readiness.gemini_aggregate_quota.status, 'GEMINI_AGGREGATE_QUOTA_READ');
+  assert.equal(readiness.gemini_aggregate_quota.weekly_remaining_percent, 89);
+  assert.equal(readiness.gemini_aggregate_quota.five_hour_remaining_percent, 99);
+  assert.equal(readiness.authentication_evidence, 'AUTHENTICATED_QUOTA_READ');
+  assert.equal(readiness.inference_executed, false);
+  assert.deepEqual(calls[3], ['--print', '/usage', '--output-format', 'json']);
 });

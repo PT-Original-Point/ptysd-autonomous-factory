@@ -6,6 +6,7 @@ import { createReadStream, existsSync, lstatSync, readFileSync, readdirSync, rea
 import { isAbsolute, join, posix, relative, resolve, sep, win32 } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { parseAntigravityUsageQuotaSnapshot } from './antigravity-quota.mjs';
 
 const MODEL_ID = /^[a-z][a-z0-9_-]{1,39}\/[A-Za-z0-9_./:-]{1,160}(?:#[a-z][a-z0-9_-]{0,39})?$/;
 const MAX_AUTH_BYTES = 64 * 1024;
@@ -208,6 +209,20 @@ export function summarizeAntigravityUsage(stdout) {
     five_hour_remaining_percent: null, five_hour_reset_at: null };
   if (typeof stdout !== 'string' || Buffer.byteLength(stdout) > MAX_AGY_USAGE_BYTES)
     return unknown;
+  try {
+    const snapshot = parseAntigravityUsageQuotaSnapshot(stdout);
+    return {
+      status: 'GEMINI_AGGREGATE_QUOTA_READ',
+      source: 'GEMINI_MODELS_AGGREGATE',
+      weekly_remaining_percent: Math.floor(snapshot.gemini_weekly_remaining_fraction * 100),
+      weekly_reset_at: snapshot.gemini_weekly_reset_time,
+      five_hour_remaining_percent: Math.floor(snapshot.gemini_5h_remaining_fraction * 100),
+      five_hour_reset_at: snapshot.gemini_5h_reset_time,
+    };
+  } catch {
+    // Older CLI versions emitted a human-readable quota table. Keep parsing it
+    // as a fallback, while the readiness probe requests and prefers JSON.
+  }
   const rows = new Map();
   for (const rawLine of stdout.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -657,7 +672,7 @@ export function runAntigravityV2Readiness(bin, directory, runner = runAntigravit
     result.issues.push('MODELS_COMMAND_FAILED');
   }
   try {
-    const usageOutput = runner(bin, [...projectArgs, '--print', '/usage'],
+    const usageOutput = runner(bin, [...projectArgs, '--print', '/usage', '--output-format', 'json'],
       { ...options, timeout: 15000, maxBuffer: MAX_AGY_USAGE_BYTES });
     const usage = metadataText(usageOutput);
     result.gemini_aggregate_quota = summarizeAntigravityUsage(usage);
