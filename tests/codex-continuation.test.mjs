@@ -1960,6 +1960,12 @@ test('executor keeps a same-boot stale model-running lock fail-closed and releas
     assert.equal(existsSync(activePath), true, 'unknown model effects keep the lock intact');
 
     rmSync(activePath);
+    writeLock('CLI_REFRESH_STATE_UNKNOWN');
+    await assert.rejects(runExecutorOnce({ spool_dir: dir }, { uptimeSeconds: () => 120,
+      isProcessAlive: () => false }), /EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN/);
+    assert.equal(existsSync(activePath), true, 'an interrupted refresh remains blocked across reboot');
+
+    rmSync(activePath);
     writeLock('DISPATCHER');
     const idle = await runExecutorOnce({ spool_dir: dir }, { uptimeSeconds: () => 120,
       isProcessAlive: () => false });
