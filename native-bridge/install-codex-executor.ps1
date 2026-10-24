@@ -292,7 +292,15 @@ function Write-CodexExecutorInstallBytes([byte[]]$Bytes, [string]$DestinationPat
 }
 
 function Resolve-Sid([string]$Name) {
-    try { return ([Security.Principal.NTAccount]$Name).Translate([Security.Principal.SecurityIdentifier]).Value }
+    if ([string]::IsNullOrWhiteSpace($Name)) { throw 'EXECUTOR_ACCOUNT_SID_UNRESOLVED' }
+    try {
+        $identity = $Name.Trim()
+        if ($identity -match '^S-\d+(?:-\d+)+$') {
+            return ([Security.Principal.SecurityIdentifier]::new($identity)).Value
+        }
+        return ([Security.Principal.NTAccount]::new($identity)).Translate(
+            [Security.Principal.SecurityIdentifier]).Value
+    }
     catch { throw 'EXECUTOR_ACCOUNT_SID_UNRESOLVED' }
 }
 
@@ -635,14 +643,20 @@ try {
     $zeroLimit = ($readback.Settings.ExecutionTimeLimit -eq [TimeSpan]::Zero) -or
         ($timeLimit -eq 'PT0S') -or ($timeLimit -eq '00:00:00')
     $readbackMismatches = New-Object System.Collections.Generic.List[string]
-    if ($readback.Principal.UserId -ne $executorName) { $readbackMismatches.Add('Principal.UserId') }
+    $readbackPrincipalSid = $null
+    try { $readbackPrincipalSid = Resolve-Sid ([string]$readback.Principal.UserId) }
+    catch { $readbackPrincipalSid = $null }
+    if ([string]::IsNullOrWhiteSpace($readbackPrincipalSid) -or $readbackPrincipalSid -ne $executorSid) {
+        $readbackMismatches.Add('Principal.UserId')
+    }
     if ($readback.Principal.LogonType -ne $expectedReadbackLogonType) { $readbackMismatches.Add('Principal.LogonType') }
     if ($readback.Principal.RunLevel -ne 'Limited') { $readbackMismatches.Add('Principal.RunLevel') }
     if ($readback.Settings.MultipleInstances -ne 'IgnoreNew') { $readbackMismatches.Add('Settings.MultipleInstances') }
     if (-not $zeroLimit) { $readbackMismatches.Add('Settings.ExecutionTimeLimit') }
     if ($readback.Settings.Hidden -ne $true) { $readbackMismatches.Add('Settings.Hidden') }
     if ($readback.Settings.AllowHardTerminate -ne $false) { $readbackMismatches.Add('Settings.AllowHardTerminate') }
-    if (@($readback.Triggers).Count -ne 0) { $readbackMismatches.Add('Triggers.Count') }
+    $readbackTriggers = @($readback.Triggers | Where-Object { $null -ne $_ })
+    if ($readbackTriggers.Count -ne 0) { $readbackMismatches.Add('Triggers.Count') }
     $readbackActions = @($readback.Actions)
     if ($readbackActions.Count -ne 1) {
         $readbackMismatches.Add('Actions.Count')
