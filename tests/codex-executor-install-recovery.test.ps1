@@ -40,6 +40,8 @@ $global:MockAclStore = @{}
 $global:MockProgramDataAcl = New-Object System.Security.AccessControl.DirectorySecurity
 $global:MockBadSignaturePath = ''
 $global:MockTaskNotFoundThrows = $true
+$global:MockReadbackPrincipalUserId = $null
+$global:MockNullReadbackTriggers = $false
 
 function Assert-Equal($Actual, $Expected, [string]$Message) {
     if ($Actual -cne $Expected) { throw ('ASSERT_EQUAL_FAILED: ' + $Message + ';actual=' + $Actual + ';expected=' + $Expected) }
@@ -62,12 +64,16 @@ function global:Get-ScheduledTask {
         $hidden = $true
         $allowHardTerminate = [bool]$reg.Settings.AllowHardTerminate
         if ($global:MockFailurePoint -eq 'ReadbackMismatch') { $allowHardTerminate = $true }
+        $readbackUserId = if ($null -ne $global:MockReadbackPrincipalUserId) {
+            $global:MockReadbackPrincipalUserId
+        } else { $reg.Principal.UserId }
+        $readbackTriggers = if ($global:MockNullReadbackTriggers) { $null } else { @() }
         return [pscustomobject]@{
             TaskName = $TaskName; State = 'Ready'
-            Principal = [pscustomobject]@{ UserId = $reg.Principal.UserId; LogonType = $reg.Principal.LogonType; RunLevel = $reg.Principal.RunLevel }
+            Principal = [pscustomobject]@{ UserId = $readbackUserId; LogonType = $reg.Principal.LogonType; RunLevel = $reg.Principal.RunLevel }
             Settings = [pscustomobject]@{ MultipleInstances = $reg.Settings.MultipleInstances; ExecutionTimeLimit = $reg.Settings.ExecutionTimeLimit; Hidden = $hidden; AllowHardTerminate = $allowHardTerminate }
             Actions = @([pscustomobject]@{ Execute = $reg.Action.Execute; Arguments = $reg.Action.Arguments; WorkingDirectory = $reg.Action.WorkingDirectory })
-            Triggers = @()
+            Triggers = $readbackTriggers
         }
     }
     if ($TaskName -eq 'PTYSD-Codex-Executor' -and $global:MockTaskNotFoundThrows -and $PSBoundParameters['ErrorAction'] -eq 'Stop') {
@@ -405,6 +411,8 @@ try {
     $global:MockRuntimeCopyCalls = 0
     $global:MockFailurePoint = ''
     $global:MockRegistration = $null
+    $global:MockReadbackPrincipalUserId = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $global:MockNullReadbackTriggers = $true
     $env:USERPROFILE = $local
     $global:MockTransitionAclReads = $true
     $transitionState = Join-Path $local 'PTYSDNativeBridge\codex-executor-install-state-WIN11_TRANSITION.json'
@@ -439,6 +447,20 @@ try {
     & $installerPath -Mode Uninstall 2>$null | Out-Null
     Assert-Equal $global:MockTaskRegistered $false 'transition task can be unregistered without deleting its evidence'
     Assert-Equal (Test-Path -LiteralPath $global:MockSpool) $true 'transition uninstall preserves the spool and install evidence'
+
+    $configBeforePrincipalMismatch = Get-Content -LiteralPath $workerConfigPath -Raw
+    $global:MockReadbackPrincipalUserId = 'S-1-5-18'
+    $wrongPrincipalReadback = Invoke-InstallAttempt 'EXECUTOR_TASK_READBACK_MISMATCH' `
+        -ExecutionPhase 'WIN11_TRANSITION' -NoCredential
+    if ($wrongPrincipalReadback -notlike '*fields=Principal.UserId*' -or
+        $wrongPrincipalReadback -like '*Triggers.Count*') {
+        throw ('PRINCIPAL_SID_MISMATCH_NOT_ISOLATED: ' + $wrongPrincipalReadback)
+    }
+    Assert-Equal $global:MockTaskRegistered $false 'different principal SID is rejected and rolled back'
+    Assert-Equal (Get-Content -LiteralPath $workerConfigPath -Raw) $configBeforePrincipalMismatch `
+        'worker config is restored after principal SID mismatch'
+    $global:MockReadbackPrincipalUserId = $null
+    $global:MockNullReadbackTriggers = $false
 
     $broadAcl = New-Object System.Security.AccessControl.DirectorySecurity
     $everyone = New-Object System.Security.Principal.SecurityIdentifier('S-1-1-0')
