@@ -68,6 +68,8 @@
     .worker-name { margin:0 }
     .worker-id { font:700 12px/1.4 ui-monospace,Consolas,monospace; color:var(--link) }
     .worker-harness { color:var(--muted); font-size:13px }
+    .worker-latest { margin-top:5px; color:var(--muted); font-size:12px; overflow-wrap:anywhere }
+    .worker-latest span,.worker-latest time { display:block }
     .badge { display:inline-flex; flex-shrink:0; align-items:center; min-height:27px;
       padding:4px 10px; border:1px solid #51647c; border-radius:999px;
       background:#263449; color:#d6e0ee; font-size:12px; font-weight:800 }
@@ -84,6 +86,11 @@
       padding:3px 7px; color:var(--muted); font-size:11px }
     .infra-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px }
     .infra-card { min-width:0 }
+    .dispatch-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px }
+    .dispatch-card { min-width:0; min-height:310px; display:flex; flex-direction:column }
+    .dispatch-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px }
+    .dispatch-card .facts { grid-template-columns:minmax(105px,145px) minmax(0,1fr) }
+    .dispatch-links { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:auto; padding-top:14px }
     .infra-summary { color:var(--muted); margin:0 0 10px }
     .facts { display:grid; grid-template-columns:minmax(150px,220px) minmax(0,1fr);
       gap:8px 14px; margin:14px 0 0 }
@@ -105,6 +112,8 @@
       main { padding:22px 18px 38px }
       .worker-grid { grid-template-columns:1fr }
       .worker-card { min-height:0 }
+      .dispatch-grid { grid-template-columns:1fr }
+      .dispatch-card { min-height:0 }
     }
     @media (max-width:700px) {
       main { padding:18px 13px 30px }
@@ -170,7 +179,7 @@
   <section class="worker-grid" aria-label="W1 W2 W3 Worker 狀態">
     <article class="panel worker-card">
       <div class="worker-head">
-        <div><span class="worker-id">W1</span><h2 class="worker-name">OpenCode</h2><span class="worker-harness">OpenCode CLI V2</span></div>
+        <div><span class="worker-id">W1</span><h2 class="worker-name">OpenCode</h2><span class="worker-harness">OpenCode CLI V2</span><div class="worker-latest"><span id="w1-header-progress">最新任務進度未確認</span><time id="w1-last-event">最後任務事件：未確認</time></div></div>
         <span id="w1-badge" class="badge neutral">未確認</span>
       </div>
       <div class="field"><strong>正式任務</strong><span id="w1-task">未確認</span></div>
@@ -185,7 +194,7 @@
     </article>
     <article class="panel worker-card">
       <div class="worker-head">
-        <div><span class="worker-id">W2</span><h2 class="worker-name">Antigravity</h2><span class="worker-harness">只接受已核准的原生執行證據</span></div>
+        <div><span class="worker-id">W2</span><h2 class="worker-name">Antigravity</h2><span class="worker-harness">只接受已核准的原生執行證據</span><div class="worker-latest"><span id="w2-header-progress">最新任務進度未確認</span><time id="w2-last-event">最後任務事件：未確認</time></div></div>
         <span id="w2-badge" class="badge neutral">未確認</span>
       </div>
       <div class="field"><strong>正式任務</strong><span id="w2-task">未確認</span></div>
@@ -200,7 +209,7 @@
     </article>
     <article class="panel worker-card">
       <div class="worker-head">
-        <div><span class="worker-id">W3</span><h2 class="worker-name">ChatGPT Web／Codex Zero Risk</h2><span class="worker-harness">需有效 request_id、Human 轉送及真實工具回傳</span></div>
+        <div><span class="worker-id">W3</span><h2 class="worker-name">ChatGPT Web／Codex Zero Risk</h2><span class="worker-harness">需有效 request_id、Human 轉送及真實工具回傳</span><div class="worker-latest"><span id="w3-header-progress">最新任務進度未確認</span><time id="w3-last-event">最後任務事件：未確認</time></div></div>
         <span id="w3-badge" class="badge neutral">未確認</span>
       </div>
       <div class="field"><strong>正式任務</strong><span id="w3-task">未確認</span></div>
@@ -215,12 +224,61 @@
     </article>
   </section>
 
+  <div class="section"><h2>Codex 正式派工追蹤</h2><p>每張卡只對帳 #310 的結構化任務與 #407 的同任務收據；沒有精確綁定就顯示未知。</p></div>
+  <section class="dispatch-grid" aria-label="W1 W2 W3 Codex 派工證據">
+    <article class="panel dispatch-card">
+      <div class="dispatch-head"><div><span class="worker-id">W1</span><h3>Codex 派工 · OpenCode</h3></div><span id="w1-dispatch-state" class="badge neutral">未確認</span></div>
+      <dl class="facts">
+        <dt>正式任務／派工時間</dt><dd id="w1-dispatch-task">UNKNOWN</dd>
+        <dt>Attempt／最新收據</dt><dd id="w1-dispatch-attempt">UNKNOWN</dd>
+        <dt>模型／變體</dt><dd id="w1-dispatch-model">UNKNOWN</dd>
+        <dt>來源 PR／精確 SHA</dt><dd id="w1-dispatch-source">UNKNOWN</dd>
+        <dt>規格檔／SHA-256</dt><dd id="w1-dispatch-spec">UNKNOWN</dd>
+        <dt>進度／模型與工具證據</dt><dd id="w1-dispatch-progress">UNKNOWN</dd>
+        <dt>差異／測試／PR／CI／接受</dt><dd id="w1-dispatch-delivery">UNKNOWN</dd>
+        <dt>下一負責人</dt><dd id="w1-dispatch-next">UNKNOWN</dd>
+        <dt>最後任務事件（台灣時間）</dt><dd id="w1-dispatch-time">UNKNOWN</dd>
+      </dl>
+      <div class="dispatch-links"><a id="w1-dispatch-job-link" target="_blank" rel="noopener noreferrer" hidden>Issue #310 派工</a><a id="w1-dispatch-receipt-link" target="_blank" rel="noopener noreferrer" hidden>Issue #407 收據</a><a id="w1-dispatch-pr-link" target="_blank" rel="noopener noreferrer" hidden>來源 PR</a></div>
+    </article>
+    <article class="panel dispatch-card">
+      <div class="dispatch-head"><div><span class="worker-id">W2</span><h3>Codex 派工 · Antigravity</h3></div><span id="w2-dispatch-state" class="badge neutral">未確認</span></div>
+      <dl class="facts">
+        <dt>正式任務／派工時間</dt><dd id="w2-dispatch-task">UNKNOWN</dd>
+        <dt>Attempt／最新收據</dt><dd id="w2-dispatch-attempt">UNKNOWN</dd>
+        <dt>模型／變體</dt><dd id="w2-dispatch-model">UNKNOWN</dd>
+        <dt>來源 PR／精確 SHA</dt><dd id="w2-dispatch-source">UNKNOWN</dd>
+        <dt>規格檔／SHA-256</dt><dd id="w2-dispatch-spec">UNKNOWN</dd>
+        <dt>進度／模型與工具證據</dt><dd id="w2-dispatch-progress">UNKNOWN</dd>
+        <dt>差異／測試／PR／CI／接受</dt><dd id="w2-dispatch-delivery">UNKNOWN</dd>
+        <dt>下一負責人</dt><dd id="w2-dispatch-next">UNKNOWN</dd>
+        <dt>最後任務事件（台灣時間）</dt><dd id="w2-dispatch-time">UNKNOWN</dd>
+      </dl>
+      <div class="dispatch-links"><a id="w2-dispatch-job-link" target="_blank" rel="noopener noreferrer" hidden>Issue #310 派工</a><a id="w2-dispatch-receipt-link" target="_blank" rel="noopener noreferrer" hidden>Issue #407 收據</a><a id="w2-dispatch-pr-link" target="_blank" rel="noopener noreferrer" hidden>來源 PR</a></div>
+    </article>
+    <article class="panel dispatch-card">
+      <div class="dispatch-head"><div><span class="worker-id">W3</span><h3>Codex 派工 · Zero Risk</h3></div><span id="w3-dispatch-state" class="badge neutral">未確認</span></div>
+      <dl class="facts">
+        <dt>正式任務／派工時間</dt><dd id="w3-dispatch-task">UNKNOWN</dd>
+        <dt>Attempt／最新收據</dt><dd id="w3-dispatch-attempt">UNKNOWN</dd>
+        <dt>模型／變體</dt><dd id="w3-dispatch-model">UNKNOWN</dd>
+        <dt>來源 PR／精確 SHA</dt><dd id="w3-dispatch-source">UNKNOWN</dd>
+        <dt>規格檔／SHA-256</dt><dd id="w3-dispatch-spec">UNKNOWN</dd>
+        <dt>進度／工具回傳證據</dt><dd id="w3-dispatch-progress">UNKNOWN</dd>
+        <dt>差異／測試／PR／CI／接受</dt><dd id="w3-dispatch-delivery">UNKNOWN</dd>
+        <dt>下一負責人</dt><dd id="w3-dispatch-next">UNKNOWN</dd>
+        <dt>最後任務事件（台灣時間）</dt><dd id="w3-dispatch-time">UNKNOWN</dd>
+      </dl>
+      <div class="dispatch-links"><a id="w3-dispatch-job-link" target="_blank" rel="noopener noreferrer" hidden>Codex Zero Risk 請求</a><a id="w3-dispatch-receipt-link" target="_blank" rel="noopener noreferrer" hidden>工具回傳證據</a></div>
+    </article>
+  </section>
+
   <div class="section"><h2>主控與基礎設施</h2><p>程序與服務狀態不會被推論成模型活動。</p></div>
   <section class="infra-grid">
     <article class="panel infra-card">
       <h3>主控 Codex</h3><span id="codex-badge" class="badge neutral">狀態未確認</span>
       <p id="codex-detail" class="infra-summary">沒有可被動讀取的 Codex 原生活動來源。</p>
-      <dl class="facts"><dt>任務／工作階段</dt><dd id="codex-task">未確認</dd><dt>活動證據</dt><dd id="codex-evidence">未確認</dd><dt>下一步</dt><dd id="codex-next">未確認</dd></dl>
+      <dl class="facts"><dt>Codex Executor 主機狀態</dt><dd id="codex-executor">未確認</dd><dt>最新主控／派工摘要</dt><dd id="codex-task">未確認</dd><dt>待回收／局部阻擋</dt><dd id="codex-harvest">未確認</dd><dt>主控程序／工具活動</dt><dd id="codex-evidence">未確認</dd><dt>最後觀測／有效期限</dt><dd id="codex-observed">未確認</dd><dt>下一步</dt><dd id="codex-next">未確認</dd></dl>
     </article>
     <article class="panel infra-card">
       <h3>Win11 Native Worker／Task Scheduler</h3><span id="native-badge" class="badge neutral">未確認</span>
@@ -354,7 +412,7 @@
       request_id:task.request_id, task_state:String(task.state || 'UNKNOWN') };
   }
   function candidatePullIdentityMatches(pull, pin) {
-    return object(pull) && object(pin) && pull.number === pin.number && pull.state === 'open' &&
+    return object(pull) && object(pin) && pull.number === pin.number &&
       pull.base?.ref === 'main' && pull.base?.repo?.id === 1352411536 &&
       pull.head?.repo?.id === 1352411536 &&
       typeof pull.base.repo.full_name === 'string' &&
@@ -362,6 +420,65 @@
       typeof pull.head.repo.full_name === 'string' &&
       pull.head.repo.full_name.toLowerCase() === REPO.toLowerCase() &&
       safeSha(pull.head?.sha) !== null;
+  }
+  function candidatePullLifecycle(pull, pin) {
+    if (!object(pin)) return { status:'TASK_PR_PIN_UNKNOWN', lifecycle:'UNKNOWN', identity_matches:false,
+      source_sha_matches:false, checks_allowed:false };
+    if (!object(pull)) return { status:'PR_METADATA_UNAVAILABLE', lifecycle:'UNKNOWN', identity_matches:false,
+      source_sha_matches:false, checks_allowed:false };
+    if (!candidatePullIdentityMatches(pull,pin))
+      return { status:'REPO_OR_PROJECT_IDENTITY_MISMATCH', lifecycle:'UNKNOWN', identity_matches:false,
+        source_sha_matches:false, checks_allowed:false };
+    const head=safeSha(pull.head.sha).toLowerCase();
+    const sourceShaMatches=head === String(pin.source_sha || '').toLowerCase();
+    const state=String(pull.state || '').toLowerCase();
+    const merged=pull.merged === true || Boolean(pull.merged_at || pull.mergedAt);
+    const lifecycle=merged ? 'MERGED'
+      : state === 'closed' ? 'CLOSED_UNMERGED'
+        : state === 'open' ? (pull.draft === true ? 'OPEN_DRAFT' : 'OPEN_REVIEWABLE')
+          : 'UNKNOWN';
+    if (lifecycle === 'UNKNOWN') return { status:'PR_LIFECYCLE_UNKNOWN', lifecycle,
+      identity_matches:true, head_sha:head, source_sha_matches:sourceShaMatches, checks_allowed:false };
+    const status=!sourceShaMatches ? 'SOURCE_SHA_DRIFT' : lifecycle;
+    return { status, lifecycle, identity_matches:true, head_sha:head,
+      source_sha_matches:sourceShaMatches,
+      merge_commit_sha:safeSha(pull.merge_commit_sha || pull.mergeCommit?.oid),
+      merged_at:pull.merged_at || pull.mergedAt || null,
+      checks_allowed:sourceShaMatches && state === 'open' && !merged };
+  }
+  function validSchema6DispatchJob(job) {
+    if (!object(job) || job.schema !== 6 || job.project_id !== PROJECT ||
+        job.host !== 'DESKTOP-1B6PD2P' || !/^[A-Z][A-Z0-9_-]{7,79}$/.test(job.request_id || '') ||
+        !safeSha(job.source_sha) || !Number.isSafeInteger(job.source_pr) || job.source_pr < 1 ||
+        !Number.isSafeInteger(job.goal_comment_id) || job.goal_comment_id < 1 ||
+        !/^[a-f0-9]{64}$/i.test(job.goal_body_sha256 || '') ||
+        typeof job.spec_path !== 'string' || !/^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(job.spec_path) ||
+        !/^[a-f0-9]{64}$/i.test(job.spec_sha256 || '') || !Array.isArray(job.edit_paths) ||
+        !job.edit_paths.length || job.edit_paths.some(path => typeof path !== 'string' ||
+          !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(path) ||
+          path.split('/').some(part => !part || part === '.' || part === '..' ||
+            /^\.(?:git|github|opencode)$/i.test(part) || /^\.env(?:\.|$)/i.test(part) ||
+            /(?:secret|credential|token|password|auth\.json)/i.test(part)))) return false;
+    const uniquePaths=new Set(job.edit_paths.map(path => path.toLowerCase()));
+    if (uniquePaths.size !== job.edit_paths.length) return false;
+    if (job.kind === 'antigravity_edit')
+      return job.model === 'gemini-3.8-flash-high' && job.variant === 'high';
+    return job.kind === 'opencode_edit' && typeof job.model === 'string' &&
+      job.model.length > 0 && job.model.length <= 160 &&
+      (job.variant === null || typeof job.variant === 'string' && job.variant.length <= 60);
+  }
+  function validSchema6DispatchComment(comment, expected = {}) {
+    if (!object(comment) || !Number.isSafeInteger(Number(comment.id)) ||
+        (Number.isSafeInteger(expected.comment_id) && Number(comment.id) !== expected.comment_id) ||
+        !DISPATCHERS.has(comment.user?.login || '')) return null;
+    const job=parseMarked(comment.body,JOB_MARKER);
+    if (!validSchema6DispatchJob(job) ||
+        expected.request_id && job.request_id !== expected.request_id ||
+        expected.source_sha && job.source_sha.toLowerCase() !== String(expected.source_sha).toLowerCase() ||
+        expected.kind && job.kind !== expected.kind ||
+        Number.isSafeInteger(expected.source_pr) && job.source_pr !== expected.source_pr)
+      return null;
+    return job;
   }
   function parseMarked(body, marker) {
     if (typeof body !== 'string' || !body.startsWith(marker)) return null;
@@ -506,6 +623,19 @@
     const records = Array.isArray(snapshot?.workers) ? snapshot.workers : [];
     const matches = records.filter(record => record?.worker_id === id);
     return matches.length === 1 ? matches[0] : null;
+  }
+  function dispatchTaskSource(snapshot, id) {
+    const record=workerRecord(snapshot,id);
+    if (record) return { ...record,
+      request_id:record.task_id, kind:record.task_kind,
+      source_sha:record.task_source_sha, job_comment_id:record.task_comment_id };
+    if (id !== 'W1') return null;
+    const native=snapshot?.native_worker || {};
+    const task=native.current_task || native.latest_task;
+    return object(task) ? { ...task, task_id:task.request_id, task_kind:task.kind,
+      task_source_sha:task.source_sha, job_comment_id:task.job_comment_id,
+      task_state:task.state, attempt_id:task.attempt_id,
+      source_pr:task.source_pr } : null;
   }
   function summarizeChecks(data, expectedSha, prNumber) {
     if (!object(data) || !Array.isArray(data.check_runs) ||
@@ -958,10 +1088,21 @@
       pr:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       main:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, generation:0 },
       checks:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
+      dispatches:Object.create(null), dispatchPulls:Object.create(null), dispatchChecks:Object.create(null),
     };
     const failures=new Map();
+    function createResource(url = '') {
+      return { data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url, generation:0 };
+    }
+    function resourceForKey(key) {
+      const match=/^(dispatch|dispatch-pr|dispatch-checks):(W[123])$/.exec(key || '');
+      if (!match) return resources[key];
+      const group=match[1] === 'dispatch' ? resources.dispatches
+        : match[1] === 'dispatch-pr' ? resources.dispatchPulls : resources.dispatchChecks;
+      return group[match[2]] || (group[match[2]]=createResource());
+    }
     async function loadResource(key, url, ttl, force = false) {
-      const resource=resources[key];
+      const resource=resourceForKey(key);
       const currentTime=now();
       const serverPoll=apiClient.getMeta(url)?.pollIntervalMs || 0;
       const effectiveTtl=Math.max(ttl,serverPoll);
@@ -1034,6 +1175,37 @@
       }
       return url;
     }
+    function bindDispatchComment(workerId, commentId) {
+      if (!['W1','W2','W3'].includes(workerId) || !Number.isSafeInteger(commentId) || commentId < 1)
+        return null;
+      const resource=resourceForKey('dispatch:' + workerId);
+      const url=API + '/issues/comments/' + commentId;
+      if (resource.url !== url) clearResource(resource,url);
+      return url;
+    }
+    function bindDispatchPull(workerId, prNumber) {
+      if (!['W1','W2','W3'].includes(workerId) || !Number.isSafeInteger(prNumber) || prNumber < 1)
+        return null;
+      const resource=resourceForKey('dispatch-pr:' + workerId);
+      const url=API + '/pulls/' + prNumber;
+      if (resource.url !== url) clearResource(resource,url);
+      return url;
+    }
+    function bindDispatchChecks(workerId, head) {
+      const expectedSha=safeSha(head);
+      if (!['W1','W2','W3'].includes(workerId) || !expectedSha) return null;
+      const resource=resourceForKey('dispatch-checks:' + workerId);
+      const url=API + '/commits/' + expectedSha + '/check-runs?per_page=100';
+      if (resource.url !== url) clearResource(resource,url);
+      return url;
+    }
+    function dispatchChecksSummaryForHead(workerId, head, prNumber) {
+      const expectedSha=safeSha(head);
+      const resource=resources.dispatchChecks?.[workerId];
+      if (!expectedSha || !resource?.data || resource.error || resource.url !==
+          API + '/commits/' + expectedSha + '/check-runs?per_page=100') return null;
+      return summarizeChecks(resource.data,expectedSha,prNumber);
+    }
     function checksSummaryForHead(head, prNumber) {
       const expectedSha = safeSha(head);
       const resource = resources.checks;
@@ -1042,7 +1214,8 @@
           resource.url !== API + '/commits/' + expectedSha + '/check-runs?per_page=100') return null;
       return summarizeChecks(resource.data, expectedSha, prNumber);
     }
-    return { resources, loadResource, bindPullRequest, bindChecksHead, checksSummaryForHead, now };
+    return { resources, loadResource, bindPullRequest, bindChecksHead, checksSummaryForHead,
+      bindDispatchComment, bindDispatchPull, bindDispatchChecks, dispatchChecksSummaryForHead, now };
   }
   function adaptivePollInterval(key, apiClient) {
     const state=apiClient.getRateState?.() || {};
@@ -1076,27 +1249,66 @@
     if (!recoveryProbeCompleted && !apiClient.isPaused?.())
       await resourceStore.loadResource('main',urls.main,adaptivePollInterval('main',apiClient),force);
     const pull=resourceStore.resources.pr.data;
-    const pullIdentityMatches=candidatePullIdentityMatches(pull,prPin);
-    const head=pullIdentityMatches ? safeSha(pull.head.sha) : null;
-    if (!pullIdentityMatches && prPin && !resourceStore.resources.pr.error)
-      resourceStore.resources.pr.error='CANDIDATE_PR_IDENTITY_UNKNOWN';
+    const pullLifecycle=resourceStore.resources.pr.error ? { status:'PR_FETCH_FAILED', lifecycle:'UNKNOWN',
+      identity_matches:false, source_sha_matches:false, checks_allowed:false }
+      : candidatePullLifecycle(pull,prPin);
+    const pullIdentityMatches=pullLifecycle.identity_matches;
+    const head=pullLifecycle.checks_allowed ? pullLifecycle.head_sha : null;
     if (!recoveryProbeCompleted && !apiClient.isPaused?.() && head) {
       const checksUrl=resourceStore.bindChecksHead(head);
       await resourceStore.loadResource('checks',checksUrl,adaptivePollInterval('checks',apiClient),force);
       if (apiClient.takeRecoveryNotice?.()) recoveryProbeCompleted=true;
-    } else if (!prPin && !resourceStore.resources.checks.error)
-      resourceStore.resources.checks.error='TASK_PR_PIN_UNKNOWN';
-    else if (!pullIdentityMatches && !resourceStore.resources.checks.error)
-      resourceStore.resources.checks.error='CANDIDATE_PR_IDENTITY_UNKNOWN';
-    else if (!head && !resourceStore.resources.checks.error)
-      resourceStore.resources.checks.error='PR_HEAD_UNKNOWN';
-    return { head, prPin, pullIdentityMatches, recoveryProbeCompleted,
+    } else {
+      resourceStore.bindChecksHead(null);
+      const checksNotApplicable=['CLOSED_UNMERGED','MERGED','SOURCE_SHA_DRIFT'].includes(pullLifecycle.status);
+      resourceStore.resources.checks.error=resourceStore.resources.pr.error ? 'PR_FETCH_FAILED'
+        : checksNotApplicable ? null : pullLifecycle.status;
+    }
+    const snapshot=observation.snapshot;
+    for (const id of ['W1','W2','W3']) {
+      if (recoveryProbeCompleted || apiClient.isPaused?.()) break;
+      const task=dispatchTaskSource(snapshot,id);
+      const requestId=task?.task_id || task?.request_id;
+      const commentId=task?.task_comment_id || task?.job_comment_id;
+      if (!/^[A-Z][A-Z0-9_-]{7,79}$/.test(requestId || '') ||
+          !Number.isSafeInteger(commentId) || commentId < 1) continue;
+      const jobUrl=resourceStore.bindDispatchComment(id,commentId);
+      if (!jobUrl) continue;
+      await resourceStore.loadResource('dispatch:' + id,jobUrl,24*60*60*1000,false);
+      const jobResource=resourceStore.resources.dispatches[id];
+      const job=validSchema6DispatchComment(jobResource?.data,{comment_id:commentId,
+        request_id:requestId, source_sha:task.task_source_sha || task.source_sha,
+        kind:task.task_kind || task.kind, source_pr:task.source_pr});
+      if (!job || apiClient.isPaused?.()) continue;
+      const primaryPin=id === 'W1' && prPin?.number === job.source_pr &&
+        prPin.source_sha === job.source_sha.toLowerCase();
+      let taskPull=primaryPin ? pull : resourceStore.resources.dispatchPulls[id]?.data;
+      let taskLifecycle=primaryPin ? pullLifecycle : null;
+      if (!primaryPin) {
+        const taskPullUrl=resourceStore.bindDispatchPull(id,job.source_pr);
+        if (taskPullUrl) await resourceStore.loadResource('dispatch-pr:' + id,taskPullUrl,
+          adaptivePollInterval('pr',apiClient),force);
+        const taskPullResource=resourceStore.resources.dispatchPulls[id];
+        taskPull=taskPullResource?.data;
+        taskLifecycle=taskPullResource?.error
+          ? {status:'PR_FETCH_FAILED',lifecycle:'UNKNOWN',identity_matches:false,checks_allowed:false}
+          : candidatePullLifecycle(taskPull,{number:job.source_pr,source_sha:job.source_sha});
+      }
+      if (!taskLifecycle?.checks_allowed || apiClient.isPaused?.()) continue;
+      if (!primaryPin) {
+        const taskChecksUrl=resourceStore.bindDispatchChecks(id,taskLifecycle.head_sha);
+        if (taskChecksUrl) await resourceStore.loadResource('dispatch-checks:' + id,taskChecksUrl,
+          adaptivePollInterval('checks',apiClient),force);
+      }
+    }
+    return { head, prPin, pullIdentityMatches, pullLifecycle, recoveryProbeCompleted,
       rateState:apiClient.getRateState?.() || null };
   }
   function readTime(value) {
     const stamp = new Date(value || '');
     return Number.isFinite(stamp.valueOf())
-      ? stamp.toLocaleString('zh-TW', { timeZone:'Asia/Taipei', hour12:false }) : '未確認';
+      ? stamp.toLocaleString('zh-TW', { timeZone:'Asia/Taipei', year:'numeric', month:'2-digit',
+        day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }) : '未確認';
   }
   function safeSha(value) { return /^[a-f0-9]{40}$/i.test(value || '') ? value : null; }
   function ciLabel(summary) {
@@ -1174,6 +1386,183 @@
     if (id === 'W1' && opencode?.code_changes === 'PROVEN')
       return 'OpenCode 快照標記 PROVEN；仍需同任務來源與遠端核對。';
     return '尚未證實有同任務程式修改。';
+  }
+  function dispatchReceipt(comments, job, expectedAttempt, jobCommentId) {
+    const matching=[];
+    for (const comment of comments || []) {
+      const id=Number(comment?.id);
+      const receipt=parseMarked(comment?.body,RECEIPT_MARKER);
+      if (!Number.isSafeInteger(id) || id <= jobCommentId ||
+          !RECEIPT_AUTHORS.has(comment?.user?.login || '') || !object(receipt) ||
+          receipt.schema !== 1 || receipt.project_id !== PROJECT ||
+          receipt.host !== 'DESKTOP-1B6PD2P' || receipt.request_id !== job.request_id ||
+          String(receipt.source_sha || '').toLowerCase() !== job.source_sha.toLowerCase() ||
+          receipt.kind !== job.kind || !/^[a-f0-9-]{36}$/i.test(receipt.attempt_id || '') ||
+          !['STARTED','WAITING','FINISHED','BLOCKED'].includes(receipt.state) ||
+          !Number.isFinite(Date.parse(comment.created_at || ''))) continue;
+      matching.push({id,receipt,created_at:comment.created_at});
+    }
+    let attemptId=expectedAttempt || null;
+    if (!attemptId) {
+      const attempts=[...new Set(matching.map(item => item.receipt.attempt_id))];
+      if (attempts.length === 1) attemptId=attempts[0];
+      else if (attempts.length > 1) return { status:'MULTIPLE_ATTEMPTS_UNBOUND', items:[] };
+    }
+    const items=matching.filter(item => item.receipt.attempt_id === attemptId)
+      .sort((a,b) => Date.parse(a.created_at)-Date.parse(b.created_at) || a.id-b.id);
+    return { status:items.length ? 'MATCHED' : attemptId ? 'ATTEMPT_RECEIPT_NOT_FOUND' : 'NO_RECEIPT',
+      attempt_id:attemptId, items, latest:items.at(-1) || null };
+  }
+  function dispatchCardData(id, snapshot, comments, resources, classification, now, lifecycle = null) {
+    const task=dispatchTaskSource(snapshot,id);
+    const record=workerRecord(snapshot,id);
+    const taskId=task?.task_id || task?.request_id || null;
+    const commentId=task?.task_comment_id || task?.job_comment_id;
+    const resource=resources.dispatches?.[id] || null;
+    const fallbackState=classification?.status || 'UNKNOWN';
+    const base={id, status:fallbackState, label:fallbackState, task:'UNKNOWN', attempt:'UNKNOWN',
+      model:'UNKNOWN', source:'UNKNOWN', spec:'UNKNOWN', progress:'UNKNOWN', delivery:'UNKNOWN',
+      next:task?.next_owner || record?.next_owner || '未確認', eventAt:null,
+      jobUrl:null, receiptUrl:null, prUrl:null, record};
+    if (!taskId) {
+      return { ...base, label:'UNKNOWN／沒有可核對的正式派工', task:'沒有同來源 request_id；未證實曾派工。',
+        progress:id === 'W3' ? '沒有 Zero Risk request_id／Human 轉送／工具回傳證據。'
+          : '觀測中沒有此 Worker 的正式任務 ID。',
+        delivery:'沒有可綁定至此車道的結果 PR／CI／驗收收據。',
+        next:id === 'W3' ? 'Codex 建立有效請求；Human 手動轉送' : '未確認',
+      };
+    }
+    base.task=String(taskId) + (task?.kind ? '／' + String(task.kind) : '') +
+      (Number.isSafeInteger(commentId) ? '；派工留言 #' + commentId : '；派工留言 ID 未知');
+    base.attempt=task?.attempt_id ? String(task.attempt_id) : '尚無可核對 attempt_id';
+    if (Number.isSafeInteger(commentId) && commentId > 0) {
+      base.jobUrl='https://github.com/' + REPO + '/issues/310#issuecomment-' + commentId;
+      const job=validSchema6DispatchComment(resource?.data,{comment_id:commentId,
+        request_id:taskId, source_sha:task.task_source_sha || task.source_sha,
+        kind:task.task_kind || task.kind, source_pr:task.source_pr});
+      if (!job) {
+        const code=resource?.error || (!resource?.data ? 'TASK_COMMENT_NOT_READ' : 'JOB_COMMENT_OR_SNAPSHOT_MISMATCH');
+        return { ...base, status:'UNKNOWN', label:'UNKNOWN／' + code,
+          model:'正式結構化派工未核對：' + code,
+          source:(Number.isSafeInteger(task?.source_pr) ? 'PR #' + task.source_pr : '來源 PR 未確認') +
+            '；SHA ' + (safeSha(task.task_source_sha || task.source_sha) || '未確認'),
+          progress:'保留觀測中的任務／收據欄位；未讀回相符的 #310 schema-6 派工，不能推論模型已啟動。',
+          delivery:'結果 PR／CI／驗收未由相符派工與收據確認。',
+          eventAt:null,
+        };
+      }
+      const jobAt=Number.isFinite(Date.parse(resource.data.created_at || ''))
+        ? resource.data.created_at : null;
+      const receipts=dispatchReceipt(comments,job,task.attempt_id,commentId);
+      const latest=receipts.latest;
+      const receipt=latest?.receipt || null;
+      base.status=fallbackState;
+      const taskState=String(task.task_state || task.state || 'TASK_STATE_UNKNOWN').toUpperCase();
+      base.label=(fallbackState === 'STALE' ? '歷史快照已過期／' :
+        fallbackState === 'UNKNOWN' ? '即時狀態未確認／' : '') +
+        fallbackState + '；正式任務 ' + taskState;
+      base.model=job.model + (job.variant ? '／' + job.variant : '');
+      base.source='PR #' + job.source_pr + '／' + job.source_sha +
+        (lifecycle?.lifecycle ? '；' + lifecycle.lifecycle : '；PR 狀態未確認') +
+        (lifecycle?.status === 'SOURCE_SHA_DRIFT' ? '；來源 SHA 已漂移，禁止重用舊派工' : '');
+      base.spec=job.spec_path + '／' + job.spec_sha256;
+      const receiptText=receipt
+        ? receipt.state + (receipt.outcome ? '／' + receipt.outcome : '') +
+          '；attempt ' + receipt.attempt_id
+        : receipts.status === 'MULTIPLE_ATTEMPTS_UNBOUND'
+          ? '多個 attempt，無法安全綁定收據'
+          : '同 attempt 收據未讀回';
+      const modelText=receipt?.model_invoked === true ? '模型呼叫有收據' :
+        receipt?.model_invoked === false ? '收據證實未呼叫模型' : '模型是否呼叫未知';
+      const toolText=Number.isSafeInteger(receipt?.tool_execution_count)
+        ? '工具 ' + receipt.tool_execution_count + ' 次' : '工具次數未知';
+      base.progress=(fallbackState === 'STALE' ? '歷史快照（已過期）；' : '') +
+        'Win11 任務狀態 ' + taskState + '；' + receiptText +
+        '；' + modelText + '；' + toolText;
+      const diff=task.diff_sha256 && /^[a-f0-9]{64}$/i.test(task.diff_sha256)
+        ? 'diff ' + task.diff_sha256 + '；' : '';
+      const fileCount=Number.isSafeInteger(task.changed_files_count)
+        ? task.changed_files_count + ' 個檔案回報；' : '檔案數未確認；';
+      const test=task.test_status || task.tests || '測試未由此收據證實';
+      const resultPr=Number.isSafeInteger(task.result_pr_number || task.pr_number)
+        ? Number(task.result_pr_number || task.pr_number) : null;
+      base.delivery=diff + fileCount + String(task.code_changes || task.coding_state || '差異狀態未確認') +
+        '；' + String(test) + '；' + (resultPr ? '結果 PR #' + resultPr : '結果 PR 未由同任務收據提供') +
+        '；CI ' + String(task.ci || task.ci_status || '未確認') +
+        '；驗收 ' + String(task.task_acceptance || task.acceptance || '未確認');
+      base.next=task.next_owner || record?.next_owner || '未確認';
+      base.eventAt=latest?.created_at || jobAt;
+      base.receiptUrl=latest
+        ? 'https://github.com/' + REPO + '/issues/407#issuecomment-' + latest.id
+        : Number.isSafeInteger(task.task_receipt_comment_id)
+          ? 'https://github.com/' + REPO + '/issues/407#issuecomment-' + task.task_receipt_comment_id
+          : null;
+      base.prUrl='https://github.com/' + REPO + '/pull/' + job.source_pr;
+      if (lifecycle?.checks_allowed) {
+        const prNumber=job.source_pr;
+        const checkResource=id === 'W1' && resources.checks?.url ===
+          API + '/commits/' + lifecycle.head_sha + '/check-runs?per_page=100'
+          ? resources.checks : resources.dispatchChecks?.[id];
+        const summary=checkResource?.data && !checkResource.error &&
+          checkResource.url === API + '/commits/' + lifecycle.head_sha + '/check-runs?per_page=100' &&
+          now-(checkResource.fetchedAt || 0) <= CHECKS_POLL_MS
+          ? summarizeChecks(checkResource.data,lifecycle.head_sha,prNumber) : null;
+        if (summary) base.delivery+='；精確 HEAD CI ' + summary.counts.success + '/' + summary.counts.total +
+          ' success，' + ciLabel(summary);
+      } else if (lifecycle?.lifecycle === 'CLOSED_UNMERGED')
+        base.delivery+='；此歷史 PR 無目前 PR checks，終態仍未驗收';
+      if (jobAt) base.eventAt=latest?.created_at || jobAt;
+      return base;
+    }
+    base.label=(fallbackState === 'STALE' ? '歷史快照已過期／' : '') +
+      fallbackState + '／派工留言 ID 未確認';
+    base.source=(Number.isSafeInteger(task?.source_pr) ? 'PR #' + task.source_pr : '來源 PR 未確認') +
+      '；SHA ' + (safeSha(task?.task_source_sha || task?.source_sha) || '未確認') +
+      '；來源為 Issue #407 觀測欄位，未完成 #310 派工核對';
+    base.progress='Issue #407 快照任務狀態 ' +
+      String(task?.task_state || task?.state || task?.status || 'UNKNOWN') +
+      (task?.blocker_code ? '；阻擋 ' + String(task.blocker_code) : '') +
+      '；沒有可讀取的精確 #310 派工留言；不能推論模型已啟動。';
+    return base;
+  }
+  function renderDispatchCard(id, data) {
+    const prefix=id.toLowerCase() + '-dispatch-';
+    const status=data?.status || 'UNKNOWN';
+    const badgeLabel=data?.label || 'UNKNOWN';
+    const badgeKind=status === 'BLOCKED' ? 'bad'
+      : status === 'RUNNING_VERIFIED' || status === 'DELIVERED' || status === 'ACCEPTED' ? 'good'
+        : status === 'PENDING' || status === 'AWAITING_HUMAN' || status === 'STALE' ? 'warn' : 'neutral';
+    badge(prefix + 'state',status,badgeLabel,badgeKind);
+    text(prefix + 'task',data?.task);
+    text(prefix + 'attempt',data?.attempt);
+    text(prefix + 'model',data?.model);
+    text(prefix + 'source',data?.source);
+    text(prefix + 'spec',data?.spec);
+    text(prefix + 'progress',data?.progress);
+    text(prefix + 'delivery',data?.delivery);
+    text(prefix + 'next',data?.next);
+    text(prefix + 'time',data?.eventAt
+      ? '最後已讀回派工／收據 ' + readTime(data.eventAt)
+      : '沒有可核對的派工／收據時間');
+    text(id.toLowerCase() + '-header-progress',data?.progress || '最新任務進度未確認');
+    text(id.toLowerCase() + '-last-event',data?.eventAt
+      ? '最後任務事件：' + readTime(data.eventAt)
+      : '最後任務事件：未確認');
+    for (const [suffix,url,label] of [
+      ['job-link',data?.jobUrl,'Issue #310 派工'],
+      ['receipt-link',data?.receiptUrl,id === 'W3' ? '工具回傳證據' : 'Issue #407 收據'],
+      ['pr-link',data?.prUrl,'來源 PR'],
+    ]) {
+      const link=document.getElementById(prefix + suffix);
+      if (!link) continue;
+      link.hidden=typeof url !== 'string' || !url.startsWith('https://github.com/' + REPO + '/');
+      link.href=link.hidden ? '#' : url;
+      if (label && suffix !== 'pr-link') link.textContent=label;
+      else if (suffix === 'pr-link' && !link.hidden) {
+        const number=Number(url.match(/\/pull\/(\d+)/)?.[1]);
+        link.textContent=Number.isSafeInteger(number) ? '來源 PR #' + number : label;
+      }
+    }
   }
   function classifyRecentEvents(comments, snapshot, checkSummary) {
     const events = [];
@@ -1341,12 +1730,16 @@
     const mainFresh = resourceFreshness(resources.main, now, MAIN_POLL_MS);
     const checksFresh = resourceFreshness(resources.checks, now, CHECKS_POLL_MS);
     const prRead = prFresh === 'FRESH' ? resources.pr.data : null;
-    const pr = candidatePullIdentityMatches(prRead,prPin) ? prRead : null;
+    const prLifecycle = prRead
+      ? candidatePullLifecycle(prRead,prPin)
+      : { status:resources.pr.error ? 'PR_FETCH_FAILED' : 'PR_METADATA_UNAVAILABLE',
+        lifecycle:'UNKNOWN', identity_matches:false, source_sha_matches:false, checks_allowed:false };
+    const pr = prLifecycle.identity_matches ? prRead : null;
     const main = mainFresh === 'FRESH' ? resources.main.data : null;
-    const head = safeSha(pr?.head?.sha);
-    const expectedChecksUrl = head
+    const head = prLifecycle.identity_matches ? safeSha(pr?.head?.sha) : null;
+    const expectedChecksUrl = prLifecycle.checks_allowed && head
       ? API + '/commits/' + head + '/check-runs?per_page=100' : null;
-    const currentChecks = checksFresh === 'FRESH' && !resources.checks.error &&
+    const currentChecks = prLifecycle.checks_allowed && checksFresh === 'FRESH' && !resources.checks.error &&
       resources.checks.url === expectedChecksUrl
       ? checkSummary : null;
     const apiErrors = Object.entries(resources).filter(([,r]) => r.error).map(([key,r]) => key + ':' + r.error);
@@ -1389,6 +1782,27 @@
       W2: classifyWorker(workerRecord(snapshot, 'W2'), osFreshness, now),
       W3: classifyWorker(workerRecord(snapshot, 'W3'), osFreshness, now),
     };
+    const dispatchData = {};
+    for (const id of ['W1','W2','W3']) {
+      const task=dispatchTaskSource(snapshot,id);
+      let lifecycle=null;
+      if (Number.isSafeInteger(task?.source_pr) && safeSha(task?.task_source_sha || task?.source_sha)) {
+        const taskSha=String(task.task_source_sha || task.source_sha).toLowerCase();
+        const primaryPin=id === 'W1' && prPin?.number === task.source_pr && prPin.source_sha === taskSha;
+        if (primaryPin) lifecycle=prLifecycle;
+        else {
+          const pullResource=resources.dispatchPulls?.[id];
+          const pullIsFresh=pullResource?.url === API + '/pulls/' + task.source_pr &&
+            resourceFreshness(pullResource,now,PR_POLL_MS) === 'FRESH' && !pullResource.error;
+          lifecycle=pullIsFresh
+            ? candidatePullLifecycle(pullResource.data,{number:task.source_pr,source_sha:taskSha})
+            : {status:pullResource?.error ? 'PR_FETCH_FAILED' : 'PR_METADATA_UNAVAILABLE',
+              lifecycle:'UNKNOWN',identity_matches:false,source_sha_matches:false,checks_allowed:false};
+        }
+      }
+      dispatchData[id]=dispatchCardData(id,snapshot,comments,resources,records[id],now,lifecycle);
+      renderDispatchCard(id,dispatchData[id]);
+    }
     const cardData = {};
     for (const id of ['W1','W2','W3'])
       cardData[id] = workerCardData(id, id === 'W1' ? explicitW1 : workerRecord(snapshot,id),
@@ -1400,12 +1814,16 @@
     const blocked = osFreshness === 'FRESH'
       ? Object.values(records).filter(record => record.status === 'BLOCKED').length : null;
     text('metric-blocked', blocked === null ? '未確認' : String(blocked) + ' 個 Worker 明確受阻');
-    text('metric-human', pr?.draft ? 'Human 審閱任務來源 PR #' + pr.number + ' 草稿'
-      : prPin ? '依任務來源 PR #' + prPin.number + ' 狀態核對' : '任務來源 PR pin 未確認');
+    text('metric-human',osFreshness !== 'FRESH' ? 'UNKNOWN：Win11 等待人工作業狀態未確認'
+      : records.W3.status === 'AWAITING_HUMAN' ? 'W3 等待 Human 手動轉送'
+        : '沒有明確的待 Human 動作證據');
     text('metric-main', main?.sha ? safeSha(main.sha) || 'SHA 格式錯誤'
       : mainFresh === 'STALE' ? '上次讀回已過期' : '讀回未知');
-    text('metric-ci', currentChecks ? ciLabel(currentChecks) : checksFresh === 'STALE'
-      ? 'CI 讀回已過期' : '精確 HEAD 檢查未知');
+    text('metric-ci',currentChecks ? ciLabel(currentChecks)
+      : prLifecycle.status === 'CLOSED_UNMERGED' ? '歷史 PR 已關閉；無目前 PR checks'
+        : prLifecycle.lifecycle === 'MERGED' ? 'PR 已合併；任務 checks／正式接受另核'
+          : prLifecycle.status === 'SOURCE_SHA_DRIFT' ? '任務來源 SHA 漂移；不套用目前 PR checks'
+            : checksFresh === 'STALE' ? 'CI 讀回已過期' : '精確 HEAD 檢查未知');
     text('metric-error', apiErrors.length ? apiErrors.join('；') : '無近期同步錯誤');
     text('snapshot-detail', snapshot
       ? 'comment #' + (observation.comment?.id || snapshot.source?.comment_id || '未確認') +
@@ -1418,14 +1836,16 @@
         '／Win11 ' + osFreshness
       : '未取得可驗證快照');
     const issueUrl = API + '/issues/407/comments?per_page=100';
-    const rateMeta = apiClient.getMeta(issueUrl);
     if (rateState) renderRateStatus(rateState,resources,now);
-    if (!rateState) text('rate-detail',rateMeta
-      ? '最近回應剩餘 ' + (rateMeta.remaining == null ? '未暴露額度標頭' : rateMeta.remaining) +
-        '；ETag ' + (rateMeta.etag ? '已支援條件式讀取' : '未回傳') +
-        '；額度重設 ' + (rateMeta.resetAt ? readTime(rateMeta.resetAt) : '未暴露') +
-        '；Issue 最近讀回 ' + (issueResource.fetchedAt ? readTime(issueResource.fetchedAt) : '未成功')
-      : '尚無成功回應；瀏覽器會顯示 GitHub HTTP／CORS／網路錯誤');
+    else {
+      const rateMeta = apiClient.getMeta(issueUrl);
+      text('rate-detail',rateMeta
+        ? '最近回應剩餘 ' + (rateMeta.remaining == null ? '未暴露額度標頭' : rateMeta.remaining) +
+          '；ETag ' + (rateMeta.etag ? '已支援條件式讀取' : '未回傳') +
+          '；額度重設 ' + (rateMeta.resetAt ? readTime(rateMeta.resetAt) : '未暴露') +
+          '；Issue 最近讀回 ' + (issueResource.fetchedAt ? readTime(issueResource.fetchedAt) : '未成功')
+        : '尚無成功回應；瀏覽器會顯示 GitHub HTTP／CORS／網路錯誤');
+    }
     text('error-detail',apiErrors.length ? apiErrors.join('；') : '目前沒有新錯誤；資料有效期仍逐欄判定。');
     const task = windows.native_task || {};
     badge('native-badge',osFreshness,
@@ -1459,11 +1879,22 @@
       '；歷史 Session ' + (Number.isSafeInteger(oc.historical_sessions_count)
         ? oc.historical_sessions_count + ' 筆（' + readTime(oc.historical_sessions_observed_at) + '）'
         : '筆數未確認') + '；歷史資料不作為目前施工證據。');
-    text('codex-detail','沒有從公開 Issue／PR 取得 Codex 主控的被動原生活動資料；不以本面板 PR 作者推論施工。');
-    badge('codex-badge','UNKNOWN','活動未確認','neutral');
-    text('codex-task','沒有公開且可歸屬的當前 Codex task_id／attempt_id。');
-    text('codex-evidence','本頁讀取與 PR 作者資訊不能證明 Codex 此刻正在工作。');
-    text('codex-next','依正式 PR／Human 審閱流程處理。');
+    const codexHost=snapshot?.codex_executor || windows.codex_executor || null;
+    text('codex-executor',osFreshness === 'FRESH' && object(codexHost)
+      ? String(codexHost.status || 'UNKNOWN') + '；' + String(codexHost.reason_code || '主機程序證據未提供')
+      : 'UNKNOWN：#407 快照未提供可核對的 Codex Executor 主機狀態');
+    const dispatchSummary=['W1','W2','W3'].map(id => id + ' ' + dispatchData[id].status +
+      '（' + dispatchData[id].task + '）').join('；');
+    text('codex-detail','主控派工卡對帳 #310 schema-6 與 #407 同任務收據；不把派工、程序或 FINISHED 視為驗收。');
+    badge('codex-badge','UNKNOWN','主控 Codex 即時活動未確認','neutral');
+    text('codex-task',dispatchSummary);
+    text('codex-harvest',['W1','W2','W3'].map(id => id + '：' + dispatchData[id].delivery).join('；'));
+    text('codex-evidence','UNKNOWN：公開觀測未提供可歸屬主控 Codex 的即時程序、模型推論與工具活動。');
+    text('codex-observed',snapshot
+      ? '觀測 ' + readTime(snapshot.observed_at) + '；到期 ' + readTime(snapshot.expires_at) +
+        '；' + osFreshness
+      : 'UNKNOWN：沒有可讀回的 Win11 觀測時間與有效期限');
+    text('codex-next','W1 需由 Codex 核對已擷取差異；W2 保留未知外部效果且不得重播；W3 無有效 request_id 時不推論已派工。');
     const registration = snapshot?.github?.runner_registration;
     text('runner-registration',osFreshness === 'FRESH' && registration?.status === 'FRESH' &&
       Number.isSafeInteger(registration.count)
@@ -1497,14 +1928,24 @@
         : 'csg-trusted-verifier：' + legacy.status + (legacy.conclusion ? '/' + legacy.conclusion : '') +
           '；是否 required 未知。'
       : '本次精確 HEAD 資料沒有此檢查或 CI 未讀回；required 規則 UNKNOWN。');
-    text('pr-state',pr
-      ? (pr.draft ? 'Draft' : 'Ready for review') + '；' + (pr.merged ? '已合併' : '尚未合併') +
-        '；GitHub state ' + String(pr.state)
-      : !prPin ? 'UNKNOWN：沒有新鮮、唯一的正式任務 PR pin'
-        : prFresh === 'STALE' ? '任務來源 PR metadata 上次讀回已過期；目前未知'
-          : resources.pr.error ? '任務來源 PR 讀取未知：' + resources.pr.error
-            : '任務來源 PR identity／HEAD 未確認');
-    text('pr-head',head || (pr ? 'GitHub 回傳的 head SHA 格式錯誤' : '未讀回'));
+    const lifecycleText = prLifecycle.status === 'SOURCE_SHA_DRIFT'
+      ? '來源 SHA 漂移：任務 pin ' + (prPin?.source_sha || 'UNKNOWN') + '；PR HEAD ' + (head || 'UNKNOWN') +
+        '；PR lifecycle ' + prLifecycle.lifecycle + '；checks 不沿用。'
+      : prLifecycle.lifecycle === 'CLOSED_UNMERGED'
+        ? 'PR #' + (prPin?.number || 'UNKNOWN') + ' 已關閉未合併（歷史來源）；不再顯示為 identity unknown。'
+        : prLifecycle.lifecycle === 'MERGED'
+          ? 'PR #' + (prPin?.number || 'UNKNOWN') + ' 已合併；部署另行核對。'
+          : prLifecycle.lifecycle === 'OPEN_DRAFT' ? 'PR #' + (prPin?.number || 'UNKNOWN') + ' 仍為 Draft。'
+            : prLifecycle.lifecycle === 'OPEN_REVIEWABLE' ? 'PR #' + (prPin?.number || 'UNKNOWN') + ' 開啟並可審查。'
+              : prLifecycle.status === 'REPO_OR_PROJECT_IDENTITY_MISMATCH'
+                ? 'PR repository／project identity 不符；拒絕套用其 CI。'
+                : prLifecycle.status === 'PR_FETCH_FAILED'
+                  ? 'PR 讀取失敗：' + (resources.pr.error || 'UNKNOWN')
+                  : prLifecycle.status === 'PR_METADATA_UNAVAILABLE'
+                    ? 'PR metadata 未新鮮讀回；狀態 UNKNOWN。'
+                    : '沒有新鮮、唯一的正式任務 PR pin。';
+    text('pr-state',lifecycleText);
+    text('pr-head',head || (prLifecycle.identity_matches ? 'GitHub 回傳的 head SHA 格式錯誤' : '未讀回'));
     text('pr-base',(safeSha(pr?.base?.sha) || 'PR base 未讀回') +
       '；main ' + (safeSha(main?.sha) || (mainFresh === 'STALE' ? '上次讀回已過期' : '未讀回')));
     const runtime = snapshot?.runtime_deployment;
@@ -1524,24 +1965,39 @@
     text('runtime-bundle',runtime?.bundle_sha256 && /^[a-f0-9]{64}$/i.test(runtime.bundle_sha256)
       ? runtime.bundle_sha256 + '；' + runtimeAge
       : 'UNKNOWN：沒有可核對的 runtime bundle SHA-256');
-    text('pr-deployment',pr?.merged
-      ? '已進入 main；Win11 Worker 部署仍需獨立來源驗收。'
-      : '未接受／未合併；不可部署候選 Worker。Branch protection API 權限未知。');
-    badge('pr-badge',pr?.merged ? 'ACCEPTED' : pr ? 'PENDING' : 'UNKNOWN',
-      pr?.merged ? '來源已合併；部署另驗' : pr?.draft ? 'Draft／未合併' : '來源未確認',
-      pr?.merged ? 'good' : pr ? 'warn' : 'neutral');
+    text('pr-deployment',prLifecycle.lifecycle === 'MERGED' && prLifecycle.source_sha_matches
+      ? '任務來源 PR 已進入 main；Win11 Worker 部署仍需獨立來源驗收。'
+      : prLifecycle.lifecycle === 'MERGED'
+        ? 'PR 已合併，但 task source SHA 不符；不得將合併狀態套用至此任務。'
+      : prLifecycle.lifecycle === 'CLOSED_UNMERGED'
+        ? '歷史 PR 已關閉且未合併；不屬於可部署來源。'
+        : prLifecycle.status === 'SOURCE_SHA_DRIFT'
+          ? '任務 SHA 與目前 PR HEAD 不同；不可把目前 PR CI 套用到舊任務。'
+          : 'PR 尚未接受／合併；不可部署候選 Worker。');
+    const acceptedPr=prLifecycle.lifecycle === 'MERGED' && prLifecycle.source_sha_matches;
+    badge('pr-badge',acceptedPr ? 'ACCEPTED'
+      : ['OPEN_DRAFT','OPEN_REVIEWABLE'].includes(prLifecycle.lifecycle) ? 'PENDING' : 'UNKNOWN',
+      acceptedPr ? '來源已合併；部署另驗'
+        : prLifecycle.lifecycle === 'CLOSED_UNMERGED' ? '已關閉未合併（歷史）'
+          : prLifecycle.lifecycle === 'OPEN_DRAFT' ? 'Draft／未合併'
+            : prLifecycle.lifecycle === 'OPEN_REVIEWABLE' ? '開啟／未合併' : '來源狀態未確認',
+      acceptedPr ? 'good' : ['OPEN_DRAFT','OPEN_REVIEWABLE'].includes(prLifecycle.lifecycle) ? 'warn' : 'neutral');
     text('pr-detail',pr && head
-      ? '任務來源 PR #' + pr.number + ' head ' + head +
-        (head.toLowerCase() === prPin.source_sha ? '；與 #407 task source SHA 相符。'
-          : '；與 #407 task source SHA ' + prPin.source_sha + ' 不符，任務來源已漂移。')
-      : prPin ? '任務來源 PR #' + prPin.number + '；GitHub metadata 或正式身份尚未確認。'
+      ? '任務來源 PR #' + pr.number + ' head ' + head + '；' + lifecycleText +
+        (prLifecycle.source_sha_matches ? ' task source SHA 相符。'
+          : ' task source SHA ' + (prPin?.source_sha || 'UNKNOWN') + ' 與 PR HEAD 不符。')
+      : prPin ? '任務來源 PR #' + prPin.number + '；' + lifecycleText
         : '沒有新鮮且唯一的正式任務 PR pin；PR／CI 顯示 UNKNOWN。');
     text('checks-detail',currentChecks
       ? currentChecks.checks.map(check => check.name + '=' + check.status +
           (check.conclusion ? '/' + check.conclusion : '')).join('；')
-      : resources.checks.error
-        ? '精確 HEAD 檢查未知：' + resources.checks.error
-        : '未取得精確 head check-runs。');
+      : !prPin ? '沒有任務 PR pin；不讀取 CI。'
+        : !prLifecycle.identity_matches ? 'PR 身分／metadata 未核對；不套用任何 checks。'
+          : !prLifecycle.checks_allowed ? '此 PR lifecycle／source SHA 不允許套用目前 checks：' +
+            prLifecycle.status + '。'
+            : resources.checks.error
+              ? '精確 HEAD 檢查未知：' + resources.checks.error
+              : '未取得精確 head check-runs。');
     if (apiErrors.length) {
       text('overall-copy','同步來源錯誤：' + apiErrors.join('；') +
         '。保留最後成功讀回時間，但逾期資料標為 STALE，不能當作目前施工。');
@@ -1565,8 +2021,10 @@
   }
   const testApi = {
     parseSnapshot, findSnapshot, latestTask, summarizeChecks, fieldFreshness, validJob,
-    candidatePrPin, candidatePullIdentityMatches,
+    candidatePrPin, candidatePullIdentityMatches, candidatePullLifecycle,
     classifyWorker, classifyW1, workerRecord, workerChangeLabel, normalizeFormalTask, classifyRecentEvents,
+    validSchema6DispatchJob, validSchema6DispatchComment, dispatchTaskSource, dispatchReceipt,
+    dispatchCardData, renderDispatchCard, render,
     freshnessOfSnapshot, createApiClient, createResourceStore, renderRateStatus,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
     constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS,
