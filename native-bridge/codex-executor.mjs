@@ -112,6 +112,8 @@ function acquireActiveLock(spoolDir, deps = {}) {
           !Number.isFinite(lock.boot_uptime_seconds) || typeof lock.phase !== 'string') throw error;
       if (lock.model_pid !== undefined && lock.model_pid !== null &&
           (!Number.isSafeInteger(lock.model_pid) || lock.model_pid < 1)) throw error;
+      if (lock.phase === 'CLI_REFRESH_STATE_UNKNOWN')
+        throw new Error('EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN');
 
       // A lower OS uptime proves a reboot terminated every prior process. The
       // durable per-attempt claim remains, so the old request is never replayed.
