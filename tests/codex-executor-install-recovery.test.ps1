@@ -39,6 +39,7 @@ $global:MockFailureInjected = $false
 $global:MockAclStore = @{}
 $global:MockProgramDataAcl = New-Object System.Security.AccessControl.DirectorySecurity
 $global:MockBadSignaturePath = ''
+$global:MockTaskNotFoundThrows = $true
 
 function Assert-Equal($Actual, $Expected, [string]$Message) {
     if ($Actual -cne $Expected) { throw ('ASSERT_EQUAL_FAILED: ' + $Message + ';actual=' + $Actual + ';expected=' + $Expected) }
@@ -68,6 +69,14 @@ function global:Get-ScheduledTask {
             Actions = @([pscustomobject]@{ Execute = $reg.Action.Execute; Arguments = $reg.Action.Arguments; WorkingDirectory = $reg.Action.WorkingDirectory })
             Triggers = @()
         }
+    }
+    if ($TaskName -eq 'PTYSD-Codex-Executor' -and $global:MockTaskNotFoundThrows -and $PSBoundParameters['ErrorAction'] -eq 'Stop') {
+        $record = [System.Management.Automation.ErrorRecord]::new(
+            [System.Exception]::new('No matching MSFT_ScheduledTask objects found by CIM query.'),
+            'CmdletizationQuery_NotFound,Get-ScheduledTask',
+            [System.Management.Automation.ErrorCategory]::ObjectNotFound,
+            'MSFT_ScheduledTask')
+        $PSCmdlet.ThrowTerminatingError($record)
     }
     return @()
 }
@@ -326,7 +335,8 @@ try {
 
     $global:MockFailurePoint = 'ReadbackMismatch'
     $global:MockFailureInjected = $false
-    $null = Invoke-InstallAttempt 'EXECUTOR_TASK_READBACK_MISMATCH'
+    $readbackMismatch = Invoke-InstallAttempt 'EXECUTOR_TASK_READBACK_MISMATCH'
+    if ($readbackMismatch -notlike '*fields=Settings.AllowHardTerminate*') { throw ('READBACK_MISMATCH_DID_NOT_IDENTIFY_FIELD: ' + $readbackMismatch) }
     Assert-Equal $global:MockTaskRegistered $false 'registered mock task rolled back after readback mismatch'
     Assert-Equal (Get-Content -LiteralPath $workerConfigPath -Raw) $originalConfig 'worker config restored after readback mismatch'
     Assert-Equal (Test-Path -LiteralPath $statePath) $true 'install identity remains after task readback rollback for safe retry'

@@ -41,7 +41,15 @@ $registeredHere = $false
 
 function Get-TaskOptional([string]$Name, [switch]$Strict) {
     $readErrorAction = if ($Strict) { 'Stop' } else { 'SilentlyContinue' }
-    $items = @(Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction $readErrorAction)
+    try {
+        $items = @(Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction $readErrorAction)
+    } catch {
+        # NotFound is a valid absent-task readback after rollback or uninstall.
+        if ($Strict -and $_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound,Get-ScheduledTask*') {
+            return $null
+        }
+        throw
+    }
     if ($items.Count -gt 1) { throw ('TASK_NAME_NOT_UNIQUE: ' + $Name) }
     if ($items.Count -eq 0) { return $null }
     return $items[0]
@@ -626,15 +634,25 @@ try {
     $timeLimit = [string]$readback.Settings.ExecutionTimeLimit
     $zeroLimit = ($readback.Settings.ExecutionTimeLimit -eq [TimeSpan]::Zero) -or
         ($timeLimit -eq 'PT0S') -or ($timeLimit -eq '00:00:00')
-    if ($readback.Principal.UserId -ne $executorName -or $readback.Principal.LogonType -ne $expectedReadbackLogonType -or
-        $readback.Principal.RunLevel -ne 'Limited' -or $readback.Settings.MultipleInstances -ne 'IgnoreNew' -or
-        -not $zeroLimit -or $readback.Settings.Hidden -ne $true -or
-        $readback.Settings.AllowHardTerminate -ne $false -or
-        @($readback.Triggers).Count -ne 0 -or @($readback.Actions).Count -ne 1 -or
-        $readback.Actions[0].Execute -ne $wscript -or
-        $readback.Actions[0].Arguments -ne $actionArgs -or
-        $readback.Actions[0].WorkingDirectory -ne $spoolDir) {
-        throw 'EXECUTOR_TASK_READBACK_MISMATCH'
+    $readbackMismatches = New-Object System.Collections.Generic.List[string]
+    if ($readback.Principal.UserId -ne $executorName) { $readbackMismatches.Add('Principal.UserId') }
+    if ($readback.Principal.LogonType -ne $expectedReadbackLogonType) { $readbackMismatches.Add('Principal.LogonType') }
+    if ($readback.Principal.RunLevel -ne 'Limited') { $readbackMismatches.Add('Principal.RunLevel') }
+    if ($readback.Settings.MultipleInstances -ne 'IgnoreNew') { $readbackMismatches.Add('Settings.MultipleInstances') }
+    if (-not $zeroLimit) { $readbackMismatches.Add('Settings.ExecutionTimeLimit') }
+    if ($readback.Settings.Hidden -ne $true) { $readbackMismatches.Add('Settings.Hidden') }
+    if ($readback.Settings.AllowHardTerminate -ne $false) { $readbackMismatches.Add('Settings.AllowHardTerminate') }
+    if (@($readback.Triggers).Count -ne 0) { $readbackMismatches.Add('Triggers.Count') }
+    $readbackActions = @($readback.Actions)
+    if ($readbackActions.Count -ne 1) {
+        $readbackMismatches.Add('Actions.Count')
+    } else {
+        if ($readbackActions[0].Execute -ne $wscript) { $readbackMismatches.Add('Actions[0].Execute') }
+        if ($readbackActions[0].Arguments -ne $actionArgs) { $readbackMismatches.Add('Actions[0].Arguments') }
+        if ($readbackActions[0].WorkingDirectory -ne $spoolDir) { $readbackMismatches.Add('Actions[0].WorkingDirectory') }
+    }
+    if ($readbackMismatches.Count -gt 0) {
+        throw ('EXECUTOR_TASK_READBACK_MISMATCH;fields=' + ($readbackMismatches -join ','))
     }
     foreach ($property in @{
         codex_spool=$spoolDir; publisher_identity_sid=$publisherSid; executor_identity_sid=$executorSid
