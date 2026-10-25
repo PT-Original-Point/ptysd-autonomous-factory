@@ -1952,12 +1952,19 @@ test('executor keeps a same-boot stale model-running lock fail-closed and releas
     const activePath = join(locks, 'executor.active');
     const writeLock = phase => writeFileSync(activePath, JSON.stringify({ schema: 1,
       pid: 5002, started_at: new Date().toISOString(), boot_uptime_seconds: 100,
-      phase, request_id: null, attempt_id: null }));
+      phase, request_id: null, attempt_id: null, model_pid: null }));
 
     writeLock('MODEL_RUNNING');
     await assert.rejects(runExecutorOnce({ spool_dir: dir }, { uptimeSeconds: () => 120,
       isProcessAlive: () => false }), /EXECUTOR_LOCK_STALE_MODEL_EFFECTS_UNKNOWN/);
     assert.equal(existsSync(activePath), true, 'unknown model effects keep the lock intact');
+
+    rmSync(activePath);
+    writeLock('CLI_REFRESH_STATE_UNKNOWN');
+    await assert.rejects(runExecutorOnce({ spool_dir: dir }, { uptimeSeconds: () => 120,
+      isProcessAlive: () => false }), /EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN/);
+    assert.equal(existsSync(activePath), true,
+      'same-boot parent death does not prove the refresh updater child has ended');
 
     rmSync(activePath);
     writeLock('DISPATCHER');
@@ -1966,6 +1973,38 @@ test('executor keeps a same-boot stale model-running lock fail-closed and releas
     assert.equal(idle.state, 'IDLE');
     assert.equal(existsSync(activePath), false);
     assert.ok(readdirSync(locks).some(name => name.startsWith('executor.stale-')));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor recovers an interrupted CLI refresh lock after reboot without replaying work', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-refresh-reboot-lock-'));
+  try {
+    const locks = join(dir, 'locks');
+    mkdirSync(locks);
+    const activePath = join(locks, 'executor.active');
+    writeFileSync(activePath, JSON.stringify({ schema: 1, pid: 5005,
+      started_at: new Date().toISOString(), boot_uptime_seconds: 900,
+      phase: 'CLI_REFRESH_STATE_UNKNOWN', request_id: null, attempt_id: null, model_pid: null }));
+
+    const idle = await runExecutorOnce({ spool_dir: dir }, {
+      uptimeSeconds: () => 10,
+      isProcessAlive: () => { throw new Error('reboot evidence makes PID probing unnecessary'); },
+    });
+
+    assert.deepEqual(idle, { state: 'IDLE', model_invoked: false });
+    assert.equal(existsSync(activePath), false,
+      'a reboot proves the refresh parent and any child processes have ended');
+    assert.ok(readdirSync(locks).some(name => name.startsWith('executor.stale-')),
+      'the old lock remains available as recovery evidence');
+
+    writeFileSync(activePath, JSON.stringify({ schema: 1, pid: 5006,
+      started_at: new Date().toISOString(), boot_uptime_seconds: 900,
+      phase: 'CLI_REFRESH_STATE_UNKNOWN', request_id: 'unexpected-request',
+      attempt_id: null, model_pid: null }));
+    await assert.rejects(runExecutorOnce({ spool_dir: dir }, { uptimeSeconds: () => 10 }),
+      /EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN/);
+    assert.equal(existsSync(activePath), true,
+      'unexpected task identity keeps the refresh lock fail-closed even after reboot');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

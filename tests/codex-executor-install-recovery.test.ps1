@@ -42,9 +42,73 @@ $global:MockBadSignaturePath = ''
 $global:MockTaskNotFoundThrows = $true
 $global:MockReadbackPrincipalUserId = $null
 $global:MockNullReadbackTriggers = $false
+$global:MockExecutorTaskState = 'Ready'
+$global:MockProcesses = @()
+$global:MockOperatingSystemCimCalls = 0
+$global:MockLastBootUpTime = (Get-Date).AddHours(-4)
+$global:MockCreateExecutorLockAtSignature = $false
+$global:MockRefreshConfigPath = ''
+$global:MockRefreshStatePath = ''
+$global:MockRefreshOriginalConfigHash = ''
+$global:MockRefreshExternalStateText = ''
+$global:MockInjectConcurrentStateAfterConfigReplace = $false
+$global:MockRefreshExternalConfigText = ''
+$global:MockInjectConcurrentConfigAfterReplace = $false
+$global:MockMismatchConfigReadbackOnce = $false
+$global:MockFailFailedReplacementHashOnce = $false
 
 function Assert-Equal($Actual, $Expected, [string]$Message) {
     if ($Actual -cne $Expected) { throw ('ASSERT_EQUAL_FAILED: ' + $Message + ';actual=' + $Actual + ';expected=' + $Expected) }
+}
+
+function Get-TestByteSha256([byte[]]$Bytes) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Get-TestPathHash([string]$Path) {
+    $hash = Get-TestByteSha256 ([IO.File]::ReadAllBytes($Path))
+    return [pscustomobject]@{ Path=$Path; Algorithm='SHA256'; Hash=$hash }
+}
+
+function global:Get-FileHash {
+    [CmdletBinding()]
+    param([Alias('Path')][string]$LiteralPath, [string]$Algorithm = 'SHA256')
+    if ($global:MockInjectConcurrentStateAfterConfigReplace -and
+        [string]::Equals([IO.Path]::GetFullPath($LiteralPath),
+            [IO.Path]::GetFullPath($global:MockRefreshStatePath), [StringComparison]::OrdinalIgnoreCase)) {
+        $configHash = Get-TestPathHash -Path $global:MockRefreshConfigPath
+        if ($configHash.Hash.ToLowerInvariant() -ne $global:MockRefreshOriginalConfigHash) {
+            [IO.File]::WriteAllText($global:MockRefreshStatePath, $global:MockRefreshExternalStateText,
+                [Text.UTF8Encoding]::new($false))
+            $global:MockInjectConcurrentStateAfterConfigReplace = $false
+        }
+    }
+    if ($global:MockInjectConcurrentConfigAfterReplace -and
+        [string]::Equals([IO.Path]::GetFullPath($LiteralPath),
+            [IO.Path]::GetFullPath($global:MockRefreshConfigPath), [StringComparison]::OrdinalIgnoreCase)) {
+        $configHash = Get-TestPathHash -Path $global:MockRefreshConfigPath
+        if ($configHash.Hash.ToLowerInvariant() -ne $global:MockRefreshOriginalConfigHash) {
+            [IO.File]::WriteAllText($global:MockRefreshConfigPath, $global:MockRefreshExternalConfigText,
+                [Text.UTF8Encoding]::new($false))
+            $global:MockInjectConcurrentConfigAfterReplace = $false
+        }
+    }
+    if ($global:MockMismatchConfigReadbackOnce -and
+        [string]::Equals([IO.Path]::GetFullPath($LiteralPath),
+            [IO.Path]::GetFullPath($global:MockRefreshConfigPath), [StringComparison]::OrdinalIgnoreCase)) {
+        $configHash = Get-TestPathHash -Path $global:MockRefreshConfigPath
+        if ($configHash.Hash.ToLowerInvariant() -ne $global:MockRefreshOriginalConfigHash) {
+            $global:MockMismatchConfigReadbackOnce = $false
+            return [pscustomobject]@{ Path=$LiteralPath; Algorithm=$Algorithm; Hash=('0' * 64) }
+        }
+    }
+    if ($global:MockFailFailedReplacementHashOnce -and $LiteralPath -like '*.failed-replacement-*') {
+        $global:MockFailFailedReplacementHashOnce = $false
+        throw 'INJECTED_FAILED_REPLACEMENT_HASH_UNKNOWN'
+    }
+    Get-TestPathHash -Path $LiteralPath
 }
 
 function global:Get-ScheduledTask {
@@ -69,7 +133,7 @@ function global:Get-ScheduledTask {
         } else { $reg.Principal.UserId }
         $readbackTriggers = if ($global:MockNullReadbackTriggers) { $null } else { @() }
         return [pscustomobject]@{
-            TaskName = $TaskName; State = 'Ready'
+            TaskName = $TaskName; State = $global:MockExecutorTaskState
             Principal = [pscustomobject]@{ UserId = $readbackUserId; LogonType = $reg.Principal.LogonType; RunLevel = $reg.Principal.RunLevel }
             Settings = [pscustomobject]@{ MultipleInstances = $reg.Settings.MultipleInstances; ExecutionTimeLimit = $reg.Settings.ExecutionTimeLimit; Hidden = $hidden; AllowHardTerminate = $allowHardTerminate }
             Actions = @([pscustomobject]@{ Execute = $reg.Action.Execute; Arguments = $reg.Action.Arguments; WorkingDirectory = $reg.Action.WorkingDirectory })
@@ -97,6 +161,14 @@ function global:Get-LocalGroupMember {
 function global:Get-AuthenticodeSignature {
     [CmdletBinding()]
     param([string]$FilePath)
+    if ($global:MockCreateExecutorLockAtSignature) {
+        $global:MockCreateExecutorLockAtSignature = $false
+        $lockPath = Join-Path $global:MockSpool 'locks\executor.active'
+        $lock = [ordered]@{ schema=1; pid=5001; started_at=[DateTime]::UtcNow.ToString('o')
+            boot_uptime_seconds=1; phase='DISPATCHER'; request_id=$null; attempt_id=$null; model_pid=$null }
+        [IO.File]::WriteAllText($lockPath, (ConvertTo-Json -InputObject $lock -Depth 4 -Compress),
+            [Text.UTF8Encoding]::new($false))
+    }
     if ($global:MockBadSignaturePath -and [string]::Equals([IO.Path]::GetFullPath($FilePath),
         [IO.Path]::GetFullPath($global:MockBadSignaturePath), [StringComparison]::OrdinalIgnoreCase)) {
         return [pscustomobject]@{ Status = 'NotSigned'; SignerCertificate = $null }
@@ -182,6 +254,17 @@ function global:Unregister-ScheduledTask {
     if ($TaskName -eq 'PTYSD-Codex-Executor') { $global:MockTaskRegistered = $false }
 }
 
+function global:Get-CimInstance {
+    [CmdletBinding()]
+    param([string]$ClassName, [string]$Filter)
+    if ($ClassName -eq 'Win32_Process') { return @($global:MockProcesses) }
+    if ($ClassName -eq 'Win32_OperatingSystem') {
+        $global:MockOperatingSystemCimCalls++
+        return [pscustomobject]@{ LastBootUpTime = $global:MockLastBootUpTime }
+    }
+    throw ('UNEXPECTED_CIM_CLASS: ' + $ClassName)
+}
+
 function Invoke-InstallAttempt([string]$ExpectedError = '', [string]$CodexPath = '',
     [string]$ExecutionPhase = 'VM_ISOLATED', [switch]$NoCredential) {
     if (-not $CodexPath) { $CodexPath = $global:MockCodexPath }
@@ -207,7 +290,54 @@ function Invoke-InstallAttempt([string]$ExpectedError = '', [string]$CodexPath =
     return $failure
 }
 
+function Invoke-CliRefreshAttempt([string]$ExpectedError = '', [string]$CodexPath = '') {
+    if (-not $CodexPath) { $CodexPath = $global:MockCodexPath }
+    $failure = $null
+    try {
+        & $installerPath -Mode RefreshCodexCli -ExecutionPhase WIN11_TRANSITION `
+            -CodexExecutable $CodexPath 2>$null | Out-Null
+    } catch { $failure = $_.Exception.Message }
+    if ($ExpectedError) {
+        if ($null -eq $failure -or $failure -notlike ('*' + $ExpectedError + '*')) {
+            throw ('EXPECTED_CLI_REFRESH_FAILURE_NOT_SEEN: ' + $ExpectedError + ';actual=' + $failure)
+        }
+    } elseif ($null -ne $failure) {
+        throw ('CLI_REFRESH_FAILED: ' + $failure)
+    }
+    return $failure
+}
+
 try {
+    # Reproduce a forward wall-clock correction by returning a boot timestamp
+    # years behind "now". Refresh-lock uptime must still match the monotonic
+    # kernel counter that Node/libuv compares, without consulting CIM wall time.
+    $uptimeFunction = $installerAst.Find({ param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Get-CodexExecutorBootUptimeSeconds'
+    }, $true)
+    if ($null -eq $uptimeFunction) { throw 'MONOTONIC_UPTIME_FUNCTION_MISSING' }
+    $lockFunction = $installerAst.Find({ param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'New-CodexExecutorCliRefreshLock'
+    }, $true)
+    if ($null -eq $lockFunction) { throw 'CLI_REFRESH_LOCK_FUNCTION_MISSING' }
+    Invoke-Expression $uptimeFunction.Extent.Text
+    Invoke-Expression $lockFunction.Extent.Text
+    $clockSkewSpool = Join-Path $testRoot 'clock-skew-probe'
+    New-Item -ItemType Directory -Path (Join-Path $clockSkewSpool 'locks') -Force | Out-Null
+    $global:MockLastBootUpTime = (Get-Date).AddYears(-10)
+    $global:MockOperatingSystemCimCalls = 0
+    $uptimeBeforeLock = Get-CodexExecutorBootUptimeSeconds
+    $clockSkewLockPath = New-CodexExecutorCliRefreshLock -SpoolPath $clockSkewSpool
+    $clockSkewLock = Get-Content -LiteralPath $clockSkewLockPath -Raw | ConvertFrom-Json
+    $uptimeDifference = [Math]::Abs([long]$clockSkewLock.boot_uptime_seconds - $uptimeBeforeLock)
+    if ($uptimeDifference -gt 2) {
+        throw ('REFRESH_LOCK_UPTIME_NOT_MONOTONIC: difference=' + $uptimeDifference)
+    }
+    Assert-Equal $global:MockOperatingSystemCimCalls 0 `
+        'refresh lock does not derive boot uptime from wall-clock CIM data'
+    Remove-Item -LiteralPath $clockSkewLockPath -Force
+
     New-Item -ItemType Directory -Path $local, $programData, $programFiles -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $local 'PTYSDNativeBridge') -Force | Out-Null
     $aclTestParent = Join-Path $testRoot 'acl-inherit-only-parent'
@@ -444,6 +574,368 @@ try {
     $transitionWorkerConfig = Get-Content -LiteralPath $workerConfigPath -Raw | ConvertFrom-Json
     Assert-Equal $transitionWorkerConfig.codex_executor_execution_phase 'WIN11_TRANSITION' `
         'Publisher readback carries the same task phase'
+
+    $transitionConfigPath = Join-Path $global:MockRuntime 'executor-config.json'
+    $transitionConfigBytes = [IO.File]::ReadAllBytes($transitionConfigPath)
+    $transitionManifestBytes = [IO.File]::ReadAllBytes($transitionState)
+    $transitionWorkerBytes = [IO.File]::ReadAllBytes($workerConfigPath)
+    $registerCallsBeforeRefresh = $global:MockRegisterCalls
+    $registrationBeforeRefresh = $global:MockRegistration
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_PIN_REFRESH_NOT_REQUIRED'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'unchanged CLI pin does not rewrite executor config'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionState))) `
+        ([BitConverter]::ToString($transitionManifestBytes)) 'unchanged CLI pin does not rewrite install state'
+
+    Remove-Item -LiteralPath $global:MockCodexPath -Force
+    $global:MockCodexRefreshPath = Join-Path $local 'OpenAI\Codex\bin\synthetic-version-2\codex.exe'
+    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $global:MockCodexRefreshPath) -Force
+    [IO.File]::WriteAllText($global:MockCodexRefreshPath, 'synthetic signed refreshed Codex CLI')
+
+    $nodePathForRefresh = $transitionExecutorConfig.codex_executor_node_path
+    $global:MockProcesses = @([pscustomobject]@{
+        ExecutablePath = $nodePathForRefresh
+        CommandLine = ('node "' + (Join-Path $global:MockRuntime 'codex-executor.mjs') + '" "' + $transitionConfigPath + '"')
+    })
+    $null = Invoke-CliRefreshAttempt 'CODEX_EXECUTOR_PROCESS_RUNNING_DO_NOT_REFRESH' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'live executor process prevents all CLI pin writes'
+    $global:MockProcesses = @([pscustomobject]@{
+        Name = 'node.exe'
+        ExecutablePath = $nodePathForRefresh
+        SessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        CommandLine = $null
+    })
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_PROCESS_STATE_UNKNOWN' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'unreadable Node command line keeps the refresh from writing'
+    $global:MockProcesses = @([pscustomobject]@{
+        Name = 'node.exe'
+        ExecutablePath = $nodePathForRefresh
+        CommandLine = $null
+    })
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_PROCESS_STATE_UNKNOWN' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'missing process session readback keeps refresh blocked'
+    $global:MockProcesses = @([pscustomobject]@{
+        Name = 'node.exe'
+        ExecutablePath = $nodePathForRefresh
+        SessionId = $null
+        CommandLine = $null
+    })
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_PROCESS_STATE_UNKNOWN' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'null process session readback stays unknown instead of becoming Session 0'
+    $global:MockProcesses = @([pscustomobject]@{
+        Name = 'node.exe'
+        ExecutablePath = $nodePathForRefresh
+        SessionId = 'unknown'
+        CommandLine = $null
+    })
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_PROCESS_STATE_UNKNOWN' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'malformed process session readback remains unknown'
+    $global:MockProcesses = @([pscustomobject]@{
+        Name = 'node.exe'
+        ExecutablePath = $nodePathForRefresh
+        SessionId = ([Diagnostics.Process]::GetCurrentProcess().SessionId + 1)
+        CommandLine = $null
+    })
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_PROCESS_STATE_UNKNOWN' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'unreadable executor in another interactive session remains protected'
+    $wscriptPathForRefresh = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    $global:MockProcesses = @([pscustomobject]@{
+        Name = 'wscript.exe'
+        ExecutablePath = $wscriptPathForRefresh
+        CommandLine = ('wscript //B //NoLogo "' + $transitionExecutorConfig.codex_executor_launcher_path + '" "' +
+            $nodePathForRefresh + '" "' + (Join-Path $global:MockRuntime 'codex-executor.mjs') + '" "' +
+            $transitionConfigPath + '"')
+    })
+    $null = Invoke-CliRefreshAttempt 'CODEX_EXECUTOR_PROCESS_RUNNING_DO_NOT_REFRESH' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'live WScript launcher prevents all CLI pin writes'
+    $alternateNodePath = Join-Path $programFiles 'alternate-node\node.exe'
+    $global:MockProcesses = @([pscustomobject]@{
+        ExecutablePath = $alternateNodePath
+        CommandLine = ('"' + $alternateNodePath + '" "' +
+            (Join-Path $global:MockRuntime 'codex-executor.mjs') + '" "' + $transitionConfigPath + '"')
+    })
+    $null = Invoke-CliRefreshAttempt 'CODEX_EXECUTOR_PROCESS_RUNNING_DO_NOT_REFRESH' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'matching executor script and config block refresh under alternate Node path'
+    $global:MockProcesses = @([pscustomobject]@{
+        ExecutablePath = (Join-Path $programFiles 'PowerShell\pwsh.exe')
+        CommandLine = ('powershell text contains ' + (Join-Path $global:MockRuntime 'codex-executor.mjs'))
+    })
+    $global:MockExecutorTaskState = 'Running'
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_TASK_NOT_IDLE' $global:MockCodexRefreshPath
+    $global:MockExecutorTaskState = 'Ready'
+
+    $global:MockCreateExecutorLockAtSignature = $true
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_EXECUTOR_LOCK_BUSY' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'executor winning the lock race prevents config writes'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionState))) `
+        ([BitConverter]::ToString($transitionManifestBytes)) 'executor winning the lock race prevents manifest writes'
+    $competingLockPath = Join-Path $global:MockSpool 'locks\executor.active'
+    Assert-Equal (Test-Path -LiteralPath $competingLockPath) $true 'refresh preserves the competing executor lock'
+    Remove-Item -LiteralPath $competingLockPath -Force
+
+    $badSignaturePath = $global:MockCodexRefreshPath
+    $global:MockBadSignaturePath = $badSignaturePath
+    $null = Invoke-CliRefreshAttempt 'CODEX_EXECUTABLE_SIGNATURE_NOT_QUALIFIED' $badSignaturePath
+    $global:MockBadSignaturePath = ''
+    $global:MockProcesses = @()
+
+    $lockedConfig = Get-Content -LiteralPath $transitionConfigPath -Raw | ConvertFrom-Json
+    $lockedConfig.enable_codex_model_runs = $true
+    [IO.File]::WriteAllText($transitionConfigPath, (ConvertTo-Json -InputObject $lockedConfig -Depth 20 -Compress) + [Environment]::NewLine,
+        [Text.Encoding]::UTF8)
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_MODEL_AUTHORIZATION_MUST_REMAIN_DISABLED' $global:MockCodexRefreshPath
+    [IO.File]::WriteAllBytes($transitionConfigPath, $transitionConfigBytes)
+
+    $manifestTextBeforeMismatch = [IO.File]::ReadAllText($transitionState)
+    [IO.File]::WriteAllText($transitionState, $manifestTextBeforeMismatch.Replace('DESKTOP-1B6PD2P','OTHER-HOST'),
+        [System.Text.UTF8Encoding]::new($false))
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_INSTALL_STATE_IDENTITY_MISMATCH' $global:MockCodexRefreshPath
+    [IO.File]::WriteAllBytes($transitionState, $transitionManifestBytes)
+
+    $claimProbe = Join-Path $global:MockSpool 'claims\unknown-attempt.json'
+    [IO.File]::WriteAllText($claimProbe, 'preserve')
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT' $global:MockCodexRefreshPath
+    Assert-Equal (Get-Content -LiteralPath $claimProbe -Raw) 'preserve' 'unknown claim is preserved and blocks CLI refresh'
+    Remove-Item -LiteralPath $claimProbe -Force
+
+    $settledRequestId = 'CODEX_REFRESH_SETTLED_01'
+    $settledAttemptId = '123e4567-e89b-42d3-a456-426614174000'
+    $settledClaimPath = Join-Path $global:MockSpool ("claims\$settledRequestId-$settledAttemptId.json")
+    $settledResultPath = Join-Path $global:MockSpool ("results\$settledRequestId-$settledAttemptId.json")
+    $settledClaim = [ordered]@{ schema=1; request_id=$settledRequestId; attempt_id=$settledAttemptId
+        source_sha=('a' * 40); fingerprint=('b' * 64) }
+    $settledResult = [ordered]@{ schema=1; kind='codex_plan'; request_id=$settledRequestId
+        attempt_id=$settledAttemptId; source_sha=$settledClaim.source_sha; fingerprint=$settledClaim.fingerprint
+        outcome='BLOCKED'; model_invoked=$false; session_started=$false;
+        termination_state='NOT_STARTED'; termination_error=$null }
+    [IO.File]::WriteAllText($settledClaimPath, (ConvertTo-Json -InputObject $settledClaim -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $settledClaimBytes = [IO.File]::ReadAllBytes($settledClaimPath)
+    $settledResult.request_id = 'CODEX_REFRESH_OTHER_01'
+    [IO.File]::WriteAllText($settledResultPath, (ConvertTo-Json -InputObject $settledResult -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'mismatched settled result blocks refresh without config writes'
+    $settledResult.request_id = $settledRequestId
+    foreach ($invalidTerminationState in @('ORPHAN_POSSIBLE','TERMINATION_REQUESTED',
+        'TERMINATION_UNCONFIRMED','FINISHED','UNKNOWN')) {
+        $settledResult.termination_state = $invalidTerminationState
+        [IO.File]::WriteAllText($settledResultPath, (ConvertTo-Json -InputObject $settledResult -Compress),
+            [Text.UTF8Encoding]::new($false))
+        $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT' $global:MockCodexRefreshPath
+        Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+            ([BitConverter]::ToString($transitionConfigBytes)) ('uncertain termination state blocks refresh without writes: ' + $invalidTerminationState)
+    }
+    $settledResult.termination_state = 'NOT_STARTED'
+    $settledResult.model_invoked = $true
+    $settledResult.session_started = $true
+    [IO.File]::WriteAllText($settledResultPath, (ConvertTo-Json -InputObject $settledResult -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'NOT_STARTED cannot describe a model invocation'
+    $settledResult.termination_state = 'NOT_STARTED'
+    $settledResult.model_invoked = $false
+    $settledResult.session_started = $false
+    $settledResult.termination_error = $null
+    [IO.File]::WriteAllText($settledResultPath, (ConvertTo-Json -InputObject $settledResult -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $notStartedRefreshOutput = & $installerPath -Mode RefreshCodexCli -ExecutionPhase WIN11_TRANSITION `
+        -CodexExecutable $global:MockCodexRefreshPath 2>$null
+    if (@($notStartedRefreshOutput | Where-Object { $_ -like 'CODEX_CLI_PIN_REFRESH=SUCCESS;*' }).Count -ne 1) {
+        throw 'CODEX_CLI_REFRESH_VALID_NOT_STARTED_CLAIM_REJECTED'
+    }
+    [IO.File]::WriteAllBytes($transitionConfigPath, $transitionConfigBytes)
+    [IO.File]::WriteAllBytes($transitionState, $transitionManifestBytes)
+
+    $settledResult.termination_state = 'NOT_REQUESTED'
+    $settledResult.model_invoked = $true
+    $settledResult.session_started = $true
+    $settledResult.termination_error = 'PROCESS_TREE_STILL_ACTIVE'
+    [IO.File]::WriteAllText($settledResultPath, (ConvertTo-Json -InputObject $settledResult -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'termination error conflicts block refresh without writes'
+    $settledResult.termination_state = 'NOT_REQUESTED'
+    $settledResult.model_invoked = $true
+    $settledResult.session_started = $true
+    $settledResult.termination_error = $null
+    [IO.File]::WriteAllText($settledResultPath, (ConvertTo-Json -InputObject $settledResult -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) `
+        'legacy NOT_REQUESTED result without process-tree readback cannot prove descendants exited'
+
+    $settledResult.termination_state = 'TERMINATION_CONFIRMED'
+    [IO.File]::WriteAllText($settledResultPath, (ConvertTo-Json -InputObject $settledResult -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $confirmedRefreshOutput = & $installerPath -Mode RefreshCodexCli -ExecutionPhase WIN11_TRANSITION `
+        -CodexExecutable $global:MockCodexRefreshPath 2>$null
+    if (@($confirmedRefreshOutput | Where-Object { $_ -like 'CODEX_CLI_PIN_REFRESH=SUCCESS;*' }).Count -ne 1) {
+        throw 'CODEX_CLI_REFRESH_VALID_LEGACY_CONFIRMED_TERMINAL_REJECTED'
+    }
+    [IO.File]::WriteAllBytes($transitionConfigPath, $transitionConfigBytes)
+    [IO.File]::WriteAllBytes($transitionState, $transitionManifestBytes)
+
+    $settledResult.termination_state = 'NOT_REQUESTED'
+    $settledResult.process_tree_state = 'UNKNOWN'
+    [IO.File]::WriteAllText($settledResultPath, (ConvertTo-Json -InputObject $settledResult -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'unknown process-tree readback blocks refresh without writes'
+
+    $settledResult.process_tree_state = 'DEAD'
+    [IO.File]::WriteAllText($settledResultPath, (ConvertTo-Json -InputObject $settledResult -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $completedRefreshOutput = & $installerPath -Mode RefreshCodexCli -ExecutionPhase WIN11_TRANSITION `
+        -CodexExecutable $global:MockCodexRefreshPath 2>$null
+    if (@($completedRefreshOutput | Where-Object { $_ -like 'CODEX_CLI_PIN_REFRESH=SUCCESS;*' }).Count -ne 1) {
+        throw 'CODEX_CLI_REFRESH_VALID_TERMINAL_TREE_REJECTED'
+    }
+    [IO.File]::WriteAllBytes($transitionConfigPath, $transitionConfigBytes)
+    [IO.File]::WriteAllBytes($transitionState, $transitionManifestBytes)
+    $settledResultBytes = [IO.File]::ReadAllBytes($settledResultPath)
+
+    $pendingRequest = Join-Path $global:MockSpool 'requests\pending.json'
+    [IO.File]::WriteAllText($pendingRequest, 'leave-queued-request-untouched')
+
+    # A concurrent install-state update after config replacement must not be
+    # overwritten by refresh rollback. The config write belongs to this refresh
+    # and should roll back; the third-party state bytes must remain untouched.
+    $global:MockRefreshConfigPath = $transitionConfigPath
+    $global:MockRefreshStatePath = $transitionState
+    $global:MockRefreshOriginalConfigHash = (Get-FileHash -LiteralPath $transitionConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $global:MockRefreshExternalStateText = '{"concurrent_writer":"preserve-this-state"}'
+    $global:MockInjectConcurrentStateAfterConfigReplace = $true
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_PARTIAL_STATE_REVIEW_REQUIRED' $global:MockCodexRefreshPath
+    Assert-Equal (Get-Content -LiteralPath $transitionState -Raw) $global:MockRefreshExternalStateText `
+        'refresh rollback preserves a concurrent third-party install-state update'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'refresh rollback restores only its own config write'
+    $refreshLockPath = Join-Path $global:MockSpool 'locks\executor.active'
+    Assert-Equal (Test-Path -LiteralPath $refreshLockPath) $true `
+        'ambiguous concurrent state preserves the fail-closed executor lock'
+    Remove-Item -LiteralPath $refreshLockPath -Force
+    [IO.File]::WriteAllBytes($transitionState, $transitionManifestBytes)
+    $global:MockRefreshConfigPath = ''
+    $global:MockRefreshStatePath = ''
+    $global:MockRefreshOriginalConfigHash = ''
+    $global:MockRefreshExternalStateText = ''
+
+    # A concurrent config writer after File.Replace must not be overwritten by
+    # the atomic helper's own rollback when its immediate readback detects it.
+    $global:MockRefreshConfigPath = $transitionConfigPath
+    $global:MockRefreshOriginalConfigHash = (Get-FileHash -LiteralPath $transitionConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $global:MockRefreshExternalConfigText = '{"concurrent_writer":"preserve-config"}'
+    $global:MockInjectConcurrentConfigAfterReplace = $true
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_PARTIAL_STATE_REVIEW_REQUIRED' $global:MockCodexRefreshPath
+    Assert-Equal (Get-Content -LiteralPath $transitionConfigPath -Raw) $global:MockRefreshExternalConfigText `
+        'atomic rollback preserves a concurrent third-party config update'
+    $replaceBackups = @(Get-ChildItem -LiteralPath (Split-Path -Parent $transitionConfigPath) `
+        -Filter ((Split-Path -Leaf $transitionConfigPath) + '.replace-backup-*') -File)
+    Assert-Equal $replaceBackups.Count 1 'atomic rollback retains one original config backup for reconciliation'
+    $retainedBackupHash = Get-TestByteSha256 ([IO.File]::ReadAllBytes($replaceBackups[0].FullName))
+    Assert-Equal $retainedBackupHash $global:MockRefreshOriginalConfigHash `
+        'atomic rollback backup preserves the original config bytes'
+    $refreshLockPath = Join-Path $global:MockSpool 'locks\executor.active'
+    Assert-Equal (Test-Path -LiteralPath $refreshLockPath) $true `
+        'atomic rollback ambiguity preserves the fail-closed executor lock'
+    [IO.File]::WriteAllBytes($transitionConfigPath, $transitionConfigBytes)
+    [IO.File]::WriteAllBytes($transitionState, $transitionManifestBytes)
+    Remove-Item -LiteralPath $refreshLockPath -Force
+    Remove-Item -LiteralPath $replaceBackups[0].FullName -Force
+    $global:MockRefreshConfigPath = ''
+    $global:MockRefreshOriginalConfigHash = ''
+    $global:MockRefreshExternalConfigText = ''
+
+    # If rollback evidence cannot be read after restoring the original config,
+    # the outer transaction must retain its lock instead of reporting a clean rollback.
+    $global:MockRefreshConfigPath = $transitionConfigPath
+    $global:MockRefreshOriginalConfigHash = (Get-FileHash -LiteralPath $transitionConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $global:MockMismatchConfigReadbackOnce = $true
+    $global:MockFailFailedReplacementHashOnce = $true
+    $null = Invoke-CliRefreshAttempt 'CODEX_CLI_REFRESH_PARTIAL_STATE_REVIEW_REQUIRED' $global:MockCodexRefreshPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($transitionConfigBytes)) 'rollback ambiguity leaves the original config restored'
+    $failedReplacements = @(Get-ChildItem -LiteralPath (Split-Path -Parent $transitionConfigPath) `
+        -Filter ((Split-Path -Leaf $transitionConfigPath) + '.failed-replacement-*') -File)
+    Assert-Equal $failedReplacements.Count 1 'rollback ambiguity retains failed replacement evidence'
+    $refreshLockPath = Join-Path $global:MockSpool 'locks\executor.active'
+    Assert-Equal (Test-Path -LiteralPath $refreshLockPath) $true `
+        'atomic rollback evidence failure retains the fail-closed executor lock'
+    Remove-Item -LiteralPath $refreshLockPath -Force
+    Remove-Item -LiteralPath $failedReplacements[0].FullName -Force
+    $global:MockRefreshConfigPath = ''
+    $global:MockRefreshOriginalConfigHash = ''
+
+    $global:MockProcesses = @([pscustomobject]@{
+        Name = 'node.exe'
+        ExecutablePath = $nodePathForRefresh
+        SessionId = 0
+        CommandLine = $null
+    })
+    $refreshOutput = & $installerPath -Mode RefreshCodexCli -ExecutionPhase WIN11_TRANSITION `
+        -CodexExecutable $global:MockCodexRefreshPath 2>$null
+    if (@($refreshOutput | Where-Object { $_ -like 'CODEX_CLI_PIN_REFRESH=SUCCESS;*' }).Count -ne 1) {
+        throw 'CODEX_CLI_PIN_REFRESH_SUCCESS_RECEIPT_MISSING'
+    }
+    $refreshedConfig = Get-Content -LiteralPath $transitionConfigPath -Raw | ConvertFrom-Json
+    Assert-Equal $refreshedConfig.codex_executable $global:MockCodexRefreshPath `
+        'refresh updates only the missing official CLI executable path'
+    Assert-Equal $refreshedConfig.codex_executable_sha256 `
+        ((Get-FileHash -LiteralPath $global:MockCodexRefreshPath -Algorithm SHA256).Hash.ToLowerInvariant()) `
+        'refresh reads back the signed CLI hash'
+    Assert-Equal $refreshedConfig.enable_codex_model_runs $false 'refresh keeps model execution disabled'
+    Assert-Equal $refreshedConfig.codex_usage_authorized $false 'refresh keeps usage authorization disabled'
+    $refreshedManifest = Get-Content -LiteralPath $transitionState -Raw | ConvertFrom-Json
+    Assert-Equal $refreshedManifest.runtime_sha256.'executor-config.json' `
+        ((Get-FileHash -LiteralPath $transitionConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()) `
+        'refresh updates the bound config hash in the existing install state'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($workerConfigPath))) `
+        ([BitConverter]::ToString($transitionWorkerBytes)) 'refresh does not change the Publisher config'
+    Assert-Equal $global:MockRegisterCalls $registerCallsBeforeRefresh 'refresh does not register or recreate a task'
+    Assert-Equal ([object]::ReferenceEquals($global:MockRegistration,$registrationBeforeRefresh)) $true `
+        'refresh does not replace Task Scheduler settings or action'
+    Assert-Equal (Get-Content -LiteralPath $pendingRequest -Raw) 'leave-queued-request-untouched' `
+        'unclaimed queued request is preserved during CLI pin refresh'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($settledClaimPath))) `
+        ([BitConverter]::ToString($settledClaimBytes)) 'refresh preserves a byte-verified settled claim'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($settledResultPath))) `
+        ([BitConverter]::ToString($settledResultBytes)) 'refresh preserves its matching terminal result'
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $global:MockSpool 'locks\executor.active')) $false `
+        'refresh releases its shared executor lock after successful config and manifest readback'
+    $backupDir = Join-Path (Split-Path -Parent (Split-Path -Parent $global:MockRuntime)) 'CodexExecutor\maintenance-backups'
+    $backedUpConfig = @(Get-ChildItem -LiteralPath $backupDir -Filter '*-executor-config.json' -File)
+    $backedUpManifest = @(Get-ChildItem -LiteralPath $backupDir -Filter '*-install-state.json' -File)
+    Assert-Equal ($backedUpConfig.Count -gt 0) $true 'refresh keeps a byte-verified config rollback copy'
+    Assert-Equal ($backedUpManifest.Count -gt 0) $true 'refresh keeps a byte-verified install-state rollback copy'
+    Assert-Equal (Get-FileHash -LiteralPath $backedUpConfig[-1].FullName -Algorithm SHA256).Hash.ToLowerInvariant() `
+        (Get-TestByteSha256 $transitionConfigBytes) 'config backup is byte-identical to the original'
+    Assert-Equal (Get-FileHash -LiteralPath $backedUpManifest[-1].FullName -Algorithm SHA256).Hash.ToLowerInvariant() `
+        (Get-TestByteSha256 $transitionManifestBytes) 'install-state backup is byte-identical to the original'
+
+    # Restore the synthetic pre-refresh fixture so later installer recovery tests
+    # continue from the original registered task/config state.
+    [IO.File]::WriteAllBytes($transitionConfigPath, $transitionConfigBytes)
+    [IO.File]::WriteAllBytes($transitionState, $transitionManifestBytes)
+    [IO.File]::WriteAllText($global:MockCodexPath, 'synthetic signed Codex bundle codex.exe')
+    Remove-Item -LiteralPath $global:MockCodexRefreshPath -Force
+    Remove-Item -LiteralPath $pendingRequest -Force
+    Remove-Item -LiteralPath $settledClaimPath,$settledResultPath -Force
+
     & $installerPath -Mode Uninstall 2>$null | Out-Null
     Assert-Equal $global:MockTaskRegistered $false 'transition task can be unregistered without deleting its evidence'
     Assert-Equal (Test-Path -LiteralPath $global:MockSpool) $true 'transition uninstall preserves the spool and install evidence'
