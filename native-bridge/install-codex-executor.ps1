@@ -3,7 +3,7 @@
 # installer before the exact source and the Human model/cost gates are accepted.
 [CmdletBinding()]
 param(
-    [ValidateSet('Audit','Install','Uninstall')][string]$Mode = 'Audit',
+    [ValidateSet('Audit','Install','Uninstall','RefreshCodexCli')][string]$Mode = 'Audit',
     [ValidateSet('WIN11_TRANSITION','VM_ISOLATED')][string]$ExecutionPhase = 'VM_ISOLATED',
     [PSCredential]$ExecutorCredential,
     [string]$NodeExecutable = '',
@@ -191,6 +191,112 @@ function Assert-CodexExecutorInstallArtifacts {
     }
 }
 
+function Assert-CodexExecutorCliRefreshSettledClaims([string]$SpoolPath) {
+    $claimsPath = Join-Path $SpoolPath 'claims'
+    $resultsPath = Join-Path $SpoolPath 'results'
+    foreach ($entry in @(Get-ChildItem -LiteralPath $claimsPath -Force -Recurse -ErrorAction Stop)) {
+        if ($entry.PSIsContainer -or
+            (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+            $entry.Name -notmatch '^(?<request>[A-Z][A-Z0-9_-]{7,79})-(?<attempt>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$') {
+            throw 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT'
+        }
+        $requestId = $Matches.request
+        $attemptId = $Matches.attempt
+        try { $claim = Get-Content -LiteralPath $entry.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT' }
+        if ($claim.request_id -cne $requestId -or $claim.attempt_id -cne $attemptId -or
+            [string]$claim.source_sha -notmatch '^[0-9a-f]{40}$' -or
+            [string]$claim.fingerprint -notmatch '^[0-9a-f]{64}$') {
+            throw 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT'
+        }
+        $resultPath = Join-Path $resultsPath $entry.Name
+        if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+            throw 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT'
+        }
+        $resultItem = Get-Item -LiteralPath $resultPath -Force -ErrorAction Stop
+        if (($resultItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT'
+        }
+        try { $result = Get-Content -LiteralPath $resultPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT' }
+        $terminationStateProperty = $result.PSObject.Properties['termination_state']
+        $terminationState = if ($null -ne $terminationStateProperty) {
+            [string]$terminationStateProperty.Value
+        } else { '' }
+        $safeTerminationState = @('NOT_STARTED','NOT_REQUESTED','TERMINATION_CONFIRMED') -ccontains $terminationState
+        $notStartedMismatch = $false
+        if ($terminationState -ceq 'NOT_STARTED') {
+            $modelInvokedProperty = $result.PSObject.Properties['model_invoked']
+            $sessionStartedProperty = $result.PSObject.Properties['session_started']
+            $notStartedMismatch = $null -eq $modelInvokedProperty -or
+                $modelInvokedProperty.Value -isnot [bool] -or $modelInvokedProperty.Value -ne $false -or
+                $null -eq $sessionStartedProperty -or
+                $sessionStartedProperty.Value -isnot [bool] -or $sessionStartedProperty.Value -ne $false
+        }
+        $terminationErrorProperty = $result.PSObject.Properties['termination_error']
+        $hasTerminationError = $null -ne $terminationErrorProperty -and
+            -not [string]::IsNullOrWhiteSpace([string]$terminationErrorProperty.Value)
+        $modelInvokedProperty = $result.PSObject.Properties['model_invoked']
+        $sessionStartedProperty = $result.PSObject.Properties['session_started']
+        $modelActivityStateInvalid = $null -eq $modelInvokedProperty -or
+            $modelInvokedProperty.Value -isnot [bool] -or $null -eq $sessionStartedProperty -or
+            $sessionStartedProperty.Value -isnot [bool]
+        $modelActivityStarted = $false
+        if (-not $modelActivityStateInvalid) {
+            $modelActivityStarted = $modelInvokedProperty.Value -or $sessionStartedProperty.Value
+        }
+        $processTreeStateProperty = $result.PSObject.Properties['process_tree_state']
+        $processTreeReadbackInvalid = $false
+        if ($modelActivityStarted -or ($terminationState -ceq 'TERMINATION_CONFIRMED')) {
+            $processTreeReadbackInvalid = $null -eq $processTreeStateProperty -or
+                $processTreeStateProperty.Value -cne 'DEAD'
+        }
+        if ($result.schema -ne 1 -or $result.kind -ne 'codex_plan' -or
+            $result.request_id -cne $requestId -or $result.attempt_id -cne $attemptId -or
+            $result.source_sha -cne $claim.source_sha -or $result.fingerprint -cne $claim.fingerprint -or
+            [string]::IsNullOrWhiteSpace([string]$result.outcome) -or
+            -not $safeTerminationState -or $notStartedMismatch -or $hasTerminationError -or
+            $modelActivityStateInvalid -or $processTreeReadbackInvalid) {
+            throw 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT'
+        }
+    }
+}
+
+function Assert-CodexExecutorCliRefreshArtifacts([string]$SpoolPath, [string]$RuntimePath,
+    [string[]]$SpoolDirectoryNames, [System.Collections.IDictionary]$ExpectedRuntimeHashes) {
+    $spool = Get-CodexExecutorInstallTree $SpoolPath
+    if (-not $spool.Exists) { throw 'CODEX_CLI_REFRESH_SPOOL_MISSING' }
+    foreach ($relative in $spool.Directories + $spool.Files) {
+        $top = $relative.Split([char[]]@('\','/'), [StringSplitOptions]::RemoveEmptyEntries)[0]
+        if (-not (@($SpoolDirectoryNames | Where-Object { $_ -ieq $top }).Count)) {
+            throw 'CODEX_CLI_REFRESH_UNEXPECTED_SPOOL_ENTRY'
+        }
+    }
+    foreach ($name in $SpoolDirectoryNames) {
+        if (-not (Test-Path -LiteralPath (Join-Path $SpoolPath $name) -PathType Container)) {
+            throw 'CODEX_CLI_REFRESH_SPOOL_LAYOUT_INCOMPLETE'
+        }
+    }
+    if (@(Get-ChildItem -LiteralPath (Join-Path $SpoolPath 'locks') -Force -Recurse -ErrorAction Stop).Count -gt 0) {
+        throw 'CODEX_CLI_REFRESH_ACTIVE_CLAIM_OR_LOCK_PRESENT'
+    }
+    Assert-CodexExecutorCliRefreshSettledClaims -SpoolPath $SpoolPath
+    $runtime = Get-CodexExecutorInstallTree $RuntimePath
+    if (-not $runtime.Exists -or $runtime.Directories.Count -gt 0 -or
+        $runtime.Files.Count -ne $ExpectedRuntimeHashes.Count) {
+        throw 'CODEX_CLI_REFRESH_RUNTIME_LAYOUT_MISMATCH'
+    }
+    foreach ($name in $ExpectedRuntimeHashes.Keys) {
+        if (-not (@($runtime.Files | Where-Object { $_ -ieq [string]$name }).Count)) {
+            throw 'CODEX_CLI_REFRESH_RUNTIME_FILE_MISSING'
+        }
+        $actual = (Get-FileHash -LiteralPath (Join-Path $RuntimePath $name) -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        if ($actual -ne [string]$ExpectedRuntimeHashes[$name]) {
+            throw 'CODEX_CLI_REFRESH_RUNTIME_HASH_MISMATCH'
+        }
+    }
+}
+
 function Initialize-CodexExecutorInstallState([string]$ManifestPath, [string]$ManifestText,
     [string]$SpoolPath, [string]$RuntimePath, [string[]]$SpoolDirectoryNames,
     [System.Collections.IDictionary]$ExpectedRuntimeHashes) {
@@ -289,6 +395,410 @@ function Write-CodexExecutorInstallBytes([byte[]]$Bytes, [string]$DestinationPat
         throw 'INSTALL_CONFIG_READBACK_MISMATCH'
     }
     return 'WRITTEN'
+}
+
+function Get-CodexExecutorBytesSha256([byte[]]$Bytes) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Write-CodexExecutorAtomicReplacement([byte[]]$Bytes, [string]$DestinationPath,
+    [string]$ExpectedSha256) {
+    if ((Get-CodexExecutorBytesSha256 $Bytes) -ne $ExpectedSha256.ToLowerInvariant()) {
+        throw 'CODEX_CLI_REFRESH_BYTES_HASH_MISMATCH'
+    }
+    Assert-CodexExecutorInstallPathChain $DestinationPath
+    $destinationItem = Get-Item -LiteralPath $DestinationPath -Force -ErrorAction Stop
+    if ($destinationItem.PSIsContainer -or
+        (($destinationItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw 'CODEX_CLI_REFRESH_DESTINATION_REVIEW_REQUIRED'
+    }
+    $temporaryPath = $DestinationPath + '.refresh-' + [guid]::NewGuid().ToString('N') + '.tmp'
+    $replaceBackupPath = $DestinationPath + '.replace-backup-' + [guid]::NewGuid().ToString('N')
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($temporaryPath, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Write($Bytes, 0, $Bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        if ((Get-FileHash -LiteralPath $temporaryPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+            $ExpectedSha256.ToLowerInvariant()) { throw 'CODEX_CLI_REFRESH_STAGED_HASH_MISMATCH' }
+        # ReplaceFile preserves the destination's security descriptor on Windows.
+        [IO.File]::Replace($temporaryPath, $DestinationPath, $replaceBackupPath)
+        if ((Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+            $ExpectedSha256.ToLowerInvariant()) { throw 'CODEX_CLI_REFRESH_READBACK_MISMATCH' }
+        if (Test-Path -LiteralPath $replaceBackupPath) {
+            Remove-Item -LiteralPath $replaceBackupPath -Force -ErrorAction Stop
+        }
+    } catch {
+        $replaceError = $_.Exception.Message
+        if (Test-Path -LiteralPath $replaceBackupPath) {
+            try {
+                $backupHash = (Get-FileHash -LiteralPath $replaceBackupPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                $currentHash = if (Test-Path -LiteralPath $DestinationPath -PathType Leaf) {
+                    (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                } else { '' }
+                if ($currentHash -eq $ExpectedSha256.ToLowerInvariant()) {
+                    # Restore only while the destination still contains the exact
+                    # bytes this call installed. A third hash belongs to another
+                    # writer and must remain untouched for reconciliation.
+                    $failedReplacementPath = $DestinationPath + '.failed-replacement-' + [guid]::NewGuid().ToString('N')
+                    [IO.File]::Replace($replaceBackupPath, $DestinationPath, $failedReplacementPath)
+                    $restoredHash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                    if ($restoredHash -ne $backupHash) { throw 'CODEX_CLI_REFRESH_ATOMIC_REPLACE_RESTORE_READBACK_MISMATCH' }
+                    if (Test-Path -LiteralPath $failedReplacementPath) {
+                        $failedHash = (Get-FileHash -LiteralPath $failedReplacementPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                        if ($failedHash -ne $ExpectedSha256.ToLowerInvariant()) {
+                            throw 'CODEX_CLI_REFRESH_ATOMIC_REPLACE_FAILED_BYTES_UNKNOWN'
+                        }
+                        Remove-Item -LiteralPath $failedReplacementPath -Force -ErrorAction Stop
+                    }
+                } elseif ($currentHash -eq $backupHash) {
+                    # The original bytes are already in place; the adjacent
+                    # backup is a verified duplicate and can be removed.
+                    Remove-Item -LiteralPath $replaceBackupPath -Force -ErrorAction Stop
+                } else {
+                    throw 'CODEX_CLI_REFRESH_ATOMIC_REPLACE_THIRD_HASH_PRESERVED'
+                }
+            } catch { throw 'CODEX_CLI_REFRESH_ATOMIC_REPLACE_ROLLBACK_UNKNOWN' }
+        }
+        throw ('CODEX_CLI_REFRESH_ATOMIC_REPLACE_FAILED:' + $replaceError)
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Get-CodexExecutorBootUptimeSeconds {
+    try {
+        if (-not ('PtysdV53R4Kernel32Clock' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class PtysdV53R4Kernel32Clock {
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    public static extern ulong GetTickCount64();
+}
+'@ -ErrorAction Stop | Out-Null
+        }
+        $tickCountMilliseconds = [long][PtysdV53R4Kernel32Clock]::GetTickCount64()
+        if ($tickCountMilliseconds -lt 0) { throw 'BOOT_UPTIME_READBACK_INVALID' }
+        return [long][Math]::Floor($tickCountMilliseconds / 1000.0)
+    } catch { throw 'CODEX_CLI_REFRESH_BOOT_TIME_UNKNOWN' }
+}
+
+function New-CodexExecutorCliRefreshLock([string]$SpoolPath) {
+    $lockPath = Join-Path $SpoolPath 'locks\executor.active'
+    try {
+        # Match Node/libuv os.uptime() on Windows: both read GetTickCount64.
+        # Deriving uptime from wall-clock time minus LastBootUpTime can jump
+        # forward after clock correction and make a live refresh look rebooted.
+        $bootUptimeSeconds = Get-CodexExecutorBootUptimeSeconds
+    } catch { throw 'CODEX_CLI_REFRESH_BOOT_TIME_UNKNOWN' }
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::None)
+    } catch {
+        if (Test-Path -LiteralPath $lockPath) { throw 'CODEX_CLI_REFRESH_EXECUTOR_LOCK_BUSY' }
+        throw 'CODEX_CLI_REFRESH_EXECUTOR_LOCK_CREATE_FAILED'
+    }
+    try {
+        $lock = [ordered]@{
+            schema = 1
+            pid = [int]$PID
+            started_at = [DateTime]::UtcNow.ToString('o')
+            boot_uptime_seconds = $bootUptimeSeconds
+            phase = 'CLI_REFRESH_STATE_UNKNOWN'
+            request_id = $null
+            attempt_id = $null
+            model_pid = $null
+        }
+        $text = ConvertTo-Json -InputObject $lock -Depth 4 -Compress
+        $bytes = ([Text.UTF8Encoding]::new($false)).GetBytes($text)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    } catch {
+        # Leave an incomplete lock in place so the executor fails closed.
+        throw 'CODEX_CLI_REFRESH_EXECUTOR_LOCK_CREATE_UNKNOWN'
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+    return $lockPath
+}
+
+function Remove-CodexExecutorCliRefreshLock([string]$LockPath) {
+    if (-not (Test-Path -LiteralPath $LockPath -PathType Leaf)) {
+        throw 'CODEX_CLI_REFRESH_EXECUTOR_LOCK_OWNERSHIP_UNKNOWN'
+    }
+    try { $lock = Get-Content -LiteralPath $LockPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw 'CODEX_CLI_REFRESH_EXECUTOR_LOCK_OWNERSHIP_UNKNOWN' }
+    if ($lock.schema -ne 1 -or $lock.pid -ne [int]$PID -or
+        $lock.phase -ne 'CLI_REFRESH_STATE_UNKNOWN' -or $null -ne $lock.request_id -or
+        $null -ne $lock.attempt_id -or $null -ne $lock.model_pid) {
+        throw 'CODEX_CLI_REFRESH_EXECUTOR_LOCK_OWNERSHIP_UNKNOWN'
+    }
+    [IO.File]::Delete($LockPath)
+    if (Test-Path -LiteralPath $LockPath) { throw 'CODEX_CLI_REFRESH_EXECUTOR_LOCK_RELEASE_UNKNOWN' }
+}
+
+function Invoke-CodexExecutorCliPinRefresh([string]$NewCodexExecutable) {
+    if ($ExecutionPhase -ne 'WIN11_TRANSITION' -or $null -ne $ExecutorCredential) {
+        throw 'CODEX_CLI_REFRESH_WIN11_TRANSITION_ONLY'
+    }
+    if (-not $env:USERPROFILE -or -not $env:LOCALAPPDATA -or
+        -not (Test-Path -LiteralPath $env:USERPROFILE -PathType Container) -or
+        -not (Test-Path -LiteralPath $env:LOCALAPPDATA -PathType Container) -or
+        [Diagnostics.Process]::GetCurrentProcess().SessionId -le 0) {
+        throw 'CODEX_CLI_REFRESH_CURRENT_PROFILE_REQUIRED'
+    }
+    foreach ($path in @($workerConfigPath,$executorConfigPath,$installStatePath)) {
+        Assert-CodexExecutorInstallPathChain $path
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw 'CODEX_CLI_REFRESH_INSTALLED_STATE_REQUIRED'
+        }
+    }
+
+    $task = Get-TaskOptional $executorTaskName -Strict
+    if ($null -eq $task) { throw 'CODEX_CLI_REFRESH_TASK_ABSENT' }
+    if ($task.State -ne 'Ready') { throw 'CODEX_CLI_REFRESH_TASK_NOT_IDLE' }
+    $configText = Get-Content -LiteralPath $executorConfigPath -Raw -ErrorAction Stop
+    $config = $configText | ConvertFrom-Json -ErrorAction Stop
+    $workerConfig = (Get-Content -LiteralPath $workerConfigPath -Raw -ErrorAction Stop) | ConvertFrom-Json -ErrorAction Stop
+    if ($config.project_id -ne $project -or $config.repo -ne $repo -or
+        $config.codex_executor_execution_phase -ne 'WIN11_TRANSITION' -or
+        [IO.Path]::GetFullPath([string]$config.spool_dir) -ne [IO.Path]::GetFullPath($spoolDir) -or
+        [IO.Path]::GetFullPath([string]$config.codex_executor_config_path) -ne [IO.Path]::GetFullPath($executorConfigPath) -or
+        [IO.Path]::GetFullPath([string]$config.codex_executor_script_path) -ne [IO.Path]::GetFullPath($executorScriptPath) -or
+        [IO.Path]::GetFullPath([string]$config.codex_executor_launcher_path) -ne [IO.Path]::GetFullPath($launcherPath) -or
+        [IO.Path]::GetFullPath([string]$config.codex_executor_wscript_path) -ne
+            [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32\wscript.exe')) -or
+        [IO.Path]::GetFullPath([string]$config.codex_executor_working_directory) -ne [IO.Path]::GetFullPath($spoolDir) -or
+        $config.codex_executor_task -ne $executorTaskName -or
+        $config.codex_executor_task_user -ne [Security.Principal.WindowsIdentity]::GetCurrent().Name -or
+        $config.publisher_identity_sid -ne $publisherSid -or $config.executor_identity_sid -ne $publisherSid) {
+        throw 'CODEX_CLI_REFRESH_INSTALLED_IDENTITY_MISMATCH'
+    }
+    if ($workerConfig.codex_executor_execution_phase -ne 'WIN11_TRANSITION' -or
+        $workerConfig.codex_executor_task -ne $config.codex_executor_task -or
+        $workerConfig.codex_executor_task_user -ne $config.codex_executor_task_user -or
+        $workerConfig.codex_executor_config_path -ne $executorConfigPath -or
+        $workerConfig.codex_executor_script_path -ne $executorScriptPath -or
+        $workerConfig.enable_codex_model_runs -ne $false -or $workerConfig.codex_usage_authorized -ne $false -or
+        $workerConfig.codex_cli_qualified -ne $false -or $workerConfig.codex_login_verified -ne $false -or
+        $null -eq $workerConfig.allowed_codex_models -or
+        @($workerConfig.allowed_codex_models.PSObject.Properties).Count -ne 0) {
+        throw 'CODEX_CLI_REFRESH_PUBLISHER_CONFIG_MISMATCH'
+    }
+    $installedNodePath = [IO.Path]::GetFullPath([string]$config.codex_executor_node_path)
+    if (-not (Test-Path -LiteralPath $installedNodePath -PathType Leaf)) {
+        throw 'CODEX_CLI_REFRESH_INSTALLED_NODE_UNAVAILABLE'
+    }
+    if ($config.enable_codex_model_runs -ne $false -or $config.codex_usage_authorized -ne $false -or
+        $config.codex_cli_qualified -ne $false -or $config.codex_login_verified -ne $false -or
+        $null -eq $config.allowed_codex_models -or
+        @($config.allowed_codex_models.PSObject.Properties).Count -ne 0) {
+        throw 'CODEX_CLI_REFRESH_MODEL_AUTHORIZATION_MUST_REMAIN_DISABLED'
+    }
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    $expectedArgs = ('//B //NoLogo "' + $launcherPath + '" "' + $installedNodePath + '" "' +
+        $executorScriptPath + '" "' + $executorConfigPath + '"')
+    $taskUserSid = $null
+    try { $taskUserSid = Resolve-Sid ([string]$task.Principal.UserId) } catch { $taskUserSid = $null }
+    if ($taskUserSid -ne $publisherSid -or $task.Principal.LogonType -ne 'Interactive' -or
+        $task.Principal.RunLevel -ne 'Limited' -or $task.Settings.MultipleInstances -ne 'IgnoreNew' -or
+        $task.Settings.Hidden -ne $true -or $task.Settings.AllowHardTerminate -ne $false -or
+        -not ($task.Settings.ExecutionTimeLimit -eq [TimeSpan]::Zero -or
+            [string]$task.Settings.ExecutionTimeLimit -in @('PT0S','00:00:00')) -or
+        @($task.Triggers | Where-Object { $null -ne $_ }).Count -ne 0 -or
+        @($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ne $wscript -or
+        $task.Actions[0].Arguments -ne $expectedArgs -or
+        [IO.Path]::GetFullPath([string]$task.Actions[0].WorkingDirectory) -ne [IO.Path]::GetFullPath($spoolDir)) {
+        throw 'CODEX_CLI_REFRESH_TASK_IDENTITY_MISMATCH'
+    }
+    try { $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop) }
+    catch { throw 'CODEX_CLI_REFRESH_PROCESS_STATE_UNKNOWN' }
+    foreach ($process in $processes) {
+        $processNameProperty = $process.PSObject.Properties['Name']
+        $processName = if ($null -ne $processNameProperty) { [string]$processNameProperty.Value } else { '' }
+        $processExecutable = [string]$process.ExecutablePath
+        $processExecutableName = ''
+        if ($processExecutable) {
+            try { $processExecutableName = [IO.Path]::GetFileName([IO.Path]::GetFullPath($processExecutable)) }
+            catch { throw 'CODEX_CLI_REFRESH_PROCESS_IDENTITY_UNKNOWN' }
+        }
+        $commandLineProperty = $process.PSObject.Properties['CommandLine']
+        $commandLine = if ($null -ne $commandLineProperty) { [string]$commandLineProperty.Value } else { '' }
+        if ([string]::IsNullOrWhiteSpace($commandLine)) {
+            # A process whose command line cannot be read may still be this
+            # executor, but a Session 0 service process cannot own this
+            # task's Interactive principal. Other nonzero sessions stay unknown.
+            if ($processName -in @('node.exe','wscript.exe') -or
+                $processExecutableName -in @('node.exe','wscript.exe')) {
+                $sessionIdProperty = $process.PSObject.Properties['SessionId']
+                if ($null -eq $sessionIdProperty) { throw 'CODEX_CLI_REFRESH_PROCESS_STATE_UNKNOWN' }
+                $sessionIdText = [string]$sessionIdProperty.Value
+                if ($sessionIdText -notmatch '^\d+$') { throw 'CODEX_CLI_REFRESH_PROCESS_STATE_UNKNOWN' }
+                try { $processSessionId = [int]$sessionIdText }
+                catch { throw 'CODEX_CLI_REFRESH_PROCESS_STATE_UNKNOWN' }
+                if ($processSessionId -eq 0) { continue }
+                throw 'CODEX_CLI_REFRESH_PROCESS_STATE_UNKNOWN'
+            }
+            continue
+        }
+        if ($commandLine.IndexOf($executorScriptPath, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+            $commandLine.IndexOf($executorConfigPath, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+        if (-not $processExecutable) { throw 'CODEX_CLI_REFRESH_PROCESS_IDENTITY_UNKNOWN' }
+        # Both the Node executor and its exact WScript launcher prove that the
+        # registered task is still live, even if one process is between starts.
+        if ($processExecutableName -in @('node.exe','wscript.exe')) {
+            throw 'CODEX_EXECUTOR_PROCESS_RUNNING_DO_NOT_REFRESH'
+        }
+    }
+
+    $manifestText = Get-Content -LiteralPath $installStatePath -Raw -ErrorAction Stop
+    $manifest = $manifestText | ConvertFrom-Json -ErrorAction Stop
+    $preflightManifestHash = (Get-FileHash -LiteralPath $installStatePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    if ($manifest.schema -ne 'ptysd-codex-executor-install-state.v1' -or
+        $manifest.execution_phase -ne 'WIN11_TRANSITION' -or
+        $manifest.host -ne $env:COMPUTERNAME.ToUpperInvariant() -or
+        $manifest.publisher_sid -ne $publisherSid -or $manifest.executor_sid -ne $publisherSid -or
+        [IO.Path]::GetFullPath([string]$manifest.spool_dir) -ne [IO.Path]::GetFullPath($spoolDir) -or
+        [IO.Path]::GetFullPath([string]$manifest.runtime_dir) -ne [IO.Path]::GetFullPath($runtimeDir)) {
+        throw 'CODEX_CLI_REFRESH_INSTALL_STATE_IDENTITY_MISMATCH'
+    }
+    $runtimeHashes = [ordered]@{}
+    foreach ($property in $manifest.runtime_sha256.PSObject.Properties) {
+        if ([string]$property.Value -notmatch '^[0-9a-fA-F]{64}$') {
+            throw 'CODEX_CLI_REFRESH_INSTALL_STATE_HASH_INVALID'
+        }
+        $runtimeHashes[$property.Name] = ([string]$property.Value).ToLowerInvariant()
+    }
+    if (-not $runtimeHashes.Contains('executor-config.json')) {
+        throw 'CODEX_CLI_REFRESH_CONFIG_HASH_MISSING'
+    }
+    if ((Get-FileHash -LiteralPath $executorConfigPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+        $runtimeHashes['executor-config.json']) { throw 'CODEX_CLI_REFRESH_CONFIG_HASH_MISMATCH' }
+    Assert-CodexExecutorCliRefreshArtifacts -SpoolPath $spoolDir -RuntimePath $runtimeDir `
+        -SpoolDirectoryNames @('requests','bundles','claims','results','evidence','workspaces','locks') `
+        -ExpectedRuntimeHashes $runtimeHashes
+
+    $oldCodexPath = [IO.Path]::GetFullPath([string]$config.codex_executable)
+    if (Test-Path -LiteralPath $oldCodexPath) { throw 'CODEX_CLI_PIN_REFRESH_NOT_REQUIRED' }
+    if ([string]$config.codex_executable_sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw 'CODEX_CLI_REFRESH_OLD_HASH_INVALID'
+    }
+    if (-not $NewCodexExecutable -or -not (Test-Path -LiteralPath $NewCodexExecutable -PathType Leaf)) {
+        throw 'CODEX_EXECUTABLE_NOT_FOUND'
+    }
+    $newCodexPath = [IO.Path]::GetFullPath($NewCodexExecutable)
+    if ([IO.Path]::GetFileName($newCodexPath) -ine 'codex.exe') { throw 'CODEX_EXECUTABLE_PATH_NOT_QUALIFIED' }
+    $localCodexBin = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'))
+    $codexBinDirectory = Split-Path -Parent (Split-Path -Parent $newCodexPath)
+    if (-not [string]::Equals([IO.Path]::GetFullPath($codexBinDirectory), $localCodexBin,
+        [StringComparison]::OrdinalIgnoreCase)) { throw 'CODEX_EXECUTABLE_MUST_BE_OFFICIAL_LOCAL_CODEX' }
+    Assert-CodexExecutorInstallPathChain $newCodexPath
+    $signature = Get-AuthenticodeSignature -FilePath $newCodexPath
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'OpenAI OpCo, LLC') {
+        throw 'CODEX_EXECUTABLE_SIGNATURE_NOT_QUALIFIED'
+    }
+    $newCodexHash = (Get-FileHash -LiteralPath $newCodexPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    $config.codex_executable = $newCodexPath
+    $config.codex_executable_sha256 = $newCodexHash
+    $configEncoding = [Text.Encoding]::UTF8
+    $newConfigText = (ConvertTo-Json -InputObject $config -Depth 20 -Compress) + [Environment]::NewLine
+    $newConfigBytes = $configEncoding.GetPreamble() + $configEncoding.GetBytes($newConfigText)
+    $newConfigHash = Get-CodexExecutorBytesSha256 $newConfigBytes
+    $manifestPattern = '("executor-config\.json"\s*:\s*")[0-9a-fA-F]{64}(")'
+    $matches = [regex]::Matches($manifestText, $manifestPattern)
+    if ($matches.Count -ne 1) { throw 'CODEX_CLI_REFRESH_MANIFEST_CONFIG_HASH_AMBIGUOUS' }
+    $newManifestText = [regex]::Replace($manifestText, $manifestPattern,
+        ('${1}' + $newConfigHash + '${2}'), 1)
+    $newManifest = $newManifestText | ConvertFrom-Json -ErrorAction Stop
+    if ($newManifest.runtime_sha256.'executor-config.json' -ne $newConfigHash) {
+        throw 'CODEX_CLI_REFRESH_MANIFEST_UPDATE_FAILED'
+    }
+    $manifestBytes = ([System.Text.UTF8Encoding]::new($false)).GetBytes($newManifestText)
+    $newManifestHash = Get-CodexExecutorBytesSha256 $manifestBytes
+
+    $backupDir = Join-Path $sharedBase 'maintenance-backups'
+    Assert-CodexExecutorInstallPathChain $backupDir
+    if (-not (Test-Path -LiteralPath $backupDir -PathType Container)) {
+        $null = New-Item -ItemType Directory -Path $backupDir -ErrorAction Stop
+    }
+    Assert-CodexExecutorTransitionAcl $backupDir
+    $backupStem = 'codex-cli-refresh-' + (Get-Date -Format 'yyyyMMddHHmmss') + '-' +
+        [guid]::NewGuid().ToString('N')
+    $configBackup = Join-Path $backupDir ($backupStem + '-executor-config.json')
+    $manifestBackup = Join-Path $backupDir ($backupStem + '-install-state.json')
+    $refreshLockPath = New-CodexExecutorCliRefreshLock -SpoolPath $spoolDir
+    $preserveRefreshLock = $false
+    try {
+    [IO.File]::Copy($executorConfigPath, $configBackup, $false)
+    [IO.File]::Copy($installStatePath, $manifestBackup, $false)
+    $oldConfigHash = (Get-FileHash -LiteralPath $configBackup -Algorithm SHA256).Hash.ToLowerInvariant()
+    $oldManifestHash = (Get-FileHash -LiteralPath $manifestBackup -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($oldConfigHash -ne $runtimeHashes['executor-config.json'] -or
+        $oldManifestHash -ne $preflightManifestHash) {
+        throw 'CODEX_CLI_REFRESH_SOURCE_CHANGED_NO_WRITE'
+    }
+    try {
+        if ((Get-FileHash -LiteralPath $executorConfigPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $oldConfigHash -or
+            (Get-FileHash -LiteralPath $installStatePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $oldManifestHash) {
+            throw 'CODEX_CLI_REFRESH_SOURCE_CHANGED_NO_WRITE'
+        }
+        Write-CodexExecutorAtomicReplacement $newConfigBytes $executorConfigPath $newConfigHash
+        if ((Get-FileHash -LiteralPath $installStatePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $oldManifestHash) {
+            throw 'CODEX_CLI_REFRESH_INSTALL_STATE_CHANGED_DURING_UPDATE'
+        }
+        Write-CodexExecutorAtomicReplacement $manifestBytes $installStatePath $newManifestHash
+        if ((Get-Content -LiteralPath $executorConfigPath -Raw | ConvertFrom-Json).codex_executable_sha256 -ne $newCodexHash -or
+            (Get-Content -LiteralPath $installStatePath -Raw | ConvertFrom-Json).runtime_sha256.'executor-config.json' -ne $newConfigHash) {
+            throw 'CODEX_CLI_REFRESH_READBACK_MISMATCH'
+        }
+    } catch {
+        $originalError = $_.Exception.Message
+        $rollbackErrors = New-Object System.Collections.Generic.List[string]
+        $atomicRollbackUnknown = $originalError -like '*CODEX_CLI_REFRESH_ATOMIC_REPLACE_ROLLBACK_UNKNOWN*'
+        foreach ($rollback in @(
+            @{ Path=$installStatePath; Backup=$manifestBackup; Hash=$oldManifestHash; WrittenHash=$newManifestHash },
+            @{ Path=$executorConfigPath; Backup=$configBackup; Hash=$oldConfigHash; WrittenHash=$newConfigHash }
+        )) {
+            try {
+                $currentHash = (Get-FileHash -LiteralPath $rollback.Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                if ($currentHash -ne $rollback.Hash) {
+                    # Roll back only bytes written by this refresh. A third hash
+                    # means another writer changed the file; preserve it and
+                    # retain the fail-closed lock for explicit reconciliation.
+                    if ($currentHash -ne $rollback.WrittenHash) {
+                        $rollbackErrors.Add([string]$rollback.Path)
+                        continue
+                    }
+                    Write-CodexExecutorAtomicReplacement ([IO.File]::ReadAllBytes($rollback.Backup)) `
+                        $rollback.Path $rollback.Hash
+                }
+            } catch { $rollbackErrors.Add([string]$rollback.Path) }
+        }
+        if ($rollbackErrors.Count -gt 0 -or $atomicRollbackUnknown) {
+            $preserveRefreshLock = $true
+            $partialPaths = @($rollbackErrors)
+            if ($atomicRollbackUnknown) { $partialPaths += 'atomic-replacement-evidence-retained' }
+            throw ('CODEX_CLI_REFRESH_PARTIAL_STATE_REVIEW_REQUIRED;backup=' + $backupDir +
+                ';paths=' + ($partialPaths -join ','))
+        }
+        throw ('CODEX_CLI_REFRESH_FAILED_ROLLED_BACK:' + $originalError + ';backup=' + $backupDir)
+    }
+    Write-Output ('CODEX_CLI_PIN_REFRESH=SUCCESS;path=' + $newCodexPath + ';sha256=' + $newCodexHash)
+    Write-Output ('CODEX_CLI_PIN_REFRESH_BACKUP=' + $backupDir)
+    Write-Output ('CODEX_CLI_PIN_REFRESH_OLD_CONFIG_SHA256=' + $oldConfigHash)
+    Write-Output ('CODEX_CLI_PIN_REFRESH_OLD_INSTALL_STATE_SHA256=' + $oldManifestHash)
+    Write-Output 'MODEL_EXECUTION=UNCHANGED_DISABLED'
+    } finally {
+        if (-not $preserveRefreshLock) { Remove-CodexExecutorCliRefreshLock -LockPath $refreshLockPath }
+    }
 }
 
 function Resolve-Sid([string]$Name) {
@@ -407,6 +917,21 @@ if ($Mode -eq 'Audit') {
     Write-Output ('WORKER_CONFIG_EXISTS=' + (Test-Path -LiteralPath $workerConfigPath -PathType Leaf))
     Write-Output ('CODEX_SPOOL_EXISTS=' + (Test-Path -LiteralPath $spoolDir -PathType Container))
     Write-Output 'MODEL_EXECUTION=NOT_TESTED_NO_MODEL_CALL'
+    return
+}
+
+if ($Mode -eq 'RefreshCodexCli') {
+    $refreshMutex = [Threading.Mutex]::new($false, ('Local\PTYSD-CodexExecutor-CliRefresh-' + $publisherSid))
+    $refreshMutexAcquired = $false
+    try {
+        try { $refreshMutexAcquired = $refreshMutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $refreshMutexAcquired = $true }
+        if (-not $refreshMutexAcquired) { throw 'CODEX_CLI_REFRESH_ALREADY_RUNNING' }
+        Invoke-CodexExecutorCliPinRefresh -NewCodexExecutable $CodexExecutable
+    } finally {
+        if ($refreshMutexAcquired) { $refreshMutex.ReleaseMutex() }
+        $refreshMutex.Dispose()
+    }
     return
 }
 
