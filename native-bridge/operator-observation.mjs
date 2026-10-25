@@ -364,7 +364,7 @@ export function collectWindowsObservation({
   try {
     const text = execute('powershell.exe',
       ['-NoProfile', '-NonInteractive', '-Command', POWERSHELL_READBACK],
-      { encoding: 'utf8', timeout: 7000, windowsHide: true, maxBuffer: 128 * 1024 });
+      { encoding: 'utf8', timeout: 30_000, windowsHide: true, maxBuffer: 128 * 1024 });
     const raw = JSON.parse(String(text).trim());
     if (!object(raw) || !validTime(raw.observed_at) ||
         typeof raw.legacy_monitor_registered !== 'boolean' ||
