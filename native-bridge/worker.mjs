@@ -1542,13 +1542,25 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
             head_after_sha: projectRootAfter.head_sha } } };
     }
     if (projectRootAfter.changes.length) {
+      const allowedProjectPaths = new Set(job.edit_paths.map(path =>
+        platform() === 'win32' ? path.toLowerCase() : path));
+      const projectRootChangedPaths = [...new Set(projectRootAfter.changes
+        .map(change => change.path.replaceAll('\\', '/'))
+        .filter(path => allowedProjectPaths.has(
+          platform() === 'win32' ? path.toLowerCase() : path)))].sort();
       return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROJECT_ROOT_WRITE_ESCAPED_ATTEMPT',
         exit_code: -1, coding_state: 'PROJECT_ROOT_WRITE_PRESERVED_UNVERIFIED',
         external_effects: 'UNKNOWN', scope_valid: false,
         project_root_changed_files_count: projectRootAfter.changes.length,
+        project_root_changed_paths: projectRootChangedPaths,
+        project_root_out_of_scope_changed_files_count:
+          projectRootAfter.changes.length - projectRootChangedPaths.length,
         local_evidence: { ...evidencedResult.local_evidence,
           antigravity_project_root_check: { status: 'CHANGES_PRESERVED',
             head_sha: projectRootAfter.head_sha,
+            changed_allowed_paths: projectRootChangedPaths,
+            out_of_scope_changed_files_count:
+              projectRootAfter.changes.length - projectRootChangedPaths.length,
             sha256: createHash('sha256').update(projectRootAfter.status_bytes).digest('hex'),
             bytes: projectRootAfter.status_bytes.length } } };
     }

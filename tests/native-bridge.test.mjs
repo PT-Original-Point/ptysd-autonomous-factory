@@ -2678,8 +2678,10 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
 
     const escapedWorkspace=join(home,'attempt-workspaces',randomUUID());
     git(registeredProjectRoot,'worktree','add','--quiet','--detach',escapedWorkspace,sourceSha);
+    const escapedJob={...job,edit_paths:['package.json','native-bridge/antigravity-quota.mjs',
+      'tests/antigravity-quota.test.mjs']};
     const escapedAttempt=await executeOpenCodeTask('Synthetic project-root escape; no inference.',
-      {...config,workspace:escapedWorkspace},job,randomUUID(),{
+      {...config,workspace:escapedWorkspace},escapedJob,randomUUID(),{
         now:()=>now,baseEnv:env,localAppData,runAntigravityV2Readiness:()=>readiness,
         async runCapturedProcess(_bin,_args,options){
           const escapedFiles=[
@@ -2692,6 +2694,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
             mkdirSync(dirname(absolute),{recursive:true});
             writeFileSync(absolute,contents);
           }
+          writeFileSync(join(registeredProjectRoot,'unapproved-local-state.txt'),
+            'must remain undisclosed by the recovery receipt\n');
           const empty=Buffer.alloc(0);
           writeFileSync(options.stdoutPath,empty,{flag:'wx'});
           writeFileSync(options.stderrPath,empty,{flag:'wx'});
@@ -2707,7 +2711,16 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(escapedAttempt.scope_valid,false);
     assert.equal(escapedAttempt.external_effects,'UNKNOWN');
     assert.equal(escapedAttempt.coding_state,'PROJECT_ROOT_WRITE_PRESERVED_UNVERIFIED');
-    assert.equal(escapedAttempt.project_root_changed_files_count,3);
+    assert.equal(escapedAttempt.project_root_changed_files_count,4);
+    assert.deepEqual(escapedAttempt.project_root_changed_paths,[
+      'native-bridge/antigravity-quota.mjs','package.json','tests/antigravity-quota.test.mjs',
+    ]);
+    assert.equal(escapedAttempt.project_root_out_of_scope_changed_files_count,1);
+    assert.deepEqual(escapedAttempt.local_evidence.antigravity_project_root_check.changed_allowed_paths,
+      escapedAttempt.project_root_changed_paths);
+    assert.equal(escapedAttempt.local_evidence.antigravity_project_root_check.out_of_scope_changed_files_count,1);
+    assert.equal(JSON.stringify(escapedAttempt).includes('unapproved-local-state.txt'),false,
+      'only exact authorized edit paths may be emitted in recovery evidence');
     assert.equal(Object.hasOwn(escapedAttempt,'diff_bytes'),false,
       'a root mismatch must not be misreported as a zero-byte candidate diff');
     assert.equal(escapedAttempt.local_evidence.antigravity_project_root_check.status,'CHANGES_PRESERVED');
