@@ -1482,6 +1482,7 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     forbidden_tool_execution_evidence: runEvidence.forbidden_tool_execution_evidence ?? 'UNKNOWN',
     session_id: runEvidence.session_id, session_started: runEvidence.session_started,
     cli_status: runEvidence.cli_status, run_disposition: runEvidence.run_disposition,
+        workspace_cwd_evidence: runEvidence.workspace_cwd_evidence ?? { status: 'UNKNOWN' },
     external_effects: runEvidence.external_effects,
     source_diff_evidence: runEvidence.source_diff_evidence,
     task_acceptance: runEvidence.task_acceptance,
@@ -1542,13 +1543,25 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
             head_after_sha: projectRootAfter.head_sha } } };
     }
     if (projectRootAfter.changes.length) {
+      const allowedProjectPaths = new Set(job.edit_paths.map(path =>
+        platform() === 'win32' ? path.toLowerCase() : path));
+      const projectRootChangedPaths = [...new Set(projectRootAfter.changes
+        .map(change => change.path.replaceAll('\\', '/'))
+        .filter(path => allowedProjectPaths.has(
+          platform() === 'win32' ? path.toLowerCase() : path)))].sort();
       return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROJECT_ROOT_WRITE_ESCAPED_ATTEMPT',
         exit_code: -1, coding_state: 'PROJECT_ROOT_WRITE_PRESERVED_UNVERIFIED',
         external_effects: 'UNKNOWN', scope_valid: false,
         project_root_changed_files_count: projectRootAfter.changes.length,
+        project_root_changed_paths: projectRootChangedPaths,
+        project_root_out_of_scope_changed_files_count:
+          projectRootAfter.changes.length - projectRootChangedPaths.length,
         local_evidence: { ...evidencedResult.local_evidence,
           antigravity_project_root_check: { status: 'CHANGES_PRESERVED',
             head_sha: projectRootAfter.head_sha,
+            changed_allowed_paths: projectRootChangedPaths,
+            out_of_scope_changed_files_count:
+              projectRootAfter.changes.length - projectRootChangedPaths.length,
             sha256: createHash('sha256').update(projectRootAfter.status_bytes).digest('hex'),
             bytes: projectRootAfter.status_bytes.length } } };
     }
@@ -1558,6 +1571,22 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
       status_sha256: createHash('sha256').update(projectRootAfter.status_bytes).digest('hex'),
       status_bytes: projectRootAfter.status_bytes.length,
     };
+  }
+  if (!runEvidence.valid && runEvidence.workspace_cwd_evidence?.status !== 'MATCHED') {
+    // A process stream bound to another or unknown working directory cannot
+    // prove an empty diff in the configured candidate. Keep the captured
+    // stream/artifacts, but do not inspect a different checkout and call it 0.
+    return { ...evidencedResult,
+      outcome: `ANTIGRAVITY_EDIT_WORKSPACE_IDENTITY_UNKNOWN_${runEvidence.reason}`,
+      exit_code: -1, coding_state: 'UNKNOWN_WORKSPACE_EFFECTS_PRESERVED',
+      scope_valid: false, external_effects: 'UNKNOWN', source_diff_evidence: 'UNKNOWN',
+      task_acceptance: 'UNKNOWN', diff_sha256: null, diff_bytes: null,
+      local_evidence: { ...evidencedResult.local_evidence,
+        antigravity_run: { ...evidencedResult.local_evidence.antigravity_run,
+          source_diff_evidence: 'UNKNOWN' },
+        source_diff_evidence: 'UNKNOWN',
+        edit_diff: { status: 'NOT_CAPTURED_WORKSPACE_IDENTITY_UNKNOWN' },
+        workspace_cwd_evidence: runEvidence.workspace_cwd_evidence ?? { status: 'UNKNOWN' } } };
   }
   if (!runEvidence.valid) {
     // The process has exited, so it is now safe to inspect its scoped workspace
