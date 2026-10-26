@@ -29,6 +29,7 @@ $expectedHost = 'DESKTOP-1B6PD2P'
 $homeDir = Join-Path $env:LOCALAPPDATA 'PTYSDNativeBridge'
 $worker = Join-Path $homeDir 'worker.mjs'
 $configPath = Join-Path $homeDir 'config.json'
+$configWriteLockPath = $configPath + '.write.lock'
 $hiddenWorker = Join-Path $homeDir 'HiddenWorker.vbs'
 $hiddenWorkerSha256 = 'BEB20341D759C4F6380A62197AB0FAD79B2F0D0B52798BFBF734346A05B82A89'
 $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
@@ -43,6 +44,21 @@ $runtimeFiles = @(
     'safe-error-code.mjs',
     'windows-executor.mjs'
 )
+
+function Merge-WorkerConfig {
+    param(
+        [AllowNull()][object]$ExistingConfig,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$BaseConfig
+    )
+    $merged = [ordered]@{}
+    if ($null -ne $ExistingConfig) {
+        foreach ($property in $ExistingConfig.PSObject.Properties) {
+            $merged[$property.Name] = $property.Value
+        }
+    }
+    foreach ($key in $BaseConfig.Keys) { $merged[$key] = $BaseConfig[$key] }
+    return $merged
+}
 
 function Require-Command([string]$Name) {
     $entry = Get-Command $Name -ErrorAction Stop | Select-Object -First 1
@@ -154,11 +170,35 @@ if ($Mode -eq 'Install') {
         if ($LASTEXITCODE -ne 0) { throw ('NODE_SYNTAX_INVALID:' + $runtimeFile) }
         if ($runtimeFile -eq 'worker.mjs') { $workerHash = $sourceHash }
     }
-    $c = [ordered]@{
+    $baseConfig = [ordered]@{
         project_id = $project; repo = $repo; host = $expectedHost; issue = $IssueNumber
         workspace = $full; state_dir = $homeDir; dispatchers = @($TrustedDispatcher)
     }
-    [IO.File]::WriteAllText($configPath, ($c | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
+    $configWriteLock = $null
+    try {
+        $configWriteLock = [IO.File]::Open($configWriteLockPath, [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    } catch [IO.IOException] {
+        throw 'WORKER_CONFIG_WRITE_LOCK_BUSY_DO_NOT_OVERWRITE'
+    }
+    try {
+        $existingConfig = $null
+        if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+            try {
+                $existingConfig = [IO.File]::ReadAllText($configPath) | ConvertFrom-Json -ErrorAction Stop
+                if ($null -eq $existingConfig -or
+                    $existingConfig -isnot [System.Management.Automation.PSCustomObject]) {
+                    throw 'WORKER_CONFIG_TOP_LEVEL_OBJECT_REQUIRED'
+                }
+            } catch {
+                throw 'WORKER_CONFIG_READ_OR_PARSE_FAILED_DO_NOT_OVERWRITE'
+            }
+        }
+        $c = Merge-WorkerConfig $existingConfig $baseConfig
+        [IO.File]::WriteAllText($configPath, ($c | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    } finally {
+        if ($null -ne $configWriteLock) { $configWriteLock.Dispose() }
+    }
     $argsLine = '//B //NoLogo "' + $hiddenWorker + '"'
     $action = New-ScheduledTaskAction -Execute $wscript -Argument $argsLine -WorkingDirectory $homeDir
     $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `

@@ -9,6 +9,7 @@ import { assertExecutorTaskReady, buildExecutorTaskXml } from '../native-bridge/
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const sourceDir = join(root, 'native-bridge');
 const installer = readFileSync(join(sourceDir, 'install.ps1'), 'utf8');
+const executorInstaller = readFileSync(join(sourceDir, 'install-codex-executor.ps1'), 'utf8');
 const installIndex = installer.indexOf("if ($Mode -eq 'Install')");
 assert.notEqual(installIndex, -1, 'installer has an explicit install mode');
 const installBlock = installer.slice(installIndex);
@@ -48,6 +49,14 @@ assert.match(installer, /\$node\s*=\s*\$nodeMatch\.Groups\[1\]\.Value/i,
   'syntax checks use the same Node executable that the scheduled wrapper launches');
 assert.doesNotMatch(installBlock, /\$node\s*=\s*Require-Command\s+'node\.exe'/i,
   'a different PATH Node binary cannot be mistaken for the deployed runtime');
+assert.match(installer, /\$configWriteLockPath\s*=\s*\$configPath\s*\+\s*'\.write\.lock'/i,
+  'the worker installer derives the shared OS lock file from config.json');
+assert.match(installBlock, /\[IO\.File\]::Open\(\$configWriteLockPath[\s\S]*?\[IO\.FileShare\]::None/i,
+  'the worker installer acquires the shared exclusive config lock before writing');
+assert.match(executorInstaller, /\$workerConfigPath\s*\+\s*'\.write\.lock'/i,
+  'the Codex executor installer uses the same worker config lock file');
+assert.match(installBlock, /Merge-WorkerConfig\s+/i,
+  'the worker installer preserves executor-owned config fields across a worker refresh');
 assert.match(installer, /New-ScheduledTaskAction\s+-Execute\s+\$wscript\s+-Argument\s+\$argsLine/i,
   'scheduled action invokes the validated hidden Windows Script Host wrapper');
 assert.doesNotMatch(installer, /New-ScheduledTaskAction\s+-Execute\s+\$node\b/i,
