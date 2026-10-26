@@ -112,6 +112,9 @@ function acquireActiveLock(spoolDir, deps = {}) {
           !Number.isFinite(lock.boot_uptime_seconds) || typeof lock.phase !== 'string') throw error;
       if (lock.model_pid !== undefined && lock.model_pid !== null &&
           (!Number.isSafeInteger(lock.model_pid) || lock.model_pid < 1)) throw error;
+      if (lock.phase === 'CLI_REFRESH_STATE_UNKNOWN' &&
+          (lock.request_id !== null || lock.attempt_id !== null || lock.model_pid !== null))
+        throw new Error('EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN');
 
       // A lower OS uptime proves a reboot terminated every prior process. The
       // durable per-attempt claim remains, so the old request is never replayed.
@@ -119,6 +122,10 @@ function acquireActiveLock(spoolDir, deps = {}) {
       if (!previousBoot) {
         const alive = (deps.isProcessAlive || isProcessAlive)(lock.pid);
         if (alive !== false) throw error;
+        // A refresh may have started an updater child that is not represented by
+        // model_pid. Same-boot parent death alone cannot prove that child ended.
+        if (lock.phase === 'CLI_REFRESH_STATE_UNKNOWN')
+          throw new Error('EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN');
         if (Number.isSafeInteger(lock.model_pid)) {
           const readback = (deps.readProcessTree || readWindowsProcessTree)(lock.model_pid);
           if (readback?.root_pid !== lock.model_pid || readback?.state !== 'DEAD' ||
@@ -311,6 +318,8 @@ export async function runCodex(request, config, worktree, evidenceDir, deps = {}
     input_error: evidence.stdin_error, capture_error: evidence.capture_error ?? evidenceReadError,
     storage_error: evidence.storage_error, termination_state: evidence.termination_state,
     termination_error: evidence.termination_error,
+    process_tree_state: evidence.process_tree_state,
+    process_tree_error: evidence.process_tree_error,
     outcome, tests: 'NOT_RUN', pr_url: null };
 }
 
@@ -841,6 +850,8 @@ export async function runExecutorOnce(config, deps = {}) {
       input_error: execution.input_error, capture_error: execution.capture_error,
       storage_error: execution.storage_error, termination_state: execution.termination_state,
       termination_error: execution.termination_error,
+      process_tree_state: execution.process_tree_state,
+      process_tree_error: execution.process_tree_error,
       tests: 'NOT_RUN', pr_url: null, observed_at: new Date().toISOString(),
     };
     result.model_invoked = result.provider_usage_evidence === 'CONFIRMED';
