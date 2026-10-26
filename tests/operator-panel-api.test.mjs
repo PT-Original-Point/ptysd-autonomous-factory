@@ -1068,3 +1068,14 @@ test('an HTTP 503 with remaining quota fails locally, lets unrelated reads proce
   assert.ok(backoffs.every((ms, index) => index === 0 || ms >= backoffs[index - 1]), 'backoff never shrinks');
   assert.equal(Math.max(...backoffs), 5 * 60 * 1000, 'per-resource backoff caps at five minutes');
 });
+
+test('mobile overview keeps its GitHub state badge within the card', () => {
+  const start = html.indexOf('@media (max-width:700px)');
+  const end = html.indexOf('@media (max-width:440px)', start);
+  assert.ok(start >= 0 && end > start, 'mobile layout rules are present');
+  const mobileCss = html.slice(start, end);
+  assert.match(mobileCss, /\.overview-head\s*\{[^}]*flex-direction:\s*column/);
+  assert.match(mobileCss, /\.overview-copy\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  assert.match(mobileCss,
+    /\.overview-head\s*>\s*\.badge\s*\{[^}]*max-width:\s*100%[^}]*white-space:\s*normal[^}]*overflow-wrap:\s*anywhere/);
+});

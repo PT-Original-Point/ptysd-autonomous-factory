@@ -135,6 +135,10 @@
     @media (max-width:700px) {
       main { padding:18px 13px 30px }
       .topbar { align-items:center }
+      .overview-head { flex-direction:column; align-items:flex-start }
+      .overview-head > .badge { max-width:100%; min-width:0; white-space:normal;
+        overflow-wrap:anywhere }
+      .overview-copy { overflow-wrap:anywhere }
       .top-actions { align-items:flex-end }
       .dispatch-grid { grid-template-columns:1fr }
       .metrics { grid-template-columns:repeat(2,minmax(0,1fr)) }
