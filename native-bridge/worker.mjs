@@ -137,6 +137,19 @@ function executorRouteFailure(config, kind) {
     return 'EXECUTOR_NOT_CONFIGURED_FOR_' + lane.toUpperCase();
   return 'EXECUTOR_NOT_CONFIGURED';
 }
+function opencodeExecutorIsolationFailure(descriptor) {
+  const phase = descriptor?.execution_phase ?? 'VM_ISOLATED';
+  const userSid = typeof descriptor?.user_sid === 'string' ? descriptor.user_sid.trim() : '';
+  const publisherSid = typeof descriptor?.publisher_sid === 'string' ? descriptor.publisher_sid.trim() : '';
+  if (!userSid || !publisherSid) return 'EXECUTOR_OS_ISOLATION_REQUIRED';
+  const sameIdentity = userSid.toUpperCase() === publisherSid.toUpperCase();
+  // Match EXECUTOR-ISOLATION.md: the Human-authorized Win11 transition uses
+  // the current Publisher SID, while VM isolation requires a distinct SID.
+  if (!((phase === 'WIN11_TRANSITION' && sameIdentity) ||
+        (phase === 'VM_ISOLATED' && !sameIdentity)))
+    return 'EXECUTOR_OS_ISOLATION_REQUIRED';
+  return null;
+}
 function validateExecutorRouting(config) {
   if (config.executors === undefined) {
     if (config.executor_lane !== undefined &&
@@ -2781,14 +2794,16 @@ export async function runWorker(configInput, adapters = {}) {
         // inspect the wrong SID and can falsely block an otherwise eligible lane.
       } else if (config.enable_v2_model_runs !== true) reason = 'MODEL_RUNS_NOT_ENABLED';
       if (!reason && !checkModelAuthorization(next.job, config)) reason = 'MODEL_NOT_EXPLICITLY_ALLOWED';
-      else if (!reason && next.job.kind === 'opencode_edit') {
+      if (!reason && !preparedExecutor) reason = executorRouteFailure(config, next.job.kind);
+      if (!reason && next.job.kind === 'opencode_edit')
+        reason = opencodeExecutorIsolationFailure(preparedExecutor);
+      if (!reason && next.job.kind === 'opencode_edit') {
         try { buildV2ScopedEditConfig(config.workspace, next.job.edit_paths); }
         catch (error) {
           reason = `EDIT_SCOPE_${safeErrorCode(error, 'INVALID')}`;
         }
       }
-      if (!reason && !preparedExecutor) reason = executorRouteFailure(config, next.job.kind);
-      else if (!reason) {
+      if (!reason) {
         try {
           // The OpenCode verifier's contract is throw-on-failure and return the
           // validated Task Scheduler readback on success; unlike the Codex

@@ -1189,6 +1189,93 @@ test('operator observation publisher will not adopt an untrusted replacement for
   assert.equal(patches, 0, 'the publisher must never update an untrusted replacement comment');
 });
 
+test('schema-6 OpenCode edit honors phase-specific OS identity and leaves independent work moving', async () => {
+  const root=mkdtempSync(join(homedir(),'.ptysd-opencode-isolation-gate-'));
+  try {
+    const workspace=join(root,'workspace'),stateDir=join(root,'state');
+    const blockedStateDir=join(root,'blocked-state');
+    mkdirSync(join(workspace,'src'),{recursive:true}); mkdirSync(stateDir); mkdirSync(blockedStateDir);
+    writeFileSync(join(workspace,'src','worker.mjs'),'export const state = "base";\n');
+    const host=hostname().toUpperCase(),spec='Edit only src/worker.mjs for this synthetic task.';
+    const job=withHumanGoal({project_id:PROJECT,host,
+      request_id:'PTYSD_OPENCODE_ISOLATION_REQUIRED_20261027',kind:'opencode_edit',source_sha:commit,
+      spec_path:'native-bridge/tasks/edit-worker.md',spec_sha256:h(spec),model:'opencode/spark',
+      variant:'high',edit_paths:['src/worker.mjs'],source_pr:437});
+    const jobComment={...com(10,encoded(job)),issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+    const pingJob=mkjob({host,request_id:'PTYSD_PING_DURING_OPENCODE_ISOLATION_WAIT_20261027'});
+    const pingComment={...com(11,encoded(pingJob)),issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+    const taskComments=[jobComment],receiptComments=[pingComment];
+    const publisherSid='S-1-5-21-100-200-300-1002';
+    const executor={...executorDescriptorForLane('OpenCode',1002),publisher_sid:publisherSid,
+      execution_phase:'WIN11_TRANSITION'};
+    const config={repo:REPO,project_id:PROJECT,host,issue:407,workspace,state_dir:stateDir,
+      dispatchers:['t14210184'],executors:{opencode:executor},enable_v2_model_runs:true,
+      allowed_models:{'opencode/spark':['high']}};
+    const writes=[],logs=[]; let bundles=0,dispatches=0,modelCalls=0,readinessCalls=0,nextId=20;
+    const adapters={
+      goalCommentsRead:()=>[humanGoalComment(),...taskComments],
+      apiRead(uri){
+        if(uri==='user')return {login:'worker'};
+        if(uri===`repos/${REPO}/issues/407`)return {title:ISSUE_TITLE,state:'open'};
+        if(uri===`repos/${REPO}/git/ref/heads/main`)return {object:{sha:commit}};
+        if(uri===`repos/${REPO}/issues/comments/6188322050`)return humanGoalComment();
+        if(uri===`repos/${REPO}/pulls/437`)return {number:437,state:'open',
+          base:{ref:'main',repo:{id:1352411536,full_name:REPO}},
+          head:{sha:commit,repo:{id:1352411536,full_name:REPO}}};
+        if(uri===`repos/${REPO}/issues/comments/10`)return jobComment;
+        if(uri===`repos/${REPO}/issues/comments/11`)return pingComment;
+        if(uri.startsWith(`repos/${REPO}/contents/`))
+          return {encoding:'base64',content:Buffer.from(spec).toString('base64')};
+        throw new Error(`UNEXPECTED_OPENCODE_ISOLATION_TEST_API:${uri}`);
+      },
+      commentsRead:()=>receiptComments,
+      assertExecutorTaskReady:()=>{readinessCalls++;return {ready:true};},
+      createExecutorSourceBundle:({job:sourceJob,attemptId})=>{
+        bundles++; return {attempt_id:attemptId,source_sha:sourceJob.source_sha,sha256:'c'.repeat(64)};
+      },
+      dispatchToExecutor:()=>{dispatches++;return {outcome:'SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION'};},
+      writeReceipt(_receiptConfig,data,login){
+        writes.push(data);
+        receiptComments.push(com(nextId++,RECEIPT_MARKER+JSON.stringify(data),login));
+      },
+      runPlan:()=>{modelCalls++;throw new Error('TEST_MUST_NOT_INVOKE_MODEL_INLINE');},
+      observationDependencies:{collectWindowsObservation:()=>({status:'UNKNOWN'})},
+      log:value=>logs.push(value),
+    };
+
+    const ping=await executeWorker({...config,state_dir:blockedStateDir},adapters);
+    assert.equal(ping.state,'FINISHED');
+    assert.equal(ping.request_id,pingJob.request_id,
+      'an independent ping remains runnable while the W1 candidate is present');
+    async function runJob(requestId,phase,userSid){
+      jobComment.body=encoded({...job,request_id:requestId});
+      executor.execution_phase=phase; executor.user_sid=userSid;
+      return executeWorker({...config,state_dir:blockedStateDir},adapters);
+    }
+    const transitionReady=await runJob(job.request_id,'WIN11_TRANSITION',publisherSid);
+    assert.equal(transitionReady.state,'DISPATCHED',
+      'the Human-authorized Win11 transition allows only the same Publisher and Executor SID');
+    assert.equal(transitionReady.request_id,job.request_id);
+    assert.equal(readinessCalls,1); assert.equal(bundles,1); assert.equal(dispatches,1);
+    assert.equal(modelCalls,0,'the synthetic dispatcher test never launches OpenCode');
+    assert.deepEqual(writes.filter(item=>item.request_id===job.request_id).map(item=>item.state),['STARTED']);
+
+    await assert.rejects(runJob('PTYSD_OPENCODE_TRANSITION_MISMATCH_20261027',
+      'WIN11_TRANSITION','S-1-5-21-100-200-300-1001'), /EXECUTOR_TRANSITION_IDENTITY_MISMATCH/);
+    assert.equal(readinessCalls,1,'a phase/identity mismatch must fail before Task Scheduler preflight');
+    assert.equal(dispatches,1);
+
+    const vmDescriptor={...executorDescriptorForLane('OpenCode',1001),execution_phase:'VM_ISOLATED'};
+    assert.doesNotThrow(()=>guardConfig({...config,executors:{opencode:vmDescriptor}}),
+      'the separate-SID VM phase remains eligible');
+    assert.throws(()=>guardConfig({...config,executors:{opencode:{...vmDescriptor,
+      user_sid:publisherSid}}}),/EXECUTOR_IDENTITY_NOT_SEPARATE/);
+    assert.equal(readinessCalls,1); assert.equal(bundles,1); assert.equal(dispatches,1);
+    assert.equal(modelCalls,0);
+    assert.deepEqual(writes.filter(item=>item.request_id==='PTYSD_OPENCODE_TRANSITION_MISMATCH_20261027'),[]);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
 test('Issue #310 structured candidate task dispatches through the existing Executor and receipts stay on #407', async () => {
   const root=mkdtempSync(join(homedir(),'.ptysd-edit-dispatch-test-'));
   try {
