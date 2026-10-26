@@ -17,7 +17,8 @@ import { OPERATOR_MARKER, OPERATOR_COMMENT_ID, encodeOperatorObservation, parseO
   from '../native-bridge/operator-observation.mjs';
 import { makeCodexExecutorRequest, codexScopedActionStatus }
   from '../native-bridge/codex-continuation.mjs';
-import { ANTIGRAVITY_V2_MODEL, buildAntigravityChildEnvironment, buildNativeChildEnvironment }
+import { ANTIGRAVITY_V2_MODEL, buildAntigravityChildEnvironment, buildNativeChildEnvironment,
+  readAntigravityV2RunEvidence }
   from '../native-bridge/v2-readiness.mjs';
 
 const commit = 'a'.repeat(40); const hash = 'b'.repeat(64);
@@ -33,6 +34,48 @@ const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1
 const encoded = o => JOB_MARKER + JSON.stringify(o);
 const com = (id, body, login = 't14210184') => ({ id, body, user: { login } });
 const h = x => createHash('sha256').update(x).digest('hex');
+
+test('Antigravity stream evidence binds the exact candidate cwd and reports mismatch or missing cwd without leaking paths', async () => {
+  const root=mkdtempSync(join(homedir(),'.ptysd-agy-cwd-evidence-'));
+  try {
+    const expectedCwd=join(root,'candidate'),otherCwd=join(root,'other-candidate');
+    mkdirSync(expectedCwd); mkdirSync(otherCwd);
+    const stdoutPath=join(root,'stream.jsonl');
+    const read=async init=>{
+      const session='conv_agy_cwd_evidence_20261026';
+      const events=[
+        {event:'init',conversation_id:session,init:{model:ANTIGRAVITY_V2_MODEL,
+          permission_mode:'request-review',...init}},
+        {event:'result',result:{conversation_id:session,status:'SUCCESS',response:'synthetic',
+          usage:{input_tokens:0,output_tokens:0,thinking_tokens:0,cache_read_tokens:0,total_tokens:0}}},
+      ];
+      const bytes=Buffer.from(events.map(event=>JSON.stringify(event)).join('\n')+'\n');
+      writeFileSync(stdoutPath,bytes);
+      return readAntigravityV2RunEvidence(stdoutPath,h(bytes),expectedCwd);
+    };
+
+    const matched=await read({cwd:expectedCwd});
+    assert.equal(matched.valid,true);
+    assert.equal(matched.workspace_cwd_evidence.status,'MATCHED');
+    assert.equal(matched.workspace_cwd_evidence.expected_path_sha256,
+      matched.workspace_cwd_evidence.observed_path_sha256);
+
+    const mismatch=await read({cwd:otherCwd});
+    assert.equal(mismatch.valid,false);
+    assert.equal(mismatch.reason,'ANTIGRAVITY_WORKSPACE_CWD_MISMATCH');
+    assert.equal(mismatch.workspace_cwd_evidence.status,'MISMATCH');
+    assert.notEqual(mismatch.workspace_cwd_evidence.expected_path_sha256,
+      mismatch.workspace_cwd_evidence.observed_path_sha256);
+    assert.equal(JSON.stringify(mismatch).includes(otherCwd),false,
+      'the public evidence carries path digests, not local absolute paths');
+
+    const missing=await read({});
+    assert.equal(missing.valid,false);
+    assert.equal(missing.reason,'ANTIGRAVITY_WORKSPACE_CWD_MISSING_OR_INVALID');
+    assert.equal(missing.workspace_cwd_evidence.status,'MISSING_OR_INVALID');
+    assert.equal(missing.workspace_cwd_evidence.observed_path_sha256,null);
+  } finally { rmSync(root,{recursive:true,force:true}); }
+});
 const executeWorker = (config, adapters = {}) => runWorkerImplementation(config,
   { goalCommentsRead: () => [], ...adapters });
 function seededOperatorObservation(commentId, sequence, mainSha, at = Date.now()) {
@@ -2676,10 +2719,64 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(selectNext(forbiddenComments,['t14210184'],'worker',job.host,job.source_sha),null,
       'a forbidden tool event with possible edits is preserved as terminal and never replayed');
 
+    git(workspace,'checkout','--','src/worker.mjs');
+    const mismatchedWorkspace=join(home,'mismatched-workspace',randomUUID());
+    mkdirSync(dirname(mismatchedWorkspace),{recursive:true});
+    git(registeredProjectRoot,'worktree','add','--quiet','--detach',mismatchedWorkspace,sourceSha);
+    const mismatchedFile=join(mismatchedWorkspace,'src','worker.mjs');
+    const mismatchSession='conv_agy_cwd_mismatch_20261018';
+    const candidateDiffsBefore=readdirSync(stateDir).filter(name=>name.startsWith('edit-diff-')).length;
+    const cwdMismatch=await executeOpenCodeTask(
+      'Synthetic unexpected Antigravity cwd; no model call.',config,job,randomUUID(),{
+        now:()=>now,baseEnv:env,localAppData,runAntigravityV2Readiness:()=>readiness,
+        readGitProcessTree:pid=>({state:'DEAD',root_pid:pid,process_ids:[],census_complete:true,
+          observed_at:new Date(now).toISOString(),error:null}),
+        async runCapturedProcess(_bin,_args,options){
+          writeFileSync(mismatchedFile,'export const state = "changed in other workspace";\n');
+          const events=[
+            {event:'init',conversation_id:mismatchSession,init:{model:ANTIGRAVITY_V2_MODEL,
+              cwd:mismatchedWorkspace,permission_mode:'request-review'}},
+            {event:'step_update',step_update:{conversation_id:mismatchSession,step_index:0,
+              state:'DONE',step_type:'tool',tool_name:'edit_file',tool_info:{}}},
+            {event:'result',result:{conversation_id:mismatchSession,status:'SUCCESS',response:'synthetic',
+              usage:{input_tokens:1,output_tokens:1,thinking_tokens:0,cache_read_tokens:0,total_tokens:2}}},
+          ];
+          const out=Buffer.from(events.map(event=>JSON.stringify(event)).join('\n')+'\n');
+          const err=Buffer.alloc(0);
+          writeFileSync(options.stdoutPath,out,{flag:'wx'});
+          writeFileSync(options.stderrPath,err,{flag:'wx'});
+          return {outcome:'SYNTHETIC_PROCESS_EXITED',exit_code:0,evidence_sha256:null,
+            evidence_bytes:out.length,local_evidence:{stdout_file:basename(options.stdoutPath),
+              stdout_sha256:createHash('sha256').update(out).digest('hex'),stdout_bytes:out.length,
+              stderr_file:basename(options.stderrPath),stderr_sha256:createHash('sha256').update(err).digest('hex'),
+              stderr_bytes:0,termination_state:'NOT_REQUESTED'}};
+        },
+      });
+    assert.equal(cwdMismatch.outcome,
+      'ANTIGRAVITY_EDIT_WORKSPACE_IDENTITY_UNKNOWN_ANTIGRAVITY_WORKSPACE_CWD_MISMATCH');
+    assert.equal(cwdMismatch.scope_valid,false);
+    assert.equal(cwdMismatch.external_effects,'UNKNOWN');
+    assert.equal(cwdMismatch.source_diff_evidence,'UNKNOWN');
+    assert.equal(cwdMismatch.diff_bytes,null,'a different cwd must never become a zero-byte candidate diff');
+    assert.equal(cwdMismatch.diff_sha256,null);
+    assert.equal(cwdMismatch.local_evidence.workspace_cwd_evidence.status,'MISMATCH');
+    assert.equal(cwdMismatch.local_evidence.edit_diff.status,'NOT_CAPTURED_WORKSPACE_IDENTITY_UNKNOWN');
+    assert.ok(existsSync(join(stateDir,cwdMismatch.local_evidence.stdout_file)),
+      'the original captured stream remains available for reconciliation');
+    assert.equal(readdirSync(stateDir).filter(name=>name.startsWith('edit-diff-')).length,
+      candidateDiffsBefore,'the executor must not capture an unrelated checkout as proof of no changes');
+    assert.match(readFileSync(mismatchedFile,'utf8'),/changed in other workspace/,
+      'the mismatched workspace effect remains intact for later recovery');
+    assert.equal(readFileSync(join(workspace,'src','worker.mjs'),'utf8').replaceAll('\r\n','\n'),
+      'export const state = "base";\n',
+      'the configured candidate is not falsely treated as the model write destination');
+
     const escapedWorkspace=join(home,'attempt-workspaces',randomUUID());
     git(registeredProjectRoot,'worktree','add','--quiet','--detach',escapedWorkspace,sourceSha);
+    const escapedJob={...job,edit_paths:['package.json','native-bridge/antigravity-quota.mjs',
+      'tests/antigravity-quota.test.mjs']};
     const escapedAttempt=await executeOpenCodeTask('Synthetic project-root escape; no inference.',
-      {...config,workspace:escapedWorkspace},job,randomUUID(),{
+      {...config,workspace:escapedWorkspace},escapedJob,randomUUID(),{
         now:()=>now,baseEnv:env,localAppData,runAntigravityV2Readiness:()=>readiness,
         async runCapturedProcess(_bin,_args,options){
           const escapedFiles=[
@@ -2692,6 +2789,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
             mkdirSync(dirname(absolute),{recursive:true});
             writeFileSync(absolute,contents);
           }
+          writeFileSync(join(registeredProjectRoot,'unapproved-local-state.txt'),
+            'must remain undisclosed by the recovery receipt\n');
           const empty=Buffer.alloc(0);
           writeFileSync(options.stdoutPath,empty,{flag:'wx'});
           writeFileSync(options.stderrPath,empty,{flag:'wx'});
@@ -2707,7 +2806,16 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(escapedAttempt.scope_valid,false);
     assert.equal(escapedAttempt.external_effects,'UNKNOWN');
     assert.equal(escapedAttempt.coding_state,'PROJECT_ROOT_WRITE_PRESERVED_UNVERIFIED');
-    assert.equal(escapedAttempt.project_root_changed_files_count,3);
+    assert.equal(escapedAttempt.project_root_changed_files_count,4);
+    assert.deepEqual(escapedAttempt.project_root_changed_paths,[
+      'native-bridge/antigravity-quota.mjs','package.json','tests/antigravity-quota.test.mjs',
+    ]);
+    assert.equal(escapedAttempt.project_root_out_of_scope_changed_files_count,1);
+    assert.deepEqual(escapedAttempt.local_evidence.antigravity_project_root_check.changed_allowed_paths,
+      escapedAttempt.project_root_changed_paths);
+    assert.equal(escapedAttempt.local_evidence.antigravity_project_root_check.out_of_scope_changed_files_count,1);
+    assert.equal(JSON.stringify(escapedAttempt).includes('unapproved-local-state.txt'),false,
+      'only exact authorized edit paths may be emitted in recovery evidence');
     assert.equal(Object.hasOwn(escapedAttempt,'diff_bytes'),false,
       'a root mismatch must not be misreported as a zero-byte candidate diff');
     assert.equal(escapedAttempt.local_evidence.antigravity_project_root_check.status,'CHANGES_PRESERVED');

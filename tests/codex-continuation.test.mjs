@@ -1372,6 +1372,95 @@ test('executor terminal receipt keeps model_invoked false when CLI spawn produce
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('executor persists the scalar process-tree readback from its real capture pipeline', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-process-tree-result-'));
+  try {
+    const source = join(dir, 'source');
+    mkdirSync(source);
+    const git = (...args) => execFileSync('git', ['-C', source, ...args], {
+      encoding: 'utf8', windowsHide: true, shell: false,
+    }).trim();
+    git('init', '-q');
+    git('config', 'user.name', 'PTYSD test');
+    git('config', 'user.email', 'ptysd-test@example.invalid');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(source, 'sample.mjs'), 'export const baseline = true;\n');
+    git('add', 'sample.mjs');
+    git('commit', '-q', '-m', 'synthetic process-tree baseline');
+    const sourceSha = git('rev-parse', 'HEAD');
+    const spool = join(dir, 'spool');
+    const bundles = join(spool, 'bundles');
+    mkdirSync(bundles, { recursive: true });
+    const bundlePath = join(bundles, 'process-tree.bundle');
+    git('bundle', 'create', bundlePath, 'HEAD');
+    const spec = '# Synthetic executor process-tree evidence test; no real model is invoked.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_PROCESS_TREE_READBACK_20261026',
+      source_sha: sourceSha, spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-0000-0000-000000000291';
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath,
+      createHash('sha256').update(readFileSync(bundlePath)).digest('hex'));
+    publishCodexExecutorRequest(spool, request);
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: join(dir, 'workspaces'),
+      codex_executable: 'C:\\codex.exe' });
+
+    const spawnProcess = (_command, _args, options) => {
+      assert.equal(options.shell, false);
+      const child = new EventEmitter();
+      child.pid = 45678;
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin = new PassThrough();
+      child.stdin.resume();
+      child.stdin.once('finish', () => setImmediate(() => child.emit('close', 0, null)));
+      setImmediate(() => {
+        child.emit('spawn');
+        child.stdout.end(`${JSON.stringify({ type: 'thread.started', thread_id: 'thread_tree_291' })}\n`);
+        child.stderr.end('');
+      });
+      return child;
+    };
+    const inheritedGithubTokens = new Map(['GH_TOKEN', 'GITHUB_TOKEN']
+      .filter(name => Object.hasOwn(process.env, name))
+      .map(name => [name, process.env[name]]));
+    for (const name of ['GH_TOKEN', 'GITHUB_TOKEN']) delete process.env[name];
+    let execution;
+    try {
+      execution = await runExecutorOnce(config, {
+        currentSid: config.executor_identity_sid,
+        environment: {},
+        qualifyCodex: async () => {},
+        runCodex: (taskRequest, _config, worktree, evidenceDir, hooks) => runCodex(taskRequest,
+          { codex_executable: config.codex_executable }, worktree, evidenceDir, {
+            environment: {}, spawnProcess,
+            terminate: () => ({ treeConfirmed: true }),
+            platformName: 'win32',
+            readProcessTree: pid => ({ root_pid: pid, state: 'DEAD', process_ids: [], error: null }),
+            onProcessSpawn: hooks.onProcessSpawn,
+          }),
+      });
+    } finally {
+      for (const name of ['GH_TOKEN', 'GITHUB_TOKEN']) {
+        if (inheritedGithubTokens.has(name)) process.env[name] = inheritedGithubTokens.get(name);
+        else delete process.env[name];
+      }
+    }
+
+    assert.equal(execution.state, 'RESULT_SAVED');
+    const saved = JSON.parse(readFileSync(
+      executorResultPath(spool, picked.request_id, attemptId), 'utf8'));
+    assert.equal(saved.session_id, 'thread_tree_291');
+    assert.equal(saved.session_started, true);
+    assert.equal(saved.provider_usage_evidence, 'UNKNOWN',
+      'a session-start event alone is not proof of provider usage');
+    assert.equal(saved.termination_state, 'NOT_REQUESTED');
+    assert.equal(saved.process_tree_state, 'DEAD',
+      'the persisted result must carry the scalar OS readback required by CLI refresh');
+    validateCodexExecutorResult(saved, { request_id: picked.request_id,
+      attempt_id: attemptId, source_sha: sourceSha, task_fingerprint: request.fingerprint });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('Codex executor reports saved only after exact result readback and never reruns', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pty-codex-result-readback-'));
   try {
@@ -1598,6 +1687,8 @@ test('Codex process capture keeps incomplete stdin blocked when post-exit proces
     assert.equal(good.result.stderr_bytes, 0);
     assert.equal(good.result.outcome, 'CODEX_CLI_EXIT_0_UNVERIFIED');
     assert.equal(good.result.session_started, true);
+    assert.equal(good.result.process_tree_state, 'DEAD',
+      'the real Windows process-tree readback must survive the captured-process boundary');
     assert.equal(good.result.provider_usage_evidence, 'UNKNOWN',
       'thread.started alone does not prove provider usage');
     assert.equal(good.result.model_activity_evidence, 'UNKNOWN',
@@ -1626,6 +1717,11 @@ test('Codex process capture keeps incomplete stdin blocked when post-exit proces
     assert.equal(good.result.tool_execution_evidence, 'UNKNOWN');
     assert.equal(good.result.model_invoked, false);
     assert.equal(terminalStateForResult(good.result), 'FINISHED');
+
+    const unknownTree = await execute({ termination: { treeConfirmed: true }, processTreeState: 'UNKNOWN' });
+    assert.equal(unknownTree.result.process_tree_state, 'UNKNOWN',
+      'missing process-tree certainty must remain UNKNOWN rather than be inferred from exit 0');
+    assert.notEqual(unknownTree.result.process_tree_state, 'DEAD');
 
     const started = { schema: 1, project_id: picked.project_id, host: picked.host,
       request_id: picked.request_id, attempt_id: request.attemptId, state: 'STARTED',
@@ -1952,12 +2048,19 @@ test('executor keeps a same-boot stale model-running lock fail-closed and releas
     const activePath = join(locks, 'executor.active');
     const writeLock = phase => writeFileSync(activePath, JSON.stringify({ schema: 1,
       pid: 5002, started_at: new Date().toISOString(), boot_uptime_seconds: 100,
-      phase, request_id: null, attempt_id: null }));
+      phase, request_id: null, attempt_id: null, model_pid: null }));
 
     writeLock('MODEL_RUNNING');
     await assert.rejects(runExecutorOnce({ spool_dir: dir }, { uptimeSeconds: () => 120,
       isProcessAlive: () => false }), /EXECUTOR_LOCK_STALE_MODEL_EFFECTS_UNKNOWN/);
     assert.equal(existsSync(activePath), true, 'unknown model effects keep the lock intact');
+
+    rmSync(activePath);
+    writeLock('CLI_REFRESH_STATE_UNKNOWN');
+    await assert.rejects(runExecutorOnce({ spool_dir: dir }, { uptimeSeconds: () => 120,
+      isProcessAlive: () => false }), /EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN/);
+    assert.equal(existsSync(activePath), true,
+      'same-boot parent death does not prove the refresh updater child has ended');
 
     rmSync(activePath);
     writeLock('DISPATCHER');
@@ -1966,6 +2069,38 @@ test('executor keeps a same-boot stale model-running lock fail-closed and releas
     assert.equal(idle.state, 'IDLE');
     assert.equal(existsSync(activePath), false);
     assert.ok(readdirSync(locks).some(name => name.startsWith('executor.stale-')));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor recovers an interrupted CLI refresh lock after reboot without replaying work', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-refresh-reboot-lock-'));
+  try {
+    const locks = join(dir, 'locks');
+    mkdirSync(locks);
+    const activePath = join(locks, 'executor.active');
+    writeFileSync(activePath, JSON.stringify({ schema: 1, pid: 5005,
+      started_at: new Date().toISOString(), boot_uptime_seconds: 900,
+      phase: 'CLI_REFRESH_STATE_UNKNOWN', request_id: null, attempt_id: null, model_pid: null }));
+
+    const idle = await runExecutorOnce({ spool_dir: dir }, {
+      uptimeSeconds: () => 10,
+      isProcessAlive: () => { throw new Error('reboot evidence makes PID probing unnecessary'); },
+    });
+
+    assert.deepEqual(idle, { state: 'IDLE', model_invoked: false });
+    assert.equal(existsSync(activePath), false,
+      'a reboot proves the refresh parent and any child processes have ended');
+    assert.ok(readdirSync(locks).some(name => name.startsWith('executor.stale-')),
+      'the old lock remains available as recovery evidence');
+
+    writeFileSync(activePath, JSON.stringify({ schema: 1, pid: 5006,
+      started_at: new Date().toISOString(), boot_uptime_seconds: 900,
+      phase: 'CLI_REFRESH_STATE_UNKNOWN', request_id: 'unexpected-request',
+      attempt_id: null, model_pid: null }));
+    await assert.rejects(runExecutorOnce({ spool_dir: dir }, { uptimeSeconds: () => 10 }),
+      /EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN/);
+    assert.equal(existsSync(activePath), true,
+      'unexpected task identity keeps the refresh lock fail-closed even after reboot');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
