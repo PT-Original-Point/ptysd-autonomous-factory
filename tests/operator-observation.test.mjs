@@ -344,7 +344,7 @@ test('Windows collector reads only the two named PTYSD tasks and publishes only 
       assert.equal(file, 'powershell.exe');
       assert.ok(args.includes('-NonInteractive'));
       assert.equal(options.windowsHide, true);
-      assert.equal(options.timeout, 7000);
+      assert.equal(options.timeout, 30_000);
       return JSON.stringify(raw);
     },
   });
