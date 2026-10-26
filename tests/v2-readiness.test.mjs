@@ -968,10 +968,15 @@ test('Antigravity stream evidence fails closed on wrong model, cwd, capture hash
     assert.equal((await readAntigravityV2RunEvidence(stdoutPath, '0'.repeat(64),
       'C:\\Users\\worker\\candidate')).reason, 'ANTIGRAVITY_CAPTURE_HASH_MISMATCH');
     assert.equal((await readAntigravityV2RunEvidence(stdoutPath, null,
-      'C:\\Users\\other\\candidate')).reason, 'ANTIGRAVITY_JSONL_INVALID');
-    writeFileSync(stdoutPath, makeStream('gemini-3.8-flash-medium'));
+      'C:\\Users\\other\\candidate')).reason, 'ANTIGRAVITY_WORKSPACE_CWD_MISMATCH');
     assert.equal((await readAntigravityV2RunEvidence(stdoutPath, null,
-      'C:\\Users\\worker\\candidate')).reason, 'ANTIGRAVITY_JSONL_INVALID');
+      'C:\\Users\\other\\candidate')).workspace_cwd_evidence.status, 'MISMATCH');
+    writeFileSync(stdoutPath, makeStream('gemini-3.8-flash-medium'));
+    const wrongModel = await readAntigravityV2RunEvidence(stdoutPath, null,
+      'C:\\Users\\worker\\candidate');
+    assert.equal(wrongModel.reason, 'ANTIGRAVITY_JSONL_INVALID');
+    assert.equal(wrongModel.workspace_cwd_evidence.status, 'MATCHED',
+      'invalid model evidence must not erase independently observed workspace identity');
     writeFileSync(stdoutPath, makeStream('gemini-3.8-flash-high', 'auto'));
     assert.equal((await readAntigravityV2RunEvidence(stdoutPath, null,
       'C:\\Users\\worker\\candidate')).reason, 'ANTIGRAVITY_PERMISSION_MODE_UNRECOGNIZED');
