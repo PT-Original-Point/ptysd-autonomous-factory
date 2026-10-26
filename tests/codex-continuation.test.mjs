@@ -2356,3 +2356,75 @@ test('Codex result scope is recomputed against the immutable request before rece
     assert.equal(receipts[0].outcome, 'WRITE_SCOPE_VIOLATION');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('schema-4 Codex claim stays unresolved while the exact schema-6 W1 lane is selected', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-w1-independent-lane-'));
+  try {
+    const currentGoalCommentId = 6188322050;
+    const currentGoalMarker = 'PTYSD_V53R4_R4_INDEPENDENT_LANE_20261027';
+    const currentGoalBody = `# PTYSD R4 independent lane\n${currentGoalMarker}\n\n` +
+      'Source-only regression. No unique Codex action section is present.\n';
+    assert.deepEqual(codexScopedActionStatus(currentGoalBody),
+      { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' },
+      'the schema-4 scoped-action preflight remains blocked for the current GOAL body');
+    const currentGoalSha = createHash('sha256').update(currentGoalBody).digest('hex');
+
+    const historicalGoalCommentId = 6188322049;
+    const historicalGoalMarker = 'PTYSD_V53R4_R4_INDEPENDENT_LANE_HISTORICAL_20261020';
+    const historicalGoalBody = `# Historical schema-4 directive\n${historicalGoalMarker}\n\n` +
+      '**Codex 下一動作**：Repair the bounded historical source task.\n';
+    assert.equal(codexScopedActionStatus(historicalGoalBody).ready, true,
+      'the historical schema-4 fixture keeps its own exact scoped directive');
+    const historicalGoalSha = createHash('sha256').update(historicalGoalBody).digest('hex');
+    const historicalMainSha = 'c'.repeat(40);
+    const historicalCodexJob = job({ schema: 4, source_sha: historicalMainSha,
+      request_id: `PTYSD_HUMAN_GOAL_${historicalGoalCommentId}_${
+        historicalGoalSha.slice(0, 42).toUpperCase()}`,
+      spec_path: CODEX_HUMAN_GOAL_SPEC_PATH,
+      spec_sha256: createHash('sha256').update('# Historical schema-4 task\n').digest('hex'),
+      write_paths: ['native-bridge/worker.mjs'], goal_comment_id: historicalGoalCommentId,
+      goal_body_sha256: historicalGoalSha, goal_author: author, goal_marker: historicalGoalMarker });
+    assert.ok(parseCodexJob(body(historicalCodexJob)),
+      'the historical schema-4 fixture is a valid Codex job');
+    const claim = claimCodexAttempt(dir, historicalCodexJob,
+      '00000000-0000-0000-0000-0000000000a1');
+    assert.equal(claim.claimed, true);
+    const claimBytes = readFileSync(claim.path);
+
+    const candidateHeadSha = 'd'.repeat(40);
+    const sourcePr = 407;
+    const w1Job = {
+      schema: 6, project_id: job().project_id, host: job().host,
+      request_id: 'PTYSD_W1_SCHEMA6_INDEPENDENT_LANE_20261027',
+      kind: 'opencode_edit', source_sha: candidateHeadSha,
+      spec_path: 'native-bridge/tasks/w1-independent-lane.md',
+      spec_sha256: createHash('sha256').update('# Independent schema-6 W1 task\n').digest('hex'),
+      model: 'opencode/deepseek-v4.1-flash-free', variant: null,
+      edit_paths: ['native-bridge/worker.mjs'], source_pr: sourcePr,
+      goal_comment_id: currentGoalCommentId, goal_body_sha256: currentGoalSha,
+    };
+    const selected = selectNextWithCodexClaim([
+      comment(currentGoalCommentId, currentGoalBody),
+      comment(historicalGoalCommentId, body(historicalCodexJob)),
+      comment(6188322051, body(w1Job)),
+    ], [author], worker, w1Job.host, historicalMainSha, dir, [],
+    new Map([[sourcePr, candidateHeadSha]]));
+
+    assert.equal(selected.unresolvedRequestId, historicalCodexJob.request_id,
+      'the historical Codex request remains unresolved while its local claim exists');
+    assert.equal(selected.next?.job?.request_id, w1Job.request_id,
+      'the independently authorized schema-6 W1 request is selected in the same pass');
+    assert.equal(selected.next?.job?.kind, 'opencode_edit');
+    assert.equal(selected.next.job.source_pr, sourcePr);
+    assert.equal(selected.next.job.source_sha, candidateHeadSha);
+    assert.equal(selected.next.job.goal_comment_id, currentGoalCommentId);
+    assert.equal(selected.next.job.goal_body_sha256, currentGoalSha);
+    assert.deepEqual(selected.next.job.edit_paths, ['native-bridge/worker.mjs']);
+    assert.deepEqual(readFileSync(claim.path), claimBytes,
+      'selection must not rewrite or release the existing Codex claim');
+    assert.equal(existsSync(join(dir, `codex-claim-${w1Job.request_id}.json`)), false,
+      'selection must not create a W1 claim');
+    assert.deepEqual(readdirSync(dir), [`codex-claim-${historicalCodexJob.request_id}.json`],
+      'the only local claim remains the untouched historical Codex claim');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
