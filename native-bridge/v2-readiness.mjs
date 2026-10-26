@@ -713,7 +713,9 @@ function emptyAntigravityRunEvidence(valid, reason = null, forbiddenToolEvidence
     tool_execution_failed_count: 0, tool_execution_incomplete_count: 0,
     file_change_tool_evidence: 'UNKNOWN', file_change_tool_completed_count: 0,
     file_change_tool_failed_count: 0, file_change_tool_incomplete_count: 0,
-    token_usage: null, event_count: 0, stdout_sha256: null, stdout_bytes: 0 };
+    token_usage: null, event_count: 0, stdout_sha256: null, stdout_bytes: 0,
+    workspace_cwd_evidence: { status: 'UNKNOWN', expected_path_sha256: null,
+      observed_path_sha256: null } };
 }
 
 export const ANTIGRAVITY_RUN_DISPOSITIONS = Object.freeze({
@@ -758,6 +760,14 @@ function sameAntigravityCwd(actual, expected) {
   return actual === expected;
 }
 
+function antigravityCwdDigest(value) {
+  if (typeof value !== 'string' || !value) return null;
+  const normalized = win32.isAbsolute(value)
+    ? win32.normalize(value).replace(/[\\/]+$/, '').toLowerCase()
+    : isAbsolute(value) ? resolve(value) : value;
+  return sha(normalized);
+}
+
 function isForbiddenAntigravityToolName(value) {
   if (typeof value !== 'string') return false;
   const tokens = value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
@@ -785,6 +795,9 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
   let bytes = 0;
   let eventCount = 0;
   let init = null;
+  let sawInitEvent = false;
+  let workspaceCwdFailure = null;
+  let observedCwdSha256 = null;
   let observedSessionId = null;
   let result = null;
   let malformed = false;
@@ -807,12 +820,23 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
       if (!event || typeof event !== 'object' || Array.isArray(event)) { malformed = true; continue; }
       eventCount++;
       if (event.event === 'init') {
+        sawInitEvent = true;
         if (typeof event.conversation_id === 'string' &&
             /^[A-Za-z0-9_-]{8,128}$/.test(event.conversation_id))
           observedSessionId ??= event.conversation_id;
+        if (event.init && typeof event.init === 'object' && !Array.isArray(event.init)) {
+          if (typeof event.init.cwd !== 'string' || !event.init.cwd ||
+              !(isAbsolute(event.init.cwd) || win32.isAbsolute(event.init.cwd)))
+            workspaceCwdFailure = 'ANTIGRAVITY_WORKSPACE_CWD_MISSING_OR_INVALID';
+          else if (!sameAntigravityCwd(event.init.cwd, expectedCwd))
+            workspaceCwdFailure = 'ANTIGRAVITY_WORKSPACE_CWD_MISMATCH';
+          observedCwdSha256 = antigravityCwdDigest(event.init.cwd);
+        } else {
+          workspaceCwdFailure = 'ANTIGRAVITY_WORKSPACE_CWD_MISSING_OR_INVALID';
+        }
         if (init || !event.init || typeof event.init !== 'object' || Array.isArray(event.init) ||
             typeof event.conversation_id !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(event.conversation_id) ||
-            event.init.model !== ANTIGRAVITY_V2_MODEL || !sameAntigravityCwd(event.init.cwd, expectedCwd)) {
+            event.init.model !== ANTIGRAVITY_V2_MODEL) {
           malformed = true; continue;
         }
         const permissionMode = event.init.permission_mode;
@@ -891,6 +915,12 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
     return { ...emptyAntigravityRunEvidence(false, reason,
       forbiddenToolObserved ? 'OBSERVED' : 'UNKNOWN'),
       session_id: init?.session_id ?? observedSessionId,
+      workspace_cwd_evidence: { status: workspaceCwdFailure === 'ANTIGRAVITY_WORKSPACE_CWD_MISMATCH'
+        ? 'MISMATCH' : workspaceCwdFailure ? 'MISSING_OR_INVALID' :
+          observedCwdSha256 && observedCwdSha256 === antigravityCwdDigest(expectedCwd)
+            ? 'MATCHED' : 'UNKNOWN',
+      expected_path_sha256: antigravityCwdDigest(expectedCwd),
+      observed_path_sha256: observedCwdSha256 },
       session_started: observedSessionId ? true : null,
       cli_status: result?.status ?? null,
       run_disposition: result ? ANTIGRAVITY_RUN_DISPOSITIONS[result.status] : 'UNKNOWN',
@@ -918,6 +948,8 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
   };
   if (streamError) return invalid('ANTIGRAVITY_JSONL_UNAVAILABLE');
   if (malformed) return invalid('ANTIGRAVITY_JSONL_INVALID');
+  if (!sawInitEvent) return invalid('ANTIGRAVITY_WORKSPACE_CWD_MISSING_OR_INVALID');
+  if (workspaceCwdFailure) return invalid(workspaceCwdFailure);
   if (permissionModeUnconfirmed) return invalid('ANTIGRAVITY_PERMISSION_MODE_UNRECOGNIZED');
   if (!eventCount || !init || !result) return invalid('ANTIGRAVITY_JSONL_INCOMPLETE');
   if (expectedSha256 && stdoutHash.toLowerCase() !== expectedSha256.toLowerCase())
@@ -941,6 +973,9 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
     forbidden_tool_execution_evidence: forbiddenToolObserved ? 'OBSERVED' : 'NOT_OBSERVED',
     permission_mode_evidence: init.permission_mode === 'accept-edits'
       ? 'ACCEPT_EDITS_CONFIRMED' : 'REQUEST_REVIEW_CONFIRMED',
+     workspace_cwd_evidence: { status: 'MATCHED',
+       expected_path_sha256: antigravityCwdDigest(expectedCwd),
+       observed_path_sha256: observedCwdSha256 },
     response_sha256: sha(result.response), model_invoked: modelInvoked,
     provider_usage_evidence: modelInvoked ? 'OBSERVED' : 'NO_POSITIVE_USAGE_OBSERVED',
     model_activity_evidence: agentTextObserved || hasPositiveAntigravityUsage(usage)
