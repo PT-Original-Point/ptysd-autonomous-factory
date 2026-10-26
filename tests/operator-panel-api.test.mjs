@@ -8,10 +8,17 @@ const inlineScript = html.match(/<script>\s*([\s\S]*?)<\/script>/i)?.[1];
 assert.ok(inlineScript, 'operator panel inline module exists');
 const windowObject = { __PTYSD_TEST__: true };
 const domElements = new Map();
+function elementMock() {
+  const children=[];
+  return { textContent:'',className:'',hidden:false,href:'#',children,
+    get firstChild() { return children[0] || null; },
+    appendChild(child) { children.push(child); return child; },
+    removeChild(child) { const index=children.indexOf(child); if (index >= 0) children.splice(index,1); return child; } };
+}
 const documentMock = { getElementById(id) {
-  if (!domElements.has(id)) domElements.set(id, {});
+  if (!domElements.has(id)) domElements.set(id, elementMock());
   return domElements.get(id);
-} };
+}, createElement() { return elementMock(); } };
 runInNewContext(inlineScript, { window: windowObject, document: documentMock, AbortController,
   setTimeout, clearTimeout }, { filename: 'operator-panel/index.html' });
 const panel = windowObject.PTYSDOperatorPanel;
@@ -272,7 +279,447 @@ test('PR identity mismatch never requests checks for an unpinned or foreign cand
   assert.equal(cycle.pullIdentityMatches, false);
   assert.ok(calls.includes(urls.pr));
   assert.equal(calls.some(url => url.includes('/check-runs')), false);
-  assert.equal(store.resources.checks.error, 'CANDIDATE_PR_IDENTITY_UNKNOWN');
+  assert.equal(store.resources.checks.error, 'REPO_OR_PROJECT_IDENTITY_MISMATCH');
+});
+
+test('closed unmerged task PR is historical lifecycle, not candidate identity failure', async () => {
+  let now=baseTime;
+  const calls=[];
+  const closed={...pullRequest(437,head,{state:'closed'}),merged:false,merged_at:null};
+  const client=panel.createApiClient(async url => {
+    calls.push(url);
+    if (url === urls.issue) return response(200,observationComments(now),quotaHeaders(now));
+    if (url === urls.pr) return response(200,closed,quotaHeaders(now));
+    if (url === urls.main) return response(200,{sha:head},quotaHeaders(now));
+    throw new Error(`UNEXPECTED_CLOSED_PR_READ:${url}`);
+  },{now:() => now});
+  const store=panel.createResourceStore(client,() => now);
+  const cycle=await panel.runSyncCycle(store,client,{issue:urls.issue,main:urls.main});
+  assert.equal(cycle.pullIdentityMatches,true);
+  assert.equal(cycle.pullLifecycle.lifecycle,'CLOSED_UNMERGED');
+  assert.equal(cycle.pullLifecycle.source_sha_matches,true);
+  assert.equal(cycle.pullLifecycle.checks_allowed,false);
+  assert.equal(store.resources.checks.error,null,
+    'a closed historical PR has no applicable checks; this is not a GitHub API error');
+  assert.equal(calls.some(url => url.includes('/check-runs')),false);
+  const direct=panel.candidatePullLifecycle(closed,{number:437,source_sha:head});
+  assert.equal(direct.status,'CLOSED_UNMERGED');
+  assert.equal(direct.identity_matches,true);
+});
+
+test('task SHA drift is reported separately and never reads current PR checks for the old task', async () => {
+  let now=baseTime;
+  const staleTaskSha='c'.repeat(40);
+  const calls=[];
+  const client=panel.createApiClient(async url => {
+    calls.push(url);
+    if (url === urls.issue) return response(200,
+      observationComments(now,{sourceSha:staleTaskSha}),quotaHeaders(now));
+    if (url === urls.pr) return response(200,pullRequest(437,head),quotaHeaders(now));
+    if (url === urls.main) return response(200,{sha:head},quotaHeaders(now));
+    throw new Error(`UNEXPECTED_SHA_DRIFT_READ:${url}`);
+  },{now:() => now});
+  const store=panel.createResourceStore(client,() => now);
+  const cycle=await panel.runSyncCycle(store,client,{issue:urls.issue,main:urls.main});
+  assert.equal(cycle.pullLifecycle.lifecycle,'OPEN_REVIEWABLE');
+  assert.equal(cycle.pullLifecycle.status,'SOURCE_SHA_DRIFT');
+  assert.equal(cycle.pullLifecycle.source_sha_matches,false);
+  assert.equal(cycle.pullLifecycle.checks_allowed,false);
+  assert.equal(store.resources.checks.error,null);
+  assert.equal(calls.some(url => url.includes('/check-runs')),false);
+});
+
+test('formal W1/W2 cards fetch their exact schema-6 job, source PR, and SHA-bound checks once', async () => {
+  let now=baseTime;
+  const w1Request='W1_PANEL_FETCH_20261024';
+  const w2Request='W2_PANEL_FETCH_20261024';
+  const w2Sha='b'.repeat(40);
+  const w1CommentId=6356591863;
+  const w2CommentId=6342391654;
+  const common={schema:6,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+    goal_comment_id:6188322050,goal_body_sha256:'c'.repeat(64),
+    spec_path:'native-bridge/tasks/panel-fetch-test.md',spec_sha256:'d'.repeat(64),
+    edit_paths:['tests/operator-panel-api.test.mjs']};
+  const w1Job={...common,request_id:w1Request,kind:'opencode_edit',source_sha:head,
+    model:'opencode/deepseek-v4.1-flash-free',variant:null,source_pr:437};
+  const w2Job={...common,request_id:w2Request,kind:'antigravity_edit',source_sha:w2Sha,
+    model:'gemini-3.8-flash-high',variant:'high',source_pr:461};
+  const w1JobUrl=`${apiRoot}/issues/comments/${w1CommentId}`;
+  const w2JobUrl=`${apiRoot}/issues/comments/${w2CommentId}`;
+  const w2PrUrl=`${apiRoot}/pulls/461`;
+  const w2ChecksUrl=`${apiRoot}/commits/${w2Sha}/check-runs?per_page=100`;
+  const calls=[];
+  const snapshot={schema:1,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',repo:repository,
+    issue:407,host_alias:'win11-primary',snapshot_id:'11111111-1111-4111-8111-111111111111',
+    sequence:3,observed_at:new Date(now).toISOString(),expires_at:new Date(now+10*60_000).toISOString(),
+    source:{comment_id:407007},
+    native_worker:{latest_task:{request_id:w1Request,kind:'opencode_edit',source_pr:437,
+      source_sha:head,state:'QUEUED_NOT_STARTED',job_comment_id:w1CommentId}},
+    workers:[{worker_id:'W2',status:'BLOCKED',task_id:w2Request,task_kind:'antigravity_edit',
+      task_source_sha:w2Sha,source_pr:461,task_comment_id:w2CommentId,task_state:'BLOCKED'}]};
+  const issue=[{id:407007,user:{login:'wfvupu1212'},updated_at:new Date(now).toISOString(),
+    body:'PTYSD_OPERATOR_OBSERVATION_V1\n'+JSON.stringify(snapshot)}];
+  const jobComment=(id,job) => ({id,user:{login:'t14210184'},created_at:new Date(now-1000).toISOString(),
+    body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job)});
+  const client=panel.createApiClient(async url => {
+    calls.push(url);
+    if (url === urls.issue) return response(200,issue,quotaHeaders(now));
+    if (url === urls.pr) return response(200,pullRequest(437,head),quotaHeaders(now));
+    if (url === urls.main) return response(200,{sha:head},quotaHeaders(now));
+    if (url === `${apiRoot}/commits/${head}/check-runs?per_page=100` || url === w2ChecksUrl)
+      return response(200,{check_runs:[]},quotaHeaders(now));
+    if (url === w1JobUrl) return response(200,jobComment(w1CommentId,w1Job),quotaHeaders(now));
+    if (url === w2JobUrl) return response(200,jobComment(w2CommentId,w2Job),quotaHeaders(now));
+    if (url === w2PrUrl) return response(200,pullRequest(461,w2Sha),quotaHeaders(now));
+    throw new Error(`UNEXPECTED_FORMAL_DISPATCH_READ:${url}`);
+  },{now:() => now});
+  const store=panel.createResourceStore(client,() => now);
+  await panel.runSyncCycle(store,client,{issue:urls.issue,main:urls.main});
+  assert.equal(store.resources.dispatches.W1.data.id,w1CommentId);
+  assert.equal(store.resources.dispatches.W2.data.id,w2CommentId);
+  assert.equal(store.resources.dispatchPulls.W2.data.number,461);
+  assert.equal(store.resources.dispatchChecks.W2.url,w2ChecksUrl);
+  assert.equal(calls.filter(url => url === w1JobUrl).length,1);
+  assert.equal(calls.filter(url => url === w2JobUrl).length,1);
+  assert.equal(calls.filter(url => url === w2PrUrl).length,1);
+  assert.equal(calls.filter(url => url === w2ChecksUrl).length,1);
+  assert.equal(panel.validSchema6DispatchComment(store.resources.dispatches.W1.data,
+    {comment_id:w1CommentId,request_id:w1Request,source_sha:head,kind:'opencode_edit',source_pr:437}).model,
+    w1Job.model);
+});
+
+test('renderer separates closed W1 source history from live worker status and shows three dispatch cards', () => {
+  domElements.clear();
+  const now=baseTime;
+  const observedAt=new Date(now-30_000).toISOString();
+  const expiresAt=new Date(now+90_000).toISOString();
+  const w1Sha='221e0c0e4524e07bc06a2aae431fdd34d121b73d';
+  const mainSha='0a54bab4cef150f0c43cd27d96c09697e422db78';
+  const requestId='W1_PANEL_CLOSED_PR_20261024';
+  const attemptId='3f9246cd-f968-4290-9c76-0514bb7775b5';
+  const jobCommentId=6356591863;
+  const task={worker_id:'W1',status:'UNKNOWN',task_id:requestId,task_kind:'opencode_edit',
+    task_source_sha:w1Sha,source_pr:505,task_comment_id:jobCommentId,
+    task_state:'FINISHED_NOT_ACCEPTANCE',attempt_id:attemptId,code_changes:'DIFF_CAPTURED_UNVERIFIED',
+    changed_files_count:2,diff_sha256:'d'.repeat(64),next_owner:'Codex'};
+  const snapshot={schema:1,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',
+    repo:repository,issue:407,host_alias:'win11-primary',
+    snapshot_id:'11111111-1111-4111-8111-111111111111',sequence:511,
+    observed_at:observedAt,expires_at:expiresAt,
+    source:{comment_id:6144415195,main_sha:mainSha},
+    windows:{status:'FRESH',observed_at:observedAt,native_task:{registered:true,enabled:true,
+      state:'READY',identity_class:'INTERACTIVE_LIMITED',multiple_instances:'IgnoreNew'}},
+    native_worker:{latest_task:{request_id:requestId,kind:'opencode_edit',source_pr:505,
+      source_sha:w1Sha,state:'FINISHED_NOT_ACCEPTANCE'}},
+    workers:[task,{worker_id:'W2',status:'BLOCKED',task_id:'W2_PANEL_TEST',
+      blocker_code:'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED'},
+      {worker_id:'W3',status:'UNKNOWN'}],
+    opencode_v2:{process_count:0,installed_version:'2.0.32'}};
+  const observationComment={id:6144415195,user:{login:'wfvupu1212'},
+    updated_at:new Date(now-20_000).toISOString(),
+    body:'PTYSD_OPERATOR_OBSERVATION_V1\n'+JSON.stringify(snapshot)};
+  const receipt={schema:1,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+    request_id:requestId,source_sha:w1Sha,kind:'opencode_edit',attempt_id:attemptId,state:'FINISHED',
+    outcome:'V2_EDIT_DIFF_CAPTURED_UNVERIFIED',model_invoked:true,tool_execution_count:2};
+  const receiptComment={id:6357000001,user:{login:'t14210184'},
+    created_at:new Date(now-10_000).toISOString(),
+    body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(receipt)};
+  const job={schema:6,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+    request_id:requestId,kind:'opencode_edit',source_sha:w1Sha,
+    spec_path:'native-bridge/tasks/panel-test.md',spec_sha256:'a'.repeat(64),
+    model:'opencode/deepseek-v4.1-flash-free',variant:null,
+    edit_paths:['tests/operator-panel-api.test.mjs'],source_pr:505,
+    goal_comment_id:6188322050,goal_body_sha256:'b'.repeat(64)};
+  const jobComment={id:jobCommentId,user:{login:'t14210184'},
+    created_at:new Date(now-15_000).toISOString(),
+    body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job)};
+  const closedPr={number:505,state:'closed',draft:false,merged:false,merged_at:null,
+    base:{ref:'main',sha:'2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2',
+      repo:{id:1352411536,full_name:repository}},
+    head:{sha:w1Sha,repo:{id:1352411536,full_name:repository}}};
+  const resources={
+    issue:{data:[observationComment,receiptComment],fetchedAt:now,error:null,url:urls.issue},
+    pr:{data:closedPr,fetchedAt:now,error:null,url:`${apiRoot}/pulls/505`},
+    main:{data:{sha:mainSha},fetchedAt:now,error:null,url:urls.main},
+    checks:{data:null,fetchedAt:0,error:'CLOSED_UNMERGED',url:''},
+    dispatches:{W1:{data:jobComment,fetchedAt:now,error:null}},
+    dispatchPulls:{},dispatchChecks:{},
+  };
+  const lifecycle=panel.candidatePullLifecycle(closedPr,{number:505,source_sha:w1Sha});
+  assert.equal(lifecycle.lifecycle,'CLOSED_UNMERGED');
+  assert.equal(lifecycle.identity_matches,true);
+  panel.render(null,resources,null,now,{status:'READY',coordination:'SHARED_LOCKED',remaining:40,
+    lastError:null,lastSuccessAt:now,resetAt:null,pauseUntil:null,indefinite:false});
+  assert.match(domElements.get('pr-state').textContent,/已關閉未合併/);
+  assert.match(domElements.get('pr-state').textContent,/歷史來源/);
+  assert.doesNotMatch(domElements.get('pr-state').textContent,/CANDIDATE_PR_IDENTITY_UNKNOWN/);
+  assert.match(domElements.get('pr-deployment').textContent,/不屬於可部署來源/);
+  assert.match(domElements.get('checks-detail').textContent,/CLOSED_UNMERGED/);
+  assert.match(domElements.get('metric-ci').textContent,/歷史 PR 已關閉/);
+  assert.equal(domElements.get('w1-dispatch-state').textContent.includes('UNKNOWN'),true);
+  assert.match(domElements.get('w1-dispatch-task').textContent,/W1_PANEL_CLOSED_PR_20261024/);
+  assert.match(domElements.get('w1-dispatch-attempt').textContent,/3f9246cd-f968-4290-9c76-0514bb7775b5/);
+  assert.match(domElements.get('w1-dispatch-progress').textContent,/FINISHED_NOT_ACCEPTANCE/);
+  assert.match(domElements.get('w1-dispatch-delivery').textContent,/DIFF_CAPTURED_UNVERIFIED/);
+  assert.match(domElements.get('w1-dispatch-time').textContent,/最後已讀回派工／收據/);
+  assert.match(domElements.get('w2-dispatch-state').textContent,/BLOCKED／派工留言 ID 未確認/);
+  assert.match(domElements.get('w2-dispatch-progress').textContent,/ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED/);
+  assert.match(domElements.get('w3-dispatch-progress').textContent,/沒有 Zero Risk request_id/);
+  assert.match(domElements.get('codex-executor').textContent,/UNKNOWN/);
+  assert.match(domElements.get('codex-evidence').textContent,/UNKNOWN/);
+  assert.match(domElements.get('codex-task').textContent,/UNKNOWN.*Executor/);
+  assert.match(domElements.get('codex-harvest').textContent,/W1 正式接受待確認/);
+});
+
+test('recent events join #310 schema-6 dispatches to exact #407 request, source, kind, and attempt receipts', () => {
+  const w1Request='W1_EDITFILE_TELEMETRY_20261023_9C8247675F914DCBBC708DD2AB90A6C2';
+  const w1Sha='221e0c0e4524e07bc06a2aae431fdd34d121b73d';
+  const w1Attempt='3f9246cd-f968-4290-9c76-0514bb7775b5';
+  const w2Request='W2S_5AA1ADD410B24E28ADAB8E4B7E528920_20261022_154481FF';
+  const w2Sha='918f60e0023b7194874e6ea640cb98023760697c';
+  const w2Attempt='24331e45-62db-4f55-ad40-87776a799c5d';
+  const job=(request_id,kind,source_sha,source_pr,model,variant=null) => ({
+    schema:6,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+    request_id,kind,source_sha,source_pr,goal_comment_id:6188322050,
+    goal_body_sha256:'a'.repeat(64),spec_path:'native-bridge/tasks/panel-event-test.md',
+    spec_sha256:'b'.repeat(64),edit_paths:['tests/operator-panel-api.test.mjs'],model,variant,
+  });
+  const dispatch=(id,value,at) => ({id,user:{login:'t14210184'},created_at:at,
+    body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(value)});
+  const receipt=(id,value,at) => ({id,user:{login:'t14210184'},created_at:at,
+    body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify({schema:1,
+      project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',...value})});
+  const snapshot={sequence:526,observed_at:'2026-10-24T05:42:33.371Z',
+    expires_at:'2026-10-24T05:52:33.371Z',workers:[
+      {worker_id:'W1',task_id:w1Request,task_kind:'opencode_edit',task_source_sha:w1Sha,
+        source_pr:505,task_comment_id:6356591863,attempt_id:w1Attempt,task_state:'FINISHED_NOT_ACCEPTANCE'},
+      {worker_id:'W2',task_id:w2Request,task_kind:'antigravity_edit',task_source_sha:w2Sha,
+        source_pr:461,task_comment_id:6342391654,attempt_id:w2Attempt,task_state:'BLOCKED'},
+    ]};
+  const w1Job=dispatch(6356591863,job(w1Request,'opencode_edit',w1Sha,505,
+    'opencode/deepseek-v4.1-flash-free'),'2026-10-23T03:21:45Z');
+  const w2Job=dispatch(6342391654,job(w2Request,'antigravity_edit',w2Sha,461,
+    'gemini-3.8-flash-high','high'),'2026-10-22T13:49:13Z');
+  const w2EarlierReceipts=Array.from({length:13},(_,index) => receipt(6344000000+index,
+    {request_id:w2Request,source_sha:w2Sha,kind:'antigravity_edit',attempt_id:w2Attempt,
+      state:index===12?'BLOCKED':'WAITING'},
+    new Date(Date.parse('2026-10-22T14:54:35Z')+index*1000).toISOString()));
+  const comments=[
+    {id:6000000000,user:{login:'t14210184'},created_at:'2026-10-13T00:00:00Z',
+      body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify({schema:1,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',
+        host:'DESKTOP-1B6PD2P',request_id:'OLD_2013_EVENT',kind:'native_preflight',
+        source_sha:'c'.repeat(40),spec_path:null,spec_sha256:null})},
+    receipt(6356722286,{request_id:w1Request,source_sha:w1Sha,kind:'opencode_edit',
+      attempt_id:w1Attempt,state:'STARTED'},'2026-10-23T03:32:45Z'),
+    receipt(6356778997,{request_id:w1Request,source_sha:w1Sha,kind:'opencode_edit',
+      attempt_id:w1Attempt,state:'FINISHED',outcome:'V2_EDIT_DIFF_CAPTURED_UNVERIFIED'},'2026-10-23T03:37:33Z'),
+    receipt(6356999999,{request_id:w1Request,source_sha:w1Sha,kind:'opencode_edit',
+      attempt_id:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',state:'BLOCKED'},'2026-10-24T04:00:00Z'),
+    ...w2EarlierReceipts,
+    receipt(6344079399,{request_id:w2Request,source_sha:w2Sha,kind:'antigravity_edit',
+      attempt_id:w2Attempt,state:'BLOCKED'},'2026-10-22T15:07:35Z'),
+  ];
+  const crowdedChecks={pr_number:525,checks:Array.from({length:9},(_,index)=>({
+    name:'check-'+index,status:'completed',conclusion:'success',
+    completed_at:new Date(Date.parse('2026-10-24T05:53:00Z')+index*1000).toISOString(),
+  }))};
+  const events=panel.classifyRecentEvents(comments,snapshot,crowdedChecks,
+    {W1:{data:w1Job},W2:{data:w2Job}},Date.parse('2026-10-24T14:00:00+08:00'));
+  assert.equal(events.length,8);
+  assert.ok(events.some(event => event.at==='2026-10-23T03:37:33Z' &&
+    /W1.*FINISHED.*不代表/.test(event.label)), 'W1 terminal receipt is paired to its #310 dispatch');
+  assert.ok(events.some(event => event.at==='2026-10-22T15:07:35Z' &&
+    /W2.*BLOCKED/.test(event.label)), 'W2 blocked receipt is paired to its #310 dispatch');
+  assert.ok(events.some(event => event.at===snapshot.observed_at && /526.*STALE/.test(event.label)),
+    'latest Win11 observation is present but explicitly historical after expiry');
+  assert.equal(events.some(event => /OLD_2013_EVENT/.test(event.label)),false,
+    'an Issue #407 legacy job cannot crowd out the #310 dispatch timeline');
+  assert.equal(events.some(event => /aaaaaaaa-aaaa/.test(event.label)),false,
+    'a receipt from a different attempt cannot be attributed to the current task');
+});
+
+test('dispatch cards separate W1 execution, reconciliation, result PR/CI, and acceptance while preserving W2 ambiguity', () => {
+  const w1Request='W1_EDITFILE_TELEMETRY_20261023_9C8247675F914DCBBC708DD2AB90A6C2';
+  const w1Sha='221e0c0e4524e07bc06a2aae431fdd34d121b73d';
+  const w1Attempt='3f9246cd-f968-4290-9c76-0514bb7775b5';
+  const w2Request='W2S_5AA1ADD410B24E28ADAB8E4B7E528920_20261022_154481FF';
+  const w2Sha='918f60e0023b7194874e6ea640cb98023760697c';
+  const w2Attempt='24331e45-62db-4f55-ad40-87776a799c5d';
+  const job=(request_id,kind,source_sha,source_pr,model,variant=null) => ({
+    schema:6,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+    request_id,kind,source_sha,source_pr,goal_comment_id:6188322050,
+    goal_body_sha256:'a'.repeat(64),spec_path:'native-bridge/tasks/panel-event-test.md',
+    spec_sha256:'b'.repeat(64),edit_paths:['tests/operator-panel-api.test.mjs'],model,variant,
+  });
+  const dispatch=(id,value,at) => ({id,user:{login:'t14210184'},created_at:at,
+    body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(value)});
+  const receipt=(id,value,at) => ({id,user:{login:'t14210184'},created_at:at,
+    body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify({schema:1,
+      project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',...value})});
+  const snapshot={sequence:526,observed_at:'2026-10-24T05:42:33.371Z',
+    expires_at:'2026-10-24T05:52:33.371Z',workers:[
+      {worker_id:'W1',status:'UNKNOWN',task_id:w1Request,task_kind:'opencode_edit',task_source_sha:w1Sha,
+        source_pr:505,task_comment_id:6356591863,attempt_id:w1Attempt,task_state:'FINISHED_NOT_ACCEPTANCE',
+        code_changes:'DIFF_CAPTURED_UNVERIFIED',changed_files_count:2,diff_sha256:'2d40660d98eb983dc343c7b1a6612a868a948a288545bb51a4abb7af14e9e968'},
+      {worker_id:'W2',status:'BLOCKED',task_id:w2Request,task_kind:'antigravity_edit',task_source_sha:w2Sha,
+        source_pr:461,task_comment_id:6342391654,attempt_id:w2Attempt,task_state:'BLOCKED',
+        blocker_code:'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_NO_DIFF'},
+      {worker_id:'W3',status:'UNKNOWN'},
+    ]};
+  const w1Job=dispatch(6356591863,job(w1Request,'opencode_edit',w1Sha,505,
+    'opencode/deepseek-v4.1-flash-free'),'2026-10-23T03:21:45Z');
+  const w2Job=dispatch(6342391654,job(w2Request,'antigravity_edit',w2Sha,461,
+    'gemini-3.8-flash-high','high'),'2026-10-22T13:49:13Z');
+  const w1Terminal=receipt(6356778997,{request_id:w1Request,source_sha:w1Sha,kind:'opencode_edit',
+    attempt_id:w1Attempt,state:'FINISHED',outcome:'V2_EDIT_DIFF_CAPTURED_UNVERIFIED',
+    model_invoked:true,tool_execution_count:11,diff_sha256:'2d40660d98eb983dc343c7b1a6612a868a948a288545bb51a4abb7af14e9e968',
+    diff_bytes:12151,changed_files_count:2},'2026-10-23T03:37:33Z');
+  const w2Terminal=receipt(6344079399,{request_id:w2Request,source_sha:w2Sha,kind:'antigravity_edit',
+    attempt_id:w2Attempt,state:'BLOCKED',outcome:'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_NO_DIFF',
+    diff_bytes:0,changed_files_count:0,external_effects:'UNKNOWN',model_invoked:true,
+    tool_execution_count:31,file_change_tool_completed_count:2},'2026-10-22T15:07:35Z');
+  const reconciliation={id:6367399586,user:{login:'wfvupu1212'},created_at:'2026-10-23T14:36:17Z',
+    body:[
+      'PTYSD_V53R4_R2_EVIDENCE_RECONCILIATION_V1','observed_at=2026-10-23T14:35:26Z',
+      'W1_EDITFILE_TELEMETRY',`request_id=${w1Request}`,`attempt_id=${w1Attempt}`,'source_pr=505',
+      `source_head=${w1Sha}`,'original_terminal_state=FINISHED_NOT_ACCEPTANCE',
+      `diff_sha256=2d40660d98eb983dc343c7b1a6612a868a948a288545bb51a4abb7af14e9e968`,
+      'diff_reconciliation=PASS','codex_review=PASS_FOR_SCOPED_TELEMETRY_CHANGE',
+      'integration=PR_507_MERGED','integration_commit=928e9d129d299761063ac4b5e11d125b368d6a9f',
+      'pr_507_checks=check-native-only:PASS;csg-trusted-verifier-hosted:PASS;v2-native-windows:PASS;bounded-driver-acceptance:SKIPPED;csg-trusted-verifier:CANCELLED',
+      'W2_ARTIFACT_RECOVERY',`request_id=${w2Request}`,`attempt_id=${w2Attempt}`,
+      'original_task_source_pr=461',`original_task_source_sha=${w2Sha}`,
+      'last_original_receipt=6344079399','receipt_vs_stream=terminal_receipt_reported_ZERO_DIFF; raw stream and Win11 original worktree show three scoped files changed',
+      'classification=PARTIAL_OR_AMBIGUOUS','external_effects=UNKNOWN','replay=PROHIBITED',
+      'native-bridge/antigravity-quota.mjs_sha256=3756936b35d742430419ca5a1c152642a9c31ee4fbce724eb83ee3c34d8f5014',
+      'tests/antigravity-quota.test.mjs_sha256=6b13ad53f12967610e2dc7ad7fbfe3b9c80be81a2e9f8be8e77ce2319ad1a88c',
+      'package.json_sha256=bb0b28885e6150008d5e520f397965542840608fdc619271c31170171493c7b2',
+    ].join('\n')};
+  const comments=[w1Terminal,w2Terminal,reconciliation];
+  const resources={dispatches:{W1:{data:w1Job},W2:{data:w2Job}},dispatchPulls:{},dispatchChecks:{}};
+  const now=Date.parse('2026-10-24T13:47:35+08:00');
+  const w1=panel.dispatchCardData('W1',snapshot,comments,resources,{status:'STALE'},now,
+    {lifecycle:'CLOSED_UNMERGED',status:'CLOSED_UNMERGED',checks_allowed:false});
+  const w2=panel.dispatchCardData('W2',snapshot,comments,resources,{status:'STALE'},now,
+    {lifecycle:'OPEN_DRAFT',status:'OPEN_DRAFT',checks_allowed:false});
+  assert.equal(w1.shortStatus,'已完成執行');
+  assert.equal(w1.workerTerminal,'FINISHED_NOT_ACCEPTANCE');
+  assert.equal(w1.diffReconciliation,'PASS');
+  assert.equal(w1.resultPr.number,507);
+  assert.equal(w1.resultPr.head,'928e9d129d299761063ac4b5e11d125b368d6a9f');
+  assert.match(w1.resultPr.checks,/bounded-driver-acceptance:SKIPPED/);
+  assert.match(w1.formalAcceptance,/UNKNOWN/);
+  for (const invalidIntegrationCommit of [null,'not-a-git-sha']) {
+    const bodyLines=reconciliation.body.split('\n').filter(line => !line.startsWith('integration_commit='));
+    if (invalidIntegrationCommit !== null) bodyLines.push('integration_commit=' + invalidIntegrationCommit);
+    const malformedReconciliation={...reconciliation,id:6367399587,body:bodyLines.join('\n')};
+    const withoutTrustedResultHead=panel.dispatchCardData('W1',snapshot,
+      [w1Terminal,w2Terminal,malformedReconciliation],resources,{status:'STALE'},now,
+      {lifecycle:'CLOSED_UNMERGED',status:'CLOSED_UNMERGED',checks_allowed:false});
+    assert.equal(withoutTrustedResultHead.resultPr,null,
+      'missing or invalid integration_commit must not fabricate a result PR head');
+    assert.match(withoutTrustedResultHead.resultDetails,/回收核對未確認/);
+  }
+  assert.equal(w2.shortStatus,'受阻');
+  assert.equal(w2.externalEffectClass,'PARTIAL_OR_AMBIGUOUS');
+  assert.equal(w2.externalEffects,'UNKNOWN');
+  assert.equal(w2.recoveredFileHashes.length,3);
+  assert.match(w2.summaryProgress,/回收證據待核對/);
+  assert.doesNotMatch(w2.summaryProgress,/沒有修改|零修改/);
+  assert.equal(w2.noReplay,true);
+});
+
+test('dispatch layout uses two readable desktop columns, collapsible technical detail, and a compact W3 empty state', () => {
+  assert.match(html, /\.dispatch-grid\s*\{[^}]*repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(html, /\.worker-title-line\s*\{[^}]*flex-wrap:\s*wrap/);
+  assert.match(html, /\.worker-live \.badge\s*\{[^}]*white-space:\s*normal/);
+  assert.match(html, /\.worker-live \.badge\s*\{[^}]*overflow-wrap:\s*break-word/);
+  assert.match(html, /<details class="dispatch-technical"/);
+  assert.match(html, /id="w3-empty"/);
+  assert.match(html, /id="w1-task-badge"/);
+  assert.match(html, /id="w2-task-badge"/);
+  assert.match(html, /id="w3-task-badge"/);
+  assert.match(html, /@media\s*\(max-width:\s*700px\)/);
+});
+
+test('W3 Agent/request identifiers do not stand in for handoff, MCP execution, completion, or Codex receipt', () => {
+  const agentId='01a16cdd-bbf7-71c0-af1e-0ba1e568790e';
+  const snapshot={workers:[{worker_id:'W3',status:'UNKNOWN',task_id:agentId,
+    task_comment_id:6368000001,attempt_id:'11111111-1111-4111-8111-111111111111'}]};
+  const card=panel.dispatchCardData('W3',snapshot,[],{dispatches:{}},{status:'UNKNOWN'},baseTime);
+  assert.equal(card.hasTask,true);
+  assert.match(card.task,/候選留言 #6368000001（未驗證）/);
+  assert.match(card.w3Stages.formal,/UNKNOWN/);
+  assert.match(card.w3Stages.handoff,/UNKNOWN/);
+  assert.match(card.w3Stages.toolCalls,/UNKNOWN/);
+  assert.match(card.w3Stages.completion,/UNKNOWN/);
+  assert.match(card.w3Stages.codexReceipt,/UNKNOWN/);
+  assert.match(card.summaryProgress,/五階段獨立待驗證/);
+  assert.doesNotMatch(card.summaryProgress,/已完成|已傳送|工具執行成功/);
+});
+
+test('W3 self-reported tool activity and launcher traces do not prove Zero Risk execution or delivery', () => {
+  const now=baseTime;
+  const record={worker_id:'W3',status:'RUNNING_VERIFIED',task_id:'W3_PANEL_CANDIDATE',
+    attempt_id:'11111111-1111-4111-8111-111111111111',task_source:'issue-407',
+    evidence_ref:'self-reported-tool-call',evidence_kind:'ZERO_RISK_TOOL_CALL',
+    activity_observed_at:new Date(now).toISOString(),
+    verified_steps:['launcher_1','launcher_2','launcher_3','launcher_4','launcher_5'],
+    code_changes:'PROVEN',commit_sha:'a'.repeat(40),pr_number:527,delivery_status:'ACCEPTED'};
+  assert.equal(panel.classifyWorker(record,'FRESH',now).status,'RUNNING_VERIFIED',
+    'generic classification alone would promote the source-only claim');
+  const classified=panel.classifyW3(record,'FRESH',now);
+  assert.equal(classified.status,'UNKNOWN');
+  const card=panel.workerCardData('W3',record,classified,{workers:[record]});
+  for (const field of ['session','activity','progress','changes','delivery','source'])
+    assert.match(card[field],/UNKNOWN/);
+  assert.doesNotMatch(card.progress,/launcher_1|launcher_5/);
+  assert.doesNotMatch(card.delivery,/Commit a{40}|交付階段 ACCEPTED/);
+  assert.equal(panel.classifyW3(record,'STALE',now).status,'STALE');
+});
+
+test('future timestamps never masquerade as current observations or dispatch events', () => {
+  const now=Date.parse('2026-10-24T14:00:00Z');
+  const snapshot={sequence:1,observed_at:new Date(now+1000).toISOString(),
+    expires_at:new Date(now+11*60_000).toISOString()};
+  assert.equal(panel.fieldFreshness(snapshot.observed_at,10*60_000,now),'UNKNOWN');
+  assert.equal(panel.classifyRecentEvents([] ,snapshot,null,{},now).some(
+    event=>event.eventType==='observation'),false);
+  const invalidExpiration={...snapshot,observed_at:new Date(now-1000).toISOString(),
+    expires_at:new Date(now-2000).toISOString()};
+  assert.equal(panel.classifyRecentEvents([],invalidExpiration,null,{},now).some(
+    event=>event.eventType==='observation'),false);
+  const published=observationComments(now);
+  const futurePublisher={...published[0],updated_at:new Date(now+1001).toISOString()};
+  assert.equal(panel.findSnapshot([futurePublisher],now).status,'UNKNOWN',
+    'GitHub metadata beyond a one-second clock skew cannot attest freshness');
+  const body=JSON.parse(published[0].body.split('\n').slice(1).join('\n'));
+  body.observed_at=new Date(now+1000).toISOString();
+  const futureSample={...published[0],body:'PTYSD_OPERATOR_OBSERVATION_V1\n'+JSON.stringify(body)};
+  assert.equal(panel.findSnapshot([futureSample],now).status,'UNKNOWN',
+    'future observed_at is untrusted even when GitHub metadata is current');
+});
+
+test('future and foreign attempt receipts cannot override a valid matching dispatch', () => {
+  const now=Date.parse('2026-10-24T14:00:00Z');
+  const request_id='W1_PANEL_STRICT_MATCH_20261024';
+  const source_sha='a'.repeat(40);
+  const attempt_id='11111111-1111-4111-8111-111111111111';
+  const job={request_id,source_sha,kind:'opencode_edit',source_pr:505};
+  const item=(id,overrides,created_at)=>({id,created_at,user:{login:'t14210184'},
+    body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify({
+      schema:1,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+      request_id,source_sha,kind:job.kind,attempt_id,state:'FINISHED',...overrides})});
+  const valid=item(12,{},new Date(now-1000).toISOString());
+  const comments=[valid,
+    item(13,{source_sha:'b'.repeat(40)},new Date(now-100).toISOString()),
+    item(14,{kind:'antigravity_edit'},new Date(now-100).toISOString()),
+    item(15,{attempt_id:'22222222-2222-4222-8222-222222222222'},
+      new Date(now-100).toISOString()),
+    item(16,{},new Date(now+1000).toISOString())];
+  const receipts=panel.dispatchReceipt(comments,job,attempt_id,10,now);
+  assert.equal(receipts.items.length,1);
+  assert.equal(receipts.latest.id,12);
 });
 
 test('changing the task PR pin invalidates PR and checks data from the previous pin', async () => {
@@ -620,4 +1067,15 @@ test('an HTTP 503 with remaining quota fails locally, lets unrelated reads proce
   assert.ok(backoffs.every(ms => ms > 0 && ms <= 5 * 60 * 1000), 'per-resource backoff stays within five minutes');
   assert.ok(backoffs.every((ms, index) => index === 0 || ms >= backoffs[index - 1]), 'backoff never shrinks');
   assert.equal(Math.max(...backoffs), 5 * 60 * 1000, 'per-resource backoff caps at five minutes');
+});
+
+test('mobile overview keeps its GitHub state badge within the card', () => {
+  const start = html.indexOf('@media (max-width:700px)');
+  const end = html.indexOf('@media (max-width:440px)', start);
+  assert.ok(start >= 0 && end > start, 'mobile layout rules are present');
+  const mobileCss = html.slice(start, end);
+  assert.match(mobileCss, /\.overview-head\s*\{[^}]*flex-direction:\s*column/);
+  assert.match(mobileCss, /\.overview-copy\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  assert.match(mobileCss,
+    /\.overview-head\s*>\s*\.badge\s*\{[^}]*max-width:\s*100%[^}]*white-space:\s*normal[^}]*overflow-wrap:\s*anywhere/);
 });
