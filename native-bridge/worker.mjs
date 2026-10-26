@@ -137,6 +137,15 @@ function executorRouteFailure(config, kind) {
     return 'EXECUTOR_NOT_CONFIGURED_FOR_' + lane.toUpperCase();
   return 'EXECUTOR_NOT_CONFIGURED';
 }
+function opencodeExecutorIsolationFailure(descriptor) {
+  const phase = descriptor?.execution_phase ?? 'VM_ISOLATED';
+  const userSid = descriptor?.user_sid;
+  const publisherSid = descriptor?.publisher_sid;
+  if (phase !== 'VM_ISOLATED' || typeof userSid !== 'string' ||
+      typeof publisherSid !== 'string' || userSid.toUpperCase() === publisherSid.toUpperCase())
+    return 'EXECUTOR_OS_ISOLATION_REQUIRED';
+  return null;
+}
 function validateExecutorRouting(config) {
   if (config.executors === undefined) {
     if (config.executor_lane !== undefined &&
@@ -2672,14 +2681,16 @@ export async function runWorker(configInput, adapters = {}) {
         // inspect the wrong SID and can falsely block an otherwise eligible lane.
       } else if (config.enable_v2_model_runs !== true) reason = 'MODEL_RUNS_NOT_ENABLED';
       if (!reason && !checkModelAuthorization(next.job, config)) reason = 'MODEL_NOT_EXPLICITLY_ALLOWED';
-      else if (!reason && next.job.kind === 'opencode_edit') {
+      if (!reason && !preparedExecutor) reason = executorRouteFailure(config, next.job.kind);
+      if (!reason && next.job.kind === 'opencode_edit')
+        reason = opencodeExecutorIsolationFailure(preparedExecutor);
+      if (!reason && next.job.kind === 'opencode_edit') {
         try { buildV2ScopedEditConfig(config.workspace, next.job.edit_paths); }
         catch (error) {
           reason = `EDIT_SCOPE_${safeErrorCode(error, 'INVALID')}`;
         }
       }
-      if (!reason && !preparedExecutor) reason = executorRouteFailure(config, next.job.kind);
-      else if (!reason) {
+      if (!reason) {
         try {
           // The OpenCode verifier's contract is throw-on-failure and return the
           // validated Task Scheduler readback on success; unlike the Codex
