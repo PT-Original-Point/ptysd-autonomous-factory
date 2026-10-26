@@ -3,7 +3,7 @@
 # installer before the exact source and the Human model/cost gates are accepted.
 [CmdletBinding()]
 param(
-    [ValidateSet('Audit','Install','Uninstall','RefreshCodexCli')][string]$Mode = 'Audit',
+    [ValidateSet('Audit','Install','Uninstall','RefreshCodexCli','RefreshRuntimeModules')][string]$Mode = 'Audit',
     [ValidateSet('WIN11_TRANSITION','VM_ISOLATED')][string]$ExecutionPhase = 'VM_ISOLATED',
     [PSCredential]$ExecutorCredential,
     [string]$NodeExecutable = '',
@@ -35,6 +35,8 @@ $executorConfigPath = Join-Path $runtimeDir 'executor-config.json'
 $executorScriptPath = Join-Path $runtimeDir 'codex-executor.mjs'
 $continuationScriptPath = Join-Path $runtimeDir 'codex-continuation.mjs'
 $launcherPath = Join-Path $runtimeDir 'HiddenCodexExecutor.vbs'
+$runtimeModuleNames = @('codex-executor.mjs','codex-continuation.mjs','captured-process.mjs',
+    'safe-error-code.mjs','windows-executor.mjs','HiddenCodexExecutor.vbs')
 $installStatePath = Join-Path (Split-Path -Parent $workerConfigPath) `
     ('codex-executor-install-state-' + $ExecutionPhase + '.json')
 $backupPath = $null
@@ -569,7 +571,350 @@ function Remove-CodexExecutorCliRefreshLock([string]$LockPath) {
     if (Test-Path -LiteralPath $LockPath) { throw 'CODEX_CLI_REFRESH_EXECUTOR_LOCK_RELEASE_UNKNOWN' }
 }
 
-function Invoke-CodexExecutorCliPinRefresh([string]$NewCodexExecutable) {
+function Get-CodexExecutorRuntimeRefreshTaskIdentity($Task) {
+    $actions = @($Task.Actions)
+    if ($actions.Count -ne 1) { throw 'CODEX_RUNTIME_MODULE_REFRESH_TASK_IDENTITY_MISMATCH' }
+    $identity = [ordered]@{
+        task_name = [string]$Task.TaskName
+        task_path = [string]$Task.TaskPath
+        principal_user = [string]$Task.Principal.UserId
+        principal_logon = [string]$Task.Principal.LogonType
+        principal_run_level = [string]$Task.Principal.RunLevel
+        multiple_instances = [string]$Task.Settings.MultipleInstances
+        execution_time_limit = [string]$Task.Settings.ExecutionTimeLimit
+        hidden = [bool]$Task.Settings.Hidden
+        allow_hard_terminate = [bool]$Task.Settings.AllowHardTerminate
+        action_execute = [string]$actions[0].Execute
+        action_arguments = [string]$actions[0].Arguments
+        action_working_directory = [string]$actions[0].WorkingDirectory
+        trigger_count = @($Task.Triggers | Where-Object { $null -ne $_ }).Count
+    }
+    return ConvertTo-Json -InputObject $identity -Depth 5 -Compress
+}
+
+function Assert-CodexExecutorRuntimeRefreshTaskState([string]$ExpectedIdentity,
+    [bool]$Enabled, [string]$State) {
+    $task = Get-TaskOptional $executorTaskName -Strict
+    if ($null -eq $task -or [string]$task.State -cne $State) {
+        throw 'CODEX_RUNTIME_MODULE_REFRESH_TASK_STATE_READBACK_MISMATCH'
+    }
+    $enabledProperty = $task.Settings.PSObject.Properties['Enabled']
+    if ($null -eq $enabledProperty -or $enabledProperty.Value -isnot [bool] -or
+        $enabledProperty.Value -ne $Enabled) {
+        throw 'CODEX_RUNTIME_MODULE_REFRESH_TASK_ENABLED_READBACK_MISMATCH'
+    }
+    if ((Get-CodexExecutorRuntimeRefreshTaskIdentity $task) -cne $ExpectedIdentity) {
+        throw 'CODEX_RUNTIME_MODULE_REFRESH_TASK_IDENTITY_CHANGED'
+    }
+    return $task
+}
+
+function Assert-CodexExecutorRuntimeRefreshNoProcess {
+    try { $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop) }
+    catch { throw 'CODEX_RUNTIME_MODULE_REFRESH_PROCESS_STATE_UNKNOWN' }
+    foreach ($process in $processes) {
+        $nameProperty = $process.PSObject.Properties['Name']
+        $name = if ($null -ne $nameProperty) { [string]$nameProperty.Value } else { '' }
+        $executable = [string]$process.ExecutablePath
+        $executableName = ''
+        if ($executable) {
+            try { $executableName = [IO.Path]::GetFileName([IO.Path]::GetFullPath($executable)) }
+            catch { throw 'CODEX_RUNTIME_MODULE_REFRESH_PROCESS_IDENTITY_UNKNOWN' }
+        }
+        $commandProperty = $process.PSObject.Properties['CommandLine']
+        $command = if ($null -ne $commandProperty) { [string]$commandProperty.Value } else { '' }
+        if ([string]::IsNullOrWhiteSpace($command)) {
+            if ($name -in @('node.exe','wscript.exe') -or $executableName -in @('node.exe','wscript.exe')) {
+                $sessionProperty = $process.PSObject.Properties['SessionId']
+                if ($null -eq $sessionProperty -or [string]$sessionProperty.Value -notmatch '^\d+$') {
+                    throw 'CODEX_RUNTIME_MODULE_REFRESH_PROCESS_STATE_UNKNOWN'
+                }
+                if ([int]$sessionProperty.Value -ne 0) { throw 'CODEX_RUNTIME_MODULE_REFRESH_PROCESS_STATE_UNKNOWN' }
+            }
+            continue
+        }
+        if ($command.IndexOf($executorScriptPath, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+            $command.IndexOf($executorConfigPath, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+        if ($executableName -in @('node.exe','wscript.exe')) {
+            throw 'CODEX_EXECUTOR_PROCESS_RUNNING_DO_NOT_REFRESH'
+        }
+    }
+}
+
+function Invoke-CodexExecutorRuntimeModuleRefresh($Task,
+    [System.Collections.IDictionary]$RuntimeHashes, [string]$PreflightManifestHash,
+    [string]$WorkerConfigHash) {
+    if ($Task.Settings.Enabled -ne $true) { throw 'CODEX_RUNTIME_MODULE_REFRESH_TASK_MUST_START_ENABLED' }
+    $taskIdentity = Get-CodexExecutorRuntimeRefreshTaskIdentity $Task
+    $allowedNames = @($runtimeModuleNames) + @('executor-config.json')
+    if ($RuntimeHashes.Count -ne $allowedNames.Count) {
+        throw 'CODEX_RUNTIME_MODULE_REFRESH_RUNTIME_SET_MISMATCH'
+    }
+    foreach ($name in $RuntimeHashes.Keys) {
+        if ($name -notin $allowedNames) { throw 'CODEX_RUNTIME_MODULE_REFRESH_RUNTIME_SET_MISMATCH' }
+    }
+
+    $sourceModules = [ordered]@{}
+    $changedNames = New-Object System.Collections.Generic.List[string]
+    foreach ($name in $runtimeModuleNames) {
+        $sourcePath = Join-Path $sourceRoot $name
+        Assert-CodexExecutorInstallPathChain $sourcePath
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            throw ('CODEX_RUNTIME_MODULE_REFRESH_SOURCE_MISSING:' + $name)
+        }
+        $sourceBytes = [IO.File]::ReadAllBytes($sourcePath)
+        $sourceHash = Get-CodexExecutorBytesSha256 $sourceBytes
+        $installedBytes = [IO.File]::ReadAllBytes((Join-Path $runtimeDir $name))
+        $installedHash = Get-CodexExecutorBytesSha256 $installedBytes
+        if ($installedHash -ne [string]$RuntimeHashes[$name]) {
+            throw ('CODEX_RUNTIME_MODULE_REFRESH_INSTALLED_HASH_MISMATCH:' + $name)
+        }
+        $sourceModules[$name] = [pscustomobject]@{
+            Path = $sourcePath
+            Bytes = $sourceBytes
+            Hash = $sourceHash
+            OldBytes = $installedBytes
+            OldHash = $installedHash
+        }
+        if ($sourceHash -ne $installedHash) { $changedNames.Add($name) }
+    }
+    if ($changedNames.Count -eq 0) {
+        Write-Output 'CODEX_RUNTIME_MODULE_REFRESH=NOT_REQUIRED'
+        Write-Output 'MODEL_EXECUTION=UNCHANGED_DISABLED'
+        return
+    }
+
+    $manifestText = Get-Content -LiteralPath $installStatePath -Raw -ErrorAction Stop
+    if ((Get-FileHash -LiteralPath $installStatePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+        $PreflightManifestHash.ToLowerInvariant()) {
+        throw 'CODEX_RUNTIME_MODULE_REFRESH_INSTALL_STATE_CHANGED_BEFORE_UPDATE'
+    }
+    $newManifest = $manifestText | ConvertFrom-Json -ErrorAction Stop
+    foreach ($name in $changedNames) {
+        $hashProperty = $newManifest.runtime_sha256.PSObject.Properties[$name]
+        if ($null -eq $hashProperty) { throw ('CODEX_RUNTIME_MODULE_REFRESH_MANIFEST_HASH_MISSING:' + $name) }
+        $hashProperty.Value = $sourceModules[$name].Hash
+    }
+    $newManifestText = (ConvertTo-Json -InputObject $newManifest -Depth 10 -Compress) + [Environment]::NewLine
+    $newManifest = $newManifestText | ConvertFrom-Json -ErrorAction Stop
+    foreach ($name in $runtimeModuleNames) {
+        $expectedModuleHash = if ($name -in $changedNames) {
+            $sourceModules[$name].Hash
+        } else {
+            [string]$RuntimeHashes[$name]
+        }
+        if ($newManifest.runtime_sha256.PSObject.Properties[$name].Value -ne $expectedModuleHash) {
+            throw ('CODEX_RUNTIME_MODULE_REFRESH_MANIFEST_UPDATE_FAILED:' + $name)
+        }
+    }
+    $manifestBytes = ([System.Text.UTF8Encoding]::new($false)).GetBytes($newManifestText)
+    $newManifestHash = Get-CodexExecutorBytesSha256 $manifestBytes
+    $oldManifestBytes = [IO.File]::ReadAllBytes($installStatePath)
+
+    $changes = New-Object System.Collections.Generic.List[object]
+    foreach ($name in $changedNames) {
+        $module = $sourceModules[$name]
+        $changes.Add([pscustomobject]@{
+            Name = $name
+            Path = (Join-Path $runtimeDir $name)
+            OldBytes = $module.OldBytes
+            OldHash = $module.OldHash
+            NewBytes = $module.Bytes
+            NewHash = $module.Hash
+        })
+    }
+    $changes.Add([pscustomobject]@{
+        Name = 'install-state.json'
+        Path = $installStatePath
+        OldBytes = $oldManifestBytes
+        OldHash = $PreflightManifestHash.ToLowerInvariant()
+        NewBytes = $manifestBytes
+        NewHash = $newManifestHash
+    })
+
+    $backupDir = Join-Path $sharedBase 'maintenance-backups'
+    Assert-CodexExecutorInstallPathChain $backupDir
+    if (-not (Test-Path -LiteralPath $backupDir -PathType Container)) {
+        $null = New-Item -ItemType Directory -Path $backupDir -ErrorAction Stop
+    }
+    Assert-CodexExecutorTransitionAcl $backupDir
+    $backupStem = 'codex-runtime-refresh-' + (Get-Date -Format 'yyyyMMddHHmmss') + '-' +
+        [guid]::NewGuid().ToString('N')
+    foreach ($change in $changes) {
+        $backupName = if ($change.Name -eq 'install-state.json') {
+            $backupStem + '-install-state.json'
+        } else {
+            $backupStem + '-' + $change.Name
+        }
+        $change | Add-Member -NotePropertyName BackupPath -NotePropertyValue (Join-Path $backupDir $backupName)
+        [IO.File]::Copy($change.Path, $change.BackupPath, $false)
+        if ((Get-FileHash -LiteralPath $change.BackupPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+            $change.OldHash) {
+            throw ('CODEX_RUNTIME_MODULE_REFRESH_BACKUP_READBACK_MISMATCH:' + $change.Name)
+        }
+    }
+
+    $workerConfigWriteLock = Enter-WorkerConfigWriteLock
+    try {
+        $refreshLockPath = New-CodexExecutorCliRefreshLock -SpoolPath $spoolDir
+        $preserveRefreshLock = $false
+        try {
+            try { Disable-ScheduledTask -TaskName $executorTaskName -TaskPath '\' -ErrorAction Stop | Out-Null }
+            catch {}
+            $null = Assert-CodexExecutorRuntimeRefreshTaskState -ExpectedIdentity $taskIdentity -Enabled $false -State 'Disabled'
+            Assert-CodexExecutorRuntimeRefreshNoProcess
+
+            if ((Get-FileHash -LiteralPath $workerConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                $WorkerConfigHash.ToLowerInvariant() -or
+                (Get-FileHash -LiteralPath $executorConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                [string]$RuntimeHashes['executor-config.json'] -or
+                (Get-FileHash -LiteralPath $installStatePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                $PreflightManifestHash.ToLowerInvariant()) {
+                throw 'CODEX_RUNTIME_MODULE_REFRESH_SOURCE_CHANGED_BEFORE_WRITE'
+            }
+            $lockedWorkerConfig = Get-Content -LiteralPath $workerConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $lockedExecutorConfig = Get-Content -LiteralPath $executorConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($lockedWorkerConfig.enable_codex_model_runs -ne $false -or
+                $lockedWorkerConfig.codex_usage_authorized -ne $false -or
+                $lockedWorkerConfig.codex_cli_qualified -ne $false -or
+                $lockedWorkerConfig.codex_login_verified -ne $false -or
+                $null -eq $lockedWorkerConfig.allowed_codex_models -or
+                @($lockedWorkerConfig.allowed_codex_models.PSObject.Properties).Count -ne 0 -or
+                $lockedExecutorConfig.enable_codex_model_runs -ne $false -or
+                $lockedExecutorConfig.codex_usage_authorized -ne $false -or
+                $lockedExecutorConfig.codex_cli_qualified -ne $false -or
+                $lockedExecutorConfig.codex_login_verified -ne $false -or
+                $null -eq $lockedExecutorConfig.allowed_codex_models -or
+                @($lockedExecutorConfig.allowed_codex_models.PSObject.Properties).Count -ne 0) {
+                throw 'CODEX_RUNTIME_MODULE_REFRESH_MODEL_AUTHORIZATION_MUST_REMAIN_DISABLED'
+            }
+            if ((Get-FileHash -LiteralPath $workerConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                $WorkerConfigHash.ToLowerInvariant() -or
+                (Get-FileHash -LiteralPath $executorConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                [string]$RuntimeHashes['executor-config.json']) {
+                throw 'CODEX_RUNTIME_MODULE_REFRESH_CONFIG_CHANGED_DURING_READBACK'
+            }
+            foreach ($name in $runtimeModuleNames) {
+                $currentHash = (Get-FileHash -LiteralPath (Join-Path $runtimeDir $name) -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                if ($currentHash -ne [string]$RuntimeHashes[$name]) {
+                    throw ('CODEX_RUNTIME_MODULE_REFRESH_SOURCE_CHANGED_BEFORE_WRITE:' + $name)
+                }
+                $sourcePath = $sourceModules[$name].Path
+                if ((Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                    $sourceModules[$name].Hash) {
+                    throw ('CODEX_RUNTIME_MODULE_REFRESH_SOURCE_CHANGED_BEFORE_WRITE:' + $name)
+                }
+            }
+            foreach ($change in $changes) {
+                $currentHash = (Get-FileHash -LiteralPath $change.Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                if ($currentHash -ne $change.OldHash) {
+                    throw ('CODEX_RUNTIME_MODULE_REFRESH_TARGET_CHANGED_BEFORE_WRITE:' + $change.Name)
+                }
+                Write-CodexExecutorAtomicReplacement $change.NewBytes $change.Path $change.NewHash
+            }
+            foreach ($name in $runtimeModuleNames) {
+                $expectedHash = if ($name -in $changedNames) {
+                    $sourceModules[$name].Hash
+                } else {
+                    [string]$RuntimeHashes[$name]
+                }
+                if ((Get-FileHash -LiteralPath (Join-Path $runtimeDir $name) -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                    $expectedHash) {
+                    throw ('CODEX_RUNTIME_MODULE_REFRESH_RUNTIME_READBACK_MISMATCH:' + $name)
+                }
+            }
+            if ((Get-FileHash -LiteralPath $installStatePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                $newManifestHash -or
+                (Get-FileHash -LiteralPath $executorConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                [string]$RuntimeHashes['executor-config.json'] -or
+                (Get-FileHash -LiteralPath $workerConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                $WorkerConfigHash.ToLowerInvariant()) {
+                throw 'CODEX_RUNTIME_MODULE_REFRESH_FINAL_READBACK_MISMATCH'
+            }
+            $null = Assert-CodexExecutorRuntimeRefreshTaskState -ExpectedIdentity $taskIdentity -Enabled $false -State 'Disabled'
+            Enable-ScheduledTask -TaskName $executorTaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+            $null = Assert-CodexExecutorRuntimeRefreshTaskState -ExpectedIdentity $taskIdentity -Enabled $true -State 'Ready'
+            try { Remove-CodexExecutorCliRefreshLock -LockPath $refreshLockPath }
+            catch {
+                $preserveRefreshLock = $true
+                throw 'CODEX_RUNTIME_MODULE_REFRESH_LOCK_RELEASE_UNKNOWN'
+            }
+            $refreshLockPath = $null
+        } catch {
+            $originalError = $_.Exception.Message
+            if ($preserveRefreshLock) { throw $originalError }
+            $rollbackErrors = New-Object System.Collections.Generic.List[string]
+            try {
+                $currentTask = Get-TaskOptional $executorTaskName -Strict
+                if ($null -eq $currentTask -or
+                    (Get-CodexExecutorRuntimeRefreshTaskIdentity $currentTask) -cne $taskIdentity) {
+                    throw 'CODEX_RUNTIME_MODULE_REFRESH_TASK_IDENTITY_CHANGED'
+                }
+                if ($currentTask.Settings.Enabled -eq $true) {
+                    Disable-ScheduledTask -TaskName $executorTaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+                }
+                $null = Assert-CodexExecutorRuntimeRefreshTaskState -ExpectedIdentity $taskIdentity -Enabled $false -State 'Disabled'
+            } catch { $rollbackErrors.Add('TaskScheduler') }
+            if ($rollbackErrors.Count -eq 0) {
+                for ($index = $changes.Count - 1; $index -ge 0; $index--) {
+                    $change = $changes[$index]
+                    try {
+                        $currentHash = (Get-FileHash -LiteralPath $change.Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                        if ($currentHash -eq $change.OldHash) { continue }
+                        if ($currentHash -ne $change.NewHash) {
+                            $rollbackErrors.Add($change.Name)
+                            continue
+                        }
+                        Write-CodexExecutorAtomicReplacement $change.OldBytes $change.Path $change.OldHash
+                    } catch { $rollbackErrors.Add($change.Name) }
+                }
+            }
+            if ($rollbackErrors.Count -eq 0) {
+                foreach ($name in $runtimeModuleNames) {
+                    try {
+                        if ((Get-FileHash -LiteralPath (Join-Path $runtimeDir $name) -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                            [string]$RuntimeHashes[$name]) { $rollbackErrors.Add($name) }
+                    } catch { $rollbackErrors.Add($name) }
+                }
+                try {
+                    if ((Get-FileHash -LiteralPath $installStatePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                        $PreflightManifestHash.ToLowerInvariant() -or
+                        (Get-FileHash -LiteralPath $executorConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                        [string]$RuntimeHashes['executor-config.json'] -or
+                        (Get-FileHash -LiteralPath $workerConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                        $WorkerConfigHash.ToLowerInvariant()) {
+                        $rollbackErrors.Add('configuration-or-manifest')
+                    }
+                } catch { $rollbackErrors.Add('configuration-or-manifest') }
+            }
+            if ($rollbackErrors.Count -eq 0) {
+                try {
+                    $null = Assert-CodexExecutorRuntimeRefreshTaskState -ExpectedIdentity $taskIdentity -Enabled $false -State 'Disabled'
+                    Enable-ScheduledTask -TaskName $executorTaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+                    $null = Assert-CodexExecutorRuntimeRefreshTaskState -ExpectedIdentity $taskIdentity -Enabled $true -State 'Ready'
+                } catch { $rollbackErrors.Add('TaskScheduler-enable') }
+            }
+            if ($rollbackErrors.Count -gt 0) {
+                $preserveRefreshLock = $true
+                throw ('CODEX_RUNTIME_MODULE_REFRESH_PARTIAL_STATE_REVIEW_REQUIRED;backup=' + $backupDir +
+                    ';paths=' + ($rollbackErrors -join ','))
+            }
+            throw ('CODEX_RUNTIME_MODULE_REFRESH_FAILED_ROLLED_BACK:' + $originalError + ';backup=' + $backupDir)
+        } finally {
+            if (-not $preserveRefreshLock -and $refreshLockPath -and (Test-Path -LiteralPath $refreshLockPath)) {
+                Remove-CodexExecutorCliRefreshLock -LockPath $refreshLockPath
+            }
+        }
+        Write-Output ('CODEX_RUNTIME_MODULE_REFRESH=SUCCESS;updated=' + ($changedNames -join ','))
+        Write-Output ('CODEX_RUNTIME_MODULE_REFRESH_BACKUP=' + $backupDir)
+        Write-Output ('CODEX_RUNTIME_MODULE_REFRESH_OLD_INSTALL_STATE_SHA256=' + $PreflightManifestHash)
+        Write-Output 'MODEL_EXECUTION=UNCHANGED_DISABLED'
+    } finally {
+        $workerConfigWriteLock.Dispose()
+    }
+}
+
+function Invoke-CodexExecutorCliPinRefresh([string]$NewCodexExecutable, [switch]$RefreshRuntimeModules) {
     if ($ExecutionPhase -ne 'WIN11_TRANSITION' -or $null -ne $ExecutorCredential) {
         throw 'CODEX_CLI_REFRESH_WIN11_TRANSITION_ONLY'
     }
@@ -592,6 +937,7 @@ function Invoke-CodexExecutorCliPinRefresh([string]$NewCodexExecutable) {
     $configText = Get-Content -LiteralPath $executorConfigPath -Raw -ErrorAction Stop
     $config = $configText | ConvertFrom-Json -ErrorAction Stop
     $workerConfig = (Get-Content -LiteralPath $workerConfigPath -Raw -ErrorAction Stop) | ConvertFrom-Json -ErrorAction Stop
+    $workerConfigHash = (Get-FileHash -LiteralPath $workerConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
     if ($config.project_id -ne $project -or $config.repo -ne $repo -or
         $config.codex_executor_execution_phase -ne 'WIN11_TRANSITION' -or
         [IO.Path]::GetFullPath([string]$config.spool_dir) -ne [IO.Path]::GetFullPath($spoolDir) -or
@@ -709,6 +1055,10 @@ function Invoke-CodexExecutorCliPinRefresh([string]$NewCodexExecutable) {
     Assert-CodexExecutorCliRefreshArtifacts -SpoolPath $spoolDir -RuntimePath $runtimeDir `
         -SpoolDirectoryNames @('requests','bundles','claims','results','evidence','workspaces','locks') `
         -ExpectedRuntimeHashes $runtimeHashes
+    if ($RefreshRuntimeModules) {
+        Invoke-CodexExecutorRuntimeModuleRefresh -Task $task -RuntimeHashes $runtimeHashes -PreflightManifestHash $preflightManifestHash -WorkerConfigHash $workerConfigHash
+        return
+    }
 
     $oldCodexPath = [IO.Path]::GetFullPath([string]$config.codex_executable)
     if (Test-Path -LiteralPath $oldCodexPath) { throw 'CODEX_CLI_PIN_REFRESH_NOT_REQUIRED' }
@@ -945,14 +1295,18 @@ if ($Mode -eq 'Audit') {
     return
 }
 
-if ($Mode -eq 'RefreshCodexCli') {
+if ($Mode -eq 'RefreshCodexCli' -or $Mode -eq 'RefreshRuntimeModules') {
     $refreshMutex = [Threading.Mutex]::new($false, ('Local\PTYSD-CodexExecutor-CliRefresh-' + $publisherSid))
     $refreshMutexAcquired = $false
     try {
         try { $refreshMutexAcquired = $refreshMutex.WaitOne(0) }
         catch [Threading.AbandonedMutexException] { $refreshMutexAcquired = $true }
         if (-not $refreshMutexAcquired) { throw 'CODEX_CLI_REFRESH_ALREADY_RUNNING' }
-        Invoke-CodexExecutorCliPinRefresh -NewCodexExecutable $CodexExecutable
+        if ($Mode -eq 'RefreshRuntimeModules') {
+            Invoke-CodexExecutorCliPinRefresh -RefreshRuntimeModules
+        } else {
+            Invoke-CodexExecutorCliPinRefresh -NewCodexExecutable $CodexExecutable
+        }
     } finally {
         if ($refreshMutexAcquired) { $refreshMutex.ReleaseMutex() }
         $refreshMutex.Dispose()

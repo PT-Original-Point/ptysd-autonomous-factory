@@ -44,6 +44,9 @@ $global:MockTaskNotFoundThrows = $true
 $global:MockReadbackPrincipalUserId = $null
 $global:MockNullReadbackTriggers = $false
 $global:MockExecutorTaskState = 'Ready'
+$global:MockExecutorTaskEnabled = $true
+$global:MockTaskDisableCalls = 0
+$global:MockTaskEnableCalls = 0
 $global:MockProcesses = @()
 $global:MockOperatingSystemCimCalls = 0
 $global:MockLastBootUpTime = (Get-Date).AddHours(-4)
@@ -59,6 +62,10 @@ $global:MockMismatchConfigReadbackOnce = $false
 $global:MockFailFailedReplacementHashOnce = $false
 $global:MockBlockRefreshLockRelease = $false
 $global:MockRefreshLockHandle = $null
+$global:MockInjectConcurrentRuntimeModuleAfterReplace = $false
+$global:MockRuntimeRefreshTargetPath = ''
+$global:MockRuntimeRefreshExpectedHash = ''
+$global:MockRuntimeRefreshExternalBytes = [byte[]]@()
 $global:MockInstallConfigPath = ''
 $global:MockInstallConfigLockPath = ''
 $global:MockTryConcurrentConfigWriteBeforeMove = $false
@@ -139,6 +146,15 @@ function Get-TestPathHash([string]$Path) {
 function global:Get-FileHash {
     [CmdletBinding()]
     param([Alias('Path')][string]$LiteralPath, [string]$Algorithm = 'SHA256')
+    if ($global:MockInjectConcurrentRuntimeModuleAfterReplace -and
+        [string]::Equals([IO.Path]::GetFullPath($LiteralPath),
+            [IO.Path]::GetFullPath($global:MockRuntimeRefreshTargetPath), [StringComparison]::OrdinalIgnoreCase)) {
+        $currentRuntimeHash = Get-TestPathHash -Path $LiteralPath
+        if ($currentRuntimeHash.Hash.ToLowerInvariant() -eq $global:MockRuntimeRefreshExpectedHash) {
+            [IO.File]::WriteAllBytes($LiteralPath, $global:MockRuntimeRefreshExternalBytes)
+            $global:MockInjectConcurrentRuntimeModuleAfterReplace = $false
+        }
+    }
     if ($global:MockInjectConcurrentStateAfterConfigReplace -and
         [string]::Equals([IO.Path]::GetFullPath($LiteralPath),
             [IO.Path]::GetFullPath($global:MockRefreshStatePath), [StringComparison]::OrdinalIgnoreCase)) {
@@ -208,9 +224,9 @@ function global:Get-ScheduledTask {
         } else { $reg.Principal.UserId }
         $readbackTriggers = if ($global:MockNullReadbackTriggers) { $null } else { @() }
         return [pscustomobject]@{
-            TaskName = $TaskName; State = $global:MockExecutorTaskState
+            TaskName = $TaskName; TaskPath = '\'; State = $global:MockExecutorTaskState
             Principal = [pscustomobject]@{ UserId = $readbackUserId; LogonType = $reg.Principal.LogonType; RunLevel = $reg.Principal.RunLevel }
-            Settings = [pscustomobject]@{ MultipleInstances = $reg.Settings.MultipleInstances; ExecutionTimeLimit = $reg.Settings.ExecutionTimeLimit; Hidden = $hidden; AllowHardTerminate = $allowHardTerminate }
+            Settings = [pscustomobject]@{ MultipleInstances = $reg.Settings.MultipleInstances; ExecutionTimeLimit = $reg.Settings.ExecutionTimeLimit; Hidden = $hidden; AllowHardTerminate = $allowHardTerminate; Enabled = [bool]$global:MockExecutorTaskEnabled }
             Actions = @([pscustomobject]@{ Execute = $reg.Action.Execute; Arguments = $reg.Action.Arguments; WorkingDirectory = $reg.Action.WorkingDirectory })
             Triggers = $readbackTriggers
         }
@@ -371,6 +387,23 @@ function global:Unregister-ScheduledTask {
     if ($TaskName -eq 'PTYSD-Codex-Executor') { $global:MockTaskRegistered = $false }
 }
 
+function global:Disable-ScheduledTask {
+    [CmdletBinding()]
+    param([string]$TaskName, [string]$TaskPath)
+    if ($TaskName -ne 'PTYSD-Codex-Executor' -or -not $global:MockTaskRegistered) { throw 'MOCK_TASK_NOT_FOUND' }
+    if (-not (Test-Path -LiteralPath (Join-Path $global:MockSpool 'locks\executor.active'))) { throw 'MOCK_REFRESH_LOCK_MISSING_BEFORE_DISABLE' }
+    $global:MockTaskDisableCalls++
+    $global:MockExecutorTaskEnabled = $false
+    $global:MockExecutorTaskState = 'Disabled'
+}
+function global:Enable-ScheduledTask {
+    [CmdletBinding()]
+    param([string]$TaskName, [string]$TaskPath)
+    if ($TaskName -ne 'PTYSD-Codex-Executor' -or -not $global:MockTaskRegistered) { throw 'MOCK_TASK_NOT_FOUND' }
+    $global:MockTaskEnableCalls++
+    $global:MockExecutorTaskEnabled = $true
+    $global:MockExecutorTaskState = 'Ready'
+}
 function global:Get-CimInstance {
     [CmdletBinding()]
     param([string]$ClassName, [string]$Filter)
@@ -382,6 +415,20 @@ function global:Get-CimInstance {
     throw ('UNEXPECTED_CIM_CLASS: ' + $ClassName)
 }
 
+function Invoke-RuntimeModuleRefreshAttempt([string]$ExpectedError = '') {
+    $failure = $null
+    try {
+        & $installerPath -Mode RefreshRuntimeModules -ExecutionPhase WIN11_TRANSITION 2>$null | Out-Null
+    } catch { $failure = $_.Exception.Message }
+    if ($ExpectedError) {
+        if ($null -eq $failure -or $failure -notlike ('*' + $ExpectedError + '*')) {
+            throw ('EXPECTED_RUNTIME_REFRESH_FAILURE_NOT_SEEN: ' + $ExpectedError + ';actual=' + $failure)
+        }
+    } elseif ($null -ne $failure) {
+        throw ('RUNTIME_MODULE_REFRESH_FAILED: ' + $failure)
+    }
+    return $failure
+}
 function Invoke-InstallAttempt([string]$ExpectedError = '', [string]$CodexPath = '',
     [string]$ExecutionPhase = 'VM_ISOLATED', [switch]$NoCredential) {
     if (-not $CodexPath) { $CodexPath = $global:MockCodexPath }
@@ -1177,6 +1224,97 @@ try {
     Assert-Equal (Get-FileHash -LiteralPath $backedUpManifest[-1].FullName -Algorithm SHA256).Hash.ToLowerInvariant() `
         (Get-TestByteSha256 $transitionManifestBytes) 'install-state backup is byte-identical to the original'
 
+    $runtimeModuleName = 'captured-process.mjs'
+    $runtimeModulePath = Join-Path $global:MockRuntime $runtimeModuleName
+    $runtimeModuleBefore = [IO.File]::ReadAllBytes($runtimeModulePath)
+    $runtimeManifestBefore = [IO.File]::ReadAllBytes($transitionState)
+    $runtimeConfigBefore = [IO.File]::ReadAllBytes($transitionConfigPath)
+    $runtimeWorkerBefore = [IO.File]::ReadAllBytes($workerConfigPath)
+    $staleModuleBytes = ([Text.UTF8Encoding]::new($false)).GetBytes('synthetic prior Codex Executor module')
+    $staleModuleHash = Get-TestByteSha256 $staleModuleBytes
+    [IO.File]::WriteAllBytes($runtimeModulePath, $staleModuleBytes)
+    $staleManifest = [Text.Encoding]::UTF8.GetString($runtimeManifestBefore) | ConvertFrom-Json
+    $staleHashProperty = $staleManifest.runtime_sha256.PSObject.Properties[$runtimeModuleName]
+    if ($null -eq $staleHashProperty) { throw 'RUNTIME_REFRESH_TEST_MANIFEST_HASH_MISSING' }
+    $staleHashProperty.Value = $staleModuleHash
+    $staleManifestText = (ConvertTo-Json -InputObject $staleManifest -Depth 10 -Compress) + [Environment]::NewLine
+    [IO.File]::WriteAllText($transitionState, $staleManifestText, [Text.UTF8Encoding]::new($false))
+    $staleManifestBytes = [IO.File]::ReadAllBytes($transitionState)
+
+    $disableCallsBeforeRuntimeRefresh = $global:MockTaskDisableCalls
+    $enableCallsBeforeRuntimeRefresh = $global:MockTaskEnableCalls
+    $registrationBeforeRuntimeRefresh = $global:MockRegistration
+    $runtimeRefreshOutput = & $installerPath -Mode RefreshRuntimeModules -ExecutionPhase WIN11_TRANSITION 2>$null
+    if (@($runtimeRefreshOutput | Where-Object { $_ -like 'CODEX_RUNTIME_MODULE_REFRESH=SUCCESS;*' }).Count -ne 1) { throw 'CODEX_RUNTIME_MODULE_REFRESH_SUCCESS_RECEIPT_MISSING' }
+    $runtimeSourcePath = Join-Path $repoRoot ('native-bridge\' + $runtimeModuleName)
+    $runtimeSourceHash = (Get-FileHash -LiteralPath $runtimeSourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-Equal (Get-FileHash -LiteralPath $runtimeModulePath -Algorithm SHA256).Hash.ToLowerInvariant() $runtimeSourceHash 'runtime refresh installs exact current source bytes'
+    $runtimeManifest = Get-Content -LiteralPath $transitionState -Raw | ConvertFrom-Json
+    Assert-Equal $runtimeManifest.runtime_sha256.PSObject.Properties[$runtimeModuleName].Value $runtimeSourceHash 'runtime refresh updates the matching install-state module hash'
+    Assert-Equal $global:MockExecutorTaskEnabled $true 'runtime refresh re-enables the exact task after readback'
+    Assert-Equal $global:MockExecutorTaskState 'Ready' 'runtime refresh reads back the ready task state'
+    Assert-Equal $global:MockTaskDisableCalls ($disableCallsBeforeRuntimeRefresh + 1) 'runtime refresh disables the task exactly once'
+    Assert-Equal $global:MockTaskEnableCalls ($enableCallsBeforeRuntimeRefresh + 1) 'runtime refresh re-enables the task exactly once'
+    Assert-Equal ([object]::ReferenceEquals($global:MockRegistration,$registrationBeforeRuntimeRefresh)) $true 'runtime refresh does not replace Task Scheduler action or settings'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) ([BitConverter]::ToString($runtimeConfigBefore)) 'runtime refresh leaves executor config byte-identical'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($workerConfigPath))) ([BitConverter]::ToString($runtimeWorkerBefore)) 'runtime refresh leaves Publisher config byte-identical'
+    $runtimeBackupDir = Join-Path (Split-Path -Parent (Split-Path -Parent $global:MockRuntime)) 'CodexExecutor\maintenance-backups'
+    $runtimeModuleBackups = @(Get-ChildItem -LiteralPath $runtimeBackupDir -Filter ('*-'+$runtimeModuleName) -File)
+    $runtimeManifestBackups = @(Get-ChildItem -LiteralPath $runtimeBackupDir -Filter '*-install-state.json' -File)
+    Assert-Equal ($runtimeModuleBackups.Count -gt 0) $true 'runtime refresh retains the prior module bytes'
+    Assert-Equal ($runtimeManifestBackups.Count -gt 0) $true 'runtime refresh retains the prior install-state bytes'
+    Assert-Equal (Get-FileHash -LiteralPath $runtimeModuleBackups[-1].FullName -Algorithm SHA256).Hash.ToLowerInvariant() $staleModuleHash 'runtime module backup is byte-identical to the prior file'
+    Assert-Equal (Get-FileHash -LiteralPath $runtimeManifestBackups[-1].FullName -Algorithm SHA256).Hash.ToLowerInvariant() (Get-TestByteSha256 $staleManifestBytes) 'install-state backup is byte-identical to the prior manifest'
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $global:MockSpool 'locks\executor.active')) $false 'successful runtime refresh releases its shared executor lock'
+
+    [IO.File]::WriteAllBytes($runtimeModulePath, $runtimeModuleBefore)
+    [IO.File]::WriteAllBytes($transitionState, $runtimeManifestBefore)
+    $disableCallsBeforeNoop = $global:MockTaskDisableCalls
+    $enableCallsBeforeNoop = $global:MockTaskEnableCalls
+    $manifestHashBeforeNoop = (Get-FileHash -LiteralPath $transitionState -Algorithm SHA256).Hash.ToLowerInvariant()
+    $noopRuntimeRefresh = & $installerPath -Mode RefreshRuntimeModules -ExecutionPhase WIN11_TRANSITION 2>$null
+    if (@($noopRuntimeRefresh | Where-Object { $_ -eq 'CODEX_RUNTIME_MODULE_REFRESH=NOT_REQUIRED' }).Count -ne 1) { throw 'CODEX_RUNTIME_MODULE_REFRESH_NOOP_RECEIPT_MISSING' }
+    Assert-Equal $global:MockTaskDisableCalls $disableCallsBeforeNoop 'no-op runtime refresh does not disable the task'
+    Assert-Equal $global:MockTaskEnableCalls $enableCallsBeforeNoop 'no-op runtime refresh does not enable the task'
+    Assert-Equal (Get-FileHash -LiteralPath $transitionState -Algorithm SHA256).Hash.ToLowerInvariant() $manifestHashBeforeNoop 'no-op runtime refresh does not rewrite install state'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) ([BitConverter]::ToString($runtimeConfigBefore)) 'no-op runtime refresh leaves executor config byte-identical'
+    [IO.File]::WriteAllBytes($runtimeModulePath, $runtimeModuleBefore)
+    [IO.File]::WriteAllBytes($transitionState, $runtimeManifestBefore)
+    $staleModuleBytes = ([Text.UTF8Encoding]::new($false)).GetBytes('synthetic stale module before third-writer test')
+    $staleModuleHash = Get-TestByteSha256 $staleModuleBytes
+    [IO.File]::WriteAllBytes($runtimeModulePath, $staleModuleBytes)
+    $staleManifest = [Text.Encoding]::UTF8.GetString($runtimeManifestBefore) | ConvertFrom-Json
+    $staleHashProperty = $staleManifest.runtime_sha256.PSObject.Properties[$runtimeModuleName]
+    $staleHashProperty.Value = $staleModuleHash
+    $staleManifestText = (ConvertTo-Json -InputObject $staleManifest -Depth 10 -Compress) + [Environment]::NewLine
+    [IO.File]::WriteAllText($transitionState, $staleManifestText, [Text.UTF8Encoding]::new($false))
+    $staleManifestBytes = [IO.File]::ReadAllBytes($transitionState)
+    $thirdWriterBytes = ([Text.UTF8Encoding]::new($false)).GetBytes('preserve concurrent third writer bytes')
+    $thirdWriterHash = Get-TestByteSha256 $thirdWriterBytes
+    $global:MockRuntimeRefreshTargetPath = $runtimeModulePath
+    $global:MockRuntimeRefreshExpectedHash = $runtimeSourceHash
+    $global:MockRuntimeRefreshExternalBytes = $thirdWriterBytes
+    $global:MockInjectConcurrentRuntimeModuleAfterReplace = $true
+    $null = Invoke-RuntimeModuleRefreshAttempt 'CODEX_RUNTIME_MODULE_REFRESH_PARTIAL_STATE_REVIEW_REQUIRED'
+    Assert-Equal (Get-FileHash -LiteralPath $runtimeModulePath -Algorithm SHA256).Hash.ToLowerInvariant() $thirdWriterHash 'runtime refresh preserves a concurrent third-party module hash'
+    Assert-Equal $global:MockExecutorTaskEnabled $false 'ambiguous third-party module state leaves the executor task disabled'
+    Assert-Equal $global:MockExecutorTaskState 'Disabled' 'ambiguous third-party module state reads back the disabled task'
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $global:MockSpool 'locks\executor.active')) $true 'ambiguous runtime refresh keeps the fail-closed executor lock'
+    $thirdWriterManifest = Get-Content -LiteralPath $transitionState -Raw | ConvertFrom-Json
+    Assert-Equal $thirdWriterManifest.runtime_sha256.PSObject.Properties[$runtimeModuleName].Value $staleModuleHash 'manifest remains bound to the prior module after a third-party race'
+    $thirdWriterReplaceBackups = @(Get-ChildItem -LiteralPath (Split-Path -Parent $runtimeModulePath) -Filter ($runtimeModuleName + '.replace-backup-*') -File)
+    Assert-Equal ($thirdWriterReplaceBackups.Count -gt 0) $true 'atomic replacement retains original bytes for third-party reconciliation'
+    Assert-Equal (Get-FileHash -LiteralPath $thirdWriterReplaceBackups[-1].FullName -Algorithm SHA256).Hash.ToLowerInvariant() $staleModuleHash 'retained atomic backup contains the prior module bytes'
+    [IO.File]::WriteAllBytes($runtimeModulePath, $runtimeModuleBefore)
+    [IO.File]::WriteAllBytes($transitionState, $runtimeManifestBefore)
+    Remove-Item -LiteralPath (Join-Path $global:MockSpool 'locks\executor.active') -Force
+    Remove-Item -LiteralPath $thirdWriterReplaceBackups.FullName -Force
+    $global:MockExecutorTaskEnabled = $true
+    $global:MockExecutorTaskState = 'Ready'
+    $global:MockInjectConcurrentRuntimeModuleAfterReplace = $false
+    $global:MockRuntimeRefreshTargetPath = ''
+    $global:MockRuntimeRefreshExpectedHash = ''
+    $global:MockRuntimeRefreshExternalBytes = [byte[]]@()
     # Restore the synthetic pre-refresh fixture so later installer recovery tests
     # continue from the original registered task/config state.
     [IO.File]::WriteAllBytes($transitionConfigPath, $transitionConfigBytes)
