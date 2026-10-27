@@ -12,8 +12,20 @@ const MODEL_ID = /^[a-z][a-z0-9_-]{1,39}\/[A-Za-z0-9_./:-]{1,150}$/;
 const VARIANT_ID = /^[a-z][a-z0-9_-]{0,39}$/;
 const NEVER = ['edit', 'shell', 'subagent', 'skill', 'question', 'webfetch', 'websearch', 'grep',
   'external_directory', 'execute'];
+// Conventional OpenSSH private-key basenames. Read globs are anchored at the end
+// of the resource, so the public companion (for example id_ed25519.pub) is not
+// matched while the private file is. This is deliberately not a broad *key* rule.
+const PRIVATE_KEY_BASENAMES = ['id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',
+  'id_ecdsa_sk', 'id_ed25519_sk'];
+const PRIVATE_KEY_EXTENSIONS = ['key', 'ppk', 'pem', 'p12', 'pfx'];
 const PRIVATE_READ_RESOURCES = ['*.env', '*.env.*', '*.npmrc', '*.netrc', '*.pypirc',
-  '*.git-credentials', '*.git/config', '*auth.json', '*credentials.json', '*.pem', '*.p12', '*.pfx'];
+  '*.git-credentials', '*.git/config', '*auth.json', '*credentials.json',
+  ...PRIVATE_KEY_EXTENSIONS.map(extension => `*.${extension}`),
+  ...PRIVATE_KEY_BASENAMES.flatMap(name => [name, `*${name}`])];
+// Case-insensitive so a Windows case variant cannot smuggle a private key past
+// the exact edit allowlist. `.pub` is intentionally absent from both forms.
+const PRIVATE_KEY_BASENAME = /^id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?$/i;
+const PRIVATE_KEY_SUFFIX = new RegExp(`\\.(?:${PRIVATE_KEY_EXTENSIONS.join('|')})$`, 'i');
 function workspaceReadProtection() {
   return [
     ...PRIVATE_READ_RESOURCES.map(resource => ({ action: 'read', resource, effect: 'deny' })),
@@ -279,6 +291,10 @@ export function buildV2ScopedEditConfig(workspace, editableFiles) {
         parts.some(p => /^\.env(?:\.|$)/i.test(p) ||
           /^opencode\.jsonc?$/i.test(p) ||
           /(?:secret|credential|token|password|auth\.json)/i.test(p)))
+      throw new Error('SCOPED_EDIT_CONTROL_OR_SECRET_PATH');
+    // Private keys are never editable inputs, at any depth. Public companions
+    // such as id_ed25519.pub do not match either form and remain eligible.
+    if (parts.some(p => PRIVATE_KEY_BASENAME.test(p) || PRIVATE_KEY_SUFFIX.test(p)))
       throw new Error('SCOPED_EDIT_CONTROL_OR_SECRET_PATH');
     const absolute = resolve(root, ...parts);
     const inside = relative(root, absolute);
