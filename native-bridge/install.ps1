@@ -417,6 +417,30 @@ function Assert-WorkerRuntimeTrustedRuns([string]$RunPagesJson, [string]$Expecte
     }
 }
 
+function Assert-WorkerRuntimeAcceptedPrAncestry([string]$GitExe, [string]$RepoRoot,
+    [string]$AcceptedPrHead, [string]$MergeCommitSha, [string]$SourceMainSha) {
+    foreach ($sha in @($AcceptedPrHead,$MergeCommitSha,$SourceMainSha)) {
+        if ($sha -notmatch '^[0-9a-fA-F]{40}$') { throw 'WORKER_RUNTIME_ACCEPTED_PR_SHA_INVALID' }
+    }
+    $null = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$RepoRoot,'merge-base','--is-ancestor',
+        $MergeCommitSha,$SourceMainSha) 'WORKER_RUNTIME_ACCEPTED_PR_NOT_IN_MAIN'
+    try {
+        $null = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$RepoRoot,'merge-base','--is-ancestor',
+            $AcceptedPrHead,$SourceMainSha) 'WORKER_RUNTIME_ACCEPTED_PR_HEAD_NOT_IN_MAIN'
+        return
+    } catch {
+        # GitHub rebase and squash merges can rewrite the PR head commit. If so,
+        # accept only an exact tree match to the provider-reported merge commit.
+        $acceptedTree = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$RepoRoot,'rev-parse',
+            ($AcceptedPrHead + '^{tree}')) 'WORKER_RUNTIME_ACCEPTED_PR_TREE_READBACK_FAILED'
+        $mergeTree = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$RepoRoot,'rev-parse',
+            ($MergeCommitSha + '^{tree}')) 'WORKER_RUNTIME_MERGE_TREE_READBACK_FAILED'
+        if ($acceptedTree -cne $mergeTree) {
+            throw 'WORKER_RUNTIME_ACCEPTED_PR_MERGE_TREE_MISMATCH'
+        }
+    }
+}
+
 function Assert-WorkerRuntimeSource([string]$GitExe, [string]$GhExe) {
     if ($SourceMainSha -notmatch '^[0-9a-fA-F]{40}$' -or
         $AcceptedPr -lt 1 -or $AcceptedPrHead -notmatch '^[0-9a-fA-F]{40}$') {
@@ -461,10 +485,7 @@ function Assert-WorkerRuntimeSource([string]$GitExe, [string]$GhExe) {
         ('repos/' + $repo + '/actions/runs?head_sha=' + $AcceptedPrHead + '&per_page=100'),
         '--paginate','--slurp') 'WORKER_RUNTIME_CI_READBACK_FAILED'
     Assert-WorkerRuntimeTrustedRuns $runsJson $AcceptedPrHead
-    $null = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'merge-base','--is-ancestor',
-        [string]$pr.merge_commit_sha,$SourceMainSha) 'WORKER_RUNTIME_ACCEPTED_PR_NOT_IN_MAIN'
-    $null = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'merge-base','--is-ancestor',
-        $AcceptedPrHead,$SourceMainSha) 'WORKER_RUNTIME_ACCEPTED_PR_HEAD_NOT_IN_MAIN'
+    Assert-WorkerRuntimeAcceptedPrAncestry $GitExe $repoRoot $AcceptedPrHead ([string]$pr.merge_commit_sha) $SourceMainSha
     foreach ($file in $runtimeFiles) {
         $mainBlob = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'rev-parse',($SourceMainSha + ':' + $file)) `
             'WORKER_RUNTIME_MAIN_TREE_READBACK_FAILED'
