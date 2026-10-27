@@ -276,6 +276,7 @@ function validAntigravityFileChangeTargetEvidence(value) {
     'outside_or_unknown_root_count', 'relative_or_unknown_root_count', 'unidentified_tool_count'];
   if (countKeys.some(key => !Number.isSafeInteger(value[key]) || value[key] < 0)) return false;
   if (value.unidentified_tool_count > value.tool_count) return false;
+  if (value.target_count < value.tool_count - value.unidentified_tool_count) return false;
   const rootCount = value.candidate_root_count + value.registered_root_count +
     value.outside_or_unknown_root_count + value.relative_or_unknown_root_count;
   if (rootCount !== value.target_count) return false;

@@ -4602,3 +4602,109 @@ test('native preflight records Antigravity readiness without claiming model enti
     assert.equal(JSON.stringify(facts).includes(root),false);
   } finally {rmSync(root,{recursive:true,force:true});}
 });
+
+
+test('parseReceipt rejects schema-6 Antigravity receipt with impossible file-target aggregate evidence', () => {
+  const job = withHumanGoal({
+    schema: 6,
+    project_id: PROJECT,
+    host: hostname().toUpperCase(),
+    request_id: 'PTYSD_ANTIGRAVITY_AGGREGATE_REGRESSION_20261028',
+    kind: 'antigravity_edit',
+    source_sha: commit,
+    spec_path: 'native-bridge/tasks/review.md',
+    spec_sha256: hash,
+    model: ANTIGRAVITY_V2_MODEL,
+    variant: 'high',
+    edit_paths: ['src/worker.mjs'],
+    source_pr: 448,
+  });
+  const attemptId = '11111111-1111-4111-8111-111111111111';
+  const baseResult = {
+    outcome: 'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED',
+    exit_code: 0,
+    diff_sha256: hash,
+    diff_bytes: 120,
+    changed_files: ['src/worker.mjs'],
+    coding_state: 'DIFF_CAPTURED_UNVERIFIED',
+    scope_valid: true,
+    model_invoked: true,
+    external_effects: 'UNKNOWN',
+    source_diff_evidence: 'CAPTURED',
+    task_acceptance: 'UNKNOWN',
+    permission_mode_evidence: 'REQUEST_REVIEW_CONFIRMED',
+    cli_status: 'SUCCESS',
+    run_disposition: 'CLI_SUCCESS_REQUIRES_SEMANTIC_REVIEW',
+    cli_version: '1.4.2',
+    cli_binary_sha256: hash,
+    cli_binary_integrity_evidence: 'MATCHED',
+    tool_policy_evidence: 'W2_NONFILE_ACTIONS_DENIED',
+    forbidden_tool_execution_evidence: 'NOT_OBSERVED',
+    tool_execution_failed_count: 0,
+    tool_execution_incomplete_count: 0,
+  };
+
+  const validReceipt = receipt(job.request_id, attemptId, 'FINISHED', job, {
+    ...baseResult,
+    file_change_target_evidence: {
+      status: 'CANDIDATE_ROOT_ONLY',
+      tool_count: 3,
+      target_count: 3,
+      candidate_root_count: 3,
+      registered_root_count: 0,
+      outside_or_unknown_root_count: 0,
+      relative_or_unknown_root_count: 0,
+      unidentified_tool_count: 0,
+    },
+  });
+  assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(validReceipt)),
+    'otherwise valid schema-6 Antigravity receipt must pass parseReceipt');
+
+  const impossibleReceipt = {
+    ...validReceipt,
+    file_change_target_evidence: {
+      status: 'CANDIDATE_ROOT_ONLY',
+      tool_count: 3,
+      target_count: 1,
+      candidate_root_count: 1,
+      registered_root_count: 0,
+      outside_or_unknown_root_count: 0,
+      relative_or_unknown_root_count: 0,
+      unidentified_tool_count: 0,
+    },
+  };
+  assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify(impossibleReceipt)), null,
+    'parseReceipt must reject file_change_target_evidence with 3 tools, 1 target, 0 unidentified tools, and CANDIDATE_ROOT_ONLY');
+
+  const multiTargetReceipt = {
+    ...validReceipt,
+    file_change_target_evidence: {
+      status: 'CANDIDATE_ROOT_ONLY',
+      tool_count: 2,
+      target_count: 3,
+      candidate_root_count: 3,
+      registered_root_count: 0,
+      outside_or_unknown_root_count: 0,
+      relative_or_unknown_root_count: 0,
+      unidentified_tool_count: 0,
+    },
+  };
+  assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(multiTargetReceipt)),
+    'multi-target tools must remain valid');
+
+  const explicitlyUnidentifiedReceipt = {
+    ...validReceipt,
+    file_change_target_evidence: {
+      status: 'MIXED_ROOTS',
+      tool_count: 3,
+      target_count: 1,
+      candidate_root_count: 1,
+      registered_root_count: 0,
+      outside_or_unknown_root_count: 0,
+      relative_or_unknown_root_count: 0,
+      unidentified_tool_count: 2,
+    },
+  };
+  assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(explicitlyUnidentifiedReceipt)),
+    'summaries with explicitly unidentified tools must remain valid');
+});
