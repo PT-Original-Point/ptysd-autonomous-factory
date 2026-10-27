@@ -1332,6 +1332,16 @@ async function captureAntigravityProjectRootSnapshot(config, job, attemptId, lab
   return { head_sha: beforeSha, status_bytes: status.output,
     changes: parseGitStatusPaths(status.output) };
 }
+function projectRootStatusChanges(before, after) {
+  const keyFor = change => process.platform === 'win32'
+    ? change.path.replaceAll('\\', '/').toLowerCase()
+    : change.path.replaceAll('\\', '/');
+  const prior = new Map(before.changes.map(change => [keyFor(change), change]));
+  const current = new Map(after.changes.map(change => [keyFor(change), change]));
+  const keys = new Set([...prior.keys(), ...current.keys()]);
+  return [...keys].filter(key => prior.get(key)?.status !== current.get(key)?.status)
+    .map(key => current.get(key) ?? prior.get(key));
+}
 function antigravityProjectRootBindingFailure(config) {
   const projectRoot = config?.antigravity_project_root;
   const candidateRoot = config?.workspace;
@@ -1466,7 +1476,9 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     try {
       projectRootBefore = await captureAntigravityProjectRootSnapshot(config, job, attemptId,
         'project-root-before', dependencies.readGitProcessTree);
-      if (projectRootBefore.changes.length) throw new Error('EDIT_PROJECT_ROOT_NOT_CLEAN');
+      if (projectRootBefore.changes.some(change =>
+        editPathsOverlap([change.path], job.edit_paths)))
+        throw new Error('EDIT_PROJECT_ROOT_DIRTY_SCOPE_CONFLICT');
     } catch (error) {
       return { outcome: `ANTIGRAVITY_EDIT_PROJECT_ROOT_${safeErrorCode(error, 'UNKNOWN')}`,
         exit_code: 46, evidence_sha256: null, evidence_bytes: 0,
@@ -1595,34 +1607,39 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
             head_before_sha: projectRootBefore?.head_sha ?? null,
             head_after_sha: projectRootAfter.head_sha } } };
     }
-    if (projectRootAfter.changes.length) {
+    const projectRootChanged = projectRootStatusChanges(projectRootBefore, projectRootAfter);
+    if (projectRootChanged.length) {
       const allowedProjectPaths = new Set(job.edit_paths.map(path =>
         platform() === 'win32' ? path.toLowerCase() : path));
-      const projectRootChangedPaths = [...new Set(projectRootAfter.changes
+      const projectRootChangedPaths = [...new Set(projectRootChanged
         .map(change => change.path.replaceAll('\\', '/'))
         .filter(path => allowedProjectPaths.has(
           platform() === 'win32' ? path.toLowerCase() : path)))].sort();
       return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROJECT_ROOT_WRITE_ESCAPED_ATTEMPT',
         exit_code: -1, coding_state: 'PROJECT_ROOT_WRITE_PRESERVED_UNVERIFIED',
         external_effects: 'UNKNOWN', scope_valid: false,
-        project_root_changed_files_count: projectRootAfter.changes.length,
+        project_root_changed_files_count: projectRootChanged.length,
         project_root_changed_paths: projectRootChangedPaths,
         project_root_out_of_scope_changed_files_count:
-          projectRootAfter.changes.length - projectRootChangedPaths.length,
+          projectRootChanged.length - projectRootChangedPaths.length,
         local_evidence: { ...evidencedResult.local_evidence,
           antigravity_project_root_check: { status: 'CHANGES_PRESERVED',
             head_sha: projectRootAfter.head_sha,
             changed_allowed_paths: projectRootChangedPaths,
             out_of_scope_changed_files_count:
-              projectRootAfter.changes.length - projectRootChangedPaths.length,
+              projectRootChanged.length - projectRootChangedPaths.length,
             sha256: createHash('sha256').update(projectRootAfter.status_bytes).digest('hex'),
             bytes: projectRootAfter.status_bytes.length } } };
     }
     evidencedResult.local_evidence.antigravity_project_root_check = {
-      status: 'CLEAN_STABLE', head_before_sha: projectRootBefore.head_sha,
+      status: projectRootBefore.changes.length
+        ? 'UNCHANGED_PREEXISTING_CHANGES' : 'CLEAN_STABLE',
+      head_before_sha: projectRootBefore.head_sha,
       head_after_sha: projectRootAfter.head_sha,
       status_sha256: createHash('sha256').update(projectRootAfter.status_bytes).digest('hex'),
       status_bytes: projectRootAfter.status_bytes.length,
+      baseline_changed_files_count: projectRootBefore.changes.length,
+      changed_files_count: 0,
     };
   }
   if (!runEvidence.valid && runEvidence.workspace_cwd_evidence?.status !== 'MATCHED') {
