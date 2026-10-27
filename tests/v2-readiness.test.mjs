@@ -339,6 +339,43 @@ test('Antigravity W2 readiness uses documented CLI settings and never probes int
   }
 });
 
+test('Antigravity readiness binds the project ID to its registered root while querying from the isolated candidate cwd', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'pty-agy-candidate-readiness-profile-'));
+  const registeredRoot = mkdtempSync(join(tmpdir(), 'pty-agy-registered-root-'));
+  const candidateRoot = mkdtempSync(join(tmpdir(), 'pty-agy-isolated-candidate-'));
+  const calls = [];
+  const help = '--project --add-dir --print --output-format stream-json --model --effort --sandbox --mode accept-edits';
+  const projectScopedHelp = '--print --output-format stream-json --model --effort --sandbox --mode accept-edits';
+  const required = ['command(*)', 'unsandboxed(*)', 'read_url(*)', 'execute_url(*)', 'mcp(*)'];
+  const settingsDir = join(profile, '.gemini', 'antigravity-cli');
+  mkdirSync(settingsDir, { recursive: true });
+  writeFileSync(join(settingsDir, 'settings.json'), JSON.stringify({ permissions: { deny: required } }));
+  const runner = (_bin, args, options) => {
+    calls.push({ args, cwd: options.cwd });
+    const rest = args[0] === `--project=${testProjectId}` ? args.slice(1) : args;
+    if (rest[0] === '--version') return '1.4.7';
+    if (rest[0] === '--help') return args[0] === `--project=${testProjectId}` ? projectScopedHelp : help;
+    if (rest[0] === 'models') return 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n';
+    if (rest[0] === '--print' && rest[1] === '/usage') return validAntigravityUsage;
+    throw new Error('Unexpected metadata command');
+  };
+  try {
+    writeAntigravityProject(profile, testProjectId, registeredRoot);
+    const result = runAntigravityV2Readiness(process.execPath, candidateRoot, runner,
+      { USERPROFILE: profile, PATH: 'clean' }, () => true, testProjectId, registeredRoot);
+    assert.equal(result.project_scope_evidence, 'PROJECT_WORKSPACE_MATCHED');
+    assert.equal(result.status, 'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH');
+    assert.equal(antigravityV2ReadinessExecutionFailure(result), null);
+    assert.ok(calls.length > 0);
+    assert.ok(calls.every(call => call.cwd === candidateRoot),
+      'metadata commands keep the exact isolated candidate as cwd after validating the registered project root');
+  } finally {
+    rmSync(profile, { recursive: true, force: true });
+    rmSync(registeredRoot, { recursive: true, force: true });
+    rmSync(candidateRoot, { recursive: true, force: true });
+  }
+});
+
 test('Antigravity W2 does not query or execute a project with a mismatched workspace binding', () => {
   const profile = mkdtempSync(join(tmpdir(), 'pty-agy-mismatch-profile-'));
   const workspace = mkdtempSync(join(tmpdir(), 'pty-agy-mismatch-workspace-'));
@@ -810,6 +847,49 @@ test('Antigravity stream evidence binds one session, exact model and cwd without
     assert.equal(JSON.stringify(result).includes('PRIVATE_MODEL_RESPONSE'), false);
     assert.equal(JSON.stringify(result).includes('PRIVATE_TOOL_OUTPUT'), false);
     assert.equal(JSON.stringify(result).includes('PRIVATE_COMMAND_ERROR'), false);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity stream evidence classifies file tool targets and recognizes multi_replace_file_content', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-target-roots-'));
+  const stdoutPath = join(directory, 'stdout.jsonl');
+  const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
+  const registeredRoot = 'C:\\Users\\worker\\registered-project';
+  const candidateRoot = `${registeredRoot}\\.attempts\\candidate`;
+  const outsideRoot = 'C:\\Users\\worker\\outside-project';
+  const toolStep = (stepIndex, state, toolName, targetKey, target) => ({
+    event: 'step_update', step_update: { conversation_id: session, step_index: stepIndex,
+      state, step_type: 'tool', tool_name: toolName,
+      tool_info: { name: toolName, parameters: { [targetKey]: target } } },
+  });
+  const events = [
+    { event: 'init', conversation_id: session,
+      init: { model: 'gemini-3.8-flash-high', cwd: candidateRoot, tools: [], permission_mode: 'accept-edits' } },
+    toolStep(1, 'ACTIVE', 'multi_replace_file_content', 'TargetFile', `${registeredRoot}\\native-bridge\\worker.mjs`),
+    toolStep(1, 'DONE', 'multi_replace_file_content', 'TargetFile', `${registeredRoot}\\native-bridge\\worker.mjs`),
+    toolStep(2, 'ACTIVE', 'write_to_file', 'TargetFile', `${candidateRoot}\\src\\worker.mjs`),
+    toolStep(2, 'DONE', 'write_to_file', 'TargetFile', `${candidateRoot}\\src\\worker.mjs`),
+    toolStep(3, 'ACTIVE', 'edit_file', 'Path', `${outsideRoot}\\outside.mjs`),
+    toolStep(3, 'DONE', 'edit_file', 'Path', `${outsideRoot}\\outside.mjs`),
+    { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+      usage: { input_tokens: 10, output_tokens: 2, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 12 } } },
+  ];
+  const bytes = Buffer.from(events.map(event => JSON.stringify(event)).join('\n') + '\n');
+  writeFileSync(stdoutPath, bytes);
+  try {
+    const result = await readAntigravityV2RunEvidence(stdoutPath,
+      createHash('sha256').update(bytes).digest('hex'), candidateRoot, registeredRoot);
+    assert.equal(result.valid, true);
+    assert.equal(result.file_change_tool_completed_count, 3);
+    assert.deepEqual(result.file_change_target_evidence, {
+      status: 'MIXED_ROOTS', tool_count: 3, target_count: 3,
+      candidate_root_count: 1, registered_root_count: 1,
+      outside_or_unknown_root_count: 1, relative_or_unknown_root_count: 0,
+      unidentified_tool_count: 0,
+    });
+    assert.equal(JSON.stringify(result).includes(registeredRoot), false,
+      'the returned evidence classifies roots without disclosing filesystem paths');
+    assert.equal(JSON.stringify(result).includes('native-bridge\\worker.mjs'), false);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

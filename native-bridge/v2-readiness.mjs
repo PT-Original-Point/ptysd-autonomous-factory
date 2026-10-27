@@ -548,7 +548,8 @@ export function summarizeAntigravityV2Models(stdout) {
 // and aggregate quota report never prove model-specific entitlement, billing
 // terms, write scope, or a real run.
 export function runAntigravityV2Readiness(bin, directory, runner = runAntigravityMetadata,
-  baseEnv = process.env, signatureVerifier = verifyAntigravityAuthenticode, projectId = null) {
+  baseEnv = process.env, signatureVerifier = verifyAntigravityAuthenticode, projectId = null,
+  projectBindingDirectory = directory) {
   const cliSettings = readAntigravitySettings(baseEnv);
   const creditFallbackSetting = creditSettingFromRead(cliSettings);
   const toolPolicyEvidence = toolPolicyFromRead(cliSettings);
@@ -599,7 +600,8 @@ export function runAntigravityV2Readiness(bin, directory, runner = runAntigravit
   result.signature_verified = true;
   const projectArgs = [];
   if (projectId !== null && projectId !== undefined) {
-    result.project_scope_evidence = readAntigravityProjectBinding(projectId, directory, baseEnv);
+    result.project_scope_evidence = readAntigravityProjectBinding(projectId,
+      projectBindingDirectory, baseEnv);
     if (result.project_scope_evidence !== 'PROJECT_WORKSPACE_MATCHED') {
       result.status = 'ANTIGRAVITY_PROJECT_SCOPE_UNVERIFIED';
       result.issues.push('ANTIGRAVITY_PROJECT_WORKSPACE_BINDING_NOT_CONFIRMED');
@@ -713,6 +715,7 @@ function emptyAntigravityRunEvidence(valid, reason = null, forbiddenToolEvidence
     tool_execution_failed_count: 0, tool_execution_incomplete_count: 0,
     file_change_tool_evidence: 'UNKNOWN', file_change_tool_completed_count: 0,
     file_change_tool_failed_count: 0, file_change_tool_incomplete_count: 0,
+    file_change_target_evidence: emptyAntigravityFileChangeTargetEvidence(),
     token_usage: null, event_count: 0, stdout_sha256: null, stdout_bytes: 0,
     workspace_cwd_evidence: { status: 'UNKNOWN', expected_path_sha256: null,
       observed_path_sha256: null } };
@@ -778,14 +781,83 @@ function isForbiddenAntigravityToolName(value) {
 // File-change tools are evidence of an attempted/completed write only. They do
 // not prove a captured diff, source equality, or semantic acceptance.
 const ANTIGRAVITY_FILE_CHANGE_TOOL_NAMES = Object.freeze([
-  'replace_file_content', 'edit_file', 'write_file', 'write_to_file',
+  'replace_file_content', 'multi_replace_file_content', 'edit_file', 'write_file', 'write_to_file',
 ]);
+const ANTIGRAVITY_FILE_CHANGE_TARGET_KEYS = new Set([
+  'path', 'targetfile', 'filepath', 'file_path', 'absolute_path',
+]);
+
+export function emptyAntigravityFileChangeTargetEvidence() {
+  return { status: 'NO_FILE_CHANGE_TOOLS', tool_count: 0, target_count: 0,
+    candidate_root_count: 0, registered_root_count: 0,
+    outside_or_unknown_root_count: 0, relative_or_unknown_root_count: 0,
+    unidentified_tool_count: 0 };
+}
+
+function antigravityFileChangeTargetRoots(toolInfo, expectedCwd, registeredRoot) {
+  const roots = new Set();
+  const parameters = toolInfo && typeof toolInfo === 'object' && !Array.isArray(toolInfo)
+    ? toolInfo.parameters : null;
+  if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) return roots;
+  for (const [key, raw] of Object.entries(parameters)) {
+    if (!ANTIGRAVITY_FILE_CHANGE_TARGET_KEYS.has(key.toLowerCase())) continue;
+    const values = Array.isArray(raw) ? raw : [raw];
+    for (const value of values) {
+      if (typeof value !== 'string' || !value.trim()) {
+        roots.add('relative_or_unknown_root_count');
+        continue;
+      }
+      let target = value.trim();
+      if (/^file:/i.test(target)) target = fileUriLocalPath(target);
+      if (typeof target !== 'string' || !(isAbsolute(target) || win32.isAbsolute(target))) {
+        roots.add('relative_or_unknown_root_count');
+      } else if (antigravityPathWithinRegisteredFolder(expectedCwd, target)) {
+        roots.add('candidate_root_count');
+      } else if (typeof registeredRoot === 'string' &&
+          (isAbsolute(registeredRoot) || win32.isAbsolute(registeredRoot)) &&
+          antigravityPathWithinRegisteredFolder(registeredRoot, target)) {
+        roots.add('registered_root_count');
+      } else {
+        roots.add('outside_or_unknown_root_count');
+      }
+    }
+  }
+  return roots;
+}
+
+function summarizeAntigravityFileChangeTargets(fileTools) {
+  const evidence = emptyAntigravityFileChangeTargetEvidence();
+  evidence.tool_count = fileTools.length;
+  for (const tool of fileTools) {
+    if (!tool.targetRoots?.size) {
+      evidence.unidentified_tool_count++;
+      continue;
+    }
+    for (const root of tool.targetRoots) {
+      evidence[root]++;
+      evidence.target_count++;
+    }
+  }
+  const observedRoots = ['candidate_root_count', 'registered_root_count',
+    'outside_or_unknown_root_count', 'relative_or_unknown_root_count']
+    .filter(key => evidence[key] > 0);
+  if (!evidence.tool_count) evidence.status = 'NO_FILE_CHANGE_TOOLS';
+  else if (!observedRoots.length) evidence.status = 'TARGETS_UNAVAILABLE';
+  else if (observedRoots.length > 1 || evidence.unidentified_tool_count > 0)
+    evidence.status = 'MIXED_ROOTS';
+  else if (observedRoots[0] === 'candidate_root_count') evidence.status = 'CANDIDATE_ROOT_ONLY';
+  else if (observedRoots[0] === 'registered_root_count') evidence.status = 'REGISTERED_ROOT_ONLY';
+  else if (observedRoots[0] === 'outside_or_unknown_root_count')
+    evidence.status = 'OUTSIDE_OR_UNKNOWN_ROOT_ONLY';
+  else evidence.status = 'RELATIVE_OR_UNKNOWN_ONLY';
+  return evidence;
+}
 
 // Parse and hash the official Antigravity stream-json protocol without retaining
 // model text or tool payloads in the returned receipt. `SUCCESS` is CLI state,
 // never semantic or source acceptance.
 export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = null,
-  expectedCwd = null) {
+  expectedCwd = null, registeredRoot = null) {
   if (typeof expectedSha256 === 'string' && !/^[a-f0-9]{64}$/i.test(expectedSha256))
     return emptyAntigravityRunEvidence(false, 'ANTIGRAVITY_CAPTURE_HASH_INVALID');
   if (typeof expectedCwd !== 'string' || !(isAbsolute(expectedCwd) || win32.isAbsolute(expectedCwd)))
@@ -873,8 +945,13 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
           }
           const previous = tools.get(step.step_index);
           if (previous && previous.name !== step.tool_name) { malformed = true; continue; }
+          const targetRoots = new Set(previous?.targetRoots ?? []);
+          if (ANTIGRAVITY_FILE_CHANGE_TOOL_NAMES.includes(step.tool_name))
+            for (const root of antigravityFileChangeTargetRoots(step.tool_info,
+              expectedCwd, registeredRoot)) targetRoots.add(root);
           tools.set(step.step_index, { name: step.tool_name, state: step.state,
-            failed: step.state === 'ERROR' || (step.state === 'DONE' && Boolean(step.tool_info?.error)) });
+            failed: step.state === 'ERROR' || (step.state === 'DONE' && Boolean(step.tool_info?.error)),
+            targetRoots });
         }
       } else if (event.event === 'result') {
         const terminal = event.result;
@@ -899,6 +976,7 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
     const incompleteTools = toolValues.filter(tool => tool.state === 'ACTIVE');
     const fileTools = toolValues.filter(tool =>
       ANTIGRAVITY_FILE_CHANGE_TOOL_NAMES.includes(tool.name));
+    const fileChangeTargetEvidence = summarizeAntigravityFileChangeTargets(fileTools);
     const completedFileTools = fileTools.filter(tool => tool.state === 'DONE');
     const failedFileTools = fileTools.filter(tool => tool.failed);
     const incompleteFileTools = fileTools.filter(tool => tool.state === 'ACTIVE');
@@ -941,6 +1019,7 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
       file_change_tool_completed_count: completedFileTools.length,
       file_change_tool_failed_count: failedFileTools.length,
       file_change_tool_incomplete_count: incompleteFileTools.length,
+      file_change_target_evidence: fileChangeTargetEvidence,
       token_usage: tokenUsage ?? null,
       event_count: eventCount,
       stdout_sha256: streamComplete ? stdoutHash : null,
@@ -961,6 +1040,7 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
   const incompleteTools = toolValues.filter(tool => tool.state === 'ACTIVE');
   const fileTools = toolValues.filter(tool =>
     ANTIGRAVITY_FILE_CHANGE_TOOL_NAMES.includes(tool.name));
+  const fileChangeTargetEvidence = summarizeAntigravityFileChangeTargets(fileTools);
   const completedFileTools = fileTools.filter(tool => tool.state === 'DONE');
   const failedFileTools = fileTools.filter(tool => tool.failed);
   const incompleteFileTools = fileTools.filter(tool => tool.state === 'ACTIVE');
@@ -988,5 +1068,6 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
     file_change_tool_completed_count: completedFileTools.length,
     file_change_tool_failed_count: failedFileTools.length,
     file_change_tool_incomplete_count: incompleteFileTools.length,
+    file_change_target_evidence: fileChangeTargetEvidence,
     token_usage: usage, event_count: eventCount, stdout_sha256: stdoutHash, stdout_bytes: bytes };
 }

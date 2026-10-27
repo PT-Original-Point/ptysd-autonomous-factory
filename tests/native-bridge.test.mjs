@@ -2386,11 +2386,13 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
         return {projectId:config.antigravity_cli_project_id,
           projectScopeEvidence:'PROJECT_WORKSPACE_MATCHED'};
       },
-      runAntigravityV2Readiness(bin,cwd,_runner,_env,_signatureVerifier,projectId){
+      runAntigravityV2Readiness(bin,cwd,_runner,_env,_signatureVerifier,projectId,projectBindingRoot){
         readinessCalls++;
         assert.equal(bin,join(localAppData,'agy','bin','agy.exe'));
         assert.equal(cwd,workspace);
         assert.equal(projectId,config.antigravity_cli_project_id);
+        assert.equal(projectBindingRoot,registeredProjectRoot,
+          'readiness binds the CLI project ID to the registered root while preserving the isolated candidate cwd');
         return readiness;
       },
       async runCapturedProcess(bin,args,options){
@@ -2428,7 +2430,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
           {event:'init',conversation_id:conversation,init:{model:ANTIGRAVITY_V2_MODEL,cwd:workspace,
             permission_mode:'request-review'}},
           {event:'step_update',step_update:{conversation_id:conversation,step_index:0,state:'DONE',
-            step_type:'tool',tool_name:'write_to_file',tool_info:{}}},
+            step_type:'tool',tool_name:'write_to_file',tool_info:{name:'write_to_file',parameters:{
+              TargetFile:join(workspace,'src','worker.mjs')}}}},
           {event:'step_update',step_update:{conversation_id:conversation,step_index:1,state:'ACTIVE',
             step_type:'tool',tool_name:'run_command'}},
           {event:'step_update',step_update:{conversation_id:conversation,step_index:1,state:'ERROR',
@@ -2512,6 +2515,55 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(await verifyCapturedEvidence(stateDir,{terminal:finalReceipt,local_evidence:result.local_evidence}),true);
 
     git(workspace,'checkout','--','src/worker.mjs');
+    const wrongRootSession='conv_antigravity_registered_root_write_20261027';
+    const wrongRoot=await executeOpenCodeTask('Synthetic; file tool writes outside candidate root.',config,job,
+      randomUUID(),{now:()=>now,baseEnv:env,localAppData,
+        runAntigravityV2Readiness:()=>readiness,
+        readGitProcessTree:pid=>({state:'DEAD',root_pid:pid,process_ids:[],
+          census_complete:true,observed_at:new Date(now).toISOString(),error:null}),
+        async runCapturedProcess(_bin,_args,options){
+          const events=[
+            {event:'init',conversation_id:wrongRootSession,init:{model:ANTIGRAVITY_V2_MODEL,
+              cwd:workspace,permission_mode:'accept-edits'}},
+            {event:'step_update',step_update:{conversation_id:wrongRootSession,step_index:0,
+              state:'ACTIVE',step_type:'tool',tool_name:'multi_replace_file_content',
+              tool_info:{name:'multi_replace_file_content',parameters:{
+                TargetFile:join(registeredProjectRoot,'src','worker.mjs')}}}},
+            {event:'step_update',step_update:{conversation_id:wrongRootSession,step_index:0,
+              state:'DONE',step_type:'tool',tool_name:'multi_replace_file_content',
+              tool_info:{name:'multi_replace_file_content',parameters:{
+                TargetFile:join(registeredProjectRoot,'src','worker.mjs')}}}},
+            {event:'result',result:{conversation_id:wrongRootSession,status:'SUCCESS',response:'',
+              usage:{input_tokens:10,output_tokens:2,thinking_tokens:0,cache_read_tokens:0,total_tokens:12}}},
+          ];
+          const out=Buffer.from(events.map(event=>JSON.stringify(event)).join('\n')+'\n');
+          const err=Buffer.alloc(0); writeFileSync(options.stdoutPath,out,{flag:'wx'});
+          writeFileSync(options.stderrPath,err,{flag:'wx'});
+          const combined=createHash('sha256').update(out).update(Buffer.from('\n--- STDERR ---\n')).update(err).digest('hex');
+          return {outcome:'SYNTHETIC_REGISTERED_ROOT_WRITE',exit_code:0,
+            evidence_sha256:combined,evidence_bytes:out.length+Buffer.byteLength('\n--- STDERR ---\n'),
+            local_evidence:{stdout_file:basename(options.stdoutPath),
+              stdout_sha256:createHash('sha256').update(out).digest('hex'),stdout_bytes:out.length,
+              stderr_file:basename(options.stderrPath),stderr_sha256:createHash('sha256').update(err).digest('hex'),
+              stderr_bytes:0,termination_state:'NOT_REQUESTED'}};
+        }});
+    assert.equal(wrongRoot.outcome,'ANTIGRAVITY_EDIT_FILE_TARGET_MISMATCH_NO_CANDIDATE_DIFF');
+    assert.equal(wrongRoot.coding_state,'UNKNOWN');
+    assert.equal(wrongRoot.scope_valid,false);
+    assert.equal(wrongRoot.external_effects,'UNKNOWN');
+    assert.equal(wrongRoot.model_invoked,true);
+    assert.equal(wrongRoot.diff_bytes,0);
+    assert.deepEqual(wrongRoot.file_change_target_evidence,{
+      status:'REGISTERED_ROOT_ONLY',tool_count:1,target_count:1,candidate_root_count:0,
+      registered_root_count:1,outside_or_unknown_root_count:0,
+      relative_or_unknown_root_count:0,unidentified_tool_count:0,
+    });
+    const wrongRootReceipt=receipt(job.request_id,randomUUID(),'BLOCKED',job,wrongRoot);
+    assert.deepEqual(parseReceipt(RECEIPT_MARKER+JSON.stringify(wrongRootReceipt))?.file_change_target_evidence,
+      wrongRoot.file_change_target_evidence);
+    assert.equal(terminalStateForResult(wrongRoot),'BLOCKED');
+
+    git(workspace,'checkout','--','src/worker.mjs');
     const zeroUsageSession='conv_antigravity_zero_usage_20261018';
     const zeroUsage=await executeOpenCodeTask('Change the state value.',config,job,randomUUID(),{
       now:()=>now,baseEnv:env,localAppData,
@@ -2522,7 +2574,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
           {event:'init',conversation_id:zeroUsageSession,init:{model:ANTIGRAVITY_V2_MODEL,cwd:workspace,
             permission_mode:'accept-edits'}},
           {event:'step_update',step_update:{conversation_id:zeroUsageSession,step_index:0,state:'DONE',
-            step_type:'tool',tool_name:'write_to_file',tool_info:{}}},
+            step_type:'tool',tool_name:'write_to_file',tool_info:{name:'write_to_file',parameters:{
+              TargetFile:join(workspace,'src','worker.mjs')}}}},
           {event:'result',result:{conversation_id:zeroUsageSession,status:'SUCCESS',response:'',
             usage:{input_tokens:0,output_tokens:0,thinking_tokens:0,cache_read_tokens:0,total_tokens:0}}},
         ];
@@ -2556,7 +2609,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
           {event:'init',conversation_id:'conv_agy_binary_changed',init:{model:ANTIGRAVITY_V2_MODEL,
             cwd:workspace,permission_mode:'accept-edits'}},
           {event:'step_update',step_update:{conversation_id:'conv_agy_binary_changed',step_index:0,
-            state:'DONE',step_type:'tool',tool_name:'write_to_file',tool_info:{}}},
+            state:'DONE',step_type:'tool',tool_name:'write_to_file',tool_info:{name:'write_to_file',parameters:{
+              TargetFile:join(workspace,'src','worker.mjs')}}}},
           {event:'result',result:{conversation_id:'conv_agy_binary_changed',status:'SUCCESS',response:'',
             usage:{input_tokens:1,output_tokens:1,thinking_tokens:0,cache_read_tokens:0,total_tokens:2}}},
         ];
@@ -2588,7 +2642,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
             {event:'init',conversation_id:'conv_agy_incomplete_20261018',init:{
               model:ANTIGRAVITY_V2_MODEL,cwd:workspace,permission_mode:'accept-edits'}},
             {event:'step_update',step_update:{conversation_id:'conv_agy_incomplete_20261018',
-              step_index:0,state:'DONE',step_type:'tool',tool_name:'write_to_file',tool_info:{}}},
+              step_index:0,state:'DONE',step_type:'tool',tool_name:'write_to_file',tool_info:{name:'write_to_file',
+                parameters:{TargetFile:join(workspace,'src','worker.mjs')}}}},
           ];
           const out=Buffer.from(events.map(event=>JSON.stringify(event)).join('\n')+'\n');
           const err=Buffer.alloc(0);
@@ -2637,7 +2692,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
             {event:'init',conversation_id:incompleteCommandSession,init:{
               model:ANTIGRAVITY_V2_MODEL,cwd:workspace,permission_mode:'accept-edits'}},
             {event:'step_update',step_update:{conversation_id:incompleteCommandSession,step_index:0,
-              state:'DONE',step_type:'tool',tool_name:'write_to_file',tool_info:{}}},
+              state:'DONE',step_type:'tool',tool_name:'write_to_file',tool_info:{name:'write_to_file',
+                parameters:{TargetFile:join(workspace,'src','worker.mjs')}}}},
             {event:'step_update',step_update:{conversation_id:incompleteCommandSession,step_index:1,
               state:'ACTIVE',step_type:'tool',tool_name:'run_command'}},
             {event:'result',result:{conversation_id:incompleteCommandSession,status:'SUCCESS',response:'',
@@ -2737,7 +2793,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
             {event:'init',conversation_id:mismatchSession,init:{model:ANTIGRAVITY_V2_MODEL,
               cwd:mismatchedWorkspace,permission_mode:'request-review'}},
             {event:'step_update',step_update:{conversation_id:mismatchSession,step_index:0,
-              state:'DONE',step_type:'tool',tool_name:'edit_file',tool_info:{}}},
+              state:'DONE',step_type:'tool',tool_name:'edit_file',tool_info:{name:'edit_file',parameters:{
+                Path:join(mismatchedWorkspace,'src','worker.mjs')}}}},
             {event:'result',result:{conversation_id:mismatchSession,status:'SUCCESS',response:'synthetic',
               usage:{input_tokens:1,output_tokens:1,thinking_tokens:0,cache_read_tokens:0,total_tokens:2}}},
           ];
@@ -2753,7 +2810,7 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
         },
       });
     assert.equal(cwdMismatch.outcome,
-      'ANTIGRAVITY_EDIT_WORKSPACE_IDENTITY_UNKNOWN_ANTIGRAVITY_WORKSPACE_CWD_MISMATCH');
+      'ANTIGRAVITY_EDIT_FILE_TARGET_ROOT_MISMATCH_WORKSPACE_IDENTITY_UNKNOWN');
     assert.equal(cwdMismatch.scope_valid,false);
     assert.equal(cwdMismatch.external_effects,'UNKNOWN');
     assert.equal(cwdMismatch.source_diff_evidence,'UNKNOWN');
@@ -2778,6 +2835,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     const escapedAttempt=await executeOpenCodeTask('Synthetic project-root escape; no inference.',
       {...config,workspace:escapedWorkspace},escapedJob,randomUUID(),{
         now:()=>now,baseEnv:env,localAppData,runAntigravityV2Readiness:()=>readiness,
+        readGitProcessTree:pid=>({state:'DEAD',root_pid:pid,process_ids:[],
+          census_complete:true,observed_at:new Date(now).toISOString(),error:null}),
         async runCapturedProcess(_bin,_args,options){
           const escapedFiles=[
             ['package.json','{"name":"synthetic-root-escape"}\n'],

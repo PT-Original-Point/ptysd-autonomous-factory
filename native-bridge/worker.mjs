@@ -13,7 +13,7 @@ import { qualifyOpenCodeV2, validateV2Model, buildV2ReadOnlyConfig, buildV2ReadO
 import { ANTIGRAVITY_V2_MODEL, ANTIGRAVITY_RUN_DISPOSITIONS, buildNativeChildEnvironment,
   buildAntigravityChildEnvironment,
   antigravityV2ReadinessExecutionFailure,
-  readAntigravityV2RunEvidence, readV2ProviderAuth,
+  emptyAntigravityFileChangeTargetEvidence, readAntigravityV2RunEvidence, readV2ProviderAuth,
   resolveAntigravityProjectId, runV2Readiness, runAntigravityV2Readiness } from './v2-readiness.mjs';
 import { parseCodexJob, codexExecutionGate, claimCodexAttempt, codexScopedActionStatus,
   releaseCodexAttempt, makeCodexExecutorRequest, publishCodexExecutorRequest,
@@ -230,6 +230,8 @@ export function parseReceipt(body) {
              .includes(o.tool_policy_evidence)) ||
          o.forbidden_tool_execution_evidence !== undefined && (o.kind !== 'antigravity_edit' ||
            !['UNKNOWN', 'NOT_OBSERVED', 'OBSERVED'].includes(o.forbidden_tool_execution_evidence)) ||
+        o.file_change_target_evidence !== undefined && (o.kind !== 'antigravity_edit' ||
+          !validAntigravityFileChangeTargetEvidence(o.file_change_target_evidence)) ||
           o.tool_execution_failed_count !== undefined && (o.kind !== 'antigravity_edit' ||
             !Number.isSafeInteger(o.tool_execution_failed_count) || o.tool_execution_failed_count < 0) ||
           o.tool_execution_incomplete_count !== undefined && (o.kind !== 'antigravity_edit' ||
@@ -250,6 +252,37 @@ export function parseReceipt(body) {
         !/^[a-f0-9-]{36}$/.test(o.attempt_id)) return null;
     return o;
   } catch { return null; }
+}
+function validAntigravityFileChangeTargetEvidence(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).length !== 8 ||
+      !['NO_FILE_CHANGE_TOOLS', 'TARGETS_UNAVAILABLE', 'CANDIDATE_ROOT_ONLY',
+        'REGISTERED_ROOT_ONLY', 'OUTSIDE_OR_UNKNOWN_ROOT_ONLY',
+        'RELATIVE_OR_UNKNOWN_ONLY', 'MIXED_ROOTS'].includes(value.status)) return false;
+  const countKeys = ['tool_count', 'target_count', 'candidate_root_count', 'registered_root_count',
+    'outside_or_unknown_root_count', 'relative_or_unknown_root_count', 'unidentified_tool_count'];
+  if (countKeys.some(key => !Number.isSafeInteger(value[key]) || value[key] < 0)) return false;
+  if (value.unidentified_tool_count > value.tool_count) return false;
+  const rootCount = value.candidate_root_count + value.registered_root_count +
+    value.outside_or_unknown_root_count + value.relative_or_unknown_root_count;
+  if (rootCount !== value.target_count) return false;
+  if ((value.tool_count === 0) !== (value.status === 'NO_FILE_CHANGE_TOOLS')) return false;
+  const observedRoots = ['candidate_root_count', 'registered_root_count',
+    'outside_or_unknown_root_count', 'relative_or_unknown_root_count']
+    .filter(key => value[key] > 0);
+  let expectedStatus;
+  if (!value.tool_count) expectedStatus = 'NO_FILE_CHANGE_TOOLS';
+  else if (!observedRoots.length) {
+    if (value.unidentified_tool_count !== value.tool_count) return false;
+    expectedStatus = 'TARGETS_UNAVAILABLE';
+  } else if (observedRoots.length > 1 || value.unidentified_tool_count > 0)
+    expectedStatus = 'MIXED_ROOTS';
+  else if (observedRoots[0] === 'candidate_root_count') expectedStatus = 'CANDIDATE_ROOT_ONLY';
+  else if (observedRoots[0] === 'registered_root_count') expectedStatus = 'REGISTERED_ROOT_ONLY';
+  else if (observedRoots[0] === 'outside_or_unknown_root_count')
+    expectedStatus = 'OUTSIDE_OR_UNKNOWN_ROOT_ONLY';
+  else expectedStatus = 'RELATIVE_OR_UNKNOWN_ONLY';
+  return value.status === expectedStatus;
 }
 function hasBlockingRequestReceipt(entries) {
   if (!entries.length) return false;
@@ -1404,7 +1437,9 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
   }
   const readiness = (dependencies.runAntigravityV2Readiness ?? runAntigravityV2Readiness)(
     cliPath, config.workspace, dependencies.runAntigravityMetadata, baseEnv,
-    dependencies.verifyAntigravitySignature, projectId);
+    dependencies.verifyAntigravitySignature, projectId,
+    typeof config.antigravity_project_root === 'string'
+      ? config.antigravity_project_root : config.workspace);
   const readinessFailure = antigravityV2ReadinessExecutionFailure(readiness);
   if (readinessFailure) return wait(readinessFailure);
 
@@ -1470,7 +1505,8 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
   const runEvidence = await (dependencies.readAntigravityV2RunEvidence ?? readAntigravityV2RunEvidence)(
     typeof capturedStdout === 'string' && basename(capturedStdout) === capturedStdout
       ? join(config.state_dir, capturedStdout) : '',
-    typeof capturedHash === 'string' ? capturedHash : '', config.workspace);
+    typeof capturedHash === 'string' ? capturedHash : '', config.workspace,
+    typeof config.antigravity_project_root === 'string' ? config.antigravity_project_root : null);
   const evidencedResult = {
     ...processResult,
     cli_version: readiness.version ?? null, cli_binary_sha256: cliBinarySha256,
@@ -1499,6 +1535,8 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     file_change_tool_completed_count: runEvidence.file_change_tool_completed_count,
     file_change_tool_failed_count: runEvidence.file_change_tool_failed_count,
     file_change_tool_incomplete_count: runEvidence.file_change_tool_incomplete_count,
+    file_change_target_evidence: runEvidence.file_change_target_evidence ??
+      emptyAntigravityFileChangeTargetEvidence(),
     local_evidence: { ...processResult.local_evidence,
       ...(projectRootBefore ? { antigravity_project_root_check: {
         status: 'CLEAN_BEFORE', head_sha: projectRootBefore.head_sha,
@@ -1513,10 +1551,18 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
           source_diff_evidence: runEvidence.source_diff_evidence,
           task_acceptance: runEvidence.task_acceptance,
         permission_mode_evidence: runEvidence.permission_mode_evidence,
+          file_change_target_evidence: runEvidence.file_change_target_evidence ??
+            emptyAntigravityFileChangeTargetEvidence(),
           event_count: runEvidence.event_count, stdout_bytes: runEvidence.stdout_bytes ?? 0,
           tool_execution_failed_count: runEvidence.tool_execution_failed_count,
           tool_execution_incomplete_count: runEvidence.tool_execution_incomplete_count } },
   };
+  const fileChangeTargets = runEvidence.file_change_target_evidence ??
+    emptyAntigravityFileChangeTargetEvidence();
+  const hasForeignFileTarget = fileChangeTargets.registered_root_count > 0 ||
+    fileChangeTargets.outside_or_unknown_root_count > 0;
+  const hasUnknownFileTarget = fileChangeTargets.relative_or_unknown_root_count > 0 ||
+    fileChangeTargets.unidentified_tool_count > 0;
   if (evidencedResult.local_evidence?.termination_state &&
       ['ORPHAN_POSSIBLE', 'TERMINATION_UNCONFIRMED', 'TERMINATION_REQUESTED']
         .includes(evidencedResult.local_evidence.termination_state))
@@ -1577,7 +1623,9 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     // prove an empty diff in the configured candidate. Keep the captured
     // stream/artifacts, but do not inspect a different checkout and call it 0.
     return { ...evidencedResult,
-      outcome: `ANTIGRAVITY_EDIT_WORKSPACE_IDENTITY_UNKNOWN_${runEvidence.reason}`,
+      outcome: hasForeignFileTarget
+        ? 'ANTIGRAVITY_EDIT_FILE_TARGET_ROOT_MISMATCH_WORKSPACE_IDENTITY_UNKNOWN'
+        : `ANTIGRAVITY_EDIT_WORKSPACE_IDENTITY_UNKNOWN_${runEvidence.reason}`,
       exit_code: -1, coding_state: 'UNKNOWN_WORKSPACE_EFFECTS_PRESERVED',
       scope_valid: false, external_effects: 'UNKNOWN', source_diff_evidence: 'UNKNOWN',
       task_acceptance: 'UNKNOWN', diff_sha256: null, diff_bytes: null,
@@ -1675,6 +1723,35 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     return { ...diffEvidencedResult, outcome: 'ANTIGRAVITY_EDIT_SCOPE_VIOLATION', exit_code: 46,
       coding_state: 'REJECTED_SCOPE', scope_valid: false, diff_sha256: diff.sha256,
       diff_bytes: diff.bytes, ...diff, local_evidence: localEvidence };
+  if (hasForeignFileTarget) {
+    return { ...diffEvidencedResult,
+      outcome: diff.changed_files.length
+        ? 'ANTIGRAVITY_EDIT_FILE_TARGET_ROOT_MISMATCH_DIFF_PRESERVED'
+        : 'ANTIGRAVITY_EDIT_FILE_TARGET_MISMATCH_NO_CANDIDATE_DIFF',
+      exit_code: -1, coding_state: diff.changed_files.length ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNKNOWN',
+      scope_valid: false, external_effects: 'UNKNOWN', task_acceptance: 'UNKNOWN',
+      diff_sha256: diff.sha256, diff_bytes: diff.bytes, ...diff, scope_valid: false,
+      external_effects: 'UNKNOWN', task_acceptance: 'UNKNOWN', local_evidence: localEvidence };
+  }
+  if (hasUnknownFileTarget &&
+      runEvidence.file_change_tool_completed_count > 0) {
+    return { ...diffEvidencedResult,
+      outcome: diff.changed_files.length
+        ? 'ANTIGRAVITY_EDIT_FILE_TARGET_UNKNOWN_DIFF_PRESERVED'
+        : 'ANTIGRAVITY_EDIT_FILE_TARGET_UNKNOWN_NO_CANDIDATE_DIFF',
+      exit_code: -1, coding_state: diff.changed_files.length ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNKNOWN',
+      scope_valid: false, external_effects: 'UNKNOWN', task_acceptance: 'UNKNOWN',
+      diff_sha256: diff.sha256, diff_bytes: diff.bytes, ...diff, scope_valid: false,
+      external_effects: 'UNKNOWN', task_acceptance: 'UNKNOWN', local_evidence: localEvidence };
+  }
+  if (runEvidence.file_change_tool_completed_count > 0 &&
+      (!diff.changed_files.length || diff.bytes === 0)) {
+    return { ...diffEvidencedResult,
+      outcome: 'ANTIGRAVITY_EDIT_FILE_CHANGE_TOOLS_WITH_NO_CANDIDATE_DIFF',
+      exit_code: -1, coding_state: 'UNKNOWN', scope_valid: true,
+      external_effects: 'UNKNOWN', task_acceptance: 'UNKNOWN',
+      diff_sha256: diff.sha256, diff_bytes: diff.bytes, ...diff, local_evidence: localEvidence };
+  }
   if (runEvidence.forbidden_tool_execution_evidence === 'OBSERVED')
     return { ...diffEvidencedResult,
       outcome: diff.changed_files.length
@@ -2069,6 +2146,8 @@ export function receipt(requestId, attemptId, state, job, result = null) {
       file_change_tool_completed_count: result?.file_change_tool_completed_count ?? 0,
       file_change_tool_failed_count: result?.file_change_tool_failed_count ?? 0,
       file_change_tool_incomplete_count: result?.file_change_tool_incomplete_count ?? 0,
+      ...(job.kind === 'antigravity_edit' ? { file_change_target_evidence:
+        result?.file_change_target_evidence ?? emptyAntigravityFileChangeTargetEvidence() } : {}),
       stdout_sha256: result?.local_evidence?.stdout_sha256 ?? null,
       stderr_sha256: result?.local_evidence?.stderr_sha256 ?? null } : {}) };
 }
