@@ -13,7 +13,8 @@ Do not edit other paths. The historical W2 quota-canary files and `package.json`
 
 ## Required behavior
 
-- Count each distinct recognized file target once per tool step, including array-valued target parameters.
+- Count each distinct recognized file target once per tool step, including array-valued target parameters and multiple recognized target keys.
+- Deduplicate targets by normalized file-path identity within that step; root category alone is not a target identity. Preserve distinct target identities across repeated updates to the same step, then count each identity exactly once in its final root category.
 - Do not double-count the same target when an `ACTIVE` event is followed by a `DONE` event for that step.
 - Count target occurrences in the candidate, registered, outside-or-unknown, and relative-or-unknown root categories; `target_count` must equal the sum of those category counts.
 - Keep mixed-root classification fail-closed. A write to any non-candidate root must remain distinguishable from a candidate-only write.
