@@ -1524,7 +1524,7 @@
     const sessionMatch = body.match(/session_id=([a-f0-9-]{36})/i);
     if (!sessionMatch) return null;
     const prMatch = body.match(/\bReplacement PR\s*#(\d+)\s+is\s+OPEN\b/i);
-    const fileMatch = body.match(/changed(?:\s+only)?\s+`([^`]+)`/i);
+    const fileMatch = body.match(/Gemini changed only\s+`?([^`\s;:]+)`?(?=[:;\s])/i);
     const diffShaMatch = body.match(/diff\s+SHA-256=([a-f0-9]{64})/i);
     const diffLinesMatch = body.match(/\+(\d+)\/-(\d+)/);
     const focusedTestsMatch = body.match(/(?:-\s*)?Focused tests:\s*([^\r\n]+)/i);
@@ -1535,7 +1535,7 @@
       provenance: 'DIRECT_CLI_NOT_NATIVE_WORKER',
       session_id: sessionMatch[1],
       pull_request: prMatch ? Number(prMatch[1]) : null,
-      changed_file: fileMatch ? fileMatch[1] : null,
+      changed_file: fileMatch && validEditPath(fileMatch[1]) ? fileMatch[1] : null,
       diff_sha256: diffShaMatch ? diffShaMatch[1] : null,
       diff_lines: diffLinesMatch ? `+${diffLinesMatch[1]}/-${diffLinesMatch[2]}` : null,
       tests: [focusedTestsMatch ? 'Focused: ' + focusedTestsMatch[1].trim() : null,
@@ -1625,9 +1625,9 @@
           if (receipt.state) historical.state = receipt.state;
           if (receipt.external_effects) historical.external_effects = receipt.external_effects;
         }
-        const classMatch = c.body.match(/classification=([A-Z_]+)/);
+        const classMatch = c.body.match(/^classification=([A-Z_]+)\s*$/m);
         if (classMatch) historical.classification = classMatch[1];
-        const effectsMatch = c.body.match(/external_effects=([A-Z_]+)/);
+        const effectsMatch = c.body.match(/^external_effects=([A-Z_]+)\s*$/m);
         if (effectsMatch) historical.external_effects = effectsMatch[1];
       }
     }
