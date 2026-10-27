@@ -736,6 +736,125 @@ test('active edit scopes exclude a second writer on overlapping paths but leave 
     'the shared file remains owned by the active W2 attempt while another path can proceed');
 });
 
+test('a terminal W2 candidate-root-only diff releases only the W2 same-path writer lease', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = commit;
+  const makeEdit = (requestId, kind = 'antigravity_edit') => withHumanGoal({
+    schema: 6, project_id: PROJECT, host, request_id: requestId, kind,
+    source_sha: sourceSha, spec_path: 'native-bridge/tasks/w2-panel.md', spec_sha256: hash,
+    model: kind === 'antigravity_edit' ? ANTIGRAVITY_V2_MODEL :
+      'opencode/deepseek-v4.1-flash-free',
+    variant: kind === 'antigravity_edit' ? 'high' : 'free',
+    edit_paths: ['operator-panel/index.html'], source_pr: 461,
+  });
+  const prior = makeEdit('PTYSD_W2_PRIOR_ISOLATED_DIFF');
+  const nextW2 = makeEdit('PTYSD_W2_NEXT_ISOLATED_DIFF');
+  const isolatedReceipt = receipt(prior.request_id,
+    '55555555-5555-4555-8555-555555555555', 'BLOCKED', prior, {
+      model_invoked: true,
+      session_id: '66666666-6666-4666-8666-666666666666',
+      external_effects: 'UNKNOWN',
+      source_diff_evidence: 'CAPTURED',
+      task_acceptance: 'UNKNOWN',
+      coding_state: 'DIFF_CAPTURED_UNVERIFIED',
+      scope_valid: true,
+      diff_sha256: 'c'.repeat(64),
+      diff_bytes: 18413,
+      changed_files: ['operator-panel/index.html'],
+      tool_execution_evidence: 'OBSERVED',
+      tool_execution_count: 64,
+      file_change_tool_evidence: 'OBSERVED',
+      file_change_tool_completed_count: 19,
+      file_change_tool_failed_count: 4,
+      file_change_tool_incomplete_count: 0,
+      file_change_target_evidence: {
+        status: 'CANDIDATE_ROOT_ONLY', tool_count: 23, target_count: 23,
+        candidate_root_count: 23, registered_root_count: 0,
+        outside_or_unknown_root_count: 0, relative_or_unknown_root_count: 0,
+        unidentified_tool_count: 0,
+      },
+      permission_mode_evidence: 'REQUEST_REVIEW_CONFIRMED',
+      tool_policy_evidence: 'W2_NONFILE_ACTIONS_DENIED',
+      cli_binary_integrity_evidence: 'MATCHED',
+      forbidden_tool_execution_evidence: 'NOT_OBSERVED',
+    });
+  const comments = [
+    { ...com(801, encoded(prior)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    { ...com(802, encoded(nextW2)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(803, RECEIPT_MARKER + JSON.stringify(isolatedReceipt), 'worker'),
+  ];
+  assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(isolatedReceipt)));
+  assert.equal(isolatedReceipt.external_effects, 'UNKNOWN');
+  assert.equal(isolatedReceipt.task_acceptance, 'UNKNOWN');
+  const next = selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[461, sourceSha]]));
+  assert.equal(next?.id, 802,
+    'a complete, isolated W2 diff frees the path lease without accepting the prior task');
+});
+
+test('candidate-root lease release fails closed for mixed targets and other Worker lanes', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = commit;
+  const makeEdit = (requestId, kind = 'antigravity_edit') => withHumanGoal({
+    schema: 6, project_id: PROJECT, host, request_id: requestId, kind,
+    source_sha: sourceSha, spec_path: 'native-bridge/tasks/w2-panel.md', spec_sha256: hash,
+    model: kind === 'antigravity_edit' ? ANTIGRAVITY_V2_MODEL :
+      'opencode/deepseek-v4.1-flash-free',
+    variant: kind === 'antigravity_edit' ? 'high' : 'free',
+    edit_paths: ['operator-panel/index.html'], source_pr: 461,
+  });
+  const prior = makeEdit('PTYSD_W2_PRIOR_MIXED_TARGETS');
+  const nextW2 = makeEdit('PTYSD_W2_NEXT_MIXED_TARGETS');
+  const receiptFor = (targetEvidence, attemptId) => receipt(prior.request_id, attemptId,
+    'BLOCKED', prior, {
+      model_invoked: true, session_id: '66666666-6666-4666-8666-666666666666',
+      external_effects: 'UNKNOWN', source_diff_evidence: 'CAPTURED',
+      task_acceptance: 'UNKNOWN', coding_state: 'DIFF_CAPTURED_UNVERIFIED', scope_valid: true,
+      diff_sha256: 'c'.repeat(64), diff_bytes: 100,
+      changed_files: ['operator-panel/index.html'], tool_execution_evidence: 'OBSERVED',
+      tool_execution_count: 3, file_change_tool_evidence: 'OBSERVED',
+      file_change_tool_completed_count: 2, file_change_tool_failed_count: 1,
+      file_change_tool_incomplete_count: 0, file_change_target_evidence: targetEvidence,
+      permission_mode_evidence: 'REQUEST_REVIEW_CONFIRMED',
+      tool_policy_evidence: 'W2_NONFILE_ACTIONS_DENIED',
+      cli_binary_integrity_evidence: 'MATCHED',
+      forbidden_tool_execution_evidence: 'NOT_OBSERVED',
+    });
+  const mixedReceipt = receiptFor({
+    status: 'MIXED_ROOTS', tool_count: 3, target_count: 3,
+    candidate_root_count: 2, registered_root_count: 1,
+    outside_or_unknown_root_count: 0, relative_or_unknown_root_count: 0,
+    unidentified_tool_count: 0,
+  }, '77777777-7777-4777-8777-777777777777');
+  const mixedComments = [
+    { ...com(811, encoded(prior)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    { ...com(812, encoded(nextW2)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(813, RECEIPT_MARKER + JSON.stringify(mixedReceipt), 'worker'),
+    com(814, encoded(mkjob({ host, request_id: 'PTYSD_W2_MIXED_TARGET_INDEPENDENT_PING' }))),
+  ];
+  assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(mixedReceipt)));
+  assert.equal(selectNext(mixedComments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[461, sourceSha]]))?.id, 814,
+  'mixed-root writes continue to hold the same-path lease');
+
+  const isolatedReceipt = receiptFor({
+    status: 'CANDIDATE_ROOT_ONLY', tool_count: 3, target_count: 3,
+    candidate_root_count: 3, registered_root_count: 0,
+    outside_or_unknown_root_count: 0, relative_or_unknown_root_count: 0,
+    unidentified_tool_count: 0,
+  }, '88888888-8888-4888-8888-888888888888');
+  const overlappingW1 = makeEdit('PTYSD_W1_OVERLAPPING_ISOLATED_W2', 'opencode_edit');
+  const crossLaneComments = [
+    { ...com(821, encoded(prior)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    { ...com(822, encoded(overlappingW1)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(823, RECEIPT_MARKER + JSON.stringify(isolatedReceipt), 'worker'),
+    com(824, encoded(mkjob({ host, request_id: 'PTYSD_CROSS_LANE_INDEPENDENT_PING' }))),
+  ];
+  assert.equal(selectNext(crossLaneComments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[461, sourceSha]]))?.id, 824,
+  'the W2 lease exception does not change cross-lane path arbitration');
+});
+
 test('fresh OS publication does not carry stale W1 activity or incident state into the new snapshot', async () => {
   const staleAt = Date.now() - 24 * 60 * 60 * 1000;
   const prior = seededOperatorObservation(OPERATOR_COMMENT_ID, 17, commit, staleAt);
