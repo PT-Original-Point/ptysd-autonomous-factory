@@ -441,6 +441,10 @@ function Assert-WorkerRuntimeAcceptedPrAncestry([string]$GitExe, [string]$RepoRo
     }
 }
 
+function Get-WorkerRuntimeGitPath([string]$File) {
+    return ('native-bridge/' + $File)
+}
+
 function Assert-WorkerRuntimeSource([string]$GitExe, [string]$GhExe) {
     if ($SourceMainSha -notmatch '^[0-9a-fA-F]{40}$' -or
         $AcceptedPr -lt 1 -or $AcceptedPrHead -notmatch '^[0-9a-fA-F]{40}$') {
@@ -487,9 +491,10 @@ function Assert-WorkerRuntimeSource([string]$GitExe, [string]$GhExe) {
     Assert-WorkerRuntimeTrustedRuns $runsJson $AcceptedPrHead
     Assert-WorkerRuntimeAcceptedPrAncestry $GitExe $repoRoot $AcceptedPrHead ([string]$pr.merge_commit_sha) $SourceMainSha
     foreach ($file in $runtimeFiles) {
-        $mainBlob = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'rev-parse',($SourceMainSha + ':' + $file)) `
+        $gitPath = Get-WorkerRuntimeGitPath $file
+        $mainBlob = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'rev-parse',($SourceMainSha + ':' + $gitPath)) `
             'WORKER_RUNTIME_MAIN_TREE_READBACK_FAILED'
-        $prBlob = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'rev-parse',($AcceptedPrHead + ':' + $file)) `
+        $prBlob = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'rev-parse',($AcceptedPrHead + ':' + $gitPath)) `
             'WORKER_RUNTIME_PR_TREE_READBACK_FAILED'
         if ($mainBlob -cne $prBlob) { throw ('WORKER_RUNTIME_ACCEPTED_PR_BUNDLE_MISMATCH:' + $file) }
     }
