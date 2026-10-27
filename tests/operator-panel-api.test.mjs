@@ -805,7 +805,7 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
     'native_worker_attempt=NOT_CREATED',
     '### Actual model session',
     '- Model=gemini-3.8-flash-high; session_id=be190416-e85f-4f68-b33a-5d05f54d7072; status=SUCCESS; one turn; duration=959.607 seconds.',
-    '- Gemini changed only `tests/v2-readiness.test.mjs`: +132/-1; diff SHA-256=ae294af7292c35e949bc6a83bb16d2f38779720aa347c1721968ce9f9eb5eae4.',
+    '- Gemini changed only tests/v2-readiness.test.mjs: +132/-1; diff SHA-256=ae294af7292c35e949bc6a83bb16d2f38779720aa347c1721968ce9f9eb5eae4.',
     '- Focused tests: 52 total, 51 passed, 0 failed, 1 skipped. Full suite: 401 total, 396 passed, 0 failed, 5 skipped.',
     '- PR #575 was closed as superseded after its follow-up commit failed DIRECT_PARENT_MISMATCH.',
     '- Replacement PR #576 is OPEN, non-draft, head=a4b4b5a00f003f446847be3ab521cbf278e02c78, base=7810399813554df0aaf64dbf2c60466ae0305ff1.',
@@ -841,6 +841,7 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
   ];
   const issueComments = [
     comment(6344079399,'t14210184','PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(oldReceipt),'2026-10-22T15:07:35Z'),
+    comment(6367399586,'t14210184',`original_unknown_attempt=${oldAttempt}\nw1_classification=MODEL_SESSION_AND_SCOPED_DIFF_CONFIRMED;PATCH_INTEGRATED_AND_CODEX_TESTED_VIA_PR_507\nclassification=PARTIAL_OR_AMBIGUOUS\nexternal_effects=UNKNOWN`,'2026-10-23T14:36:17Z'),
     comment(6438594849,'t14210184',directCliBody,'2026-10-27T09:45:07Z'),
     comment(6440844675,'t14210184','PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(currentReceipt),'2026-10-27T12:04:00Z'),
     comment(6433468416,'t14210184',`original_unknown_attempt=${oldAttempt}\nclassification=PARTIAL_OR_AMBIGUOUS\nexternal_effects=UNKNOWN`,'2026-10-27T04:05:21Z'),
