@@ -893,6 +893,54 @@ test('Antigravity stream evidence classifies file tool targets and recognizes mu
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('Antigravity target evidence counts unique normalized file identities across repeated updates', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-target-identities-'));
+  const stdoutPath = join(directory, 'stdout.jsonl');
+  const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
+  const registeredRoot = 'C:\\Users\\worker\\registered-project';
+  const candidateRoot = `${registeredRoot}\\.attempts\\candidate`;
+  const firstCandidateTarget = `${candidateRoot}\\src\\one.mjs`;
+  const secondCandidateTarget = `${candidateRoot}\\src\\two.mjs`;
+  const registeredTarget = `${registeredRoot}\\native-bridge\\worker.mjs`;
+  const toolStep = (state, parameters) => ({
+    event: 'step_update', step_update: { conversation_id: session, step_index: 4,
+      state, step_type: 'tool', tool_name: 'multi_replace_file_content',
+      tool_info: { name: 'multi_replace_file_content', parameters } },
+  });
+  const events = [
+    { event: 'init', conversation_id: session,
+      init: { model: 'gemini-3.8-flash-high', cwd: candidateRoot, tools: [], permission_mode: 'accept-edits' } },
+    toolStep('ACTIVE', { TargetFile: [firstCandidateTarget, secondCandidateTarget],
+      Path: firstCandidateTarget.toUpperCase().replaceAll('\\', '/'),
+      FilePath: ['relative\\unknown.mjs'] }),
+    toolStep('DONE', { TargetFile: [secondCandidateTarget.replaceAll('\\', '/'), registeredTarget],
+      absolute_path: ['relative/./unknown.mjs'] }),
+    { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+      usage: { input_tokens: 10, output_tokens: 2, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 12 } } },
+  ];
+  const bytes = Buffer.from(events.map(event => JSON.stringify(event)).join('\n') + '\n');
+  writeFileSync(stdoutPath, bytes);
+  try {
+    const result = await readAntigravityV2RunEvidence(stdoutPath,
+      createHash('sha256').update(bytes).digest('hex'), candidateRoot, registeredRoot);
+    assert.equal(result.valid, true);
+    assert.equal(result.tool_execution_count, 1);
+    assert.equal(result.file_change_tool_completed_count, 1);
+    assert.deepEqual(result.file_change_target_evidence, {
+      status: 'MIXED_ROOTS', tool_count: 1, target_count: 4,
+      candidate_root_count: 2, registered_root_count: 1,
+      outside_or_unknown_root_count: 0, relative_or_unknown_root_count: 1,
+      unidentified_tool_count: 0,
+    });
+    const serialized = JSON.stringify(result);
+    assert.equal(serialized.includes(registeredRoot), false,
+      'the returned evidence classifies target identities without disclosing filesystem paths');
+    assert.equal(serialized.includes('one.mjs'), false);
+    assert.equal(serialized.includes('two.mjs'), false);
+    assert.equal(serialized.includes('unknown.mjs'), false);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('incomplete Antigravity streams preserve deduplicated per-step usage without claiming a terminal result', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'pty-agy-partial-usage-'));
   const stdoutPath = join(directory, 'stdout.jsonl');
