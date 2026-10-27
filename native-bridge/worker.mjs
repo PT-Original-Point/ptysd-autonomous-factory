@@ -317,18 +317,15 @@ function hasBlockingRequestReceipt(entries) {
   }
   return false;
 }
-// This releases only the same-path writer lease after the executor has returned
-// and captured a complete, request-bound diff. It does not accept the task.
-function hasCompletedScopedEditDiff(receipt, job) {
+function hasRequestBoundScopedEditDiff(receipt, job) {
   // Schema-1 terminals written before source_diff_evidence was introduced can
   // still prove a complete, request-bound diff through their scope, digest,
   // byte-count, and changed-file fields. An explicit UNKNOWN/NOT_INSPECTED value
-  // remains fail-closed. This releases only the same-path writer lease; it does
-  // not accept the task.
+  // remains fail-closed.
   const sourceDiffCaptured = receipt?.source_diff_evidence === 'CAPTURED' ||
     receipt?.source_diff_evidence === undefined;
-  return receipt?.state === 'FINISHED' && receipt.model_invoked === true &&
-    receipt.coding_state === 'DIFF_CAPTURED_UNVERIFIED' && receipt.scope_valid === true &&
+  return receipt?.model_invoked === true && receipt.coding_state === 'DIFF_CAPTURED_UNVERIFIED' &&
+    receipt.scope_valid === true &&
     sourceDiffCaptured &&
     receipt.source_pr === job.source_pr && receipt.goal_comment_id === job.goal_comment_id &&
     receipt.goal_body_sha256 === job.goal_body_sha256 &&
@@ -338,7 +335,39 @@ function hasCompletedScopedEditDiff(receipt, job) {
     /^[a-f0-9]{64}$/i.test(receipt.changed_files_sha256 || '') &&
     Number.isSafeInteger(receipt.changed_files_count) && receipt.changed_files_count > 0;
 }
-function unresolvedEditAttempt(job, entries) {
+// A verified candidate-root-only W2 diff also releases the W2 same-path lease,
+// even when the attempt is BLOCKED and its task acceptance or external effects
+// remain UNKNOWN. Every file-change tool target and changed path must be bound
+// to the isolated candidate root and complete scoped diff. This does not accept
+// the task, clear UNKNOWN effects, or release the path for another Worker lane.
+function hasIsolatedW2ScopedEditDiff(receipt, job) {
+  const targets = receipt?.file_change_target_evidence;
+  const fileToolEvents = receipt?.file_change_tool_completed_count +
+    receipt?.file_change_tool_failed_count + receipt?.file_change_tool_incomplete_count;
+  return job?.kind === 'antigravity_edit' && receipt?.kind === 'antigravity_edit' &&
+    terminalStates.has(receipt?.state) && hasRequestBoundScopedEditDiff(receipt, job) &&
+    receipt.source_diff_evidence === 'CAPTURED' &&
+    receipt.tool_execution_evidence === 'OBSERVED' &&
+    receipt.file_change_tool_evidence === 'OBSERVED' &&
+    Number.isSafeInteger(fileToolEvents) &&
+    validAntigravityFileChangeTargetEvidence(targets) &&
+    targets.status === 'CANDIDATE_ROOT_ONLY' && targets.tool_count > 0 &&
+    targets.target_count === targets.tool_count &&
+    targets.candidate_root_count === targets.tool_count &&
+    targets.registered_root_count === 0 && targets.outside_or_unknown_root_count === 0 &&
+    targets.relative_or_unknown_root_count === 0 && targets.unidentified_tool_count === 0 &&
+    fileToolEvents === targets.tool_count &&
+    receipt.permission_mode_evidence === 'REQUEST_REVIEW_CONFIRMED' &&
+    receipt.tool_policy_evidence === 'W2_NONFILE_ACTIONS_DENIED' &&
+    receipt.cli_binary_integrity_evidence === 'MATCHED' &&
+    receipt.forbidden_tool_execution_evidence === 'NOT_OBSERVED';
+}
+function hasCompletedScopedEditDiff(receipt, job) {
+  // FINISHED plus a complete request-bound diff releases the same-path lease;
+  // task acceptance remains a separate review.
+  return receipt?.state === 'FINISHED' && hasRequestBoundScopedEditDiff(receipt, job);
+}
+function unresolvedEditAttempt(job, entries, { allowIsolatedW2ScopedDiff = false } = {}) {
   if (!validEditPaths(job?.edit_paths)) return true;
   const matching = entries.filter(entry => entry.receipt.host.toUpperCase() === job.host.toUpperCase() &&
     entry.receipt.kind === job.kind && entry.receipt.source_sha === job.source_sha);
@@ -354,7 +383,8 @@ function unresolvedEditAttempt(job, entries) {
     const last = attemptEntries.at(-1)?.receipt;
     if (last?.state === 'STARTED' || (terminalStates.has(last?.state) &&
         last.external_effects !== 'NONE' && last.model_invoked !== false &&
-        !hasCompletedScopedEditDiff(last, job))) return true;
+        !hasCompletedScopedEditDiff(last, job) &&
+        !(allowIsolatedW2ScopedDiff && hasIsolatedW2ScopedEditDiff(last, job)))) return true;
   }
   return false;
 }
@@ -676,7 +706,10 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     if (isEditExecutionKind(v.job.kind) && [...jobs.values()].some(owner =>
       owner.job.request_id !== v.job.request_id && isEditExecutionKind(owner.job.kind) &&
       editPathsOverlap(v.job.edit_paths, owner.job.edit_paths) &&
-      unresolvedEditAttempt(owner.job, receipts.get(owner.job.request_id) || []))) continue;
+      unresolvedEditAttempt(owner.job, receipts.get(owner.job.request_id) || [], {
+        allowIsolatedW2ScopedDiff: v.job.kind === 'antigravity_edit' &&
+          owner.job.kind === 'antigravity_edit',
+      }))) continue;
     return { job: v.job, id: v.id, originalBody: v.content };
   }
   return null;
