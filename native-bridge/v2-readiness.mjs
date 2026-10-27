@@ -794,46 +794,52 @@ export function emptyAntigravityFileChangeTargetEvidence() {
     unidentified_tool_count: 0 };
 }
 
-function antigravityFileChangeTargetRoots(toolInfo, expectedCwd, registeredRoot) {
-  const roots = new Set();
+function antigravityFileChangeTargetIdentities(toolInfo, expectedCwd, registeredRoot) {
+  const targets = new Map();
   const parameters = toolInfo && typeof toolInfo === 'object' && !Array.isArray(toolInfo)
     ? toolInfo.parameters : null;
-  if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) return roots;
+  if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) return targets;
   for (const [key, raw] of Object.entries(parameters)) {
     if (!ANTIGRAVITY_FILE_CHANGE_TARGET_KEYS.has(key.toLowerCase())) continue;
     const values = Array.isArray(raw) ? raw : [raw];
     for (const value of values) {
-      if (typeof value !== 'string' || !value.trim()) {
-        roots.add('relative_or_unknown_root_count');
-        continue;
-      }
-      let target = value.trim();
-      if (/^file:/i.test(target)) target = fileUriLocalPath(target);
+      const rawTarget = typeof value === 'string' ? value.trim() : null;
+      let target = rawTarget;
+      if (typeof target === 'string' && /^file:/i.test(target)) target = fileUriLocalPath(target);
+      const identity = typeof target === 'string' && target.trim()
+        ? (win32.isAbsolute(target)
+          ? `win:${win32.normalize(target).replace(/[\\/]+$/, '').toLowerCase()}`
+          : isAbsolute(target)
+            ? `posix:${posix.normalize(target).replace(/\/+$/, '')}`
+            : `relative:${win32.normalize(target).toLowerCase()}`)
+        : `unknown:${typeof value}:${JSON.stringify(value) ?? String(value)}`;
+      let root;
       if (typeof target !== 'string' || !(isAbsolute(target) || win32.isAbsolute(target))) {
-        roots.add('relative_or_unknown_root_count');
+        root = 'relative_or_unknown_root_count';
       } else if (antigravityPathWithinRegisteredFolder(expectedCwd, target)) {
-        roots.add('candidate_root_count');
+        root = 'candidate_root_count';
       } else if (typeof registeredRoot === 'string' &&
           (isAbsolute(registeredRoot) || win32.isAbsolute(registeredRoot)) &&
           antigravityPathWithinRegisteredFolder(registeredRoot, target)) {
-        roots.add('registered_root_count');
+        root = 'registered_root_count';
       } else {
-        roots.add('outside_or_unknown_root_count');
+        root = 'outside_or_unknown_root_count';
       }
+      targets.set(identity, root);
     }
   }
-  return roots;
+  return targets;
 }
 
 function summarizeAntigravityFileChangeTargets(fileTools) {
   const evidence = emptyAntigravityFileChangeTargetEvidence();
   evidence.tool_count = fileTools.length;
   for (const tool of fileTools) {
-    if (!tool.targetRoots?.size) {
+    if (!tool.targetIdentities?.size) {
       evidence.unidentified_tool_count++;
       continue;
     }
-    for (const root of tool.targetRoots) {
+    for (const root of tool.targetIdentities.values()) {
       evidence[root]++;
       evidence.target_count++;
     }
@@ -945,13 +951,14 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
           }
           const previous = tools.get(step.step_index);
           if (previous && previous.name !== step.tool_name) { malformed = true; continue; }
-          const targetRoots = new Set(previous?.targetRoots ?? []);
+          const targetIdentities = new Map(previous?.targetIdentities ?? []);
           if (ANTIGRAVITY_FILE_CHANGE_TOOL_NAMES.includes(step.tool_name))
-            for (const root of antigravityFileChangeTargetRoots(step.tool_info,
-              expectedCwd, registeredRoot)) targetRoots.add(root);
+            for (const [identity, root] of antigravityFileChangeTargetIdentities(step.tool_info,
+              expectedCwd, registeredRoot))
+              targetIdentities.set(identity, root);
           tools.set(step.step_index, { name: step.tool_name, state: step.state,
             failed: step.state === 'ERROR' || (step.state === 'DONE' && Boolean(step.tool_info?.error)),
-            targetRoots });
+            targetIdentities });
         }
       } else if (event.event === 'result') {
         const terminal = event.result;

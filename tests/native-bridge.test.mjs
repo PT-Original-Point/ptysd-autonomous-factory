@@ -2518,6 +2518,63 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(await verifyCapturedEvidence(stateDir,{terminal:finalReceipt,local_evidence:result.local_evidence}),true);
 
     git(workspace,'checkout','--','src/worker.mjs');
+    const fileFailureSession='conv_antigravity_file_failure_20261027';
+    let fileFailureModelLaunches=0;
+    const fileFailure=await executeOpenCodeTask('Synthetic; retain a scoped diff after a failed file edit.',
+      config,job,randomUUID(),{now:()=>now,baseEnv:env,localAppData,
+        runAntigravityV2Readiness:()=>readiness,
+        async runCapturedProcess(_bin,_args,options){
+          fileFailureModelLaunches++;
+          writeFileSync(join(workspace,'src','worker.mjs'),
+            'export const state = "captured after a failed edit attempt";\n');
+          const fileTarget=join(workspace,'src','worker.mjs');
+          const events=[
+            {event:'init',conversation_id:fileFailureSession,init:{model:ANTIGRAVITY_V2_MODEL,
+              cwd:workspace,permission_mode:'request-review'}},
+            {event:'step_update',step_update:{conversation_id:fileFailureSession,step_index:0,
+              state:'ACTIVE',step_type:'tool',tool_name:'write_to_file',tool_info:{parameters:{TargetFile:fileTarget}}}},
+            {event:'step_update',step_update:{conversation_id:fileFailureSession,step_index:0,
+              state:'ERROR',step_type:'tool',tool_name:'write_to_file',tool_info:{parameters:{TargetFile:fileTarget},
+                error:{code:'WRITE_REJECTED'}}}},
+            {event:'step_update',step_update:{conversation_id:fileFailureSession,step_index:1,
+              state:'ACTIVE',step_type:'tool',tool_name:'edit_file',tool_info:{parameters:{TargetFile:fileTarget}}}},
+            {event:'step_update',step_update:{conversation_id:fileFailureSession,step_index:1,
+              state:'DONE',step_type:'tool',tool_name:'edit_file',tool_info:{parameters:{TargetFile:fileTarget}}}},
+            {event:'result',result:{conversation_id:fileFailureSession,status:'SUCCESS',response:'',
+              usage:{input_tokens:90,output_tokens:20,thinking_tokens:4,cache_read_tokens:0,total_tokens:114}}},
+          ];
+          const out=Buffer.from(events.map(event=>JSON.stringify(event)).join('\n')+'\n');
+          const err=Buffer.alloc(0); writeFileSync(options.stdoutPath,out,{flag:'wx'});
+          writeFileSync(options.stderrPath,err,{flag:'wx'});
+          const combined=createHash('sha256').update(out).update(Buffer.from('\n--- STDERR ---\n')).update(err).digest('hex');
+          return {outcome:'SYNTHETIC_PROCESS_EXITED',exit_code:0,evidence_sha256:combined,
+            evidence_bytes:out.length+Buffer.byteLength('\n--- STDERR ---\n'),local_evidence:{
+              stdout_file:basename(options.stdoutPath),stdout_sha256:createHash('sha256').update(out).digest('hex'),
+              stdout_bytes:out.length,stderr_file:basename(options.stderrPath),
+              stderr_sha256:createHash('sha256').update(err).digest('hex'),stderr_bytes:0,
+              termination_state:'NOT_REQUESTED'}};
+        }});
+    assert.equal(fileFailureModelLaunches,1);
+    assert.equal(fileFailure.outcome,'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED_FILE_TOOL_FAILURES_RETAINED',
+      JSON.stringify({edit_diff_error:fileFailure.local_evidence?.edit_diff_error,
+        cli_status:fileFailure.cli_status,run_reason:fileFailure.local_evidence?.antigravity_run?.reason}));
+    assert.equal(fileFailure.exit_code,0,'a completed CLI session with a captured scoped diff is terminal');
+    assert.equal(fileFailure.cli_exit_code,0);
+    assert.equal(fileFailure.tool_execution_failed_count,1);
+    assert.equal(fileFailure.file_change_tool_failed_count,1);
+    assert.equal(fileFailure.file_change_tool_completed_count,1);
+    assert.equal(fileFailure.file_change_tool_incomplete_count,0);
+    assert.deepEqual(fileFailure.changed_files,['src/worker.mjs']);
+    assert.equal(fileFailure.task_acceptance,'UNKNOWN');
+    assert.equal(fileFailure.external_effects,'UNKNOWN');
+    assert.equal(terminalStateForResult(fileFailure),'FINISHED',
+      'FINISHED records terminal lifecycle only; the captured diff remains unaccepted');
+    const fileFailureReceipt=receipt(job.request_id,randomUUID(),'FINISHED',job,fileFailure);
+    assert.equal(fileFailureReceipt.file_change_tool_failed_count,1);
+    assert.equal(fileFailureReceipt.task_acceptance,'UNKNOWN');
+    assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(fileFailureReceipt)).file_change_tool_failed_count,1);
+
+    git(workspace,'checkout','--','src/worker.mjs');
     const unrelatedWipPath=join(registeredProjectRoot,'registered-root-only.txt');
     const unrelatedWip='pre-existing unrelated registered-root WIP\n';
     writeFileSync(unrelatedWipPath,unrelatedWip);
