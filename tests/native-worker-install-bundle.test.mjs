@@ -74,6 +74,35 @@ assert.doesNotMatch(installer, /New-ScheduledTaskAction\s+-Execute\s+\$node\b/i,
 assert.match(installer, /Arguments\s+-ne\s+\$argsLine/i,
   'task readback verifies the exact wrapper arguments');
 
+const refreshBlock = installer.slice(installer.indexOf('function Invoke-WorkerRuntimeRefresh'),
+  installer.indexOf('function Require-Command'));
+const taskReadbackBlock = installer.slice(installer.indexOf('function Get-WorkerRuntimeTaskReadback'),
+  installer.indexOf('function Assert-WorkerRuntimeNoActiveProcess'));
+const refreshSourceBlock = installer.slice(installer.indexOf('function Assert-WorkerRuntimeSource'),
+  installer.indexOf('function Write-WorkerRuntimeNewFile'));
+assert.match(installer, /ValidateSet\([^)]*RefreshRuntimeModules/i,
+  'Worker runtime refresh is an explicit installer mode');
+assert.ok(refreshBlock.includes('Assert-WorkerRuntimeSource $git $gh'),
+  'refresh requires a clean exact-main source tree and same-source provider readback');
+assert.ok(refreshSourceBlock.includes('merge-base'),
+  'refresh requires the accepted PR head and merge commit to be reachable from main');
+assert.ok(refreshSourceBlock.includes('Assert-WorkerRuntimeTrustedRuns $runsText $AcceptedPrHead'),
+  'refresh requires exact trusted workflow paths, trigger events and successful runs on the accepted PR head');
+assert.ok(refreshBlock.includes('Get-WorkerRuntimeTaskDefinitionSha256'),
+  'refresh pins the complete registered task definition across temporary disable and re-enable');
+assert.ok(taskReadbackBlock.includes('Resolve-WorkerRuntimeIdentitySid') && taskReadbackBlock.includes("Properties['UserId']"),
+  'refresh binds the registered task principal to the current Windows user SID');
+assert.ok(refreshBlock.includes('Assert-WorkerRuntimeNoActiveProcess'),
+  'refresh refuses to replace runtime modules while the exact worker process may be active');
+assert.ok(refreshBlock.includes('Write-WorkerRuntimeAtomicReplacement'),
+  'refresh atomically replaces only modules whose pinned source bytes differ');
+assert.ok(refreshBlock.includes("'MODEL_EXECUTION=NOT_INVOKED_BY_REFRESH'"),
+  'refresh mode itself never invokes a model');
+assert.match(refreshBlock, /configWriteLockPath[\s\S]*?FileShare\]::None/i,
+  'refresh reuses the existing exclusive Worker config lock instead of adding another coordination service');
+assert.match(installer, /WORKER_RUNTIME_REFRESH_PARTIAL_STATE_REVIEW_REQUIRED/,
+  'unreconciled failures are reported as partial state instead of success');
+
 test('Windows executor accepts omitted default RunLevel only with exact native Limited readback', () => {
   const sid = 'S-1-5-21-101-202-303-1001';
   const root = mkdtempSync(join(tmpdir(), 'pty-w2-runlevel-'));

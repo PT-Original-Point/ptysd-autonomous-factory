@@ -1,10 +1,13 @@
 # Windows PowerShell 5.1 native, least-privilege, version-neutral OpenCode ingress.
 [CmdletBinding()]
 param(
-    [ValidateSet('Audit','Install','RunOnce','Uninstall')][string]$Mode = 'Audit',
+    [ValidateSet('Audit','Install','RunOnce','RefreshRuntimeModules','Uninstall')][string]$Mode = 'Audit',
     [ValidateRange(1,99999999)][int]$IssueNumber = 1,
     [string]$Workspace = '',
-    [string]$TrustedDispatcher = 't14210184'
+    [string]$TrustedDispatcher = 't14210184',
+    [string]$SourceMainSha = '',
+    [ValidateRange(0,99999999)][int]$AcceptedPr = 0,
+    [string]$AcceptedPrHead = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -119,6 +122,579 @@ function Write-WorkerConfigAtomically {
         if ([IO.File]::Exists($temporaryPath)) { [IO.File]::Delete($temporaryPath) }
     }
 }
+
+function Get-WorkerRuntimeBytesSha256([byte[]]$Bytes) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Get-WorkerRuntimeFileSha256([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw 'WORKER_RUNTIME_PATH_NOT_REGULAR_FILE'
+    }
+    return Get-WorkerRuntimeBytesSha256 ([IO.File]::ReadAllBytes($Path))
+}
+
+function Resolve-WorkerRuntimeIdentitySid([string]$Identity) {
+    if ([string]::IsNullOrWhiteSpace($Identity)) { throw 'WORKER_RUNTIME_TASK_PRINCIPAL_IDENTITY_UNKNOWN' }
+    try {
+        if ($Identity -match '^S-\d-\d+(?:-\d+)+$') {
+            return (New-Object Security.Principal.SecurityIdentifier($Identity)).Value
+        }
+        return (New-Object Security.Principal.NTAccount($Identity)).Translate(
+            [Security.Principal.SecurityIdentifier]).Value
+    } catch { throw 'WORKER_RUNTIME_TASK_PRINCIPAL_IDENTITY_UNKNOWN' }
+}
+
+function Assert-WorkerRuntimePathChain([string]$Path) {
+    $current = [IO.Path]::GetFullPath($Path)
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'WORKER_RUNTIME_PATH_CHAIN_REPARSE_POINT'
+            }
+        }
+        $parent = [IO.Directory]::GetParent($current)
+        if ($null -eq $parent) { break }
+        $current = $parent.FullName
+    }
+}
+
+function Write-WorkerRuntimeAtomicReplacement([byte[]]$Bytes, [string]$DestinationPath,
+    [string]$ExpectedCurrentSha256, [string]$ExpectedNewSha256) {
+    if ((Get-WorkerRuntimeBytesSha256 $Bytes) -cne $ExpectedNewSha256.ToLowerInvariant()) {
+        throw 'WORKER_RUNTIME_ATOMIC_REPLACEMENT_BYTES_HASH_MISMATCH'
+    }
+    if ((Get-WorkerRuntimeFileSha256 $DestinationPath) -cne $ExpectedCurrentSha256.ToLowerInvariant()) {
+        throw 'WORKER_RUNTIME_ATOMIC_REPLACEMENT_PRESTATE_MISMATCH'
+    }
+    $temporaryPath = $DestinationPath + '.worker-refresh-' + [guid]::NewGuid().ToString('N') + '.tmp'
+    $replaceBackupPath = $DestinationPath + '.worker-refresh-backup-' + [guid]::NewGuid().ToString('N')
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($temporaryPath, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Write($Bytes, 0, $Bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        if ((Get-WorkerRuntimeFileSha256 $temporaryPath) -cne $ExpectedNewSha256.ToLowerInvariant()) {
+            throw 'WORKER_RUNTIME_ATOMIC_REPLACEMENT_STAGE_HASH_MISMATCH'
+        }
+        [IO.File]::Replace($temporaryPath, $DestinationPath, $replaceBackupPath)
+        if ((Get-WorkerRuntimeFileSha256 $DestinationPath) -cne $ExpectedNewSha256.ToLowerInvariant()) {
+            throw 'WORKER_RUNTIME_ATOMIC_REPLACEMENT_READBACK_MISMATCH'
+        }
+        if ((Get-WorkerRuntimeFileSha256 $replaceBackupPath) -cne $ExpectedCurrentSha256.ToLowerInvariant()) {
+            throw 'WORKER_RUNTIME_ATOMIC_REPLACEMENT_BACKUP_MISMATCH'
+        }
+        [IO.File]::Delete($replaceBackupPath)
+        if ([IO.File]::Exists($replaceBackupPath)) { throw 'WORKER_RUNTIME_ATOMIC_REPLACEMENT_BACKUP_CLEANUP_FAILED' }
+    } catch {
+        $originalError = $_.Exception.Message
+        if ([IO.File]::Exists($replaceBackupPath)) {
+            try {
+                $currentHash = Get-WorkerRuntimeFileSha256 $DestinationPath
+                $backupHash = Get-WorkerRuntimeFileSha256 $replaceBackupPath
+                if ($currentHash -eq $ExpectedNewSha256.ToLowerInvariant() -and
+                    $backupHash -eq $ExpectedCurrentSha256.ToLowerInvariant()) {
+                    $failedBytesPath = $DestinationPath + '.worker-refresh-failed-' + [guid]::NewGuid().ToString('N')
+                    [IO.File]::Replace($replaceBackupPath, $DestinationPath, $failedBytesPath)
+                    if ((Get-WorkerRuntimeFileSha256 $DestinationPath) -cne $ExpectedCurrentSha256.ToLowerInvariant() -or
+                        (Get-WorkerRuntimeFileSha256 $failedBytesPath) -cne $ExpectedNewSha256.ToLowerInvariant()) {
+                        throw 'WORKER_RUNTIME_ATOMIC_REPLACEMENT_ROLLBACK_READBACK_MISMATCH'
+                    }
+                    [IO.File]::Delete($failedBytesPath)
+                } elseif ($currentHash -eq $ExpectedCurrentSha256.ToLowerInvariant() -and
+                    $backupHash -eq $ExpectedCurrentSha256.ToLowerInvariant()) {
+                    [IO.File]::Delete($replaceBackupPath)
+                } else {
+                    throw 'WORKER_RUNTIME_ATOMIC_REPLACEMENT_THIRD_HASH_PRESERVED'
+                }
+            } catch { throw 'WORKER_RUNTIME_ATOMIC_REPLACEMENT_ROLLBACK_UNKNOWN' }
+        }
+        throw ('WORKER_RUNTIME_ATOMIC_REPLACEMENT_FAILED:' + $originalError)
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ([IO.File]::Exists($temporaryPath)) { [IO.File]::Delete($temporaryPath) }
+    }
+}
+
+function Get-WorkerRuntimeTaskDefinitionSha256 {
+    try { $text = Export-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop }
+    catch { throw 'WORKER_RUNTIME_TASK_XML_READBACK_UNKNOWN' }
+    if ([string]::IsNullOrWhiteSpace([string]$text)) { throw 'WORKER_RUNTIME_TASK_XML_READBACK_UNKNOWN' }
+    try { [xml]$document = [string]$text }
+    catch { throw 'WORKER_RUNTIME_TASK_XML_INVALID' }
+    $triggerNodes = @($document.SelectNodes("//*[local-name()='Triggers']/*"))
+    $settingsNode = $document.SelectSingleNode("//*[local-name()='Settings']")
+    if ($triggerNodes.Count -ne 1 -or $triggerNodes[0].LocalName -cne 'TimeTrigger' -or
+        $null -eq $settingsNode) { throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' }
+    $intervalNode = $triggerNodes[0].SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='Interval']")
+    $durationNode = $triggerNodes[0].SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='Duration']")
+    $executionLimitNode = $settingsNode.SelectSingleNode("./*[local-name()='ExecutionTimeLimit']")
+    $multipleInstancesNode = $settingsNode.SelectSingleNode("./*[local-name()='MultipleInstancesPolicy']")
+    $startWhenAvailableNode = $settingsNode.SelectSingleNode("./*[local-name()='StartWhenAvailable']")
+    if ($null -eq $intervalNode -or [string]$intervalNode.InnerText -cne 'PT5M' -or
+        $null -eq $durationNode -or [string]$durationNode.InnerText -cne 'P3650D' -or
+        $null -eq $executionLimitNode -or [string]$executionLimitNode.InnerText -cne 'PT15M' -or
+        $null -eq $multipleInstancesNode -or [string]$multipleInstancesNode.InnerText -cne 'IgnoreNew' -or
+        $null -eq $startWhenAvailableNode -or [string]$startWhenAvailableNode.InnerText -ine 'true') {
+        throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH'
+    }
+    $enabledNodes = @($document.SelectNodes("//*[local-name()='Settings']/*[local-name()='Enabled']"))
+    if ($enabledNodes.Count -gt 1) { throw 'WORKER_RUNTIME_TASK_XML_ENABLED_FIELD_AMBIGUOUS' }
+    foreach ($node in $enabledNodes) { $null = $node.ParentNode.RemoveChild($node) }
+    $bytes = ([Text.UTF8Encoding]::new($false)).GetBytes($document.OuterXml)
+    return Get-WorkerRuntimeBytesSha256 $bytes
+}
+
+function Get-WorkerRuntimeTaskReadback([bool]$ExpectedEnabled, [string]$ExpectedState,
+    [string]$ExpectedDefinitionSha256 = '', [string[]]$AdditionalStates = @()) {
+    $task = Get-TaskOptional
+    if ($null -eq $task -or $task.TaskPath -cne '\' -or
+        ([string]$task.State -cne $ExpectedState -and [string]$task.State -notin $AdditionalStates)) {
+        throw 'WORKER_RUNTIME_TASK_STATE_READBACK_MISMATCH'
+    }
+    $enabledProperty = $task.Settings.PSObject.Properties['Enabled']
+    if ($null -eq $enabledProperty -or $enabledProperty.Value -isnot [bool] -or
+        $enabledProperty.Value -ne $ExpectedEnabled) { throw 'WORKER_RUNTIME_TASK_ENABLED_READBACK_MISMATCH' }
+    $taskPrincipalProperty = $task.Principal.PSObject.Properties['UserId']
+    if ($null -eq $taskPrincipalProperty) { throw 'WORKER_RUNTIME_TASK_PRINCIPAL_IDENTITY_UNKNOWN' }
+    $taskPrincipalSid = Resolve-WorkerRuntimeIdentitySid ([string]$taskPrincipalProperty.Value)
+    $currentIdentity = $null
+    try {
+        $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        if ($null -eq $currentIdentity.User -or
+            $taskPrincipalSid -cne $currentIdentity.User.Value) {
+            throw 'WORKER_RUNTIME_TASK_PRINCIPAL_IDENTITY_MISMATCH'
+        }
+    } catch {
+        if ($_.Exception.Message -eq 'WORKER_RUNTIME_TASK_PRINCIPAL_IDENTITY_MISMATCH') { throw }
+        throw 'WORKER_RUNTIME_TASK_PRINCIPAL_IDENTITY_UNKNOWN'
+    } finally {
+        if ($null -ne $currentIdentity) { $currentIdentity.Dispose() }
+    }
+    $actions = @($task.Actions)
+    if (@($actions).Count -ne 1 -or
+        [string]$actions[0].Execute -ine $wscript -or
+        [string]$actions[0].Arguments -cne ('//B //NoLogo "' + $hiddenWorker + '"') -or
+        [string]$actions[0].WorkingDirectory -ine $homeDir -or
+        [string]$task.Principal.LogonType -cne 'Interactive' -or
+        [string]$task.Principal.RunLevel -cne 'Limited' -or
+        [string]$task.Settings.MultipleInstances -cne 'IgnoreNew' -or
+        [string]$task.Settings.ExecutionTimeLimit -cne 'PT15M' -or
+        $task.Settings.StartWhenAvailable -isnot [bool] -or
+        $task.Settings.StartWhenAvailable -ne $true) {
+        throw 'WORKER_RUNTIME_TASK_IDENTITY_MISMATCH'
+    }
+    $definitionHash = Get-WorkerRuntimeTaskDefinitionSha256
+    if ($ExpectedDefinitionSha256 -and $definitionHash -cne $ExpectedDefinitionSha256.ToLowerInvariant()) {
+        throw 'WORKER_RUNTIME_TASK_DEFINITION_CHANGED'
+    }
+    return [pscustomobject]@{ Task = $task; DefinitionSha256 = $definitionHash }
+}
+
+function Assert-WorkerRuntimeNoActiveProcess([string]$NodePath) {
+    try { $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop) }
+    catch { throw 'WORKER_RUNTIME_PROCESS_STATE_UNKNOWN' }
+    foreach ($process in $processes) {
+        $name = [string]$process.Name
+        $commandProperty = $process.PSObject.Properties['CommandLine']
+        $command = if ($null -ne $commandProperty) { [string]$commandProperty.Value } else { '' }
+        $exe = [string]$process.ExecutablePath
+        $expectedNode = $false
+        if ($exe) {
+            try { $expectedNode = [string]::Equals([IO.Path]::GetFullPath($exe),
+                [IO.Path]::GetFullPath($NodePath), [StringComparison]::OrdinalIgnoreCase) }
+            catch { throw 'WORKER_RUNTIME_PROCESS_IDENTITY_UNKNOWN' }
+        }
+        if ([string]::IsNullOrWhiteSpace($command)) {
+            if ($expectedNode -or $name -ieq 'wscript.exe') { throw 'WORKER_RUNTIME_PROCESS_STATE_UNKNOWN' }
+            continue
+        }
+        if ($command.IndexOf($worker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $command.IndexOf($hiddenWorker, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw 'WORKER_RUNTIME_PROCESS_RUNNING_DO_NOT_REFRESH'
+        }
+    }
+}
+
+function Invoke-WorkerRuntimeCommandText([string]$Executable, [string[]]$Arguments,
+    [string]$FailureCode) {
+    $oldPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $Executable @Arguments 2>$null)
+        $exitCode = $LASTEXITCODE
+    } catch { throw $FailureCode }
+    finally { $ErrorActionPreference = $oldPreference }
+    if ($exitCode -ne 0) { throw $FailureCode }
+    return (($output -join "`n").Trim())
+}
+
+function Assert-WorkerRuntimeTrustedRuns([string]$RunRows, [string]$ExpectedHead) {
+    if ($ExpectedHead -notmatch '^[0-9a-fA-F]{40}$') { throw 'WORKER_RUNTIME_CI_HEAD_PIN_INVALID' }
+    $required = @{
+        'csg-trusted-verifier-hosted' = [pscustomobject]@{
+            Name='V5.3-R4 CSG trusted verifier (GitHub-hosted)'
+            Path='.github/workflows/csg-trusted-verifier-hosted.yml'
+            Event='pull_request_target'; WorkflowId='381764260'
+        }
+        'check-native-only' = [pscustomobject]@{
+            Name='V5.3 main source retirement integrity'
+            Path='.github/workflows/v53-r4-main-source-retirement.yml'
+            Event='pull_request'; WorkflowId='381351204'
+        }
+        'v2-native-windows' = [pscustomobject]@{
+            Name='V53R4 OpenCode V2 CLI zero-token qualification'
+            Path='.github/workflows/v53r4-v2-cli-qualification.yml'
+            Event='pull_request'; WorkflowId='382735923'
+        }
+    }
+    $latest = @{}
+    foreach ($line in ($RunRows -split "`n")) {
+        $row = $line.TrimEnd("`r")
+        if (-not $row) { continue }
+        $fields = $row.Split([char]9)
+        if ($fields.Count -ne 11) { throw 'WORKER_RUNTIME_CI_READBACK_MALFORMED' }
+        if (-not $required.ContainsKey($fields[0])) { continue }
+        if ($fields[9] -notmatch '^\d+$' -or $fields[10] -notmatch '^\d+$') {
+            throw 'WORKER_RUNTIME_CI_RUN_ID_INVALID'
+        }
+        $attempt = [int]$fields[9]
+        $runId = [long]$fields[10]
+        if (-not $latest.ContainsKey($fields[0]) -or
+            $attempt -gt $latest[$fields[0]].Attempt -or
+            ($attempt -eq $latest[$fields[0]].Attempt -and $runId -gt $latest[$fields[0]].RunId)) {
+            $latest[$fields[0]] = [pscustomobject]@{ Attempt=$attempt; RunId=$runId; Fields=$fields }
+        }
+    }
+    foreach ($name in @('csg-trusted-verifier-hosted','check-native-only','v2-native-windows')) {
+        if (-not $latest.ContainsKey($name)) { throw ('WORKER_RUNTIME_CI_CHECK_MISSING:' + $name) }
+        $fields = $latest[$name].Fields
+        $identity = $required[$name]
+        if ($fields[1] -cne $identity.Name -or $fields[2] -cne $identity.Path -or
+            $fields[3] -cne $identity.Event -or $fields[4] -cne 'completed' -or
+            $fields[5] -cne 'success' -or $fields[6] -ine $ExpectedHead -or
+            $fields[7] -cne $repo -or $fields[8] -cne $identity.WorkflowId) {
+            throw ('WORKER_RUNTIME_CI_WORKFLOW_NOT_TRUSTED_SUCCESS:' + $name)
+        }
+    }
+}
+
+function Assert-WorkerRuntimeSource([string]$GitExe, [string]$GhExe) {
+    if ($SourceMainSha -notmatch '^[0-9a-fA-F]{40}$' -or
+        $AcceptedPr -lt 1 -or $AcceptedPrHead -notmatch '^[0-9a-fA-F]{40}$') {
+        throw 'WORKER_RUNTIME_SOURCE_PINS_REQUIRED'
+    }
+    if ([IO.Path]::GetFileName([IO.Path]::GetFullPath($PSScriptRoot)) -ine 'native-bridge') {
+        throw 'WORKER_RUNTIME_SOURCE_ROOT_INVALID'
+    }
+    $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $gitRoot = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'rev-parse','--show-toplevel') `
+        'WORKER_RUNTIME_LOCAL_GIT_READBACK_FAILED'
+    if (-not [string]::Equals([IO.Path]::GetFullPath($gitRoot), $repoRoot,
+        [StringComparison]::OrdinalIgnoreCase)) { throw 'WORKER_RUNTIME_LOCAL_GIT_ROOT_MISMATCH' }
+    $localHead = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'rev-parse','HEAD') `
+        'WORKER_RUNTIME_LOCAL_HEAD_READBACK_FAILED'
+    if ($localHead -ine $SourceMainSha) { throw 'WORKER_RUNTIME_LOCAL_HEAD_MISMATCH' }
+    $status = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'status','--porcelain=v1','--untracked-files=all') `
+        'WORKER_RUNTIME_LOCAL_STATUS_READBACK_FAILED'
+    if ($status) { throw 'WORKER_RUNTIME_SOURCE_WORKTREE_DIRTY' }
+    $remoteMain = Invoke-WorkerRuntimeCommandText $GhExe @('api',('repos/' + $repo + '/commits/main'),'--jq','.sha') `
+        'WORKER_RUNTIME_GITHUB_MAIN_READBACK_FAILED'
+    if ($remoteMain -ine $SourceMainSha) { throw 'WORKER_RUNTIME_GITHUB_MAIN_CHANGED' }
+    $prJq = '[.state, (.merged_at // ""), .base.ref, .base.repo.full_name, .head.repo.full_name, .head.sha, .merge_commit_sha] | @tsv'
+    $prText = Invoke-WorkerRuntimeCommandText $GhExe @('api',('repos/' + $repo + '/pulls/' + $AcceptedPr),'--jq',$prJq) `
+        'WORKER_RUNTIME_ACCEPTED_PR_READBACK_FAILED'
+    $pr = $prText.Split("`t")
+    if ($pr.Count -ne 7 -or $pr[0] -cne 'closed' -or -not $pr[1] -or $pr[2] -cne 'main' -or
+        $pr[3] -cne $repo -or $pr[4] -cne $repo -or $pr[5] -ine $AcceptedPrHead -or
+        $pr[6] -notmatch '^[0-9a-fA-F]{40}$') {
+        throw 'WORKER_RUNTIME_ACCEPTED_PR_IDENTITY_MISMATCH'
+    }
+    $runsJq = '.workflow_runs[] | select(.path == ".github/workflows/csg-trusted-verifier-hosted.yml" or ' +
+        '.path == ".github/workflows/v53-r4-main-source-retirement.yml" or ' +
+        '.path == ".github/workflows/v53r4-v2-cli-qualification.yml") | ' +
+        '[(if .path == ".github/workflows/csg-trusted-verifier-hosted.yml" then "csg-trusted-verifier-hosted" ' +
+        'elif .path == ".github/workflows/v53-r4-main-source-retirement.yml" then "check-native-only" ' +
+        'else "v2-native-windows" end), .name, .path, .event, .status, (.conclusion // ""), .head_sha, ' +
+        '(.head_repository.full_name // ""), (.workflow_id|tostring), ' +
+        '(.run_attempt|tostring), (.id|tostring)] | @tsv'
+    $runsText = Invoke-WorkerRuntimeCommandText $GhExe @('api',
+        ('repos/' + $repo + '/actions/runs?head_sha=' + $AcceptedPrHead + '&per_page=100'),
+        '--paginate','--jq',$runsJq) 'WORKER_RUNTIME_CI_READBACK_FAILED'
+    Assert-WorkerRuntimeTrustedRuns $runsText $AcceptedPrHead
+    $null = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'merge-base','--is-ancestor',
+        $pr[6],$SourceMainSha) 'WORKER_RUNTIME_ACCEPTED_PR_NOT_IN_MAIN'
+    $null = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'merge-base','--is-ancestor',
+        $AcceptedPrHead,$SourceMainSha) 'WORKER_RUNTIME_ACCEPTED_PR_HEAD_NOT_IN_MAIN'
+    foreach ($file in $runtimeFiles) {
+        $mainBlob = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'rev-parse',($SourceMainSha + ':' + $file)) `
+            'WORKER_RUNTIME_MAIN_TREE_READBACK_FAILED'
+        $prBlob = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'rev-parse',($AcceptedPrHead + ':' + $file)) `
+            'WORKER_RUNTIME_PR_TREE_READBACK_FAILED'
+        if ($mainBlob -cne $prBlob) { throw ('WORKER_RUNTIME_ACCEPTED_PR_BUNDLE_MISMATCH:' + $file) }
+    }
+    return $repoRoot
+}
+
+function Write-WorkerRuntimeNewFile([string]$Path, [byte[]]$Bytes) {
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Write($Bytes, 0, $Bytes.Length)
+        $stream.Flush($true)
+    } finally { if ($null -ne $stream) { $stream.Dispose() } }
+    if ((Get-WorkerRuntimeFileSha256 $Path) -cne (Get-WorkerRuntimeBytesSha256 $Bytes)) {
+        throw 'WORKER_RUNTIME_STAGED_FILE_READBACK_MISMATCH'
+    }
+}
+
+function Invoke-WorkerRuntimeRefresh {
+    if ($env:COMPUTERNAME.ToUpperInvariant() -ne $expectedHost) { throw 'WRONG_HOST_STOP' }
+    if (-not (Test-GhAuthenticated 'gh.exe')) { throw 'GH_AUTH_NOT_READY_HUMAN_OAUTH_GATE' }
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw 'WORKER_RUNTIME_CONFIG_REQUIRED' }
+    foreach ($path in @($homeDir,$configPath,$configWriteLockPath,$hiddenWorker,$worker)) {
+        Assert-WorkerRuntimePathChain $path
+    }
+    $gh = Require-Command 'gh.exe'
+    $git = Require-Command 'git.exe'
+    $node = $null
+    if (-not (Test-Path -LiteralPath $hiddenWorker -PathType Leaf) -or
+        (Get-WorkerRuntimeFileSha256 $hiddenWorker) -cne $hiddenWorkerSha256.ToLowerInvariant()) {
+        throw 'HIDDEN_WORKER_WRAPPER_MISSING_OR_UNVERIFIED'
+    }
+    $wrapperText = [IO.File]::ReadAllText($hiddenWorker)
+    $nodeMatch = [regex]::Match($wrapperText, '(?m)^\s*commandLine\s*=\s*"""([^"\r\n]+)"{2}')
+    if (-not $nodeMatch.Success) { throw 'HIDDEN_WORKER_NODE_COMMAND_UNREADABLE' }
+    $node = $nodeMatch.Groups[1].Value
+    if (-not [IO.Path]::IsPathRooted($node) -or -not (Test-Path -LiteralPath $node -PathType Leaf)) {
+        throw 'HIDDEN_WORKER_NODE_EXECUTABLE_MISSING'
+    }
+    if (-not (Test-Path -LiteralPath $wscript -PathType Leaf)) { throw 'WINDOWS_SCRIPT_HOST_NOT_FOUND' }
+
+    $configLock = $null
+    $backupDir = ''
+    $stagingDir = ''
+    $acceptedDir = ''
+    $initialTaskDefinitionSha256 = ''
+    $initialConfigSha256 = ''
+    $modules = [ordered]@{}
+    $changedNames = New-Object System.Collections.Generic.List[string]
+    $taskDisableAttempted = $false
+    try {
+        try { $configLock = [IO.File]::Open($configWriteLockPath, [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch [IO.IOException] { throw 'WORKER_CONFIG_WRITE_LOCK_BUSY_DO_NOT_REFRESH' }
+
+        $repoRoot = Assert-WorkerRuntimeSource $git $gh
+        $taskReadback = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $true -ExpectedState 'Ready'
+        $initialTaskDefinitionSha256 = $taskReadback.DefinitionSha256
+        $initialConfigSha256 = Get-WorkerRuntimeFileSha256 $configPath
+        $sourcePrestate = [ordered]@{}
+        foreach ($file in $runtimeFiles) {
+            $sourcePath = Join-Path $PSScriptRoot $file
+            $targetPath = Join-Path $homeDir $file
+            Assert-WorkerRuntimePathChain $sourcePath
+            Assert-WorkerRuntimePathChain $targetPath
+            if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+                throw ('WORKER_RUNTIME_MODULE_MISSING:' + $file)
+            }
+            $sourceBytes = [IO.File]::ReadAllBytes($sourcePath)
+            $targetBytes = [IO.File]::ReadAllBytes($targetPath)
+            $sourceHash = Get-WorkerRuntimeBytesSha256 $sourceBytes
+            $targetHash = Get-WorkerRuntimeBytesSha256 $targetBytes
+            & $node --check $sourcePath
+            if ($LASTEXITCODE -ne 0) { throw ('WORKER_RUNTIME_SOURCE_SYNTAX_INVALID:' + $file) }
+            $modules[$file] = [pscustomobject]@{ SourcePath=$sourcePath; TargetPath=$targetPath;
+                SourceBytes=$sourceBytes; SourceHash=$sourceHash; OldBytes=$targetBytes; OldHash=$targetHash }
+            $sourcePrestate[$file] = $targetHash
+            if ($sourceHash -ne $targetHash) { $changedNames.Add($file) }
+        }
+        if ($changedNames.Count -eq 0) {
+            Write-Output 'WORKER_RUNTIME_REFRESH=NOT_REQUIRED'
+            Write-Output 'MODEL_EXECUTION=NOT_INVOKED_BY_REFRESH; W2_CLAIMS_AND_RECEIPTS=UNCHANGED'
+            return
+        }
+
+        $backupRoot = Join-Path $homeDir 'backups'
+        if (Test-Path -LiteralPath $backupRoot) {
+            $backupRootItem = Get-Item -LiteralPath $backupRoot -Force -ErrorAction Stop
+            if (-not $backupRootItem.PSIsContainer -or
+                (($backupRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                throw 'WORKER_RUNTIME_BACKUP_ROOT_INVALID'
+            }
+        } else { $null = New-Item -ItemType Directory -Path $backupRoot -ErrorAction Stop }
+        Assert-WorkerRuntimePathChain $backupRoot
+        $operationId = [guid]::NewGuid().ToString('N')
+        $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
+        $backupDir = Join-Path $backupRoot ('worker-runtime-refresh-' + $stamp + '-' + $operationId)
+        $stagingDir = Join-Path $backupRoot ('.worker-deploy-stage-' + $operationId)
+        $acceptedDir = Join-Path $backupRoot ('worker-deploy-accepted-' + $AcceptedPr + '-' +
+            $AcceptedPrHead.Substring(0,12).ToLowerInvariant() + '-' + $operationId)
+        if ((Test-Path -LiteralPath $backupDir) -or (Test-Path -LiteralPath $stagingDir) -or
+            (Test-Path -LiteralPath $acceptedDir)) { throw 'WORKER_RUNTIME_REFRESH_PATH_COLLISION' }
+        $null = New-Item -ItemType Directory -Path $backupDir -ErrorAction Stop
+        $null = New-Item -ItemType Directory -Path $stagingDir -ErrorAction Stop
+        Assert-WorkerRuntimePathChain $backupDir
+        Assert-WorkerRuntimePathChain $stagingDir
+        foreach ($file in $runtimeFiles) {
+            $module = $modules[$file]
+            Write-WorkerRuntimeNewFile (Join-Path $backupDir $file) $module.OldBytes
+            Write-WorkerRuntimeNewFile (Join-Path $stagingDir $file) $module.SourceBytes
+        }
+        $manifest = [ordered]@{ schema=1; source_main_sha=$SourceMainSha.ToLowerInvariant();
+            accepted_pr=$AcceptedPr; accepted_pr_head=$AcceptedPrHead.ToLowerInvariant();
+            files=@($runtimeFiles | ForEach-Object { [ordered]@{ file=$_; stage_sha256=$modules[$_].SourceHash } }) }
+        $manifestBytes = ([Text.UTF8Encoding]::new($false)).GetBytes(
+            ((ConvertTo-Json -InputObject $manifest -Depth 8 -Compress) + [Environment]::NewLine))
+        Write-WorkerRuntimeNewFile (Join-Path $stagingDir 'manifest.json') $manifestBytes
+        $prestate = [ordered]@{ schema=1; recorded_at_utc=[DateTime]::UtcNow.ToString('o');
+            source_main_sha=$SourceMainSha.ToLowerInvariant(); accepted_pr=$AcceptedPr;
+            accepted_pr_head=$AcceptedPrHead.ToLowerInvariant(); task_definition_sha256=$initialTaskDefinitionSha256;
+            config_sha256=$initialConfigSha256; installed_runtime_sha256=$sourcePrestate }
+        $prestateBytes = ([Text.UTF8Encoding]::new($false)).GetBytes(
+            ((ConvertTo-Json -InputObject $prestate -Depth 8 -Compress) + [Environment]::NewLine))
+        Write-WorkerRuntimeNewFile (Join-Path $backupDir 'prestate.json') $prestateBytes
+
+        try {
+            $null = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $true -ExpectedState 'Ready' `
+                -ExpectedDefinitionSha256 $initialTaskDefinitionSha256
+            if ((Get-WorkerRuntimeFileSha256 $configPath) -cne $initialConfigSha256) {
+                throw 'WORKER_RUNTIME_CONFIG_CHANGED_BEFORE_DISABLE'
+            }
+            $taskDisableAttempted = $true
+            Disable-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop | Out-Null
+            $null = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $false -ExpectedState 'Disabled' `
+                -ExpectedDefinitionSha256 $initialTaskDefinitionSha256
+            Assert-WorkerRuntimeNoActiveProcess $node
+
+            if ((Get-WorkerRuntimeFileSha256 $configPath) -cne $initialConfigSha256) {
+                throw 'WORKER_RUNTIME_CONFIG_CHANGED_BEFORE_WRITE'
+            }
+            foreach ($file in $runtimeFiles) {
+                $module = $modules[$file]
+                if ((Get-WorkerRuntimeFileSha256 $module.TargetPath) -cne $module.OldHash -or
+                    (Get-WorkerRuntimeFileSha256 $module.SourcePath) -cne $module.SourceHash) {
+                    throw ('WORKER_RUNTIME_SOURCE_OR_TARGET_CHANGED_BEFORE_WRITE:' + $file)
+                }
+            }
+            $null = Assert-WorkerRuntimeSource $git $gh
+            foreach ($file in $changedNames) {
+                $module = $modules[$file]
+                Write-WorkerRuntimeAtomicReplacement $module.SourceBytes $module.TargetPath $module.OldHash $module.SourceHash
+            }
+            foreach ($file in $runtimeFiles) {
+                if ((Get-WorkerRuntimeFileSha256 $modules[$file].TargetPath) -cne $modules[$file].SourceHash) {
+                    throw ('WORKER_RUNTIME_FINAL_COMPONENT_READBACK_MISMATCH:' + $file)
+                }
+            }
+            if ((Get-WorkerRuntimeFileSha256 $configPath) -cne $initialConfigSha256) {
+                throw 'WORKER_RUNTIME_CONFIG_CHANGED_DURING_REFRESH'
+            }
+            $null = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $false -ExpectedState 'Disabled' `
+                -ExpectedDefinitionSha256 $initialTaskDefinitionSha256
+            [IO.Directory]::Move($stagingDir, $acceptedDir)
+            $stagingDir = ''
+            $readManifest = Get-Content -LiteralPath (Join-Path $acceptedDir 'manifest.json') -Raw -ErrorAction Stop |
+                ConvertFrom-Json -ErrorAction Stop
+            if ($readManifest.schema -ne 1 -or $readManifest.source_main_sha -cne $SourceMainSha.ToLowerInvariant() -or
+                $readManifest.accepted_pr -ne $AcceptedPr -or
+                $readManifest.accepted_pr_head -cne $AcceptedPrHead.ToLowerInvariant() -or
+                @($readManifest.files).Count -ne $runtimeFiles.Count) {
+                throw 'WORKER_RUNTIME_ACCEPTED_MANIFEST_READBACK_MISMATCH'
+            }
+            foreach ($file in $runtimeFiles) {
+                $entries = @($readManifest.files | Where-Object { $_.file -ceq $file })
+                if ($entries.Count -ne 1 -or $entries[0].stage_sha256 -cne $modules[$file].SourceHash -or
+                    (Get-WorkerRuntimeFileSha256 (Join-Path $acceptedDir $file)) -cne $modules[$file].SourceHash) {
+                    throw ('WORKER_RUNTIME_ACCEPTED_MANIFEST_COMPONENT_MISMATCH:' + $file)
+                }
+            }
+            Enable-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop | Out-Null
+            $null = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $true -ExpectedState 'Ready' `
+                -ExpectedDefinitionSha256 $initialTaskDefinitionSha256 -AdditionalStates @('Running','Queued')
+        } catch {
+            $originalError = $_.Exception.Message
+            $rollbackErrors = New-Object System.Collections.Generic.List[string]
+            if ($taskDisableAttempted) {
+                $safeToRollback = $false
+                try {
+                    $current = Get-TaskOptional
+                    if ($null -eq $current -or (Get-WorkerRuntimeTaskDefinitionSha256) -cne $initialTaskDefinitionSha256) {
+                        throw 'WORKER_RUNTIME_TASK_IDENTITY_CHANGED'
+                    }
+                    if ([string]$current.State -eq 'Running') { throw 'WORKER_RUNTIME_TASK_RUNNING_DURING_ROLLBACK' }
+                    if ($current.Settings.Enabled -eq $true) {
+                        Disable-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop | Out-Null
+                    }
+                    $null = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $false -ExpectedState 'Disabled' `
+                        -ExpectedDefinitionSha256 $initialTaskDefinitionSha256
+                    Assert-WorkerRuntimeNoActiveProcess $node
+                    $safeToRollback = $true
+                } catch { $rollbackErrors.Add('TaskScheduler-or-active-process') }
+                if ($safeToRollback) {
+                    for ($index = $changedNames.Count - 1; $index -ge 0; $index--) {
+                        $file = $changedNames[$index]
+                        $module = $modules[$file]
+                        try {
+                            $currentHash = Get-WorkerRuntimeFileSha256 $module.TargetPath
+                            if ($currentHash -eq $module.OldHash) { continue }
+                            if ($currentHash -cne $module.SourceHash) { throw 'WORKER_RUNTIME_THIRD_HASH_PRESERVED' }
+                            Write-WorkerRuntimeAtomicReplacement $module.OldBytes $module.TargetPath `
+                                $module.SourceHash $module.OldHash
+                        } catch { $rollbackErrors.Add($file) }
+                    }
+                }
+                if ($rollbackErrors.Count -eq 0) {
+                    foreach ($file in $runtimeFiles) {
+                        try {
+                            if ((Get-WorkerRuntimeFileSha256 $modules[$file].TargetPath) -cne $modules[$file].OldHash) {
+                                $rollbackErrors.Add($file)
+                            }
+                        } catch { $rollbackErrors.Add($file) }
+                    }
+                    try {
+                        if ((Get-WorkerRuntimeFileSha256 $configPath) -cne $initialConfigSha256 -or
+                            (Get-WorkerRuntimeTaskDefinitionSha256) -cne $initialTaskDefinitionSha256) {
+                            $rollbackErrors.Add('config-or-task-definition')
+                        }
+                    } catch { $rollbackErrors.Add('config-or-task-definition') }
+                }
+                if ($rollbackErrors.Count -eq 0) {
+                    try {
+                        Enable-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop | Out-Null
+                        $null = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $true -ExpectedState 'Ready' `
+                            -ExpectedDefinitionSha256 $initialTaskDefinitionSha256 -AdditionalStates @('Running','Queued')
+                    } catch { $rollbackErrors.Add('TaskScheduler-enable') }
+                }
+            }
+            if ($rollbackErrors.Count -gt 0) {
+                throw ('WORKER_RUNTIME_REFRESH_PARTIAL_STATE_REVIEW_REQUIRED:' + $originalError +
+                    ';paths=' + ($rollbackErrors -join ',') + ';backup=' + $backupDir)
+            }
+            if ($taskDisableAttempted) {
+                throw ('WORKER_RUNTIME_REFRESH_FAILED_ROLLED_BACK:' + $originalError + ';backup=' + $backupDir)
+            }
+            throw $originalError
+        }
+        Write-Output ('WORKER_RUNTIME_REFRESH=SUCCESS;updated=' + ($changedNames -join ','))
+        Write-Output ('WORKER_RUNTIME_REFRESH_BACKUP=' + $backupDir)
+        Write-Output ('WORKER_RUNTIME_ACCEPTED_MANIFEST=' + (Join-Path $acceptedDir 'manifest.json'))
+        Write-Output 'TASK_DEFINITION=UNCHANGED;CONFIG=UNCHANGED;W2_CLAIMS_AND_RECEIPTS=UNCHANGED'
+        Write-Output 'MODEL_EXECUTION=NOT_INVOKED_BY_REFRESH'
+    } finally {
+        if ($null -ne $configLock) { $configLock.Dispose() }
+    }
+}
+
 function Require-Command([string]$Name) {
     $entry = Get-Command $Name -ErrorAction Stop | Select-Object -First 1
     if (-not $entry.Source) { throw ('COMMAND_WITHOUT_SOURCE: ' + $Name) }
@@ -168,6 +744,10 @@ if ($Mode -eq 'Uninstall') {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
     if ($null -ne (Get-TaskOptional)) { throw 'TASK_UNREGISTER_READBACK_FAILED' }
     Write-Output 'NATIVE_TASK_REMOVED_LOCAL_EVIDENCE_RETAINED'
+    return
+}
+if ($Mode -eq 'RefreshRuntimeModules') {
+    Invoke-WorkerRuntimeRefresh
     return
 }
 if ($Mode -eq 'Install') {
