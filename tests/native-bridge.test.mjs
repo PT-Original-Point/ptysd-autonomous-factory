@@ -3258,6 +3258,61 @@ test('captured terminal edit evidence releases its path lease for a later exact 
       'incomplete, out-of-scope, or blocked terminal evidence must retain the path lease');
   }
 });
+test('complete legacy schema-6 diff receipt releases its path lease without the later source-diff field', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const oldSha = '221e0c0e4524e07bc06a2aae431fdd34d121b73d';
+  const nextSha = '19a62538854b648e583a6a92df563b82c6d99e36';
+  const paths = ['native-bridge/v2-readiness.mjs', 'tests/v2-readiness.test.mjs'];
+  const makeEdit = (requestId, kind, sourceSha, sourcePr, editPaths = paths) =>
+    withHumanGoal(mkjob({ request_id: requestId, kind, source_sha: sourceSha,
+      spec_path: 'native-bridge/tasks/legacy-lease-compat.md', spec_sha256: hash,
+      model: kind === 'antigravity_edit' ? ANTIGRAVITY_V2_MODEL
+        : 'opencode/deepseek-v4.1-flash-free',
+      variant: kind === 'antigravity_edit' ? 'high' : null,
+      edit_paths: editPaths, source_pr: sourcePr }));
+  const prior = makeEdit('W1_EDITFILE_TELEMETRY_20261023_9C8247675F914DCBBC708DD2AB90A6C2',
+    'opencode_edit', oldSha, 505);
+  const next = makeEdit('W2_R7_TARGET_MULTIPLICITY_TEST', 'antigravity_edit', nextSha, 572);
+  const attemptId = '3f9246cd-f968-4290-9c76-0514bb7775b5';
+  const legacyTerminal = receipt(prior.request_id, attemptId, 'FINISHED', prior, {
+    outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED', exit_code: 0, model_invoked: true,
+    coding_state: 'DIFF_CAPTURED_UNVERIFIED', scope_valid: true,
+    diff_sha256: '2d40660d98eb983dc343c7b1a6612a868a948a288545bb51a4abb7af14e9e968',
+    diff_bytes: 12151, changed_files: paths,
+  });
+  delete legacyTerminal.external_effects;
+  delete legacyTerminal.source_diff_evidence;
+  delete legacyTerminal.task_acceptance;
+
+  const jobComment = (id, job) => ({ ...com(id, encoded(job)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` });
+  const comments = [jobComment(6356591863, prior), jobComment(6420000000, next),
+    com(6356778997, RECEIPT_MARKER + JSON.stringify(legacyTerminal), 'worker')];
+  const heads = new Map([[572, nextSha]]);
+
+  assert.equal(parseJob(comments[0].body)?.request_id, prior.request_id);
+  assert.equal(parseReceipt(comments[2].body)?.source_diff_evidence, undefined,
+    'the historical terminal predates the optional source_diff_evidence field');
+  assert.equal(legacyTerminal.changed_files_sha256,
+    '1400bf7c12ebb87ee6ac38f56acfa0c521702754cfa8ba57cfa81882e9645af9',
+    'the fixture preserves the historical two-path change-set digest');
+  assert.equal(selectNext(comments, ['t14210184'], 'worker', host, nextSha, [], heads)?.id,
+    6420000000,
+    'the request-bound legacy diff releases the same-path lease so the new W2 job can run');
+
+  for (const unsafe of [
+    { ...legacyTerminal, source_diff_evidence: 'UNKNOWN' },
+    { ...legacyTerminal, changed_files_count: null },
+    { ...legacyTerminal, source_pr: 501 },
+    { ...legacyTerminal, goal_body_sha256: '0'.repeat(64) },
+  ]) {
+    const unsafeComments = [comments[0], comments[1],
+      com(6356778997, RECEIPT_MARKER + JSON.stringify(unsafe), 'worker')];
+    assert.equal(selectNext(unsafeComments, ['t14210184'], 'worker', host,
+      nextSha, [], heads), null,
+    'explicitly unknown or incomplete request/source evidence must keep the path lease');
+  }
+});
 test('publisher records executor WAITING, continues a ping, then re-dispatches the same task after readiness', async () => {
   const root = mkdtempSync(join(homedir(), '.ptysd-opencode-waiting-reconcile-'));
   try {
