@@ -188,6 +188,14 @@
         <div><span class="worker-id">W2</span><h2 class="worker-name">Antigravity</h2><span class="worker-harness">只接受已核准的原生執行證據</span></div>
         <span id="w2-badge" class="badge neutral">未確認</span>
       </div>
+      <div class="field"><strong>原生派工（Issue #310 schema-6）</strong><span id="w2-native-task">未確認</span></div>
+      <div class="field"><strong>原生收據批次（Issue #407）</strong><span id="w2-native-attempt">未確認</span></div>
+      <div class="field"><strong>原生工作階段（Session）</strong><span id="w2-native-session">未確認</span></div>
+      <div class="field"><strong>原生驗收與效果</strong><span id="w2-native-acceptance">未確認</span></div>
+      <div class="field"><strong>單次直接 CLI 紀錄（非原生 Worker）</strong><span id="w2-direct-cli">未確認</span></div>
+      <div class="field"><strong>直接 CLI 程式差異</strong><span id="w2-direct-diff">未確認</span></div>
+      <div class="field"><strong>直接 CLI 測試結果</strong><span id="w2-direct-tests">未確認</span></div>
+      <div class="field"><strong>歷史嘗試（2026-10-22）</strong><span id="w2-historical">未確認</span></div>
       <div class="field"><strong>正式任務</strong><span id="w2-task">未確認</span></div>
       <div class="field"><strong>工作階段／執行者</strong><span id="w2-session">未確認</span></div>
       <div class="field"><strong>最近有證據的活動</strong><span id="w2-activity">未確認</span></div>
@@ -273,6 +281,14 @@
   const MARKER = 'PTYSD_OPERATOR_OBSERVATION_V1\n';
   const JOB_MARKER = 'PTYSD_NATIVE_JOB_V1\n';
   const RECEIPT_MARKER = 'PTYSD_NATIVE_RECEIPT_V1\n';
+  const ACCEPTANCE_MARKER = 'PTYSD_V53R4_W2_PANEL_ACCEPTANCE_V1\n';
+  const HISTORICAL_ATTEMPT_ID = '24331e45-62db-4f55-ad40-87776a799c5d';
+  const DIRECT_CLI_COMMENT_ID = 6438594849;
+  const HUMAN_GOAL_MARKER = /<!--\s*PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_\d{8}\s*-->/m;
+  const GOAL_INDEX_POLL_MS = 60 * 60 * 1000;
+  const GOAL_LATEST_POLL_MS = 15 * 60 * 1000;
+  const ISSUE_LATEST_POLL_MS = 15 * 60 * 1000;
+  const MAX_GOAL_PAGE_HOPS = 20;
   const RECOVERABLE_WAITING_OUTCOMES = new Set([
     'V2_MODEL_EXECUTION_NOT_YET_APPROVED','MODEL_NOT_EXPLICITLY_ALLOWED',
     'OPENCODE_V2_CLI_NOT_QUALIFIED','OPENCODE_V2_AUTH_NOT_READY','OPENCODE_V2_AUTH_METADATA_UNKNOWN',
@@ -368,6 +384,68 @@
     try { const value = JSON.parse(body.slice(marker.length)); return object(value) ? value : null; }
     catch { return null; }
   }
+  function validEditPath(p) {
+    if (typeof p !== 'string' || !p || p !== p.trim()) return false;
+    if (p.startsWith('/') || p.startsWith('\\') || /^[a-zA-Z]:/.test(p)) return false;
+    const segments = p.split(/[\\/]/);
+    return segments.length > 0 && segments.every(seg => seg.length > 0 && seg !== '.' && seg !== '..' && !seg.includes(':'));
+  }
+  function paginationRelationUrl(link, relation, issueNumber = 310) {
+    if (typeof link !== 'string' || !link) return null;
+    for (const entry of link.split(/,\s*(?=<)/)) {
+      const match = entry.match(/^\s*<([^>]+)>\s*;\s*rel="?([^";]+)"?/i);
+      if (!match || match[2].toLowerCase() !== relation) continue;
+      const url = match[1];
+      const allowed = url.startsWith(API + '/issues/' + issueNumber + '/comments?') ||
+        url.startsWith('https://api.github.com/repositories/1352411536/issues/' + issueNumber + '/comments?');
+      const page = url.match(/[?&]page=(\d+)(?:&|$)/);
+      const perPage = url.match(/[?&]per_page=(\d+)(?:&|$)/);
+      if (!allowed || !page || Number(page[1]) < 1 || !perPage || Number(perPage[1]) !== 100)
+        return null;
+      return url;
+    }
+    return null;
+  }
+  function latestSchema6Job(comments) {
+    const jobs = [];
+    for (const c of (Array.isArray(comments) ? comments : [])) {
+      if (!c?.body || !DISPATCHERS.has(c.user?.login || '')) continue;
+      const job = parseMarked(c.body, JOB_MARKER);
+      if (job?.schema === 6 && validJob(job)) jobs.push({ id:Number(c.id), job, comment:c });
+    }
+    jobs.sort((a,b) => a.id - b.id);
+    return jobs.at(-1) || null;
+  }
+  async function hashHumanGoalComment(comment) {
+    if (!comment || !Number.isSafeInteger(Number(comment.id)) ||
+        !DISPATCHERS.has(comment.user?.login || '') || typeof comment.body !== 'string' ||
+        comment.issue_url !== 'https://api.github.com/repos/' + REPO + '/issues/310' ||
+        !HUMAN_GOAL_MARKER.test(comment.body) ||
+        (comment.body.match(/PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_\d{8}/g) || []).length !== 1) return null;
+    try {
+      const subtle = globalThis.crypto?.subtle;
+      if (!subtle || typeof TextEncoder !== 'function') return null;
+      const digest = await subtle.digest('SHA-256', new TextEncoder().encode(comment.body));
+      const bodySha256 = Array.from(new Uint8Array(digest),
+        byte => byte.toString(16).padStart(2,'0')).join('');
+      return { id:Number(comment.id), author:comment.user.login, body_sha256:bodySha256 };
+    } catch { return null; }
+  }
+  function validW2Acceptance(value) {
+    const tests = value?.tests;
+    return object(value) && value.schema === 1 && value.project_id === PROJECT &&
+      value.record_type === 'ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT' &&
+      /^[A-Z][A-Z0-9_-]{7,79}$/.test(value.request_id || '') &&
+      /^[a-f0-9-]{36}$/.test(value.attempt_id || '') &&
+      Number.isSafeInteger(value.source_pr) && value.source_pr > 0 &&
+      /^[a-f0-9]{40}$/.test(value.source_sha || '') &&
+      ['ACCEPTED','REJECTED'].includes(value.codex_source_acceptance) &&
+      ['SUCCESS','FAILURE','PENDING','UNKNOWN','SKIPPED'].includes(value.exact_head_ci) &&
+      object(tests) && ['total','passed','failed','skipped'].every(key =>
+        Number.isSafeInteger(tests[key]) && tests[key] >= 0) &&
+      tests.total === tests.passed + tests.failed + tests.skipped &&
+      ['NONE','UNKNOWN','OBSERVED'].includes(value.external_effects);
+  }
   function validJob(job) {
     if (!object(job) || job.project_id !== PROJECT || job.host !== 'DESKTOP-1B6PD2P' ||
         !/^[a-f0-9]{40}$/.test(job.source_sha || '') ||
@@ -375,21 +453,33 @@
     const keys = Object.keys(job).sort();
     const base = ['schema','project_id','host','request_id','kind','source_sha','spec_path','spec_sha256'].sort();
     const extended = [...base,'model','variant'].sort();
+    const schema6 = [...extended,'edit_paths','source_pr','goal_comment_id','goal_body_sha256'].sort();
     if (job.schema === 1) return JSON.stringify(keys) === JSON.stringify(base) &&
       ['ping','native_preflight','native_v2_qualify'].includes(job.kind) &&
       job.spec_path === null && job.spec_sha256 === null;
-    return job.schema === 2 && JSON.stringify(keys) === JSON.stringify(extended) &&
+    if (job.schema === 2) return JSON.stringify(keys) === JSON.stringify(extended) &&
       job.kind === 'opencode_plan' &&
       /^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(job.spec_path || '') &&
       /^[a-f0-9]{64}$/.test(job.spec_sha256 || '') &&
       typeof job.model === 'string' && job.model.length <= 160 &&
       typeof job.variant === 'string' && job.variant.length <= 60;
+    if (job.schema === 6) return JSON.stringify(keys) === JSON.stringify(schema6) &&
+      job.kind === 'antigravity_edit' &&
+      /^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(job.spec_path || '') &&
+      /^[a-f0-9]{64}$/.test(job.spec_sha256 || '') &&
+      job.model === 'gemini-3.8-flash-high' && job.variant === 'high' &&
+      Number.isSafeInteger(job.source_pr) && job.source_pr >= 1 &&
+      Number.isSafeInteger(job.goal_comment_id) && job.goal_comment_id >= 1 &&
+      /^[a-f0-9]{64}$/.test(job.goal_body_sha256 || '') &&
+      Array.isArray(job.edit_paths) && job.edit_paths.length > 0 &&
+      job.edit_paths.every(validEditPath);
+    return false;
   }
   function latestTask(comments, mainSha) {
     const jobs = [], receipts = [];
     for (const comment of comments || []) {
       const job = parseMarked(comment.body, JOB_MARKER);
-      if (validJob(job) && DISPATCHERS.has(comment.user?.login || ''))
+      if (validJob(job) && job.schema !== 6 && DISPATCHERS.has(comment.user?.login || ''))
         jobs.push({ id:comment.id, body:comment.body, job, login:comment.user?.login || '' });
       const receipt = parseMarked(comment.body, RECEIPT_MARKER);
       if (receipt && receipt.schema === 1 && receipt.project_id === PROJECT &&
@@ -682,7 +772,9 @@
       const pollSeconds=parseIntegerHeader(headerValue(headers,'X-Poll-Interval'));
       const pollIntervalMs=pollSeconds !== null && pollSeconds > 0 ? pollSeconds*1000 : null;
       const etag=headerValue(headers,'ETag');
-      const record={limit,remaining,resetAt,retryAfterAt,pollIntervalMs,etag,validatedAt:now()};
+      const link=headerValue(headers,'Link');
+      const record={limit,remaining,resetAt,retryAfterAt,pollIntervalMs,etag,
+        link:typeof link === 'string' ? link : null,validatedAt:now()};
       rate.lastResponseAt=now();
       if (limit !== null) rate.limit=limit;
       if (remaining !== null) rate.remaining=remaining;
@@ -755,7 +847,7 @@
         if (!value || value.schema !== 1 || value.url !== url ||
             !Number.isFinite(value.validatedAt) || !Object.prototype.hasOwnProperty.call(value,'data')) return null;
         return {data:value.data,etag:typeof value.etag === 'string' ? value.etag : null,
-          validatedAt:value.validatedAt};
+          link:typeof value.link === 'string' ? value.link : null,validatedAt:value.validatedAt};
       } catch {
         rate.coordination=locks ? 'BEST_EFFORT_LOCK_ONLY' : 'TAB_LOCAL_ONLY';
         return null;
@@ -766,7 +858,7 @@
       if (!storage || !key) return;
       try {
         const serialized=JSON.stringify({schema:1,url,data:value.data,etag:value.etag || null,
-          validatedAt:value.validatedAt});
+          link:value.link || null,validatedAt:value.validatedAt});
         if (serialized.length > MAX_SHARED_API_CACHE_CHARS) {
           rate.coordination=locks ? 'BEST_EFFORT_LOCK_ONLY' : 'TAB_LOCAL_ONLY';
           return;
@@ -794,7 +886,8 @@
         const response=await fetchImpl(url,{headers,credentials:'omit',signal:controller.signal,cache:'no-cache'});
         const receivedMeta=readRateHeaders(response);
         const responseMeta=response.status === 304
-          ? {...prior,...receivedMeta,etag:receivedMeta.etag || prior?.etag || null}
+          ? {...prior,...receivedMeta,etag:receivedMeta.etag || prior?.etag || null,
+            link:receivedMeta.link || prior?.link || null}
           : receivedMeta;
         meta.set(url,responseMeta);
         if (responseMeta.remaining === 0) {
@@ -954,7 +1047,12 @@
   function createResourceStore(apiClient, now = () => Date.now()) {
     let boundPullRequestNumber = null;
     const resources = {
-      issue:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, generation:0 },
+      issue:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, generation:0,
+        latestComments:[],latestComplete:false },
+      issueLatest:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, generation:0, url:'' },
+      goal:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, generation:0, identity:null },
+      goalLatest:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, generation:0, url:'' },
+      goalAuthority:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       pr:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       main:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, generation:0 },
       checks:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
@@ -1020,6 +1118,28 @@
       }
       return url || null;
     }
+    function bindGoalAuthority(commentId) {
+      const id = Number.isSafeInteger(commentId) && commentId > 0 ? commentId : null;
+      const url = id ? API + '/issues/comments/' + id : '';
+      const resource = resources.goalAuthority;
+      if (resource.url !== url) {
+        clearResource(resource,url);
+        resources.goal.identity=null;
+      }
+      return url || null;
+    }
+    function bindGoalLatest(url) {
+      const resource=resources.goalLatest;
+      const nextUrl=typeof url === 'string' && url.startsWith('https://api.github.com/') ? url : '';
+      if (resource.url !== nextUrl) clearResource(resource,nextUrl);
+      return nextUrl || null;
+    }
+    function bindIssueLatest(url) {
+      const resource=resources.issueLatest;
+      const nextUrl=typeof url === 'string' && url.startsWith('https://api.github.com/') ? url : '';
+      if (resource.url !== nextUrl) clearResource(resource,nextUrl);
+      return nextUrl || null;
+    }
     function bindChecksHead(head) {
       const expectedSha = safeSha(head);
       if (!expectedSha) {
@@ -1042,7 +1162,9 @@
           resource.url !== API + '/commits/' + expectedSha + '/check-runs?per_page=100') return null;
       return summarizeChecks(resource.data, expectedSha, prNumber);
     }
-    return { resources, loadResource, bindPullRequest, bindChecksHead, checksSummaryForHead, now };
+    return { resources, loadResource, bindPullRequest, bindGoalAuthority, bindGoalLatest,
+      bindIssueLatest,bindChecksHead,
+      checksSummaryForHead, now };
   }
   function adaptivePollInterval(key, apiClient) {
     const state=apiClient.getRateState?.() || {};
@@ -1050,12 +1172,138 @@
     if (Number.isSafeInteger(remaining) && remaining <= LOW_REMAINING_THRESHOLD) {
       if (key === 'pr' || key === 'checks') return Math.max(PR_POLL_MS,CHECKS_POLL_MS,60*60*1000);
       if (key === 'main') return Math.max(MAIN_POLL_MS,2*60*60*1000);
+      if (key === 'goal') return GOAL_INDEX_POLL_MS;
+      if (key === 'goalLatest' || key === 'issueLatest') return GOAL_INDEX_POLL_MS;
     }
+    if (key === 'goal') return GOAL_INDEX_POLL_MS;
+    if (key === 'goalLatest') return GOAL_LATEST_POLL_MS;
+    if (key === 'issueLatest') return ISSUE_LATEST_POLL_MS;
     if (key === 'issue') return ISSUE_POLL_MS;
     if (key === 'pr') return PR_POLL_MS;
     if (key === 'checks') return CHECKS_POLL_MS;
     if (key === 'main') return MAIN_POLL_MS;
     return ISSUE_POLL_MS;
+  }
+  async function loadLatestGoalComments(resourceStore, apiClient, goalUrl, force) {
+    const goal=resourceStore.resources.goal;
+    const firstPage=Array.isArray(goal.data) ? goal.data : null;
+    goal.latestComments=firstPage ? [...firstPage] : [];
+    goal.latestComplete=false;
+    if (!firstPage || goal.error) {
+      resourceStore.bindGoalLatest(null);
+      return;
+    }
+    if (firstPage.length < 100) {
+      resourceStore.bindGoalLatest(null);
+      goal.latestComplete=true;
+      return;
+    }
+
+    const firstLink=apiClient.getMeta(goalUrl)?.link;
+    const latestPageUrl=paginationRelationUrl(firstLink,'last',310) || paginationRelationUrl(firstLink,'next',310);
+    if (!latestPageUrl) {
+      resourceStore.bindGoalLatest(null);
+      return;
+    }
+
+    let pageUrl=latestPageUrl;
+    for (let hop=0; hop<MAX_GOAL_PAGE_HOPS; hop++) {
+      resourceStore.bindGoalLatest(pageUrl);
+      const pageTtl=pageUrl===latestPageUrl
+        ? adaptivePollInterval('goalLatest',apiClient) : GOAL_INDEX_POLL_MS;
+      await resourceStore.loadResource('goalLatest',pageUrl,pageTtl,force);
+      const pageResource=resourceStore.resources.goalLatest;
+      if (!Array.isArray(pageResource.data) || pageResource.error) return;
+      const merged=new Map(goal.latestComments.map(comment => [Number(comment?.id),comment]));
+      for (const comment of pageResource.data) merged.set(Number(comment?.id),comment);
+      goal.latestComments=[...merged.values()];
+      if (latestSchema6Job(pageResource.data)) {
+        goal.latestComplete=true;
+        return;
+      }
+
+      const link=apiClient.getMeta(pageUrl)?.link;
+      const previousUrl=paginationRelationUrl(link,'prev',310);
+      if (previousUrl) {
+        const previousPage=previousUrl.match(/[?&]page=(\d+)(?:&|$)/);
+        if (Number(previousPage?.[1]) === 1) {
+          goal.latestComplete=true;
+          return;
+        }
+        pageUrl=previousUrl;
+        continue;
+      }
+      const currentPage=pageUrl.match(/[?&]page=(\d+)(?:&|$)/);
+      if (Number(currentPage?.[1] || 1) <= 2 && (pageResource.data.length < 100 ||
+          typeof link === 'string' || Number(currentPage?.[1] || 1) === 1))
+        goal.latestComplete=true;
+      return;
+    }
+  }
+  function hasReceiptForJob(comments, job) {
+    if (!job || !Array.isArray(comments)) return false;
+    return comments.some(comment => {
+      if (!RECEIPT_AUTHORS.has(comment?.user?.login || '') || typeof comment?.body !== 'string') return false;
+      const receipt=parseMarked(comment.body,RECEIPT_MARKER);
+      return receipt?.schema === 1 && receipt.project_id === PROJECT &&
+        receipt.host === 'DESKTOP-1B6PD2P' && receipt.request_id === job.request_id &&
+        receipt.source_sha === job.source_sha && receipt.kind === job.kind &&
+        /^[a-f0-9-]{36}$/.test(receipt.attempt_id || '') &&
+        ['STARTED','WAITING','FINISHED','BLOCKED'].includes(receipt.state);
+    });
+  }
+  async function loadLatestIssueComments(resourceStore, apiClient, issueUrl, force, job) {
+    const issue=resourceStore.resources.issue;
+    const firstPage=Array.isArray(issue.data) ? issue.data : null;
+    issue.latestComments=firstPage ? [...firstPage] : [];
+    issue.latestComplete=false;
+    if (!firstPage || issue.error) {
+      resourceStore.bindIssueLatest(null);
+      return;
+    }
+    if (firstPage.length < 100) {
+      resourceStore.bindIssueLatest(null);
+      issue.latestComplete=true;
+      return;
+    }
+    const firstLink=apiClient.getMeta(issueUrl)?.link;
+    const latestPageUrl=paginationRelationUrl(firstLink,'last',407) || paginationRelationUrl(firstLink,'next',407);
+    if (!latestPageUrl) {
+      resourceStore.bindIssueLatest(null);
+      return;
+    }
+    let pageUrl=latestPageUrl;
+    for (let hop=0; hop<MAX_GOAL_PAGE_HOPS; hop++) {
+      resourceStore.bindIssueLatest(pageUrl);
+      const pageTtl=pageUrl===latestPageUrl
+        ? adaptivePollInterval('issueLatest',apiClient) : GOAL_INDEX_POLL_MS;
+      await resourceStore.loadResource('issueLatest',pageUrl,pageTtl,force);
+      const pageResource=resourceStore.resources.issueLatest;
+      if (!Array.isArray(pageResource.data) || pageResource.error) return;
+      const merged=new Map(issue.latestComments.map(comment => [Number(comment?.id),comment]));
+      for (const comment of pageResource.data) merged.set(Number(comment?.id),comment);
+      issue.latestComments=[...merged.values()];
+      if (!job || hasReceiptForJob(pageResource.data,job)) {
+        issue.latestComplete=true;
+        return;
+      }
+      const link=apiClient.getMeta(pageUrl)?.link;
+      const previousUrl=paginationRelationUrl(link,'prev',407);
+      if (previousUrl) {
+        const previousPage=previousUrl.match(/[?&]page=(\d+)(?:&|$)/);
+        if (Number(previousPage?.[1]) === 1) {
+          issue.latestComplete=true;
+          return;
+        }
+        pageUrl=previousUrl;
+        continue;
+      }
+      const currentPage=pageUrl.match(/[?&]page=(\d+)(?:&|$)/);
+      if (Number(currentPage?.[1] || 1) <= 2 && (pageResource.data.length < 100 ||
+          typeof link === 'string' || Number(currentPage?.[1] || 1) === 1))
+        issue.latestComplete=true;
+      return;
+    }
   }
   async function runSyncCycle(resourceStore, apiClient, urls, {force=false} = {}) {
     let recoveryProbeCompleted=false;
@@ -1067,6 +1315,26 @@
           rateState:apiClient.getRateState?.() || null};
     }
     await resourceStore.loadResource('issue',urls.issue,adaptivePollInterval('issue',apiClient),force);
+    if (!recoveryProbeCompleted && !apiClient.isPaused?.() && urls.goal) {
+      await resourceStore.loadResource('goal',urls.goal,adaptivePollInterval('goal',apiClient),force);
+      await loadLatestGoalComments(resourceStore,apiClient,urls.goal,force);
+      const goalResource = resourceStore.resources.goal;
+      const latestJob = goalResource.latestComplete ? latestSchema6Job(goalResource.latestComments) : null;
+      const authorityComment = latestJob && goalResource.latestComments.find(c =>
+        Number(c?.id) === latestJob.job.goal_comment_id) || null;
+      const authorityUrl = resourceStore.bindGoalAuthority(
+        latestJob && !authorityComment ? latestJob.job.goal_comment_id : null);
+      let exactAuthority = authorityComment;
+      if (!exactAuthority && authorityUrl) {
+        await resourceStore.loadResource('goalAuthority',authorityUrl,60*60*1000,false);
+        exactAuthority = resourceStore.resources.goalAuthority.data;
+      }
+      goalResource.identity = await hashHumanGoalComment(exactAuthority);
+    }
+    if (!recoveryProbeCompleted && !apiClient.isPaused?.() && urls.goal)
+      await loadLatestIssueComments(resourceStore,apiClient,urls.issue,force,
+        resourceStore.resources.goal?.latestComplete
+          ? latestSchema6Job(resourceStore.resources.goal.latestComments)?.job || null : null);
     if (apiClient.takeRecoveryNotice?.()) recoveryProbeCompleted=true;
     const observation=findSnapshot(resourceStore.resources.issue.data || [],resourceStore.now());
     const prPin=candidatePrPin(observation);
@@ -1245,6 +1513,210 @@
     for (const key of ['task','session','activity','progress','blocker','changes','delivery','next','source'])
       text(id.toLowerCase() + '-' + key, data[key]);
   }
+  function parseDirectCliComment(comment) {
+    if (!comment || typeof comment.body !== 'string') return null;
+    const body = comment.body;
+    if (Number(comment.id) !== DIRECT_CLI_COMMENT_ID ||
+        !DISPATCHERS.has(comment.user?.login || '') ||
+        !body.includes('record_type=ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT') ||
+        !body.includes('native_worker_job=NOT_CREATED') ||
+        !body.includes('native_worker_attempt=NOT_CREATED')) return null;
+    const sessionMatch = body.match(/session_id=([a-f0-9-]{36})/i);
+    if (!sessionMatch) return null;
+    const prMatch = body.match(/\bReplacement PR\s*#(\d+)\s+is\s+OPEN\b/i);
+    const fileMatch = body.match(/changed(?:\s+only)?\s+`([^`]+)`/i);
+    const diffShaMatch = body.match(/diff\s+SHA-256=([a-f0-9]{64})/i);
+    const diffLinesMatch = body.match(/\+(\d+)\/-(\d+)/);
+    const focusedTestsMatch = body.match(/(?:-\s*)?Focused tests:\s*([^\r\n]+)/i);
+    const fullTestsMatch = body.match(/Full suite:\s*([^\r\n]+)/i);
+    const modelMatch = body.match(/Model=([^;]+);/i);
+    const statusMatch = body.match(/status=([^;]+);/i);
+    return {
+      provenance: 'DIRECT_CLI_NOT_NATIVE_WORKER',
+      session_id: sessionMatch[1],
+      pull_request: prMatch ? Number(prMatch[1]) : null,
+      changed_file: fileMatch ? fileMatch[1] : null,
+      diff_sha256: diffShaMatch ? diffShaMatch[1] : null,
+      diff_lines: diffLinesMatch ? `+${diffLinesMatch[1]}/-${diffLinesMatch[2]}` : null,
+      tests: [focusedTestsMatch ? 'Focused: ' + focusedTestsMatch[1].trim() : null,
+        fullTestsMatch ? 'Full: ' + fullTestsMatch[1].trim() : null].filter(Boolean).join('; ') || null,
+      model: modelMatch ? modelMatch[1].trim() : null,
+      status: statusMatch ? statusMatch[1].trim() : null,
+    };
+  }
+  function w2EvidenceData(goalComments, issueComments, mainSha, goalIdentity = null,
+      goalSourceComplete = true, issueSourceComplete = true) {
+    const latest = goalSourceComplete ? latestSchema6Job(goalComments) : null;
+    const currentJob = latest?.job || null;
+    const goalReferenceVerified = Boolean(currentJob && goalIdentity &&
+      goalIdentity.id === currentJob.goal_comment_id &&
+      goalIdentity.author && DISPATCHERS.has(goalIdentity.author) &&
+      goalIdentity.body_sha256 === currentJob.goal_body_sha256);
+
+    let matchedReceipt = null;
+    if (currentJob) {
+      const candidateReceipts = [];
+      for (const c of (issueComments || [])) {
+        if (!c?.body) continue;
+        const receipt = parseMarked(c.body, RECEIPT_MARKER);
+        if (receipt && receipt.schema === 1 && receipt.project_id === PROJECT &&
+            receipt.host === 'DESKTOP-1B6PD2P' &&
+            RECEIPT_AUTHORS.has(c.user?.login || '') &&
+            receipt.request_id === currentJob.request_id &&
+            receipt.source_sha === currentJob.source_sha &&
+            receipt.kind === currentJob.kind &&
+            /^[a-f0-9-]{36}$/.test(receipt.attempt_id || '') &&
+            ['STARTED','WAITING','FINISHED','BLOCKED'].includes(receipt.state)) {
+          candidateReceipts.push({ id: Number(c.id), receipt });
+        }
+      }
+      candidateReceipts.sort((a, b) => a.id - b.id);
+      if (candidateReceipts.length) {
+        matchedReceipt = candidateReceipts.at(-1).receipt;
+      }
+    }
+
+    let matchedAcceptance = null;
+    if (currentJob && matchedReceipt) {
+      const candidateAcceptances = [];
+      for (const c of (issueComments || [])) {
+        if (!c?.body) continue;
+        const acc = parseMarked(c.body, ACCEPTANCE_MARKER);
+        if (validW2Acceptance(acc) &&
+            (DISPATCHERS.has(c.user?.login || '') || RECEIPT_AUTHORS.has(c.user?.login || '')) &&
+            acc.request_id === currentJob.request_id &&
+            acc.attempt_id === matchedReceipt.attempt_id &&
+            acc.source_pr === currentJob.source_pr &&
+            acc.source_sha === currentJob.source_sha) {
+          candidateAcceptances.push({ id: Number(c.id), acc });
+        }
+      }
+      candidateAcceptances.sort((a, b) => a.id - b.id);
+      if (candidateAcceptances.length) {
+        matchedAcceptance = candidateAcceptances.at(-1).acc;
+      }
+    }
+
+    let directCli = null;
+    for (const c of (issueComments || [])) {
+      if (Number(c?.id) === DIRECT_CLI_COMMENT_ID) {
+        const parsed = parseDirectCliComment(c);
+        if (parsed) {
+          directCli = parsed;
+          break;
+        }
+      }
+    }
+
+    let historical = null;
+    for (const c of (issueComments || [])) {
+      if (typeof c?.body !== 'string') continue;
+      if (c.body.includes(HISTORICAL_ATTEMPT_ID)) {
+        if (!historical) {
+          historical = {
+            attempt_id: HISTORICAL_ATTEMPT_ID,
+            state: 'BLOCKED',
+            classification: 'PARTIAL_OR_AMBIGUOUS',
+            external_effects: 'UNKNOWN',
+          };
+        }
+        const receipt = parseMarked(c.body, RECEIPT_MARKER);
+        if (receipt?.attempt_id === HISTORICAL_ATTEMPT_ID) {
+          if (receipt.state) historical.state = receipt.state;
+          if (receipt.external_effects) historical.external_effects = receipt.external_effects;
+        }
+        const classMatch = c.body.match(/classification=([A-Z_]+)/);
+        if (classMatch) historical.classification = classMatch[1];
+        const effectsMatch = c.body.match(/external_effects=([A-Z_]+)/);
+        if (effectsMatch) historical.external_effects = effectsMatch[1];
+      }
+    }
+
+    return {
+      native: {
+        sourceComplete:goalSourceComplete,
+        issueSourceComplete,
+        job: currentJob,
+        jobCommentId: latest?.id ?? null,
+        goalReferenceVerified,
+        receipt: matchedReceipt,
+        codexAcceptance: matchedAcceptance,
+      },
+      directCli,
+      historical,
+    };
+  }
+  function renderW2Evidence(evidence) {
+    const native = evidence?.native || {};
+    const job = native.job;
+    const receipt = native.receipt;
+    const codex = native.codexAcceptance;
+    const direct = evidence?.directCli;
+    const historical = evidence?.historical;
+
+    if (!native.sourceComplete) {
+      text('w2-native-task', 'Issue #310 最新評論分頁未核對；schema-6 派工狀態未知');
+    } else if (!job) {
+      text('w2-native-task', '尚無正式 schema-6 派工');
+    }
+    if (job) text('w2-native-task', job.request_id + '（Issue #310 comment #' +
+      evidence.native.jobCommentId + ' · PR #' + job.source_pr + ' @' + job.source_sha +
+      ' · GOAL ' + (evidence.native.goalReferenceVerified ? '已核對' : '未核對') + '）');
+
+    if (receipt?.attempt_id) {
+      const lifecycle = receipt.state === 'FINISHED' ? 'FINISHED（生命週期結束；非驗收）' : receipt.state;
+      text('w2-native-attempt', `批次 ${receipt.attempt_id} · ${lifecycle}${receipt.outcome ? ' · ' + receipt.outcome : ''}`);
+    } else if (!native.issueSourceComplete) {
+      text('w2-native-attempt', 'Issue #407 最新／相符收據分頁未核對；attempt 狀態未知');
+    } else {
+      text('w2-native-attempt', '尚無相符原生收據批次');
+    }
+
+    if (receipt?.session_id) {
+      text('w2-native-session', String(receipt.session_id));
+    } else if (!native.issueSourceComplete) {
+      text('w2-native-session', 'Issue #407 收據分頁未核對；原生 Session 未知');
+    } else {
+      text('w2-native-session', '尚無原生模型工作階段');
+    }
+
+    if (receipt || codex) {
+      const workerAcc = receipt ? `Worker task_acceptance=${receipt.task_acceptance || 'UNKNOWN'} · external_effects=${receipt.external_effects || 'UNKNOWN'}` : 'Worker 收據未讀回';
+      const codexAcc = codex ? `Codex source_acceptance=${codex.codex_source_acceptance} · CI=${codex.exact_head_ci}${codex.tests ? ` · 測試 ${codex.tests.passed}/${codex.tests.total}` : ''} · external_effects=${codex.external_effects || 'UNKNOWN'}` : 'Codex 驗收紀錄未讀回';
+      text('w2-native-acceptance', `${workerAcc}；${codexAcc}`);
+    } else {
+      text('w2-native-acceptance', '未確認');
+    }
+
+    if (!direct) {
+      text('w2-direct-cli', '無直接 CLI 紀錄（非原生 Worker）');
+    }
+    if (direct) text('w2-direct-cli', '非原生 Worker · ' + (direct.model || '模型未確認') +
+      ' · session_id=' + (direct.session_id || '未知') + ' · status=' + (direct.status || '未知') +
+      ' · PR #' + (direct.pull_request || '未知') +
+      '（單次直接 Antigravity CLI 執行，非原生 Worker 任務）');
+
+    if (direct) {
+      const file = direct.changed_file ? `修改檔案：${direct.changed_file}` : '檔案未確認';
+      const lines = direct.diff_lines ? ` (${direct.diff_lines})` : '';
+      const sha = direct.diff_sha256 ? ` · diff SHA-256=${direct.diff_sha256}` : '';
+      text('w2-direct-diff', `${file}${lines}${sha}`);
+    } else {
+      text('w2-direct-diff', '未確認');
+    }
+
+    if (direct?.tests) {
+      text('w2-direct-tests', direct.tests);
+    } else {
+      text('w2-direct-tests', '未確認');
+    }
+
+    if (historical) {
+      text('w2-historical', `歷史嘗試 ${historical.attempt_id} · ${historical.state} · ${historical.classification} · external_effects=${historical.external_effects}`);
+    } else {
+      text('w2-historical', '歷史嘗試：未確認');
+    }
+  }
   function freshnessOfSnapshot(result, now, issueResource) {
     if (result.status === 'STALE') return 'STALE';
     if (issueResource?.error) return 'UNKNOWN';
@@ -1299,7 +1771,13 @@
       ? readTime(new Date(rateState.pauseUntil).toISOString()) + '（' + countdownLabel(rateState.pauseUntil,now) + '）'
       : rateState?.indefinite ? '恢復時間未確認；讀取持續暫停' : '目前可讀取';
     const sources=[
-      'Issue #407 ' + sourceStatusLabel(resources.issue,now,ISSUE_POLL_MS),
+      'Issue #407 ' + (resources.issue.latestComplete === false ? '最新／相符留言分頁 UNKNOWN' :
+        sourceStatusLabel(resources.issueLatest?.data ? resources.issueLatest : resources.issue,
+          now,resources.issueLatest?.data ? ISSUE_LATEST_POLL_MS : ISSUE_POLL_MS)),
+      ...(resources.goal && (resources.goal.data || resources.goal.url) ? ['Issue #310 ' +
+        (resources.goal.latestComplete === false ? '最新評論分頁 UNKNOWN' :
+          sourceStatusLabel(resources.goalLatest?.data ? resources.goalLatest : resources.goal,
+            now,resources.goalLatest?.data ? GOAL_LATEST_POLL_MS : GOAL_INDEX_POLL_MS))] : []),
       '任務來源 PR ' + sourceStatusLabel(resources.pr,now,PR_POLL_MS),
       'checks ' + sourceStatusLabel(resources.checks,now,CHECKS_POLL_MS),
       'main ' + sourceStatusLabel(resources.main,now,MAIN_POLL_MS),
@@ -1330,7 +1808,9 @@
   }
   function render(snapshotResult, resources, checkSummary, now, rateState = null) {
     const issueResource = resources.issue;
-    const comments = Array.isArray(issueResource.data) ? issueResource.data : [];
+    const comments = Array.isArray(issueResource.latestComments)
+      ? issueResource.latestComments
+      : Array.isArray(issueResource.data) ? issueResource.data : [];
     const observation = findSnapshot(comments, now);
     const prPin = candidatePrPin(observation);
     const issueReadFreshness = resourceFreshness(issueResource, now, 3 * ISSUE_POLL_MS);
@@ -1394,6 +1874,16 @@
       cardData[id] = workerCardData(id, id === 'W1' ? explicitW1 : workerRecord(snapshot,id),
         records[id], snapshot, id === 'W1' ? githubTask : null);
     for (const id of ['W1','W2','W3']) renderWorker(id, cardData[id]);
+    const goalComments = Array.isArray(resources.goal?.latestComments)
+      ? [...resources.goal.latestComments]
+      : Array.isArray(resources.goal?.data) ? [...resources.goal.data] : [];
+    const goalAuthorityComment = resources.goalAuthority?.data;
+    if (goalAuthorityComment && !goalComments.some(c => Number(c?.id) === Number(goalAuthorityComment.id)))
+      goalComments.push(goalAuthorityComment);
+    const w2Evidence = w2EvidenceData(goalComments, comments, safeSha(main?.sha),
+      resources.goal?.identity || null,resources.goal?.latestComplete === true,
+      resources.issue?.latestComplete === true);
+    renderW2Evidence(w2Evidence);
     const verifiedCount = osFreshness === 'FRESH'
       ? Object.values(records).filter(record => record.status === 'RUNNING_VERIFIED').length : null;
     text('metric-workers', verifiedCount === null ? '未確認（Win11 觀測未知／過期）' : String(verifiedCount) + '／3 有近期施工證據');
@@ -1569,6 +2059,7 @@
     classifyWorker, classifyW1, workerRecord, workerChangeLabel, normalizeFormalTask, classifyRecentEvents,
     freshnessOfSnapshot, createApiClient, createResourceStore, renderRateStatus,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
+    w2EvidenceData, renderW2Evidence, hashHumanGoalComment,
     constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS,
       MANUAL_SYNC_MIN_MS, LOW_REMAINING_THRESHOLD, MAX_LIVE_AGE_MS },
   };
@@ -1612,8 +2103,9 @@
     if (button) { button.disabled = true; button.textContent = '同步中…'; }
     refreshing = (async () => {
       const issueUrl = API + '/issues/407/comments?per_page=100';
+      const goalUrl = API + '/issues/310/comments?per_page=100&sort=created&direction=desc';
       const mainUrl = API + '/commits/main';
-      await runSyncCycle(resourceStore,apiClient,{issue:issueUrl,main:mainUrl},{force:manual});
+      await runSyncCycle(resourceStore,apiClient,{issue:issueUrl,goal:goalUrl,main:mainUrl},{force:manual});
       const observation=findSnapshot(resources.issue.data || [],Date.now());
       const prPin=candidatePrPin(observation);
       const pull=resources.pr.data;
