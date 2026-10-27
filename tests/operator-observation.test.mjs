@@ -1048,11 +1048,11 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
   assert.equal(elements.get('runtime-bundle').textContent,'c'.repeat(64) + '；本次有效觀測');
   assert.match(elements.get('opencode-detail').textContent,/42/);
   assert.match(elements.get('rate-alert-title').textContent,/跨分頁鎖與公開快取未確認/);
-  assert.equal(browserCalls,4,'startup reads the four sources once in dependency order');
+  assert.equal(browserCalls,5,'startup reads the four operational sources plus the W2 task source');
   testNow += 5*60*1000;
   intervalCallbacks[0]();
   await new Promise(resolve => setTimeout(resolve,20));
-  assert.equal(browserCalls,4,'without cross-tab quota coordination, automatic polling is disabled after startup');
+  assert.equal(browserCalls,5,'without cross-tab quota coordination, automatic polling is disabled after startup');
   assert.match(elements.get('next-sync').textContent,/自動輪詢停用/);
 
   failChecks = true;
