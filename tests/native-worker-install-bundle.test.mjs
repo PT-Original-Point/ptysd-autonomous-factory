@@ -86,8 +86,10 @@ assert.ok(refreshBlock.includes('Assert-WorkerRuntimeSource $git $gh'),
   'refresh requires a clean exact-main source tree and same-source provider readback');
 assert.ok(refreshSourceBlock.includes('merge-base'),
   'refresh requires the accepted PR head and merge commit to be reachable from main');
-assert.ok(refreshSourceBlock.includes('Assert-WorkerRuntimeTrustedRuns $runsText $AcceptedPrHead'),
-  'refresh requires exact trusted workflow paths, trigger events and successful runs on the accepted PR head');
+assert.ok(refreshSourceBlock.includes("'--paginate','--slurp'") &&
+  refreshSourceBlock.includes('Assert-WorkerRuntimeTrustedRuns $runsJson $AcceptedPrHead') &&
+  !refreshSourceBlock.includes('--jq'),
+  'refresh reads provider JSON without PowerShell 5.1 jq argument splitting and requires exact trusted workflow identity on the accepted PR head');
 assert.ok(refreshBlock.includes('Get-WorkerRuntimeTaskDefinitionSha256'),
   'refresh pins the complete registered task definition across temporary disable and re-enable');
 assert.ok(taskReadbackBlock.includes('Resolve-WorkerRuntimeIdentitySid') && taskReadbackBlock.includes("Properties['UserId']"),

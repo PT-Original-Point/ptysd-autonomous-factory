@@ -336,8 +336,11 @@ function Invoke-WorkerRuntimeCommandText([string]$Executable, [string[]]$Argumen
     return (($output -join "`n").Trim())
 }
 
-function Assert-WorkerRuntimeTrustedRuns([string]$RunRows, [string]$ExpectedHead) {
+function Assert-WorkerRuntimeTrustedRuns([string]$RunPagesJson, [string]$ExpectedHead) {
     if ($ExpectedHead -notmatch '^[0-9a-fA-F]{40}$') { throw 'WORKER_RUNTIME_CI_HEAD_PIN_INVALID' }
+    try { $pages = ConvertFrom-Json -InputObject $RunPagesJson -ErrorAction Stop }
+    catch { throw 'WORKER_RUNTIME_CI_READBACK_MALFORMED' }
+    if ($null -eq $pages) { throw 'WORKER_RUNTIME_CI_READBACK_MALFORMED' }
     $required = @{
         'csg-trusted-verifier-hosted' = [pscustomobject]@{
             Name='V5.3-R4 CSG trusted verifier (GitHub-hosted)'
@@ -356,31 +359,59 @@ function Assert-WorkerRuntimeTrustedRuns([string]$RunRows, [string]$ExpectedHead
         }
     }
     $latest = @{}
-    foreach ($line in ($RunRows -split "`n")) {
-        $row = $line.TrimEnd("`r")
-        if (-not $row) { continue }
-        $fields = $row.Split([char]9)
-        if ($fields.Count -ne 11) { throw 'WORKER_RUNTIME_CI_READBACK_MALFORMED' }
-        if (-not $required.ContainsKey($fields[0])) { continue }
-        if ($fields[9] -notmatch '^\d+$' -or $fields[10] -notmatch '^\d+$') {
-            throw 'WORKER_RUNTIME_CI_RUN_ID_INVALID'
+    foreach ($page in @($pages)) {
+        if ($null -eq $page -or $null -eq $page.PSObject.Properties['workflow_runs']) {
+            throw 'WORKER_RUNTIME_CI_READBACK_MALFORMED'
         }
-        $attempt = [int]$fields[9]
-        $runId = [long]$fields[10]
-        if (-not $latest.ContainsKey($fields[0]) -or
-            $attempt -gt $latest[$fields[0]].Attempt -or
-            ($attempt -eq $latest[$fields[0]].Attempt -and $runId -gt $latest[$fields[0]].RunId)) {
-            $latest[$fields[0]] = [pscustomobject]@{ Attempt=$attempt; RunId=$runId; Fields=$fields }
+        foreach ($run in @($page.workflow_runs)) {
+            if ($null -eq $run) { throw 'WORKER_RUNTIME_CI_READBACK_MALFORMED' }
+            $pathProperty = $run.PSObject.Properties['path']
+            if ($null -eq $pathProperty) { throw 'WORKER_RUNTIME_CI_READBACK_MALFORMED' }
+            $path = [string]$pathProperty.Value
+            $name = $null
+            foreach ($requiredName in $required.Keys) {
+                if ($path -ceq $required[$requiredName].Path) { $name = $requiredName; break }
+            }
+            if ($null -eq $name) { continue }
+            foreach ($propertyName in @('name','event','status','conclusion','head_sha',
+                'workflow_id','run_attempt','id','head_repository')) {
+                if ($null -eq $run.PSObject.Properties[$propertyName]) {
+                    throw 'WORKER_RUNTIME_CI_READBACK_MALFORMED'
+                }
+            }
+            $attemptText = [string]$run.run_attempt
+            $runIdText = [string]$run.id
+            if ($attemptText -notmatch '^\d+$' -or $runIdText -notmatch '^\d+$') {
+                throw 'WORKER_RUNTIME_CI_RUN_ID_INVALID'
+            }
+            $attempt = [int]$attemptText
+            $runId = [long]$runIdText
+            $headRepository = ''
+            if ($null -ne $run.head_repository -and
+                $null -ne $run.head_repository.PSObject.Properties['full_name']) {
+                $headRepository = [string]$run.head_repository.full_name
+            }
+            $normalized = [pscustomobject]@{
+                Attempt=$attempt; RunId=$runId; Name=[string]$run.name; Path=$path
+                Event=[string]$run.event; Status=[string]$run.status
+                Conclusion=[string]$run.conclusion; HeadSha=[string]$run.head_sha
+                HeadRepository=$headRepository; WorkflowId=[string]$run.workflow_id
+            }
+            if (-not $latest.ContainsKey($name) -or
+                $attempt -gt $latest[$name].Attempt -or
+                ($attempt -eq $latest[$name].Attempt -and $runId -gt $latest[$name].RunId)) {
+                $latest[$name] = $normalized
+            }
         }
     }
     foreach ($name in @('csg-trusted-verifier-hosted','check-native-only','v2-native-windows')) {
         if (-not $latest.ContainsKey($name)) { throw ('WORKER_RUNTIME_CI_CHECK_MISSING:' + $name) }
-        $fields = $latest[$name].Fields
+        $run = $latest[$name]
         $identity = $required[$name]
-        if ($fields[1] -cne $identity.Name -or $fields[2] -cne $identity.Path -or
-            $fields[3] -cne $identity.Event -or $fields[4] -cne 'completed' -or
-            $fields[5] -cne 'success' -or $fields[6] -ine $ExpectedHead -or
-            $fields[7] -cne $repo -or $fields[8] -cne $identity.WorkflowId) {
+        if ($run.Name -cne $identity.Name -or $run.Path -cne $identity.Path -or
+            $run.Event -cne $identity.Event -or $run.Status -cne 'completed' -or
+            $run.Conclusion -cne 'success' -or $run.HeadSha -ine $ExpectedHead -or
+            $run.HeadRepository -cne $repo -or $run.WorkflowId -cne $identity.WorkflowId) {
             throw ('WORKER_RUNTIME_CI_WORKFLOW_NOT_TRUSTED_SUCCESS:' + $name)
         }
     }
@@ -405,32 +436,33 @@ function Assert-WorkerRuntimeSource([string]$GitExe, [string]$GhExe) {
     $status = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'status','--porcelain=v1','--untracked-files=all') `
         'WORKER_RUNTIME_LOCAL_STATUS_READBACK_FAILED'
     if ($status) { throw 'WORKER_RUNTIME_SOURCE_WORKTREE_DIRTY' }
-    $remoteMain = Invoke-WorkerRuntimeCommandText $GhExe @('api',('repos/' + $repo + '/commits/main'),'--jq','.sha') `
+    $mainJson = Invoke-WorkerRuntimeCommandText $GhExe @('api',('repos/' + $repo + '/commits/main')) `
         'WORKER_RUNTIME_GITHUB_MAIN_READBACK_FAILED'
-    if ($remoteMain -ine $SourceMainSha) { throw 'WORKER_RUNTIME_GITHUB_MAIN_CHANGED' }
-    $prJq = '[.state, (.merged_at // ""), .base.ref, .base.repo.full_name, .head.repo.full_name, .head.sha, .merge_commit_sha] | @tsv'
-    $prText = Invoke-WorkerRuntimeCommandText $GhExe @('api',('repos/' + $repo + '/pulls/' + $AcceptedPr),'--jq',$prJq) `
+    try { $mainReadback = ConvertFrom-Json -InputObject $mainJson -ErrorAction Stop }
+    catch { throw 'WORKER_RUNTIME_GITHUB_MAIN_READBACK_FAILED' }
+    if ($null -eq $mainReadback -or [string]$mainReadback.sha -ine $SourceMainSha) {
+        throw 'WORKER_RUNTIME_GITHUB_MAIN_CHANGED'
+    }
+    $prJson = Invoke-WorkerRuntimeCommandText $GhExe @('api',('repos/' + $repo + '/pulls/' + $AcceptedPr)) `
         'WORKER_RUNTIME_ACCEPTED_PR_READBACK_FAILED'
-    $pr = $prText.Split("`t")
-    if ($pr.Count -ne 7 -or $pr[0] -cne 'closed' -or -not $pr[1] -or $pr[2] -cne 'main' -or
-        $pr[3] -cne $repo -or $pr[4] -cne $repo -or $pr[5] -ine $AcceptedPrHead -or
-        $pr[6] -notmatch '^[0-9a-fA-F]{40}$') {
+    try { $pr = ConvertFrom-Json -InputObject $prJson -ErrorAction Stop }
+    catch { throw 'WORKER_RUNTIME_ACCEPTED_PR_READBACK_FAILED' }
+    if ($null -eq $pr -or $null -eq $pr.base -or $null -eq $pr.head -or
+        $null -eq $pr.base.repo -or $null -eq $pr.head.repo -or
+        [string]$pr.state -cne 'closed' -or -not $pr.merged_at -or
+        [string]$pr.base.ref -cne 'main' -or
+        [string]$pr.base.repo.full_name -cne $repo -or
+        [string]$pr.head.repo.full_name -cne $repo -or
+        [string]$pr.head.sha -ine $AcceptedPrHead -or
+        [string]$pr.merge_commit_sha -notmatch '^[0-9a-fA-F]{40}$') {
         throw 'WORKER_RUNTIME_ACCEPTED_PR_IDENTITY_MISMATCH'
     }
-    $runsJq = '.workflow_runs[] | select(.path == ".github/workflows/csg-trusted-verifier-hosted.yml" or ' +
-        '.path == ".github/workflows/v53-r4-main-source-retirement.yml" or ' +
-        '.path == ".github/workflows/v53r4-v2-cli-qualification.yml") | ' +
-        '[(if .path == ".github/workflows/csg-trusted-verifier-hosted.yml" then "csg-trusted-verifier-hosted" ' +
-        'elif .path == ".github/workflows/v53-r4-main-source-retirement.yml" then "check-native-only" ' +
-        'else "v2-native-windows" end), .name, .path, .event, .status, (.conclusion // ""), .head_sha, ' +
-        '(.head_repository.full_name // ""), (.workflow_id|tostring), ' +
-        '(.run_attempt|tostring), (.id|tostring)] | @tsv'
-    $runsText = Invoke-WorkerRuntimeCommandText $GhExe @('api',
+    $runsJson = Invoke-WorkerRuntimeCommandText $GhExe @('api',
         ('repos/' + $repo + '/actions/runs?head_sha=' + $AcceptedPrHead + '&per_page=100'),
-        '--paginate','--jq',$runsJq) 'WORKER_RUNTIME_CI_READBACK_FAILED'
-    Assert-WorkerRuntimeTrustedRuns $runsText $AcceptedPrHead
+        '--paginate','--slurp') 'WORKER_RUNTIME_CI_READBACK_FAILED'
+    Assert-WorkerRuntimeTrustedRuns $runsJson $AcceptedPrHead
     $null = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'merge-base','--is-ancestor',
-        $pr[6],$SourceMainSha) 'WORKER_RUNTIME_ACCEPTED_PR_NOT_IN_MAIN'
+        [string]$pr.merge_commit_sha,$SourceMainSha) 'WORKER_RUNTIME_ACCEPTED_PR_NOT_IN_MAIN'
     $null = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'merge-base','--is-ancestor',
         $AcceptedPrHead,$SourceMainSha) 'WORKER_RUNTIME_ACCEPTED_PR_HEAD_NOT_IN_MAIN'
     foreach ($file in $runtimeFiles) {
