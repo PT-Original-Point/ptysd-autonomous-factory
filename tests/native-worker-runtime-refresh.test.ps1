@@ -115,26 +115,47 @@ try {
 
     $head = 'a' * 40
     $repo = 'PT-Original-Point/ptysd-autonomous-factory'
-    $trustedRows = @(
-        "csg-trusted-verifier-hosted`tV5.3-R4 CSG trusted verifier (GitHub-hosted)`t.github/workflows/csg-trusted-verifier-hosted.yml`tpull_request_target`tcompleted`tsuccess`t$head`t$repo`t381764260`t1`t100",
-        "check-native-only`tV5.3 main source retirement integrity`t.github/workflows/v53-r4-main-source-retirement.yml`tpull_request`tcompleted`tsuccess`t$head`t$repo`t381351204`t1`t101",
-        "v2-native-windows`tV53R4 OpenCode V2 CLI zero-token qualification`t.github/workflows/v53r4-v2-cli-qualification.yml`tpull_request`tcompleted`tsuccess`t$head`t$repo`t382735923`t1`t102"
-    ) -join "`n"
-    Assert-WorkerRuntimeTrustedRuns $trustedRows $head
-    Assert-Throws { Assert-WorkerRuntimeTrustedRuns ($trustedRows.Replace($head, ('b' * 40))) $head } `
+    function New-TrustedRun([string]$WorkflowName, [string]$WorkflowPath, [string]$Event,
+        [string]$RunHead, [string]$HeadRepository, [long]$WorkflowId, [string]$Status = 'completed',
+        [string]$Conclusion = 'success', [int]$Attempt = 1, [long]$RunId = 100) {
+        return [pscustomobject]@{
+            name=$WorkflowName; path=$WorkflowPath; event=$Event; status=$Status
+            conclusion=$Conclusion; head_sha=$RunHead; workflow_id=$WorkflowId
+            run_attempt=$Attempt; id=$RunId; head_repository=[pscustomobject]@{full_name=$HeadRepository}
+        }
+    }
+    function Convert-RunsToPagesJson([object[]]$Runs) {
+        $page = [pscustomobject]@{workflow_runs=@($Runs)}
+        return ConvertTo-Json -InputObject ([object[]]@($page)) -Depth 8 -Compress
+    }
+    $trustedRuns = @(
+        (New-TrustedRun 'V5.3-R4 CSG trusted verifier (GitHub-hosted)' '.github/workflows/csg-trusted-verifier-hosted.yml' 'pull_request_target' $head $repo 381764260  'completed' 'success' 1 100),
+        (New-TrustedRun 'V5.3 main source retirement integrity' '.github/workflows/v53-r4-main-source-retirement.yml' 'pull_request' $head $repo 381351204 'completed' 'success' 1 101),
+        (New-TrustedRun 'V53R4 OpenCode V2 CLI zero-token qualification' '.github/workflows/v53r4-v2-cli-qualification.yml' 'pull_request' $head $repo 382735923 'completed' 'success' 1 102)
+    )
+    $trustedJson = Convert-RunsToPagesJson $trustedRuns
+    Assert-WorkerRuntimeTrustedRuns $trustedJson $head
+    Assert-Throws { Assert-WorkerRuntimeTrustedRuns ($trustedJson.Replace($head, ('b' * 40))) $head } `
         'WORKER_RUNTIME_CI_WORKFLOW_NOT_TRUSTED_SUCCESS' 'successful workflows on a different head cannot authorize refresh'
-    Assert-Throws { Assert-WorkerRuntimeTrustedRuns ($trustedRows.Replace("`tpull_request`tcompleted`t", "`tpull_request`tqueued`t")) $head } `
+    Assert-Throws { Assert-WorkerRuntimeTrustedRuns ($trustedJson.Replace('"status":"completed"', '"status":"queued"')) $head } `
         'WORKER_RUNTIME_CI_WORKFLOW_NOT_TRUSTED_SUCCESS' 'a queued workflow cannot authorize refresh'
-    Assert-Throws { Assert-WorkerRuntimeTrustedRuns ($trustedRows.Replace($repo, 'untrusted/fork')) $head } `
+    Assert-Throws { Assert-WorkerRuntimeTrustedRuns ($trustedJson.Replace($repo, 'untrusted/fork')) $head } `
         'WORKER_RUNTIME_CI_WORKFLOW_NOT_TRUSTED_SUCCESS' 'a same-named workflow from a different repository cannot authorize refresh'
-    Assert-Throws { Assert-WorkerRuntimeTrustedRuns ($trustedRows.Replace('381764260', '123')) $head } `
+    Assert-Throws { Assert-WorkerRuntimeTrustedRuns ($trustedJson.Replace('381764260', '123')) $head } `
         'WORKER_RUNTIME_CI_WORKFLOW_NOT_TRUSTED_SUCCESS' 'a different workflow identity cannot authorize refresh'
-    $failedRetryRows = $trustedRows + "`n" +
-        "v2-native-windows`tV53R4 OpenCode V2 CLI zero-token qualification`t.github/workflows/v53r4-v2-cli-qualification.yml`tpull_request`tcompleted`tfailure`t$head`t$repo`t382735923`t2`t103"
-    Assert-Throws { Assert-WorkerRuntimeTrustedRuns $failedRetryRows $head } `
+    Assert-Throws { Assert-WorkerRuntimeTrustedRuns ($trustedJson.Replace('V5.3-R4 CSG trusted verifier (GitHub-hosted)', 'Untrusted workflow')) $head } `
+        'WORKER_RUNTIME_CI_WORKFLOW_NOT_TRUSTED_SUCCESS' 'a same-path workflow with a different name cannot authorize refresh'
+    Assert-Throws { Assert-WorkerRuntimeTrustedRuns ($trustedJson.Replace('pull_request_target', 'pull_request')) $head } `
+        'WORKER_RUNTIME_CI_WORKFLOW_NOT_TRUSTED_SUCCESS' 'a workflow with a different trigger event cannot authorize refresh'
+    $failedRetryRuns = @($trustedRuns) + @(
+        (New-TrustedRun 'V53R4 OpenCode V2 CLI zero-token qualification' '.github/workflows/v53r4-v2-cli-qualification.yml' 'pull_request' $head $repo 382735923 'completed' 'failure' 2 103)
+    )
+    Assert-Throws { Assert-WorkerRuntimeTrustedRuns (Convert-RunsToPagesJson $failedRetryRuns) $head } `
         'WORKER_RUNTIME_CI_WORKFLOW_NOT_TRUSTED_SUCCESS' 'the latest failed workflow retry supersedes an older passing run'
-    Assert-Throws { Assert-WorkerRuntimeTrustedRuns ($trustedRows -replace "`n.*$", '') $head } `
+    Assert-Throws { Assert-WorkerRuntimeTrustedRuns (Convert-RunsToPagesJson @($trustedRuns[0],$trustedRuns[1])) $head } `
         'WORKER_RUNTIME_CI_CHECK_MISSING:v2-native-windows' 'missing Windows qualification blocks refresh'
+    Assert-Throws { Assert-WorkerRuntimeTrustedRuns '{not-json' $head } `
+        'WORKER_RUNTIME_CI_READBACK_MALFORMED' 'malformed provider JSON blocks refresh'
 
     Write-Output 'NATIVE_WORKER_RUNTIME_REFRESH_HELPERS_PASS'
 } finally {
