@@ -431,8 +431,17 @@
       return { id:Number(comment.id), author:comment.user.login, body_sha256:bodySha256 };
     } catch { return null; }
   }
+  function w2AcceptanceTestSummary(tests) {
+    const validCounts = value => object(value) &&
+      ['total','passed','failed','skipped'].every(key =>
+        Number.isSafeInteger(value[key]) && value[key] >= 0) &&
+      value.total === value.passed + value.failed + value.skipped;
+    if (validCounts(tests)) return tests;
+    if (object(tests) && validCounts(tests.full)) return tests.full;
+    return null;
+  }
   function validW2Acceptance(value) {
-    const tests = value?.tests;
+    const tests = w2AcceptanceTestSummary(value?.tests);
     return object(value) && value.schema === 1 && value.project_id === PROJECT &&
       value.record_type === 'ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT' &&
       /^[A-Z][A-Z0-9_-]{7,79}$/.test(value.request_id || '') &&
@@ -441,9 +450,7 @@
       /^[a-f0-9]{40}$/.test(value.source_sha || '') &&
       ['ACCEPTED','REJECTED'].includes(value.codex_source_acceptance) &&
       ['SUCCESS','FAILURE','PENDING','UNKNOWN','SKIPPED'].includes(value.exact_head_ci) &&
-      object(tests) && ['total','passed','failed','skipped'].every(key =>
-        Number.isSafeInteger(tests[key]) && tests[key] >= 0) &&
-      tests.total === tests.passed + tests.failed + tests.skipped &&
+      !!tests &&
       ['NONE','UNKNOWN','OBSERVED'].includes(value.external_effects);
   }
   function validJob(job) {
@@ -1682,7 +1689,9 @@
 
     if (receipt || codex) {
       const workerAcc = receipt ? `Worker task_acceptance=${receipt.task_acceptance || 'UNKNOWN'} · external_effects=${receipt.external_effects || 'UNKNOWN'}` : 'Worker 收據未讀回';
-      const codexAcc = codex ? `Codex source_acceptance=${codex.codex_source_acceptance} · CI=${codex.exact_head_ci}${codex.tests ? ` · 測試 ${codex.tests.passed}/${codex.tests.total}` : ''} · external_effects=${codex.external_effects || 'UNKNOWN'}` : 'Codex 驗收紀錄未讀回';
+      const tests = codex ? w2AcceptanceTestSummary(codex.tests) : null;
+      const testSummary = tests ? ` · 測試 ${tests.passed}/${tests.total} · 失敗 ${tests.failed} · 略過 ${tests.skipped}` : '';
+      const codexAcc = codex ? `Codex source_acceptance=${codex.codex_source_acceptance} · CI=${codex.exact_head_ci}${testSummary} · external_effects=${codex.external_effects || 'UNKNOWN'}` : 'Codex 驗收紀錄未讀回';
       text('w2-native-acceptance', `${workerAcc}；${codexAcc}`);
     } else {
       text('w2-native-acceptance', '未確認');

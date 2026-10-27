@@ -832,7 +832,12 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
     record_type:'ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT',
     request_id:currentRequest, attempt_id:currentReceipt.attempt_id,
     source_sha:currentSha, source_pr:579, codex_source_acceptance:'ACCEPTED',
-    exact_head_ci:'SUCCESS', tests:{total:402,passed:397,failed:0,skipped:5},
+    exact_head_ci:'SUCCESS', tests:{
+      focused:{total:2,passed:2,failed:0,skipped:0},
+      full:{total:407,passed:402,failed:0,skipped:5},
+      initial_full_run:{total:407,passed:401,failed:1,skipped:5},
+      failure_retest:{total:1,passed:1,failed:0,skipped:0},
+    },
     external_effects:'UNKNOWN',
   };
   const goalComments = [
@@ -868,6 +873,12 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
   assert.equal(acceptedEvidence.native.receipt.state,'BLOCKED',
     'a separate Codex source acceptance never upgrades the Worker lifecycle receipt');
   assert.equal(acceptedEvidence.native.receipt.external_effects,'UNKNOWN');
+  panel.renderW2Evidence(acceptedEvidence);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/Codex source_acceptance=ACCEPTED/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/CI=SUCCESS/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/測試 402\/407 · 失敗 0 · 略過 5/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/Worker task_acceptance=UNKNOWN/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/external_effects=UNKNOWN/);
   assert.equal(evidence.directCli.provenance,'DIRECT_CLI_NOT_NATIVE_WORKER');
   assert.equal(evidence.directCli.session_id,'be190416-e85f-4f68-b33a-5d05f54d7072');
   assert.equal(evidence.directCli.pull_request,576);
