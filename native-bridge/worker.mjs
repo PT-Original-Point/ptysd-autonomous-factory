@@ -1827,11 +1827,17 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
       exit_code: 47, coding_state: 'NO_DIFF', scope_valid: true,
       diff_sha256: diff.sha256, diff_bytes: diff.bytes, ...diff, local_evidence: localEvidence };
   if (evidencedResult.exit_code !== 0 || runEvidence.cli_status !== 'SUCCESS' ||
-      runEvidence.file_change_tool_failed_count || runEvidence.file_change_tool_incomplete_count)
+      runEvidence.file_change_tool_incomplete_count)
     return { ...diffEvidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROCESS_FAILED_DIFF_PRESERVED',
       cli_exit_code: evidencedResult.exit_code, exit_code: -1, coding_state: 'DIFF_CAPTURED_UNVERIFIED',
       scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
       ...diff, local_evidence: localEvidence };
+  if (runEvidence.file_change_tool_failed_count)
+    return { ...diffEvidencedResult,
+      outcome: 'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED_FILE_TOOL_FAILURES_RETAINED',
+      cli_exit_code: evidencedResult.exit_code,
+      coding_state: 'DIFF_CAPTURED_UNVERIFIED', scope_valid: true,
+      diff_sha256: diff.sha256, diff_bytes: diff.bytes, ...diff, local_evidence: localEvidence };
   return { ...diffEvidencedResult, outcome: 'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED',
     coding_state: 'DIFF_CAPTURED_UNVERIFIED', scope_valid: true,
     diff_sha256: diff.sha256, diff_bytes: diff.bytes, ...diff, local_evidence: localEvidence };
