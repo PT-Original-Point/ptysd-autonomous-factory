@@ -2281,6 +2281,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     const racedResult=await executeOpenCodeTask('Synthetic junction inserted during model execution.',config,
       {...job,edit_paths:['race/raced-worker.mjs']},randomUUID(),{
         now:()=>now,localAppData,runAntigravityV2Readiness:()=>readiness,
+        readGitProcessTree:pid=>({state:'DEAD',root_pid:pid,process_ids:[],
+          census_complete:true,observed_at:new Date(now).toISOString(),error:null}),
         readAntigravityV2RunEvidence:()=>({valid:true,reason:null,session_id:'synthetic-session',
           session_started:true,cli_status:'SUCCESS',run_disposition:'MODEL_ACTIVITY_OBSERVED',
           external_effects:'OBSERVED',source_diff_evidence:'CAPTURED',task_acceptance:'UNVERIFIED',
@@ -2480,6 +2482,7 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.deepEqual(result.local_evidence.antigravity_project_root_check,{
       status:'CLEAN_STABLE',head_before_sha:registeredProjectSha,head_after_sha:registeredProjectSha,
       status_sha256:createHash('sha256').update(Buffer.alloc(0)).digest('hex'),status_bytes:0,
+      baseline_changed_files_count:0,changed_files_count:0,
     },'the outer registered project is checked for isolation without requiring its HEAD to equal the candidate source SHA');
     assert.deepEqual(result.changed_files,['src/worker.mjs']);
     assert.equal(result.file_change_tool_completed_count,1);
@@ -2515,6 +2518,61 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(await verifyCapturedEvidence(stateDir,{terminal:finalReceipt,local_evidence:result.local_evidence}),true);
 
     git(workspace,'checkout','--','src/worker.mjs');
+    const unrelatedWipPath=join(registeredProjectRoot,'registered-root-only.txt');
+    const unrelatedWip='pre-existing unrelated registered-root WIP\n';
+    writeFileSync(unrelatedWipPath,unrelatedWip);
+    const isolatedSession='conv_antigravity_unrelated_registered_root_wip_20261027';
+    let isolatedModelLaunches=0;
+    try {
+      const isolated=await executeOpenCodeTask('Synthetic; preserve unrelated registered-root WIP.',
+        config,job,randomUUID(),{now:()=>now,baseEnv:env,localAppData,
+          runAntigravityV2Readiness:()=>readiness,
+          readGitProcessTree:pid=>({state:'DEAD',root_pid:pid,process_ids:[],
+            census_complete:true,observed_at:new Date(now).toISOString(),error:null}),
+          async runCapturedProcess(_bin,_args,options){
+            isolatedModelLaunches++;
+            writeFileSync(join(workspace,'src','worker.mjs'),
+              'export const state = "candidate-change-with-unrelated-root-wip";\n');
+            const events=[
+              {event:'init',conversation_id:isolatedSession,init:{model:ANTIGRAVITY_V2_MODEL,
+                cwd:workspace,permission_mode:'accept-edits'}},
+              {event:'step_update',step_update:{conversation_id:isolatedSession,step_index:0,state:'DONE',
+                step_type:'tool',tool_name:'write_to_file',tool_info:{name:'write_to_file',parameters:{
+                  TargetFile:join(workspace,'src','worker.mjs')}}}},
+              {event:'result',result:{conversation_id:isolatedSession,status:'SUCCESS',response:'',
+                usage:{input_tokens:8,output_tokens:3,thinking_tokens:0,cache_read_tokens:0,total_tokens:11}}},
+            ];
+            const out=Buffer.from(events.map(event=>JSON.stringify(event)).join('\n')+'\n');
+            const err=Buffer.alloc(0);writeFileSync(options.stdoutPath,out,{flag:'wx'});
+            writeFileSync(options.stderrPath,err,{flag:'wx'});
+            const combined=createHash('sha256').update(out).update(Buffer.from('\n--- STDERR ---\n'))
+              .update(err).digest('hex');
+            return {outcome:'SYNTHETIC_PROCESS_EXITED',exit_code:0,evidence_sha256:combined,
+              evidence_bytes:out.length+Buffer.byteLength('\n--- STDERR ---\n'),local_evidence:{
+                stdout_file:basename(options.stdoutPath),stdout_sha256:createHash('sha256').update(out).digest('hex'),
+                stdout_bytes:out.length,stderr_file:basename(options.stderrPath),
+                stderr_sha256:createHash('sha256').update(err).digest('hex'),stderr_bytes:0,
+                termination_state:'NOT_REQUESTED'}};
+          }});
+      assert.equal(isolatedModelLaunches,1,
+        'an unrelated pre-existing registered-root change must not block the isolated candidate');
+      assert.equal(isolated.outcome,'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED');
+      assert.equal(isolated.model_invoked,true);
+      assert.deepEqual(isolated.changed_files,['src/worker.mjs']);
+      assert.equal(readFileSync(unrelatedWipPath,'utf8'),unrelatedWip,
+        'the unrelated registered-root WIP must remain byte-identical');
+      assert.deepEqual(isolated.local_evidence.antigravity_project_root_check,{
+        status:'UNCHANGED_PREEXISTING_CHANGES',head_before_sha:registeredProjectSha,
+        head_after_sha:registeredProjectSha,status_sha256:createHash('sha256')
+          .update(Buffer.from(' M registered-root-only.txt\0')).digest('hex'),
+        status_bytes:Buffer.byteLength(' M registered-root-only.txt\0'),
+        baseline_changed_files_count:1,changed_files_count:0,
+      });
+    } finally {
+      git(workspace,'checkout','--','src/worker.mjs');
+      git(registeredProjectRoot,'checkout','--','registered-root-only.txt');
+    }
+
     const wrongRootSession='conv_antigravity_registered_root_write_20261027';
     const wrongRoot=await executeOpenCodeTask('Synthetic; file tool writes outside candidate root.',config,job,
       randomUUID(),{now:()=>now,baseEnv:env,localAppData,
@@ -2603,6 +2661,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     git(workspace,'checkout','--','src/worker.mjs');
     const changedBinary=await executeOpenCodeTask('Synthetic; binary changes during run.',config,job,randomUUID(),{
       now:()=>now,baseEnv:env,localAppData,runAntigravityV2Readiness:()=>readiness,
+      readGitProcessTree:pid=>({state:'DEAD',root_pid:pid,process_ids:[],
+        census_complete:true,observed_at:new Date(now).toISOString(),error:null}),
       async runCapturedProcess(_bin,_args,options){
         writeFileSync(join(workspace,'src','worker.mjs'),'export const state = "changed-with-cli-replacement";\n');
         const events=[
