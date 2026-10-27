@@ -306,9 +306,16 @@ function hasBlockingRequestReceipt(entries) {
 // This releases only the same-path writer lease after the executor has returned
 // and captured a complete, request-bound diff. It does not accept the task.
 function hasCompletedScopedEditDiff(receipt, job) {
+  // Schema-1 terminals written before source_diff_evidence was introduced can
+  // still prove a complete, request-bound diff through their scope, digest,
+  // byte-count, and changed-file fields. An explicit UNKNOWN/NOT_INSPECTED value
+  // remains fail-closed. This releases only the same-path writer lease; it does
+  // not accept the task.
+  const sourceDiffCaptured = receipt?.source_diff_evidence === 'CAPTURED' ||
+    receipt?.source_diff_evidence === undefined;
   return receipt?.state === 'FINISHED' && receipt.model_invoked === true &&
     receipt.coding_state === 'DIFF_CAPTURED_UNVERIFIED' && receipt.scope_valid === true &&
-    receipt.source_diff_evidence === 'CAPTURED' &&
+    sourceDiffCaptured &&
     receipt.source_pr === job.source_pr && receipt.goal_comment_id === job.goal_comment_id &&
     receipt.goal_body_sha256 === job.goal_body_sha256 &&
     receipt.edit_paths_sha256 === digest(Buffer.from(JSON.stringify(job.edit_paths), 'utf8')) &&
