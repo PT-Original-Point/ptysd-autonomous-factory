@@ -549,6 +549,84 @@ test('V2 worker read policy blocks secret env variants and unscoped content sear
     assert.equal(decide(rules,'grep','API_KEY'),'deny',`${name} can search file contents without a path boundary`);
   }
 });
+test('V2 policies deny conventional private-key reads in global and scoped-agent rules', () => {
+  const readonly=buildV2ReadOnlyConfig();
+  const writer=buildV2ScopedEditConfig(process.cwd(),['README.md']);
+  const configs=[
+    ['readonly-global',readonly.permissions],
+    ['readonly-agent',readonly.agents['ptysd-readonly'].permissions],
+    ['writer-global',writer.permissions],
+    ['writer-agent',writer.agents['ptysd-scoped-write'].permissions],
+  ];
+  const matches=(pattern,resource)=>new RegExp('^'+pattern.replaceAll('.','\\.').replaceAll('*','.*')+'$',
+    platform()==='win32'?'i':'').test(resource);
+  const decide=(rules,action,resource)=>rules
+    .filter(rule=>(rule.action===action||rule.action==='*')&&matches(rule.resource,resource)).at(-1)?.effect;
+  // Synthetic path strings only; no key material is created or read.
+  const privatePaths=['id_rsa','id_dsa','id_ecdsa','id_ed25519','id_ecdsa_sk','id_ed25519_sk',
+    'src/id_rsa','src/id_ed25519','keys/deploy.key','src/private.key','src/private.ppk',
+    'keys/server.pem','keys/client.p12','keys/client.pfx'];
+  const publicPaths=['id_rsa.pub','src/id_ed25519.pub','keys/server.pub'];
+  const unrelatedPaths=['src/index.mjs','src/monkey.mjs','src/keyboard/keynote.txt'];
+  for(const [name,rules] of configs){
+    for(const path of privatePaths)
+      assert.equal(decide(rules,'read',path),'deny',`${name} can read private key ${path}`);
+    for(const path of publicPaths)
+      assert.equal(decide(rules,'read',path),'allow',`${name} must keep public key ${path} readable`);
+    for(const path of unrelatedPaths)
+      assert.equal(decide(rules,'read',path),'allow',`${name} must not block unrelated ${path}`);
+    // Existing restrictions remain in place alongside the new private-key deny.
+    assert.equal(decide(rules,'shell','git status'),'deny',`${name} can run shell`);
+    assert.equal(decide(rules,'subagent','*'),'deny',`${name} can delegate`);
+    assert.equal(decide(rules,'external_directory',tmpdir()),'deny',`${name} can leave the workspace`);
+    assert.equal(decide(rules,'read','.env'),'deny',`${name} can read a private env file`);
+    assert.equal(decide(rules,'read','src/.env.example'),'allow',`${name} lost the example exception`);
+  }
+  if(platform()==='win32'){
+    for(const [name,rules] of configs){
+      assert.equal(decide(rules,'read','ID_RSA'),'deny',`${name} can bypass the deny with case`);
+      assert.equal(decide(rules,'read','SRC\\Private.Key'),'deny',`${name} can bypass the deny with case`);
+      assert.equal(decide(rules,'read','SRC\\Private.pub'),'allow',`${name} must keep public keys readable`);
+    }
+  }
+});
+test('scoped V2 writer rejects private-key edit paths and still grants public and unrelated files', () => {
+  const workspace=mkdtempSync(join(tmpdir(),'ptysd-v2-code-private-key-'));
+  try {
+    mkdirSync(join(workspace,'src'));
+    mkdirSync(join(workspace,'keys'));
+    // Fixture text is synthetic and deliberately not key material.
+    writeFileSync(join(workspace,'src','id_ed25519.pub'),'synthetic public key fixture\n');
+    writeFileSync(join(workspace,'keys','id_rsa.pub'),'synthetic public key fixture\n');
+    writeFileSync(join(workspace,'src','answer.mjs'),'export const answer = 42;\n');
+    writeFileSync(join(workspace,'src','monkey.mjs'),'export const monkey = true;\n');
+    writeFileSync(join(workspace,'src','keynote.txt'),'synthetic unrelated fixture\n');
+    // Conventional OpenSSH names, private-key extensions, nested paths and
+    // Windows case variants all fail closed before any filesystem grant.
+    for(const file of ['id_rsa','id_dsa','id_ecdsa','id_ed25519','id_ecdsa_sk','id_ed25519_sk',
+      'src/id_rsa','src/id_ed25519','keys/deploy.key','src/private.key','src/private.ppk',
+      'keys/server.pem','keys/client.p12','keys/client.pfx',
+      'src/PRIVATE.KEY','SRC/Private.Key','src/ID_ED25519','src/Id_Rsa'])
+      assert.throws(()=>buildV2ScopedEditConfig(workspace,[file]),
+        /SCOPED_EDIT_CONTROL_OR_SECRET_PATH/,file);
+    // A .pub companion remains an eligible exact edit grant.
+    for(const relativePath of ['src/id_ed25519.pub','keys/id_rsa.pub']){
+      const cfg=buildV2ScopedEditConfig(workspace,[relativePath]);
+      const allowed=cfg.agents['ptysd-scoped-write'].permissions
+        .filter(p=>p.action==='edit' && p.effect==='allow').map(p=>p.resource);
+      const native=join(workspace,...relativePath.split('/'));
+      const expected=[relativePath,native.replaceAll('\\','/')];
+      if(platform()==='win32') expected.push(relativePath.replaceAll('/','\\'),native);
+      assert.deepEqual(allowed.sort(),expected.sort(),`${relativePath} must keep its exact grant`);
+    }
+    // Filenames containing "key" are not denied by a broad substring rule.
+    for(const relativePath of ['src/answer.mjs','src/monkey.mjs','src/keynote.txt']){
+      const cfg=buildV2ScopedEditConfig(workspace,[relativePath]);
+      assert.ok(cfg.agents['ptysd-scoped-write'].permissions
+        .some(p=>p.action==='edit' && p.effect==='allow' && p.resource===relativePath),relativePath);
+    }
+  } finally {rmSync(workspace,{recursive:true,force:true});}
+});
 test('V2 policies deny external-directory access before read exceptions are applied', () => {
   const writer=buildV2ScopedEditConfig(process.cwd(),['README.md']);
   const externalDirectory=join(tmpdir(),'unrelated-opencode-worktree');
