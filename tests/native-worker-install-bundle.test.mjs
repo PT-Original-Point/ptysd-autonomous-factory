@@ -90,6 +90,11 @@ assert.ok(mergeAncestryBlock.includes('merge-base') && mergeAncestryBlock.includ
   mergeAncestryBlock.includes('WORKER_RUNTIME_ACCEPTED_PR_MERGE_TREE_MISMATCH') &&
   refreshSourceBlock.includes('Assert-WorkerRuntimeAcceptedPrAncestry'),
   'refresh requires the merge commit on main and exact tree equivalence when GitHub rewrites the accepted PR head');
+assert.ok(mergeAncestryBlock.includes("return ('native-bridge/' + $File)") &&
+  refreshSourceBlock.includes('Get-WorkerRuntimeGitPath $file') &&
+  refreshSourceBlock.includes("$SourceMainSha + ':' + $gitPath") &&
+  refreshSourceBlock.includes("$AcceptedPrHead + ':' + $gitPath"),
+  'refresh resolves runtime module blobs from their native-bridge repository paths');
 assert.ok(refreshSourceBlock.includes("'--paginate','--slurp'") &&
   refreshSourceBlock.includes('Assert-WorkerRuntimeTrustedRuns $runsJson $AcceptedPrHead') &&
   !refreshSourceBlock.includes('--jq'),

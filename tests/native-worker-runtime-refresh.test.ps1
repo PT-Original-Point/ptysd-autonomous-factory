@@ -18,7 +18,8 @@ foreach ($name in @('Get-WorkerRuntimeBytesSha256','Get-WorkerRuntimeFileSha256'
     'Resolve-WorkerRuntimeIdentitySid',
     'Write-WorkerRuntimeAtomicReplacement','Get-WorkerRuntimeTaskDefinitionSha256',
     'Get-TaskOptional','Get-WorkerRuntimeTaskReadback','Invoke-WorkerRuntimeCommandText',
-    'Assert-WorkerRuntimeTrustedRuns','Assert-WorkerRuntimeAcceptedPrAncestry')) {
+    'Assert-WorkerRuntimeTrustedRuns','Assert-WorkerRuntimeAcceptedPrAncestry',
+    'Get-WorkerRuntimeGitPath')) {
     Invoke-Expression (Get-InstallerFunction $name)
 }
 
@@ -170,9 +171,13 @@ try {
     $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'init','--quiet')
     $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'config','user.name','PTYSD Runtime Test')
     $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'config','user.email','runtime-test@example.invalid')
+    $nativeBridgeFixture = Join-Path $ancestryRoot 'native-bridge'
+    $null = [IO.Directory]::CreateDirectory($nativeBridgeFixture)
     [IO.File]::WriteAllText((Join-Path $ancestryRoot 'source.txt'),'candidate tree',
         ([Text.UTF8Encoding]::new($false)))
-    $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'add','source.txt')
+    [IO.File]::WriteAllText((Join-Path $nativeBridgeFixture 'worker.mjs'),'runtime source',
+        ([Text.UTF8Encoding]::new($false)))
+    $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'add','source.txt','native-bridge/worker.mjs')
     $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'commit','--quiet','-m','candidate source')
     $baseSha = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'rev-parse','HEAD')
     [IO.File]::WriteAllText((Join-Path $ancestryRoot 'source.txt'),'accepted PR tree',
@@ -180,6 +185,10 @@ try {
     $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'add','source.txt')
     $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'commit','--quiet','-m','accepted PR head')
     $acceptedHead = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'rev-parse','HEAD')
+    $gitPath = Get-WorkerRuntimeGitPath 'worker.mjs'
+    $runtimeBlob = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'rev-parse',($acceptedHead + ':' + $gitPath))
+    Assert-Equal $runtimeBlob (Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'hash-object','native-bridge/worker.mjs')) `
+        'runtime module Git lookup is rooted at native-bridge'
     $acceptedTree = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'rev-parse',($acceptedHead + '^{tree}'))
     $rebasedMain = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'commit-tree',$acceptedTree,
         '-p',$baseSha,'-m','rebased PR with exact tree')
