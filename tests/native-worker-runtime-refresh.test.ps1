@@ -17,7 +17,8 @@ function Get-InstallerFunction([string]$Name) {
 foreach ($name in @('Get-WorkerRuntimeBytesSha256','Get-WorkerRuntimeFileSha256',
     'Resolve-WorkerRuntimeIdentitySid',
     'Write-WorkerRuntimeAtomicReplacement','Get-WorkerRuntimeTaskDefinitionSha256',
-    'Get-TaskOptional','Get-WorkerRuntimeTaskReadback','Assert-WorkerRuntimeTrustedRuns')) {
+    'Get-TaskOptional','Get-WorkerRuntimeTaskReadback','Invoke-WorkerRuntimeCommandText',
+    'Assert-WorkerRuntimeTrustedRuns','Assert-WorkerRuntimeAcceptedPrAncestry')) {
     Invoke-Expression (Get-InstallerFunction $name)
 }
 
@@ -157,6 +158,42 @@ try {
     Assert-Throws { Assert-WorkerRuntimeTrustedRuns '{not-json' $head } `
         'WORKER_RUNTIME_CI_READBACK_MALFORMED' 'malformed provider JSON blocks refresh'
 
+    $gitExe = (Get-Command git.exe -ErrorAction Stop).Source
+    $ancestryRoot = Join-Path $testRoot 'pr-ancestry'
+    $null = [IO.Directory]::CreateDirectory($ancestryRoot)
+    function Invoke-TestGit([string[]]$GitArguments) {
+        $output = @(& $gitExe @GitArguments 2>$null)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) { throw 'TEST_GIT_COMMAND_FAILED' }
+        return (($output -join [Environment]::NewLine).Trim())
+    }
+    $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'init','--quiet')
+    $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'config','user.name','PTYSD Runtime Test')
+    $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'config','user.email','runtime-test@example.invalid')
+    [IO.File]::WriteAllText((Join-Path $ancestryRoot 'source.txt'),'candidate tree',
+        ([Text.UTF8Encoding]::new($false)))
+    $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'add','source.txt')
+    $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'commit','--quiet','-m','candidate source')
+    $baseSha = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'rev-parse','HEAD')
+    [IO.File]::WriteAllText((Join-Path $ancestryRoot 'source.txt'),'accepted PR tree',
+        ([Text.UTF8Encoding]::new($false)))
+    $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'add','source.txt')
+    $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'commit','--quiet','-m','accepted PR head')
+    $acceptedHead = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'rev-parse','HEAD')
+    $acceptedTree = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'rev-parse',($acceptedHead + '^{tree}'))
+    $rebasedMain = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'commit-tree',$acceptedTree,
+        '-p',$baseSha,'-m','rebased PR with exact tree')
+    Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $acceptedHead $acceptedHead
+    Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $rebasedMain $rebasedMain
+    Assert-Throws { Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $acceptedHead $rebasedMain } 'WORKER_RUNTIME_ACCEPTED_PR_NOT_IN_MAIN' 'a PR merge commit not reachable from main cannot authorize refresh'
+    [IO.File]::WriteAllText((Join-Path $ancestryRoot 'source.txt'),'different merge tree',
+        ([Text.UTF8Encoding]::new($false)))
+    $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'add','source.txt')
+    $differentTree = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'write-tree')
+    $differentMerge = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'commit-tree',$differentTree,
+        '-p',$baseSha,'-m','different merge result')
+    Assert-Throws { Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $differentMerge $differentMerge } 'WORKER_RUNTIME_ACCEPTED_PR_MERGE_TREE_MISMATCH' 'a rewritten PR head requires exact merge-tree equality'
+
     Write-Output 'NATIVE_WORKER_RUNTIME_REFRESH_HELPERS_PASS'
 } finally {
     Remove-Item Function:\global:Export-ScheduledTask -ErrorAction SilentlyContinue
@@ -165,6 +202,13 @@ try {
         $resolvedTestRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $testRoot).Path)
         if (-not $resolvedTestRoot.StartsWith($tempBase, [StringComparison]::OrdinalIgnoreCase)) {
             throw 'TEST_CLEANUP_PATH_OUTSIDE_TEMP'
+        }
+        foreach ($file in [IO.Directory]::EnumerateFiles($resolvedTestRoot, '*',
+            [IO.SearchOption]::AllDirectories)) {
+            $attributes = [IO.File]::GetAttributes($file)
+            if (($attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
+                [IO.File]::SetAttributes($file, ($attributes -band (-bnot [IO.FileAttributes]::ReadOnly)))
+            }
         }
         [IO.Directory]::Delete($resolvedTestRoot, $true)
     }

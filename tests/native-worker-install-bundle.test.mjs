@@ -78,14 +78,18 @@ const refreshBlock = installer.slice(installer.indexOf('function Invoke-WorkerRu
   installer.indexOf('function Require-Command'));
 const taskReadbackBlock = installer.slice(installer.indexOf('function Get-WorkerRuntimeTaskReadback'),
   installer.indexOf('function Assert-WorkerRuntimeNoActiveProcess'));
+const mergeAncestryBlock = installer.slice(installer.indexOf('function Assert-WorkerRuntimeAcceptedPrAncestry'),
+  installer.indexOf('function Assert-WorkerRuntimeSource'));
 const refreshSourceBlock = installer.slice(installer.indexOf('function Assert-WorkerRuntimeSource'),
   installer.indexOf('function Write-WorkerRuntimeNewFile'));
 assert.match(installer, /ValidateSet\([^)]*RefreshRuntimeModules/i,
   'Worker runtime refresh is an explicit installer mode');
 assert.ok(refreshBlock.includes('Assert-WorkerRuntimeSource $git $gh'),
   'refresh requires a clean exact-main source tree and same-source provider readback');
-assert.ok(refreshSourceBlock.includes('merge-base'),
-  'refresh requires the accepted PR head and merge commit to be reachable from main');
+assert.ok(mergeAncestryBlock.includes('merge-base') && mergeAncestryBlock.includes("^{tree}") &&
+  mergeAncestryBlock.includes('WORKER_RUNTIME_ACCEPTED_PR_MERGE_TREE_MISMATCH') &&
+  refreshSourceBlock.includes('Assert-WorkerRuntimeAcceptedPrAncestry'),
+  'refresh requires the merge commit on main and exact tree equivalence when GitHub rewrites the accepted PR head');
 assert.ok(refreshSourceBlock.includes("'--paginate','--slurp'") &&
   refreshSourceBlock.includes('Assert-WorkerRuntimeTrustedRuns $runsJson $AcceptedPrHead') &&
   !refreshSourceBlock.includes('--jq'),
