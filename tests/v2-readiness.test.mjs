@@ -893,7 +893,133 @@ test('Antigravity stream evidence classifies file tool targets and recognizes mu
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('Antigravity target evidence counts unique normalized file identities across repeated updates', async () => {
+test('Antigravity target evidence counts multiple unique same-root targets with normalized aliases once each', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-same-root-targets-'));
+  const stdoutPath = join(directory, 'stdout.jsonl');
+  const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
+  const registeredRoot = 'C:\\Users\\worker\\registered-project';
+  const candidateRoot = `${registeredRoot}\\.attempts\\candidate`;
+  const firstCandidateTarget = `${candidateRoot}\\src\\one.mjs`;
+  const secondCandidateTarget = `${candidateRoot}\\src\\two.mjs`;
+  const toolStep = (state, parameters) => ({
+    event: 'step_update', step_update: { conversation_id: session, step_index: 1,
+      state, step_type: 'tool', tool_name: 'multi_replace_file_content',
+      tool_info: { name: 'multi_replace_file_content', parameters } },
+  });
+  const events = [
+    { event: 'init', conversation_id: session,
+      init: { model: 'gemini-3.8-flash-high', cwd: candidateRoot, tools: [], permission_mode: 'accept-edits' } },
+    toolStep('ACTIVE', {
+      TargetFile: [firstCandidateTarget, secondCandidateTarget],
+      Path: [
+        firstCandidateTarget.toUpperCase().replaceAll('\\', '/'),
+        `${candidateRoot}\\src\\.\\one.mjs`,
+      ],
+      FilePath: [
+        secondCandidateTarget.replaceAll('\\', '/'),
+        secondCandidateTarget.toUpperCase(),
+      ],
+    }),
+    toolStep('DONE', {
+      TargetFile: [
+        firstCandidateTarget,
+        secondCandidateTarget.replaceAll('\\', '/'),
+      ],
+      absolute_path: [
+        `${candidateRoot}\\src\\one.mjs`.replaceAll('\\', '/'),
+      ],
+    }),
+    { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+      usage: { input_tokens: 10, output_tokens: 2, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 12 } } },
+  ];
+  const bytes = Buffer.from(events.map(event => JSON.stringify(event)).join('\n') + '\n');
+  writeFileSync(stdoutPath, bytes);
+  try {
+    const result = await readAntigravityV2RunEvidence(stdoutPath,
+      createHash('sha256').update(bytes).digest('hex'), candidateRoot, registeredRoot);
+    assert.equal(result.valid, true);
+    assert.equal(result.tool_execution_count, 1);
+    assert.equal(result.file_change_tool_completed_count, 1);
+    assert.deepEqual(result.file_change_target_evidence, {
+      status: 'CANDIDATE_ROOT_ONLY', tool_count: 1, target_count: 2,
+      candidate_root_count: 2, registered_root_count: 0,
+      outside_or_unknown_root_count: 0, relative_or_unknown_root_count: 0,
+      unidentified_tool_count: 0,
+    });
+    const categorySum = result.file_change_target_evidence.candidate_root_count +
+      result.file_change_target_evidence.registered_root_count +
+      result.file_change_target_evidence.outside_or_unknown_root_count +
+      result.file_change_target_evidence.relative_or_unknown_root_count;
+    assert.equal(result.file_change_target_evidence.target_count, categorySum);
+    const serialized = JSON.stringify(result);
+    assert.equal(serialized.includes(candidateRoot), false,
+      'the returned evidence classifies same-root target multiplicity without disclosing filesystem paths');
+    assert.equal(serialized.includes(registeredRoot), false);
+    assert.equal(serialized.includes('one.mjs'), false);
+    assert.equal(serialized.includes('two.mjs'), false);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity target evidence preserves MIXED_ROOTS and matches category sum for mixed candidate and registered roots', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-mixed-roots-multiplicity-'));
+  const stdoutPath = join(directory, 'stdout.jsonl');
+  const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
+  const registeredRoot = 'C:\\Users\\worker\\registered-project';
+  const candidateRoot = `${registeredRoot}\\.attempts\\candidate`;
+  const candidateTargetA = `${candidateRoot}\\src\\alpha.mjs`;
+  const candidateTargetB = `${candidateRoot}\\src\\beta.mjs`;
+  const registeredTarget = `${registeredRoot}\\native-bridge\\worker.mjs`;
+  const toolStep = (state, parameters) => ({
+    event: 'step_update', step_update: { conversation_id: session, step_index: 2,
+      state, step_type: 'tool', tool_name: 'multi_replace_file_content',
+      tool_info: { name: 'multi_replace_file_content', parameters } },
+  });
+  const events = [
+    { event: 'init', conversation_id: session,
+      init: { model: 'gemini-3.8-flash-high', cwd: candidateRoot, tools: [], permission_mode: 'accept-edits' } },
+    toolStep('ACTIVE', {
+      TargetFile: [candidateTargetA, candidateTargetB],
+      Path: registeredTarget,
+    }),
+    toolStep('DONE', {
+      TargetFile: [candidateTargetA, candidateTargetB],
+      Path: registeredTarget,
+    }),
+    { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+      usage: { input_tokens: 10, output_tokens: 2, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 12 } } },
+  ];
+  const bytes = Buffer.from(events.map(event => JSON.stringify(event)).join('\n') + '\n');
+  writeFileSync(stdoutPath, bytes);
+  try {
+    const result = await readAntigravityV2RunEvidence(stdoutPath,
+      createHash('sha256').update(bytes).digest('hex'), candidateRoot, registeredRoot);
+    assert.equal(result.valid, true);
+    assert.equal(result.tool_execution_count, 1);
+    assert.equal(result.file_change_tool_completed_count, 1);
+    assert.equal(result.file_change_target_evidence.status, 'MIXED_ROOTS');
+    const categorySum = result.file_change_target_evidence.candidate_root_count +
+      result.file_change_target_evidence.registered_root_count +
+      result.file_change_target_evidence.outside_or_unknown_root_count +
+      result.file_change_target_evidence.relative_or_unknown_root_count;
+    assert.equal(result.file_change_target_evidence.target_count, categorySum);
+    assert.equal(result.file_change_target_evidence.target_count, 3);
+    assert.deepEqual(result.file_change_target_evidence, {
+      status: 'MIXED_ROOTS', tool_count: 1, target_count: 3,
+      candidate_root_count: 2, registered_root_count: 1,
+      outside_or_unknown_root_count: 0, relative_or_unknown_root_count: 0,
+      unidentified_tool_count: 0,
+    });
+    const serialized = JSON.stringify(result);
+    assert.equal(serialized.includes(candidateRoot), false,
+      'the returned evidence classifies mixed roots without disclosing filesystem paths');
+    assert.equal(serialized.includes(registeredRoot), false);
+    assert.equal(serialized.includes('alpha.mjs'), false);
+    assert.equal(serialized.includes('beta.mjs'), false);
+    assert.equal(serialized.includes('worker.mjs'), false);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity target evidence deduplicates repeated ACTIVE and DONE updates and retains final root classification', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'pty-agy-target-identities-'));
   const stdoutPath = join(directory, 'stdout.jsonl');
   const session = '5eaf005b-c8fb-4904-8b5f-e2ccf9d28604';
@@ -938,6 +1064,11 @@ test('Antigravity target evidence counts unique normalized file identities acros
     assert.equal(serialized.includes('one.mjs'), false);
     assert.equal(serialized.includes('two.mjs'), false);
     assert.equal(serialized.includes('unknown.mjs'), false);
+    assert.equal(result.file_change_target_evidence.target_count,
+      result.file_change_target_evidence.candidate_root_count +
+      result.file_change_target_evidence.registered_root_count +
+      result.file_change_target_evidence.outside_or_unknown_root_count +
+      result.file_change_target_evidence.relative_or_unknown_root_count);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
