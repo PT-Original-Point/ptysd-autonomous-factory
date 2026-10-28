@@ -3,9 +3,17 @@
 This folder contains a static, read-only Traditional Chinese page with a
 dark-first layout. Open index.html directly in Edge or Brave; it does not start
 Node, PowerShell, Windows Terminal, a local listener, or a database. It reads
-the single PTYSD_OPERATOR_OBSERVATION_V1 comment and native Issue #407 receipts,
-the live PR #419 metadata, the current main commit, and check-runs attached to
-the exact PR head SHA from the public GitHub API.
+the single PTYSD_OPERATOR_OBSERVATION_V1 comment and native Issue #407 receipts.
+It selects current task source PRs from the fresh Issue #407 native Worker
+observation and validates them against the Issue #310 schema-6 dispatch and its
+pinned source SHA.
+The runtime deployment PR and module hashes remain observation provenance and
+are displayed separately from the task source PR. The page also reads current
+main and check-runs attached to each exact task PR head from the public GitHub
+API; the task PR number is not hard-coded. The one-time W2 direct CLI lineage
+retains its separately verified historical PR identities. W2 native schema-6
+work and direct CLI lineage remain separate, and historical attempts keep their
+historical/unknown status.
 
 The page checks the publisher account, exact project/repository/Issue identity,
 snapshot schema, source comment ID, time bounds, and expiry. Missing, duplicate, mismatched,
@@ -31,10 +39,13 @@ only allowlisted task/process fields. It never invokes OpenCode or a model.
 
 Open operator-panel/index.html. The page needs network access to
 api.github.com; without it the page reports the bounded HTTP, timeout, or
-network/CORS error and marks stale data accordingly. Its normal one-page budget
-is about 21 requests per hour: Issue #407 every 5 minutes, PR/checks every 15
-minutes, and main every 60 minutes. Requests use same-URL ETags and a bounded
-public-response cache. When browser Web Locks and local storage both work, tabs
+network/CORS error and marks stale data accordingly. It reads the Issue #407 and
+#310 comment feeds every 5 minutes, current main at least every 60 minutes,
+and each distinct task-source PR plus its exact-head checks every 15 minutes.
+Pagination and separate per-worker source PR reads add requests when needed, so
+the actual count varies; the panel shows the observed rate-limit headers and
+last successful read. Requests use same-URL ETags and a bounded public-response cache. When
+browser Web Locks and local storage both work, tabs
 serialize GitHub reads and reuse the same fresh public response. If either
 cross-tab capability is missing or fails, the page completes its startup read
 then disables automatic polling; manual reads still honor source freshness,

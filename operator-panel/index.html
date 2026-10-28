@@ -2871,8 +2871,9 @@
         ? '與目前正式 main 相符' : '與目前正式 main 不同'
       : '目前 main 比對未確認';
     text('runtime-source',runtime?.status === 'MANIFEST_MATCHED' && runtimeMain
-      ? '部署紀錄 PR #' + runtime.deployment_pr + ' HEAD ' + safeSha(runtime.deployment_pr_head) +
-        '；部署 main ' + runtimeMain + '；實際檔案與部署 manifest 相符；' + runtimeCompare + '；' + runtimeAge
+      ? 'Issue #407 Win11 runtime 觀測中的部署 PR #' + runtime.deployment_pr +
+        ' HEAD ' + safeSha(runtime.deployment_pr_head) + '；部署 main ' + runtimeMain +
+        '；實際檔案與部署 manifest 相符；與目前任務來源 PR 分開；' + runtimeCompare + '；' + runtimeAge
       : 'UNKNOWN：Win11 部署來源 main 未經 manifest 與實際檔案雜湊共同核對' +
         (runtime?.reason_code ? '（' + runtime.reason_code + '）' : '') +
         (runtimeAge ? '；' + runtimeAge : ''));

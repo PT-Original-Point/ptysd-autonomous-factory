@@ -561,6 +561,8 @@ test('renderer separates closed W1 source history from live worker status and sh
     snapshot_id:'11111111-1111-4111-8111-111111111111',sequence:511,
     observed_at:observedAt,expires_at:expiresAt,
     source:{comment_id:6144415195,main_sha:mainSha},
+    runtime_deployment:{status:'MANIFEST_MATCHED',observed_at:observedAt,source_main_sha:mainSha,
+      deployment_pr:592,deployment_pr_head:'c'.repeat(40),bundle_sha256:'d'.repeat(64)},
     windows:{status:'FRESH',observed_at:observedAt,native_task:{registered:true,enabled:true,
       state:'READY',identity_class:'INTERACTIVE_LIMITED',multiple_instances:'IgnoreNew'}},
     native_worker:{latest_task:{request_id:requestId,kind:'opencode_edit',source_pr:505,
@@ -606,8 +608,11 @@ test('renderer separates closed W1 source history from live worker status and sh
     lastError:null,lastSuccessAt:now,resetAt:null,pauseUntil:null,indefinite:false});
   assert.match(domElements.get('pr-state').textContent,/已關閉未合併/);
   assert.match(domElements.get('pr-state').textContent,/歷史來源/);
+  assert.match(domElements.get('pr-state').textContent,/PR #505/);
   assert.doesNotMatch(domElements.get('pr-state').textContent,/CANDIDATE_PR_IDENTITY_UNKNOWN/);
   assert.match(domElements.get('pr-deployment').textContent,/不屬於可部署來源/);
+  assert.match(domElements.get('runtime-source').textContent,/Issue #407 Win11 runtime 觀測中的部署 PR #592/);
+  assert.match(domElements.get('runtime-source').textContent,/與目前任務來源 PR 分開/);
   assert.match(domElements.get('checks-detail').textContent,/CLOSED_UNMERGED/);
   assert.match(domElements.get('metric-ci').textContent,/歷史 PR 已關閉/);
   assert.equal(domElements.get('w1-dispatch-state').textContent.includes('UNKNOWN'),true);
@@ -1446,4 +1451,18 @@ test('mobile overview keeps its GitHub state badge within the card', () => {
   assert.match(mobileCss, /\.overview-copy\s*\{[^}]*overflow-wrap:\s*anywhere/);
   assert.match(mobileCss,
     /\.overview-head\s*>\s*\.badge\s*\{[^}]*max-width:\s*100%[^}]*white-space:\s*normal[^}]*overflow-wrap:\s*anywhere/);
+});
+
+test('operator panel documentation binds live PR data to task evidence, not a fixed historical PR', () => {
+  const readme = readFileSync(new URL('../operator-panel/README.md', import.meta.url), 'utf8')
+    .replace(/\s+/g, ' ');
+  assert.doesNotMatch(readme, /live PR #419 metadata/i);
+  assert.doesNotMatch(readme, /normal one-page budget is about 21 requests per hour/i);
+  assert.match(readme, /task PR number is not hard-coded/i);
+  assert.match(readme, /one-time W2 direct CLI lineage.*historical PR identities/i);
+  assert.match(readme, /task source PRs.*fresh Issue #407 native Worker observation.*Issue #310 schema-6 dispatch/i);
+  assert.match(readme, /runtime deployment PR.*observation provenance.*displayed separately from.*task source PR/i);
+  assert.match(readme, /Issue #407 and #310.*every 5 minutes/);
+  assert.match(readme, /pagination and separate per-worker source PR reads add requests/i);
+  assert.match(readme, /W2.*native.*direct CLI.*separate/i);
 });
