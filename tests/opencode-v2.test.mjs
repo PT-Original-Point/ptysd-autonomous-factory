@@ -125,6 +125,132 @@ test('OpenCode free gateway abuse block is classified without retaining provider
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
 
+test('OpenCode provider.auth 403 wrapper with JSON response body retains a sanitized FreeTierError reason', async () => {
+  const dir=mkdtempSync(join(tmpdir(),'oc2-jsonl-provider-auth-wrapper-'));
+  const output=join(dir,'stdout.jsonl');
+  const sessionID='ses_providerauth12345';
+  const privateMessage='authentication detail for account acct_private_777 token sk-private-999';
+  const privateBodyMessage='free tier unavailable for request req_private_888 account acct_private_777';
+  try {
+    const events=[
+      {type:'step_start',sessionID},
+      {type:'error',sessionID,error:{
+        type:'provider.auth',status:403,
+        message:privateMessage,
+        response:{status:403,
+          headers:{authorization:'Bearer private-header-token','x-request-id':'req_header_private'},
+          body:JSON.stringify({error:{type:'FreeTierError',message:privateBodyMessage,
+            account_id:'acct_private_777',request_id:'req_private_888'}})}}},
+    ];
+    writeFileSync(output,`${events.map(event=>JSON.stringify(event)).join('\n')}\n`);
+    const evidence=await readOpenCodeV2RunEvidence(output);
+    assert.equal(evidence.valid,true,'the JSONL capture is structurally valid');
+    assert.equal(evidence.reason,'OPEN_CODE_FREE_TIER_REJECTED');
+    assert.equal(evidence.session_id,sessionID);
+    assert.equal(evidence.session_started,true);
+    assert.equal(evidence.provider_usage_evidence,'UNKNOWN');
+    assert.equal(evidence.model_activity_evidence,'UNKNOWN');
+    assert.equal(evidence.model_invoked,null,
+      'a wrapped provider rejection does not establish whether inference began');
+    const serialized=JSON.stringify(evidence);
+    for (const sensitive of ['acct_private_777','req_private_888','sk-private-999',
+      'private-header-token','req_header_private','free tier unavailable'])
+      assert.equal(serialized.includes(sensitive),false,`${sensitive} must not be retained`);
+    assert.equal(serialized.includes('FreeTierError'),false);
+    assert.equal(serialized.includes('provider.auth'),false);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('OpenCode structured free usage limit errors map to the stable sanitized reason', async () => {
+  const dir=mkdtempSync(join(tmpdir(),'oc2-jsonl-free-usage-limit-'));
+  const output=join(dir,'stdout.jsonl');
+  const privateMessage='quota detail for account acct_private_321 request req_private_654';
+  const cases=[
+    {name:'wrapped provider.free-limit with nested FreeUsageLimitError',error:{
+      type:'provider.free-limit',status:429,message:privateMessage,
+      response:{status:429,body:JSON.stringify({error:{type:'FreeUsageLimitError',
+        message:privateMessage,request_id:'req_private_654'}})}}},
+    {name:'direct FreeUsageLimitError',error:{type:'FreeUsageLimitError',status:429,
+      message:privateMessage}},
+  ];
+  try {
+    for (const scenario of cases) {
+      writeFileSync(output,[
+        {type:'step_start',sessionID:'ses_freeusage123456'},
+        {type:'error',sessionID:'ses_freeusage123456',error:scenario.error},
+      ].map(event=>JSON.stringify(event)).join('\n')+'\n');
+      const evidence=await readOpenCodeV2RunEvidence(output);
+      assert.equal(evidence.valid,true,scenario.name);
+      assert.equal(evidence.reason,'OPEN_CODE_FREE_USAGE_LIMIT_REACHED',scenario.name);
+      assert.equal(evidence.session_started,true,scenario.name);
+      assert.equal(evidence.provider_usage_evidence,'UNKNOWN',scenario.name);
+      assert.equal(evidence.model_activity_evidence,'UNKNOWN',scenario.name);
+      assert.equal(evidence.model_invoked,null,scenario.name);
+      const serialized=JSON.stringify(evidence);
+      for (const sensitive of ['acct_private_321','req_private_654','quota detail'])
+        assert.equal(serialized.includes(sensitive),false,`${scenario.name}: ${sensitive}`);
+      assert.equal(serialized.includes('FreeUsageLimitError'),false,scenario.name);
+      assert.equal(serialized.includes('provider.free-limit'),false,scenario.name);
+    }
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('OpenCode unrelated provider 429 and malformed or oversized nested bodies stay generic', async () => {
+  const dir=mkdtempSync(join(tmpdir(),'oc2-jsonl-generic-provider-error-'));
+  const output=join(dir,'stdout.jsonl');
+  const privateMessage='provider detail for account acct_private_000 request req_private_111';
+  const bodies=[
+    JSON.stringify({error:{type:'RateLimitError',message:privateMessage}}),
+    '{"error": {not valid json',
+    'x'.repeat(70_000),
+  ];
+  try {
+    for (const body of bodies) {
+      writeFileSync(output,[
+        {type:'step_start',sessionID:'ses_generic429123456'},
+        {type:'error',sessionID:'ses_generic429123456',error:{
+          type:'provider.rate_limit',status:429,message:'Too many requests; retry later',
+          response:{status:429,headers:{'retry-after':'30'},body}}},
+      ].map(event=>JSON.stringify(event)).join('\n')+'\n');
+      const evidence=await readOpenCodeV2RunEvidence(output);
+      assert.equal(evidence.valid,true,
+        'a malformed or oversized nested body must not invalidate the capture');
+      assert.equal(evidence.reason,'OPEN_CODE_PROVIDER_ERROR',
+        'an unrelated 429 is not evidence that free quota is exhausted');
+      assert.equal(evidence.model_invoked,null);
+      assert.equal(evidence.provider_usage_evidence,'UNKNOWN');
+      assert.equal(JSON.stringify(evidence).includes(privateMessage),false);
+    }
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('OpenCode rejection keeps model_invoked unknown unless independent activity is observed', async () => {
+  const dir=mkdtempSync(join(tmpdir(),'oc2-jsonl-rejection-activity-'));
+  const output=join(dir,'stdout.jsonl');
+  try {
+    writeFileSync(output,[
+      {type:'error',sessionID:'ses_rejection123456',error:{type:'FreeTierError',message:'rejected'}},
+      {type:'text',sessionID:'ses_rejection123456',part:{type:'text',text:'partial model output'}},
+    ].map(event=>JSON.stringify(event)).join('\n')+'\n');
+    const withText=await readOpenCodeV2RunEvidence(output);
+    assert.equal(withText.reason,'OPEN_CODE_FREE_TIER_REJECTED');
+    assert.equal(withText.model_activity_evidence,'CONFIRMED');
+    assert.equal(withText.model_invoked,true,
+      'independent model output, not the provider error, establishes invocation');
+
+    writeFileSync(output,[
+      {type:'error',sessionID:'ses_rejection123456',error:{type:'provider.free-limit',status:429}},
+      {type:'step_finish',sessionID:'ses_rejection123456',
+        part:{type:'step-finish',tokens:{input:7,output:2}}},
+    ].map(event=>JSON.stringify(event)).join('\n')+'\n');
+    const withUsage=await readOpenCodeV2RunEvidence(output);
+    assert.equal(withUsage.reason,'OPEN_CODE_FREE_USAGE_LIMIT_REACHED');
+    assert.equal(withUsage.provider_usage_evidence,'CONFIRMED');
+    assert.equal(withUsage.model_invoked,true,
+      'independent usage, not the provider error, establishes invocation');
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
 test('OpenCode runPlan carries a sanitized free gateway abuse block into local attempt evidence', async () => {
   const root=mkdtempSync(join(tmpdir(),'oc2-runplan-provider-error-'));
   const workspace=join(root,'workspace'),stateDir=join(root,'state');
