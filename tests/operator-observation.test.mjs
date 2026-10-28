@@ -313,7 +313,7 @@ test('expired observations degrade to STALE and future timestamps to UNKNOWN', (
   }, now), 'UNKNOWN');
 });
 
-test('Windows collector reads only the two named PTYSD tasks and publishes only allowlisted fields', () => {
+test('Windows collector reads only named PTYSD tasks and publishes only allowlisted fields', () => {
   let invoked = false;
   const ignored = collectWindowsObservation({
     platformName: 'linux',
@@ -329,6 +329,14 @@ test('Windows collector reads only the two named PTYSD tasks and publishes only 
     opencode_process_count: 0,
     runner_service_count: 1,
     runner_service_running: 1,
+    executor_tasks: {
+      opencode: { registered: true, enabled: true, state: 'Ready',
+        last_run: new Date(now - 5 * 60 * 1000).toISOString(), last_result: '0x00000000' },
+      antigravity: { registered: true, enabled: false, state: 'Disabled',
+        last_run: null, last_result: null },
+      codex: { registered: true, enabled: true, state: 'Ready',
+        last_run: new Date(now - 10 * 60 * 1000).toISOString(), last_result: '0x00000000' },
+    },
     native_task: {
       registered: true, enabled: false, state: 'Disabled',
       last_run: new Date(now - 5 * 60 * 1000).toISOString(),
@@ -356,11 +364,22 @@ test('Windows collector reads only the two named PTYSD tasks and publishes only 
   assert.equal(live.native_task.action_kind, 'WINDOWLESS_LAUNCHER');
   assert.equal(live.opencode_process_count, 0);
   assert.equal(live.runner_service_running, 1);
+  assert.deepEqual(live.executor_tasks, {
+    opencode: { registered: true, enabled: true, state: 'READY',
+      last_run: new Date(now - 5 * 60 * 1000).toISOString(), last_result: '0X00000000' },
+    antigravity: { registered: true, enabled: false, state: 'DISABLED',
+      last_run: null, last_result: null },
+    codex: { registered: true, enabled: true, state: 'READY',
+      last_run: new Date(now - 10 * 60 * 1000).toISOString(), last_result: '0X00000000' },
+  });
   assert.equal(Object.hasOwn(live, 'command_line'), false);
   assert.equal(Object.hasOwn(live, 'active_sessions'), false);
   const collectorSource = readFileSync(new URL('../native-bridge/operator-observation.mjs', import.meta.url), 'utf8');
   assert.match(collectorSource, /Get-ExactTask 'PTYSD-Native-OpenCode'/);
   assert.match(collectorSource, /Get-ExactTask 'PTYSD-Factory-Monitor'/);
+  assert.match(collectorSource, /PTYSD-OpenCode-Executor/);
+  assert.match(collectorSource, /PTYSD-Antigravity-Executor/);
+  assert.match(collectorSource, /PTYSD-Codex-Executor/);
   assert.doesNotMatch(collectorSource, /\$all\s*=\s*@\(Get-ScheduledTask/);
   assert.match(collectorSource, /wscript\.exe[\s\S]+HiddenWorker\\\.vbs/);
   assert.match(collectorSource, /Name='opencode2\.exe' OR Name='opencode-cli\.exe' OR Name='opencode\.exe'/,

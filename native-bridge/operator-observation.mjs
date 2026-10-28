@@ -286,6 +286,38 @@ function Get-ExactTask([string]$name) {
 $nativeTaskMatches = @(Get-ExactTask 'PTYSD-Native-OpenCode')
 $task = if ($nativeTaskMatches.Count -eq 1) { $nativeTaskMatches[0] } else { $null }
 $legacy = @(Get-ExactTask 'PTYSD-Factory-Monitor')
+$executorTaskSpecs = [ordered]@{
+  opencode = 'PTYSD-OpenCode-Executor'
+  antigravity = 'PTYSD-Antigravity-Executor'
+  codex = 'PTYSD-Codex-Executor'
+}
+$executorTasks = [ordered]@{}
+foreach ($lane in $executorTaskSpecs.Keys) {
+  $matches = @(Get-ExactTask $executorTaskSpecs[$lane])
+  if ($matches.Count -ne 1) {
+    $registered = if ($matches.Count -eq 0) { $false } else { $null }
+    $executorTasks[$lane] = [pscustomobject]@{
+      registered = $registered; enabled = $null; state = 'UNKNOWN'; last_run = $null; last_result = $null
+    }
+    continue
+  }
+  $executorTask = $matches[0]
+  $executorState = [string]$executorTask.State
+  if ($executorState -notin @('Ready', 'Running', 'Disabled', 'Queued')) { $executorState = 'UNKNOWN' }
+  $executorLastRun = $null
+  $executorLastResult = $null
+  try {
+    $executorInfo = Get-ScheduledTaskInfo -TaskName $executorTask.TaskName -TaskPath $executorTask.TaskPath -ErrorAction Stop
+    if ($executorInfo.LastRunTime -and $executorInfo.LastRunTime.Year -gt 2000) {
+      $executorLastRun = $executorInfo.LastRunTime.ToString('o')
+    }
+    $executorLastResult = '0x{0:X8}' -f [uint32]$executorInfo.LastTaskResult
+  } catch {}
+  $executorTasks[$lane] = [pscustomobject]@{
+    registered = $true; enabled = [bool]$executorTask.Settings.Enabled; state = $executorState
+    last_run = $executorLastRun; last_result = $executorLastResult
+  }
+}
 $listener = $null
 try { $listener = (@(Get-NetTCPConnection -State Listen -LocalPort 2667 -ErrorAction Stop).Count -gt 0) } catch {
   try {
@@ -347,6 +379,7 @@ if ($task) {
   legacy_monitor_registered = ($legacy.Count -gt 0)
   listener_2667 = $listener
   native_task = $native
+  executor_tasks = [pscustomobject]$executorTasks
   opencode_process_count = $opencodeCount
   runner_service_count = $runnerServiceCount
   runner_service_running = $runnerServiceRunning
@@ -395,12 +428,39 @@ export function collectWindowsObservation({
         t.trigger_interval_minutes > 0 && t.trigger_interval_minutes <= 1440
         ? t.trigger_interval_minutes : null,
     };
+    let executorTasks;
+    if (Object.hasOwn(raw, 'executor_tasks')) {
+      const names = ['opencode', 'antigravity', 'codex'];
+      if (!object(raw.executor_tasks) || Object.keys(raw.executor_tasks).length !== names.length ||
+          names.some(name => !Object.hasOwn(raw.executor_tasks, name)))
+        throw new Error('WINDOWS_EXECUTOR_TASKS_INVALID');
+      executorTasks = {};
+      for (const name of names) {
+        const value = raw.executor_tasks[name];
+        if (!object(value) || ![true, false, null].includes(value.registered) ||
+            ![true, false, null].includes(value.enabled) ||
+            !['READY', 'RUNNING', 'DISABLED', 'QUEUED', 'UNKNOWN']
+              .includes(String(value.state).toUpperCase()) ||
+            !(value.last_run === null || validTime(value.last_run)) ||
+            !(value.last_result === null || /^0x[0-9a-f]{8}$/i.test(value.last_result || '')))
+          throw new Error('WINDOWS_EXECUTOR_TASKS_INVALID');
+        executorTasks[name] = {
+          registered: value.registered,
+          enabled: value.enabled,
+          state: String(value.state).toUpperCase(),
+          last_run: validTime(value.last_run) ? value.last_run : null,
+          last_result: /^0x[0-9a-f]{8}$/i.test(value.last_result || '')
+            ? value.last_result.toUpperCase() : null,
+        };
+      }
+    }
     return {
       status: 'FRESH',
       observed_at: raw.observed_at,
       legacy_monitor_registered: raw.legacy_monitor_registered,
       listener_2667: raw.listener_2667,
       native_task: task,
+      ...(executorTasks ? { executor_tasks: executorTasks } : {}),
       opencode_process_count: raw.opencode_process_count,
       runner_service_count: raw.runner_service_count,
       runner_service_running: raw.runner_service_running,
