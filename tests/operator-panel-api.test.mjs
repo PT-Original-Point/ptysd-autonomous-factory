@@ -649,7 +649,7 @@ test('renderer separates closed W1 source history from live worker status and sh
   assert.match(domElements.get('codex-executor').textContent,/UNKNOWN/);
   assert.match(domElements.get('codex-evidence').textContent,/UNKNOWN/);
   assert.match(domElements.get('codex-task').textContent,/UNKNOWN.*Executor/);
-  assert.match(domElements.get('codex-harvest').textContent,/W1 正式接受待確認/);
+  assert.match(domElements.get('codex-harvest').textContent,/W1 Codex source acceptance 待確認/);
 });
 
 test('an empty formal schema-6 queue is not presented as no READY Codex Goal work', () => {
@@ -827,6 +827,166 @@ test('dispatch cards separate W1 execution, reconciliation, result PR/CI, and ac
   assert.match(w2.summaryProgress,/回收證據待核對/);
   assert.doesNotMatch(w2.summaryProgress,/沒有修改|零修改/);
   assert.equal(w2.noReplay,true);
+});
+
+test('W1 source acceptance is shown separately without upgrading the original Worker terminal', () => {
+  const requestId='W1_OPENCODE_FREE_LIMIT_EVIDENCE_20261028_AF6FA547';
+  const attemptId='4483bca1-b4c8-4297-8dd3-d4aa604a3801';
+  const sourceSha='3bdc5f62dcfed11374ed5d02cc88e2f7ab9901dd';
+  const workerDiff='9598ef67cd26cdd3d0ca029f3f2c3207a836098257429381f15ae7f6f0a378a8';
+  const sourcePrMerge='9f3007f96b61cf9a8b99bf08921ecdaccc15b1da';
+  const resultHead='76cc0f39ca2c463d730dee734c02bbaecac76403';
+  const resultMerge='cf01f6d05d71e00ac4058d5aff40f522ef318dd2';
+  const jobCommentId=6463422047;
+  const receiptId=6463850724;
+  const reconciliationId=6474981919;
+  const acceptanceId=6475955674;
+  const identityId=6477442274;
+  const job={schema:6,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+    request_id:requestId,kind:'opencode_edit',source_sha:sourceSha,
+    spec_path:'native-bridge/tasks/w1-opencode-free-limit-evidence.md',spec_sha256:'a'.repeat(64),
+    model:'opencode/deepseek-v4.1-flash-free',variant:null,
+    edit_paths:['native-bridge/opencode-v2.mjs','tests/opencode-v2.test.mjs'],source_pr:589,
+    goal_comment_id:6188322050,goal_body_sha256:'b'.repeat(64)};
+  const jobComment={id:jobCommentId,user:{login:'t14210184'},created_at:'2026-10-28T08:02:00Z',
+    body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job)};
+  const task={worker_id:'W1',task_id:requestId,task_kind:'opencode_edit',task_source_sha:sourceSha,
+    source_pr:589,task_comment_id:jobCommentId,attempt_id:attemptId,
+    task_state:'FINISHED_NOT_ACCEPTANCE',code_changes:'DIFF_CAPTURED_UNVERIFIED',
+    changed_files_count:2,diff_sha256:workerDiff,task_acceptance:'UNKNOWN',
+    external_effects:'UNKNOWN'};
+  const snapshot={workers:[task],native_worker:{latest_task:{request_id:requestId,
+    kind:'opencode_edit',source_pr:589,source_sha:sourceSha,state:'FINISHED_NOT_ACCEPTANCE'}}};
+  const receipt={schema:1,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+    request_id:requestId,attempt_id:attemptId,state:'FINISHED',kind:'opencode_edit',source_sha:sourceSha,
+    outcome:'V2_EDIT_DIFF_CAPTURED_UNVERIFIED',model_invoked:true,tool_execution_count:10,
+    model:'opencode/deepseek-v4.1-flash-free',
+    session_id:'ses_e7e7bee1dffeg50Z7gp73YsNXR',diff_sha256:workerDiff,diff_bytes:13291,
+    changed_files_count:2,external_effects:'UNKNOWN'};
+  const comment=(id,login,body,created_at) => ({id,user:{login},body,created_at});
+  const terminal=comment(receiptId,'t14210184',
+    'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(receipt),'2026-10-28T08:36:00Z');
+  const reconciliation=comment(reconciliationId,'wfvupu1212',[
+    'PTYSD_V53R4_R2_EVIDENCE_RECONCILIATION_V1','observed_at=2026-10-28T16:44:02Z',
+    'W1_EDITFILE_TELEMETRY',`request_id=${requestId}`,`attempt_id=${attemptId}`,
+    'source_pr=589',`source_head=${sourceSha}`,`worker_diff_sha256=${workerDiff}`,
+    'diff_reconciliation=PASS_SCOPED_PATHS_AND_RESULT_PR;WORKER_PATCH_BYTE_IDENTITY_NOT_REVERIFIED',
+    'codex_review=PASS_FOR_BOUNDED_NESTED_PROVIDER_ERROR_CLASSIFICATION',
+    'original_terminal_state=FINISHED_NOT_ACCEPTANCE','integration=PR_590_MERGED',
+    `integration_commit=${resultMerge}`,
+    'pr_590_checks=check-native-only:PASS;csg-trusted-verifier-hosted:PASS;v2-native-windows:PASS;bounded-driver-acceptance:SKIPPED;csg-trusted-verifier:CANCELLED_NOT_COUNTED',
+  ].join('\n'),'2026-10-28T16:44:02Z');
+  const acceptance=comment(acceptanceId,'t14210184',[
+    'PTYSD_V53R4_R6_W1_SOURCE_ACCEPTANCE_AFTER_MERGE_V1',
+    'record_type=ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_ORIGINAL_WORKER_OR_LIVE_ACCEPTANCE',
+    'repo=PT-Original-Point/ptysd-autonomous-factory',
+    'human_goal_comment_id=6188322050',
+    'current_main=37e662614821e181fa8a9c00d49b6818ef5b8329',
+    'W1_LINEAGE',`request_id=${requestId}`,`task_comment_id=${jobCommentId}`,
+    `attempt_id=${attemptId}`,'model=opencode/deepseek-v4.1-flash-free',
+    'session_id=ses_e7e7bee1dffeg50Z7gp73YsNXR',`worker_diff_sha256=${workerDiff}`,
+    `source_spec_pr=589; head=${sourceSha}; merge_commit=${sourcePrMerge}`,
+    `result_pr=590; head=${resultHead}; merge_commit=${resultMerge}`,
+    'current_main_contains_both_merges=TRUE','current_main_blobs_match_pr590_merge=TRUE',
+    'EXACT_HEAD_VALIDATION','check-native-only=SUCCESS','csg-trusted-verifier-hosted=SUCCESS',
+    'v2-native-windows=SUCCESS','csg-trusted-verifier=CANCELLED_NOT_COUNTED_AS_PASS',
+    'bounded-driver-acceptance=SKIPPED','focused_test=45_passed;0_failed;0_skipped',
+    'git_diff_check=PASS','semantic_review=PASS_FOR_BOUNDED_NESTED_PROVIDER_ERROR_CLASSIFICATION_AND_SANITIZATION',
+    'source_acceptance=PASS_FOR_PR590_REVIEWED_SOURCE_AND_MERGED_INTEGRATION',
+    'live_acceptance=NOT_CLAIMED','worker_model_external_effects=UNKNOWN_AS_ORIGINAL_TERMINAL_RECORDED',
+  ].join('\n'),'2026-10-29T01:27:56Z');
+  const patchIdentity=comment(identityId,'t14210184',[
+    'PTYSD_V53R4_R6_W1_SOURCE_PATCH_BYTE_IDENTITY_RECONCILIATION_V1',
+    'record_type=ADDITIVE_CODEX_SOURCE_RECONCILIATION_NOT_ORIGINAL_WORKER_TERMINAL_OR_LIVE_ACCEPTANCE',
+    'W1_LINEAGE',`request_id=${requestId}`,`task_comment_id=${jobCommentId}`,
+    `attempt_id=${attemptId}`,`worker_diff_sha256=${workerDiff}`,
+    'worker_diff_bytes=13291',
+    'worker_diff_byte_identity=CONFIRMED_AGAINST_PR590_GIT_DIFF',
+    `source_pr=589; source_head=${sourceSha}`,
+    `result_pr=590; result_head=${resultHead}`,
+    `merge_commit=${resultMerge}`,
+    `pr590_git_diff_bytes=13291`,`pr590_git_diff_sha256=${workerDiff}`,
+    'byte_identical=true','current_main_contains_merge=true','current_blobs_match_merge=true',
+    'EXACT_HEAD_CHECKS','check-native-only=SUCCESS',
+    'csg-trusted-verifier-hosted=SUCCESS','v2-native-windows=SUCCESS',
+    'csg-trusted-verifier=CANCELLED_NOT_COUNTED_AS_PASS','bounded-driver-acceptance=SKIPPED',
+    'BOUNDARIES','source_acceptance=SUPPORTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR590_SOURCE',
+    'original_worker_terminal=FINISHED_NOT_ACCEPTANCE;unchanged',
+    'original_worker_task_acceptance=UNKNOWN;external_effects=UNKNOWN',
+    'live_acceptance=NOT_CLAIMED',
+  ].join('\n'),'2026-10-29T02:37:44Z');
+  const comments=[terminal,reconciliation,acceptance,patchIdentity];
+  const data=panel.dispatchCardData('W1',snapshot,comments,
+    {dispatches:{W1:{data:jobComment}}},{status:'UNKNOWN'},Date.parse('2026-10-29T03:00:00Z'),
+    {lifecycle:'MERGED',status:'MERGED',checks_allowed:false});
+
+  assert.ok(data.codexSourceAcceptance,'the current W1 request and attempt have matching Codex source-acceptance and byte-identity readbacks');
+  assert.equal(data.codexSourceAcceptance.status,'ACCEPTED');
+  assert.equal(data.codexSourceAcceptance.resultPr,590);
+  assert.equal(data.codexSourceAcceptance.resultHead,resultHead);
+  assert.equal(data.codexSourceAcceptance.mergeCommit,resultMerge);
+  assert.equal(data.formalAcceptance,'UNKNOWN',
+    'Codex source acceptance must not upgrade the original Worker task_acceptance');
+  assert.equal(data.workerTerminal,'FINISHED_NOT_ACCEPTANCE');
+  assert.equal(data.externalEffects,'UNKNOWN');
+  assert.match(data.codexSourceAcceptance.label,/PR #590.*SOURCE_ACCEPTED/);
+  const worker=panel.workerCardData('W1',task,{status:'UNKNOWN',delivery:'UNKNOWN'},snapshot,null,
+    data.codexSourceAcceptance);
+  assert.match(worker.changes,/Codex.*PR #590/);
+  assert.match(worker.sourceAcceptance,/Codex source accepted/i);
+  assert.match(worker.sourceAcceptance,/Worker task_acceptance=UNKNOWN/);
+  assert.match(worker.sourceAcceptance,/external_effects=UNKNOWN/);
+  assert.match(worker.delivery,/PR #590 SOURCE_ACCEPTED/);
+  assert.match(panel.w1SourceHarvestLabel(data),/Codex source accepted via PR #590/);
+  assert.match(panel.w1SourceHarvestLabel(data),/Worker task_acceptance=UNKNOWN/);
+  assert.match(panel.w1SourceHarvestLabel(data),/external_effects=UNKNOWN/);
+  assert.equal(panel.validJob(job),true,
+    'the shared schema-6 validator accepts the official OpenCode/W1 contract');
+  const goalIdentity={id:job.goal_comment_id,author:'t14210184',body_sha256:job.goal_body_sha256};
+  const githubTask=panel.schema6TaskSource([jobComment],'W1',goalIdentity,true);
+  assert.equal(githubTask.task_comment_id,jobCommentId,
+    'a complete, identity-matched Issue #310 readback can supply the formal W1 task when the OS snapshot omits it');
+  assert.equal(panel.schema6TaskSource([jobComment],'W1',goalIdentity,false),null,
+    'an incomplete Issue #310 pagination read cannot supply a formal task');
+  assert.equal(panel.schema6TaskSource([jobComment],'W1',
+    {...goalIdentity,body_sha256:'c'.repeat(64)},true),null,
+    'a mismatched Human GOAL identity cannot supply a formal task');
+  const recoveredFromGoal=panel.dispatchCardData('W1',{workers:[],native_worker:{}},comments,{},
+    {status:'UNKNOWN'},Date.parse('2026-10-29T03:00:00Z'),
+    {lifecycle:'MERGED',status:'MERGED',checks_allowed:false},[jobComment],goalIdentity,true);
+  assert.equal(recoveredFromGoal.codexSourceAcceptance.status,'ACCEPTED',
+    'source acceptance stays visible when the current Win11 snapshot no longer carries the completed W1 task');
+  assert.match(recoveredFromGoal.formalAcceptance,/^UNKNOWN/);
+  assert.equal(recoveredFromGoal.workerTerminal,'FINISHED_NOT_ACCEPTANCE');
+  assert.equal(recoveredFromGoal.externalEffects,'UNKNOWN');
+  const sourceOnlyWorker=panel.workerCardData('W1',null,{status:'UNKNOWN',delivery:'UNKNOWN'},
+    {},null,recoveredFromGoal.codexSourceAcceptance);
+  assert.match(sourceOnlyWorker.task,/W1_OPENCODE_FREE_LIMIT_EVIDENCE/);
+  assert.match(sourceOnlyWorker.changes,/Codex 已核對.*接受 PR #590/);
+  assert.match(sourceOnlyWorker.sourceAcceptance,/Worker task_acceptance=UNKNOWN/);
+  assert.match(sourceOnlyWorker.sourceAcceptance,/external_effects=UNKNOWN/);
+  assert.match(sourceOnlyWorker.sourceAcceptance,/live_acceptance=NOT_CLAIMED/);
+  assert.match(sourceOnlyWorker.delivery,/PR #590 SOURCE_ACCEPTED/);
+  panel.renderDispatchCard('W1',data);
+  assert.match(domElements.get('w1-dispatch-codex-source-acceptance').textContent,/SOURCE_ACCEPTED/);
+  assert.match(domElements.get('w1-dispatch-acceptance').textContent,/UNKNOWN/);
+
+  const rejectedCases=[
+    comments.map(c=>c.id===acceptanceId ? {...c,body:c.body.replace(attemptId,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')} : c),
+    comments.map(c=>c.id===identityId ? {...c,user:{login:'untrusted-user'}} : c),
+    comments.map(c=>c.id===identityId ? {...c,body:c.body.replace('byte_identical=true','byte_identical=false')} : c),
+    comments.map(c=>c.id===identityId ? {...c,body:c.body.replace('v2-native-windows=SUCCESS','v2-native-windows=FAILURE')} : c),
+    comments.map(c=>c.id===acceptanceId ? {...c,body:c.body.replace('focused_test=45_passed;0_failed;0_skipped','focused_test=45_passed;1_failed;0_skipped')} : c),
+  ];
+  for (const invalidComments of rejectedCases) {
+    const rejected=panel.dispatchCardData('W1',snapshot,invalidComments,
+      {dispatches:{W1:{data:jobComment}}},{status:'UNKNOWN'},Date.parse('2026-10-29T03:00:00Z'),
+      {lifecycle:'MERGED',status:'MERGED',checks_allowed:false});
+    assert.equal(rejected.codexSourceAcceptance,null,
+      'mismatched or incomplete source evidence is not shown as accepted');
+    assert.equal(rejected.workerTerminal,'FINISHED_NOT_ACCEPTANCE');
+    assert.equal(rejected.externalEffects,'UNKNOWN');
+  }
 });
 
 test('dispatch layout uses two readable desktop columns, collapsible technical detail, and a compact W3 empty state', () => {
@@ -1381,6 +1541,7 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
     comment(6449891925,'t14210184','### W2 direct CLI delivery lineage readback\nPTYSD_W2_DIRECT_CLI_DELIVERY_V1\n'+JSON.stringify(directDeliveryReadback),'2026-10-28T01:58:00Z'),
   ];
   assert.equal(panel.validJob(currentJob),true,'the panel recognizes the exact schema-6 W2 job contract');
+  assert.equal(panel.validJob(laterW1Job),true,'the panel recognizes the exact schema-6 W1 job contract');
   assert.equal(panel.validJob({...currentJob,edit_paths:['../package.json']}),false,
     'the panel rejects an out-of-repository edit path');
   const evidence = panel.w2EvidenceData(goalComments,issueComments,head,goalIdentity);
