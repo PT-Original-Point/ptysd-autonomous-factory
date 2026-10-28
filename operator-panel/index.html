@@ -2950,7 +2950,7 @@
       (task.multiple_instances || '未知') + '；週期 ' +
       (task.trigger_interval_minutes ? task.trigger_interval_minutes + ' 分鐘' : '未知'));
     text('native-last','最近 ' + readTime(task.last_run) + '；結果 ' + (task.last_result || '未確認'));
-    const executorTaskLanes=[['opencode','W1 OpenCode'],['antigravity','W2 Antigravity'],['codex','W3 Codex']];
+    const executorTaskLanes=[['opencode','W1 OpenCode'],['antigravity','W2 Antigravity'],['codex','Codex 主控']];
     const executorTaskSummary=osFreshness !== 'FRESH' || !object(windows.executor_tasks)
       ? 'UNKNOWN：觀測未提供三個 Executor 的 Task Scheduler 狀態'
       : executorTaskLanes.map(([key,label])=>{
