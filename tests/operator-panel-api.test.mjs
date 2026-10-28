@@ -784,9 +784,9 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
   const oldRequest = 'W2S_5AA1ADD410B24E28ADAB8E4B7E528920_20261022_154481FF';
   const oldAttempt = '24331e45-62db-4f55-ad40-87776a799c5d';
   const oldSha = '918f60e0023b7194874e6ea640cb98023760697c';
-  const currentRequest = 'W2_PANEL_EVIDENCE_20261027_A7F209DCE31B4F0A';
-  const currentSha = 'e283ad08e14f6c22254c5e904056f687cfa8bd5c';
-  const specHash = '449afe31c5b19f8401ee0f750c13e83ca1d7bd43d5a76d770bc9ec5f0db06c4a';
+  const currentRequest = 'W2_TARGET_EVIDENCE_INVARIANT_20261028_JMCHITV3';
+  const currentSha = 'cc94ae4692287eb0caacb3330b78346600d01ef0';
+  const specHash = 'df8b63c1ac9516daef56ed0b866df2748f814ac87526f3ac047b2a76fd7a603c';
   const job = (requestId, sourceSha, sourcePr, specPath, editPaths) => ({
     schema:6, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
     request_id:requestId, kind:'antigravity_edit', source_sha:sourceSha,
@@ -797,8 +797,8 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
   const comment = (id, login, body, createdAt) => ({ id, user:{login}, body, created_at:createdAt });
   const oldJob = job(oldRequest,oldSha,461,'native-bridge/tasks/w2-r7-target-multiplicity.md',
     ['native-bridge/antigravity-quota.mjs','tests/antigravity-quota.test.mjs','package.json']);
-  const currentJob = job(currentRequest,currentSha,579,'native-bridge/tasks/w2-r7-panel-evidence.md',
-    ['operator-panel/index.html']);
+  const currentJob = job(currentRequest,currentSha,585,'native-bridge/tasks/w2-target-evidence-invariant.md',
+    ['native-bridge/worker.mjs','tests/native-bridge.test.mjs']);
   const directCliBody = [
     'record_type=ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT',
     'native_worker_job=NOT_CREATED',
@@ -820,63 +820,85 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
   };
   const currentReceipt = {
     schema:1, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
-    request_id:currentRequest, attempt_id:'efcc127f-bfeb-449e-8d7b-b2f4cd0590b5',
-    state:'BLOCKED', kind:'antigravity_edit', source_sha:currentSha, source_pr:579,
-    outcome:'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED',
-    session_id:'1e6ac0f0-a6b1-4a49-a038-ab72af5358dc',
-    diff_sha256:'2803dc241642aea1c677959f56a48c56a7fe6a93209f93c995f2562d3bb2adba', diff_bytes:18413,
+    request_id:currentRequest, attempt_id:'981576b0-d43f-4353-9fce-b5e980ddd6f4',
+    state:'FINISHED', kind:'antigravity_edit', source_sha:currentSha, source_pr:585,
+    outcome:'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED_FILE_TOOL_FAILURES_RETAINED',
+    session_id:'0d1b02a3-014f-4e5b-a1ff-b51776abda0e',
+    diff_sha256:'4d441bfdf09003b3478f3ee95bc953383cfe65d97f46c65552c7a10f119067bd', diff_bytes:4866,
     task_acceptance:'UNKNOWN', external_effects:'UNKNOWN',
   };
-  const syntheticAcceptance = {
+  const currentAcceptance = {
     schema:1, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',
     record_type:'ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT',
     request_id:currentRequest, attempt_id:currentReceipt.attempt_id,
-    source_sha:currentSha, source_pr:579, codex_source_acceptance:'ACCEPTED',
+    source_sha:currentSha, source_pr:585, codex_source_acceptance:'ACCEPTED',
     exact_head_ci:'SUCCESS', tests:{
-      focused:{total:2,passed:2,failed:0,skipped:0},
-      full:{total:407,passed:402,failed:0,skipped:5},
-      initial_full_run:{total:407,passed:401,failed:1,skipped:5},
-      failure_retest:{total:1,passed:1,failed:0,skipped:0},
+      focused:{total:1,passed:1,failed:0,skipped:0},
+      full:{total:409,passed:364,failed:0,skipped:45},
+      operator_panel:{total:29,passed:29,failed:0,skipped:0},
     },
+    external_effects:'UNKNOWN',
+  };
+  const directDeliveryReadback = {
+    schema:1, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',
+    record_type:'ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT',
+    direct_cli_comment_id:6438594849,
+    direct_cli_session_id:'be190416-e85f-4f68-b33a-5d05f54d7072',
+    model:'gemini-3.8-flash-high',
+    direct_cli_diff_sha256:'ae294af7292c35e949bc6a83bb16d2f38779720aa347c1721968ce9f9eb5eae4',
+    original_pr:576, original_head_sha:'a4b4b5a00f003f446847be3ab521cbf278e02c78',
+    original_pr_state:'CLOSED_UNMERGED', recovery_pr:577,
+    recovery_head_sha:'e1669889f8a9111cfb0af9f6eddeecb95a757141',
+    recovery_pr_state:'CLOSED_UNMERGED', combined_delivery_pr:578,
+    combined_head_sha:'da11c4bdddad19f30b8477c24c69e2ada0b7e163',
+    base_sha:'7810399813554df0aaf64dbf2c60466ae0305ff1',
+    sole_parent_sha:'7810399813554df0aaf64dbf2c60466ae0305ff1',
+    merge_commit_sha:'737fa98390549c12bda2e42466311b42c2198ef6',
+    main_after_merge:'1268cdbf5cc56bb7ac3b7fe7fdb9d74adb039e49',
+    main_contains_merge:true,
+    exact_head_ci:{'csg-trusted-verifier-hosted':'SUCCESS','check-native-only':'SUCCESS',
+      'v2-native-windows':'SUCCESS','bounded-driver-acceptance':'SKIPPED',
+      'csg-trusted-verifier':'CANCELLED_NOT_COUNTED'},
+    provenance:'DIRECT_CLI_NOT_NATIVE_WORKER',
+    native_worker_job:'NOT_CREATED', native_worker_attempt:'NOT_CREATED',
     external_effects:'UNKNOWN',
   };
   const goalComments = [
     comment(6342391654,'t14210184','PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(oldJob),'2026-10-22T13:49:13Z'),
-    comment(6440507307,'t14210184','PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(currentJob),'2026-10-27T11:42:00Z'),
+    comment(6447787854,'t14210184','PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(currentJob),'2026-10-28T01:44:00Z'),
   ];
   const issueComments = [
     comment(6344079399,'t14210184','PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(oldReceipt),'2026-10-22T15:07:35Z'),
     comment(6367399586,'t14210184',`original_unknown_attempt=${oldAttempt}\nw1_classification=MODEL_SESSION_AND_SCOPED_DIFF_CONFIRMED;PATCH_INTEGRATED_AND_CODEX_TESTED_VIA_PR_507\nclassification=PARTIAL_OR_AMBIGUOUS\nexternal_effects=UNKNOWN`,'2026-10-23T14:36:17Z'),
     comment(6438594849,'t14210184',directCliBody,'2026-10-27T09:45:07Z'),
-    comment(6440844675,'t14210184','PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(currentReceipt),'2026-10-27T12:04:00Z'),
+    comment(6448377614,'t14210184','PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(currentReceipt),'2026-10-28T01:49:00Z'),
     comment(6433468416,'t14210184',`original_unknown_attempt=${oldAttempt}\nclassification=PARTIAL_OR_AMBIGUOUS\nexternal_effects=UNKNOWN`,'2026-10-27T04:05:21Z'),
+    comment(6449079138,'t14210184','PTYSD_V53R4_W2_PANEL_ACCEPTANCE_V1\n'+JSON.stringify(currentAcceptance),'2026-10-28T01:52:00Z'),
+    comment(6449891925,'t14210184','PTYSD_W2_DIRECT_CLI_DELIVERY_V1\n'+JSON.stringify(directDeliveryReadback),'2026-10-28T01:58:00Z'),
   ];
   assert.equal(panel.validJob(currentJob),true,'the panel recognizes the exact schema-6 W2 job contract');
   assert.equal(panel.validJob({...currentJob,edit_paths:['../package.json']}),false,
     'the panel rejects an out-of-repository edit path');
   const evidence = panel.w2EvidenceData(goalComments,issueComments,head,goalIdentity);
   assert.equal(evidence.native.job.request_id,currentRequest);
-  assert.equal(evidence.native.jobCommentId,6440507307);
+  assert.equal(evidence.native.jobCommentId,6447787854);
   assert.equal(evidence.native.goalReferenceVerified,true);
-  assert.equal(evidence.native.job.source_pr,579);
+  assert.equal(evidence.native.job.source_pr,585);
   assert.equal(evidence.native.receipt.attempt_id,currentReceipt.attempt_id);
   assert.equal(evidence.native.receipt.session_id,currentReceipt.session_id);
-  assert.equal(evidence.native.receipt.state,'BLOCKED');
+  assert.equal(evidence.native.receipt.state,'FINISHED');
   assert.equal(evidence.native.receipt.task_acceptance,'UNKNOWN');
-  assert.equal(evidence.native.codexAcceptance,null);
+  assert.equal(evidence.native.codexAcceptance.codex_source_acceptance,'ACCEPTED');
   assert.equal(evidence.native.receipt.external_effects,'UNKNOWN');
-  const syntheticAcceptanceComment = comment(6439900003,'t14210184',
-    'PTYSD_V53R4_W2_PANEL_ACCEPTANCE_V1\n'+JSON.stringify(syntheticAcceptance),'2026-10-27T12:05:00Z');
-  const acceptedEvidence = panel.w2EvidenceData(goalComments,
-    [...issueComments,syntheticAcceptanceComment],head,goalIdentity);
+  const acceptedEvidence = panel.w2EvidenceData(goalComments,issueComments,head,goalIdentity);
   assert.equal(acceptedEvidence.native.codexAcceptance.codex_source_acceptance,'ACCEPTED');
-  assert.equal(acceptedEvidence.native.receipt.state,'BLOCKED',
+  assert.equal(acceptedEvidence.native.receipt.state,'FINISHED',
     'a separate Codex source acceptance never upgrades the Worker lifecycle receipt');
   assert.equal(acceptedEvidence.native.receipt.external_effects,'UNKNOWN');
   panel.renderW2Evidence(acceptedEvidence);
   assert.match(domElements.get('w2-native-acceptance').textContent,/Codex source_acceptance=ACCEPTED/);
   assert.match(domElements.get('w2-native-acceptance').textContent,/CI=SUCCESS/);
-  assert.match(domElements.get('w2-native-acceptance').textContent,/測試 402\/407 · 失敗 0 · 略過 5/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/測試 364\/409 · 失敗 0 · 略過 45/);
   assert.match(domElements.get('w2-native-acceptance').textContent,/Worker task_acceptance=UNKNOWN/);
   assert.match(domElements.get('w2-native-acceptance').textContent,/external_effects=UNKNOWN/);
   assert.equal(evidence.directCli.provenance,'DIRECT_CLI_NOT_NATIVE_WORKER');
@@ -885,6 +907,20 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
   assert.equal(evidence.directCli.changed_file,'tests/v2-readiness.test.mjs');
   assert.match(evidence.directCli.tests,/52 total, 51 passed, 0 failed, 1 skipped/);
   assert.match(evidence.directCli.tests,/Full: 401 total, 396 passed, 0 failed, 5 skipped/);
+  assert.equal(evidence.directCli.provenance,'DIRECT_CLI_NOT_NATIVE_WORKER');
+  assert.equal(evidence.directCli.deliveryReadback?.combined_delivery_pr,578);
+  assert.equal(evidence.directCli.deliveryReadback?.original_pr_state,'CLOSED_UNMERGED');
+  assert.equal(evidence.directCli.deliveryReadback?.main_after_merge,'1268cdbf5cc56bb7ac3b7fe7fdb9d74adb039e49');
+  assert.match(domElements.get('w2-direct-delivery').textContent,/PR #576.*CLOSED_UNMERGED/);
+  assert.match(domElements.get('w2-direct-delivery').textContent,/PR #578.*MERGED/);
+  assert.match(domElements.get('w2-direct-delivery').textContent,/737fa98390549c12bda2e42466311b42c2198ef6/);
+  const mismatchedLineage = panel.w2EvidenceData(goalComments,issueComments.map(c =>
+    c.id === 6449891925 ? {...c,body:'PTYSD_W2_DIRECT_CLI_DELIVERY_V1\n'+JSON.stringify({
+      ...directDeliveryReadback,direct_cli_session_id:'different-session'})} : c),head,goalIdentity);
+  assert.equal(mismatchedLineage.directCli.deliveryReadback,null,
+    'a lineage record for a different direct-CLI session is ignored');
+  panel.renderW2Evidence(mismatchedLineage);
+  assert.match(domElements.get('w2-direct-delivery').textContent,/UNKNOWN/);
   assert.equal(evidence.historical.attempt_id,oldAttempt);
   assert.equal(evidence.historical.state,'BLOCKED');
   assert.equal(evidence.historical.classification,'PARTIAL_OR_AMBIGUOUS');
@@ -897,13 +933,13 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
   assert.ok(domElements.get('w2-native-task').textContent.includes(currentSha));
   assert.match(domElements.get('w2-native-task').textContent,/GOAL 已核對/);
   assert.ok(domElements.get('w2-native-session').textContent.includes(currentReceipt.session_id));
-  assert.ok(domElements.get('w2-native-attempt').textContent.includes('BLOCKED'));
+  assert.ok(domElements.get('w2-native-attempt').textContent.includes('FINISHED'));
   assert.match(domElements.get('w2-native-acceptance').textContent,/task_acceptance=UNKNOWN/);
-  assert.match(domElements.get('w2-native-acceptance').textContent,/Codex 驗收紀錄未讀回/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/Codex source_acceptance=ACCEPTED/);
   assert.match(domElements.get('w2-direct-cli').textContent,/非原生 Worker/);
   assert.match(domElements.get('w2-historical').textContent,/歷史/);
   for (const id of ['w2-native-task','w2-native-attempt','w2-native-session',
-    'w2-native-acceptance','w2-direct-cli','w2-direct-diff','w2-direct-tests','w2-historical'])
+    'w2-native-acceptance','w2-direct-cli','w2-direct-delivery','w2-direct-diff','w2-direct-tests','w2-historical'])
     assert.match(html,new RegExp(`id=["']${id}["']`),`panel contains ${id}`);
 });
 
