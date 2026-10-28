@@ -438,6 +438,81 @@ function toolName(event) {
   return typeof value === 'string' ? value.toLowerCase() : '';
 }
 
+// Provider errors arrive in several shapes. The CLI can wrap an upstream
+// rejection in a generic provider.* error whose HTTP response body is a JSON
+// string, so structured type fields must be decoded defensively and only as
+// classification signals. The bounds below keep a hostile or truncated body
+// from throwing, exhausting memory, or entering returned evidence.
+const ABUSE_GATEWAY_PHRASE = 'opencode free model gateway detect abuse traffic';
+const ERROR_TYPE_FIELDS = new Set(['type', 'name', 'code', 'errorType', 'error_type']);
+const ERROR_BODY_FIELDS = new Set(['body', 'responseBody', 'response_body']);
+const FREE_TIER_ERROR_TYPES = new Set(['freetiererror']);
+const FREE_USAGE_LIMIT_ERROR_TYPES = new Set(['freeusagelimiterror', 'providerfreelimit']);
+const ERROR_DECODE_LIMITS = { maxDepth: 8, maxNodes: 512, maxKeys: 128,
+  maxStringChars: 8192, maxTotalStringChars: 65536, maxBodyChars: 65536,
+  maxBodyDecodePasses: 2 };
+
+function normalizedErrorText(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+}
+function normalizedErrorType(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+// Returns only booleans. No message, body, header, account, or request value
+// leaves this function, which makes it safe for durable attempt evidence.
+function decodeProviderErrorSignals(error) {
+  const signals = { abuse: false, freeUsageLimit: false, freeTier: false };
+  const seen = new WeakSet();
+  let nodes = 0;
+  let stringBudget = ERROR_DECODE_LIMITS.maxTotalStringChars;
+  const inspectString = value => {
+    if (signals.abuse || stringBudget <= 0) return;
+    const allowed = Math.min(ERROR_DECODE_LIMITS.maxStringChars, stringBudget);
+    const slice = value.length > allowed ? value.slice(0, allowed) : value;
+    stringBudget -= slice.length;
+    if (normalizedErrorText(slice).includes(ABUSE_GATEWAY_PHRASE)) signals.abuse = true;
+  };
+  const visit = (value, depth) => {
+    if (depth > ERROR_DECODE_LIMITS.maxDepth || nodes >= ERROR_DECODE_LIMITS.maxNodes) return;
+    if (typeof value === 'string') { inspectString(value); return; }
+    if (!value || typeof value !== 'object' || seen.has(value)) return;
+    seen.add(value);
+    nodes++;
+    if (Array.isArray(value)) {
+      const length = Math.min(value.length, ERROR_DECODE_LIMITS.maxKeys);
+      for (let index = 0; index < length; index++) visit(value[index], depth + 1);
+      return;
+    }
+    const keys = Object.keys(value).slice(0, ERROR_DECODE_LIMITS.maxKeys);
+    for (const key of keys) {
+      const field = value[key];
+      if (typeof field === 'string' && ERROR_TYPE_FIELDS.has(key)) {
+        const typeKey = normalizedErrorType(field);
+        if (FREE_USAGE_LIMIT_ERROR_TYPES.has(typeKey)) signals.freeUsageLimit = true;
+        else if (FREE_TIER_ERROR_TYPES.has(typeKey)) signals.freeTier = true;
+      }
+      if (typeof field === 'string' && ERROR_BODY_FIELDS.has(key) &&
+          field.length <= ERROR_DECODE_LIMITS.maxBodyChars) {
+        let decoded = field;
+        let parsedBody = false;
+        for (let pass = 0; pass < ERROR_DECODE_LIMITS.maxBodyDecodePasses &&
+            typeof decoded === 'string'; pass++) {
+          let next;
+          try { next = JSON.parse(decoded); } catch { break; }
+          if (next === decoded) break;
+          decoded = next;
+          parsedBody = true;
+        }
+        if (parsedBody) { visit(decoded, depth + 1); continue; }
+      }
+      visit(field, depth + 1);
+    }
+  };
+  visit(error, 0);
+  return signals;
+}
+
 /**
  * Extract only non-content execution evidence from OpenCode V2 JSONL output.
  * Raw model text is parsed transiently and never returned. When a capture hash
@@ -479,13 +554,17 @@ export async function readOpenCodeV2RunEvidence(stdoutPath, expectedSha256 = nul
       }
       eventCount++;
       if (event.type === 'error') {
-        // Keep only stable allowlisted reason codes. Provider messages can contain
-        // account or request details and must not enter durable execution evidence.
-        const providerMessage = typeof event.error?.message === 'string'
-          ? event.error.message.toLowerCase().replace(/[^a-z0-9]+/g, ' ') : '';
-        if (providerMessage.includes('opencode free model gateway detect abuse traffic'))
+        // Keep only stable allowlisted reason codes. Provider messages, raw
+        // response bodies, headers, and identifiers are never retained. The
+        // abuse block keeps its precedence, then a structured free-usage limit
+        // is more specific than a free-tier rejection; any other provider error
+        // (including an unrelated HTTP 429) stays on the generic path.
+        const signals = decodeProviderErrorSignals(event.error);
+        if (signals.abuse)
           providerErrorReason = 'OPEN_CODE_FREE_GATEWAY_ABUSE_BLOCKED';
-        else if (event.error?.type === 'FreeTierError')
+        else if (signals.freeUsageLimit)
+          providerErrorReason ??= 'OPEN_CODE_FREE_USAGE_LIMIT_REACHED';
+        else if (signals.freeTier)
           providerErrorReason ??= 'OPEN_CODE_FREE_TIER_REJECTED';
         else providerErrorReason ??= 'OPEN_CODE_PROVIDER_ERROR';
       }
