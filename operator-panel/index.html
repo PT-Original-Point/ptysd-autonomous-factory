@@ -363,7 +363,7 @@
     <article class="panel infra-card">
       <h3>Win11 Native Worker／Task Scheduler</h3><span id="native-badge" class="badge neutral">未確認</span>
       <p id="native-detail" class="infra-summary">排程就緒不等於 Worker 正在執行任務。</p>
-      <dl class="facts"><dt>正式排程／Action</dt><dd id="native-action">未確認</dd><dt>執行身分／單實例</dt><dd id="native-identity">未確認</dd><dt>最近結果／下一次執行</dt><dd id="native-last">未確認</dd><dt>舊 Monitor／2667</dt><dd id="native-retired">未確認</dd><dt>Worker 發布器</dt><dd id="native-publisher">未確認</dd></dl>
+      <dl class="facts"><dt>正式排程／Action</dt><dd id="native-action">未確認</dd><dt>執行身分／單實例</dt><dd id="native-identity">未確認</dd><dt>最近結果／下一次執行</dt><dd id="native-last">未確認</dd><dt>OpenCode／Antigravity／Codex Executor 排程</dt><dd id="native-executor-tasks">未確認</dd><dt>舊 Monitor／2667</dt><dd id="native-retired">未確認</dd><dt>Worker 發布器</dt><dd id="native-publisher">未確認</dd></dl>
     </article>
     <article class="panel infra-card">
       <h3>GitHub Actions／Runner</h3><span id="runner-badge" class="badge neutral">未確認</span>
@@ -2751,6 +2751,21 @@
       (task.multiple_instances || '未知') + '；週期 ' +
       (task.trigger_interval_minutes ? task.trigger_interval_minutes + ' 分鐘' : '未知'));
     text('native-last','最近 ' + readTime(task.last_run) + '；結果 ' + (task.last_result || '未確認'));
+    const executorTaskLanes=[['opencode','W1 OpenCode'],['antigravity','W2 Antigravity'],['codex','W3 Codex']];
+    const executorTaskSummary=osFreshness !== 'FRESH' || !object(windows.executor_tasks)
+      ? 'UNKNOWN：觀測未提供三個 Executor 的 Task Scheduler 狀態'
+      : executorTaskLanes.map(([key,label])=>{
+        const item=windows.executor_tasks[key];
+        if (!object(item)) return label + '：UNKNOWN';
+        const state=['READY','RUNNING','DISABLED','QUEUED','UNKNOWN'].includes(item.state)
+          ? item.state : 'UNKNOWN';
+        const enabled=item.registered === false ? '未註冊'
+          : item.registered !== true ? '註冊未知'
+            : item.enabled === true ? '啟用' : item.enabled === false ? '停用' : '啟用未知';
+        return label + '：' + state + '（' + enabled + '）；最近 ' + readTime(item.last_run) +
+          '；結果 ' + (item.last_result || '未確認');
+      }).join('；') + '；排程狀態不代表模型工作或成果';
+    text('native-executor-tasks',executorTaskSummary);
     text('native-retired','Monitor 排程 ' +
       (windows.legacy_monitor_registered === false ? '未註冊' : windows.legacy_monitor_registered === true ? '仍註冊' : '未知') +
       '；2667 ' + (windows.listener_2667 === false ? '無 Listener' : windows.listener_2667 === true ? '仍有 Listener' : '未知'));

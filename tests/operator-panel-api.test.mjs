@@ -564,7 +564,12 @@ test('renderer separates closed W1 source history from live worker status and sh
     runtime_deployment:{status:'MANIFEST_MATCHED',observed_at:observedAt,source_main_sha:mainSha,
       deployment_pr:592,deployment_pr_head:'c'.repeat(40),bundle_sha256:'d'.repeat(64)},
     windows:{status:'FRESH',observed_at:observedAt,native_task:{registered:true,enabled:true,
-      state:'READY',identity_class:'INTERACTIVE_LIMITED',multiple_instances:'IgnoreNew'}},
+      state:'READY',identity_class:'INTERACTIVE_LIMITED',multiple_instances:'IgnoreNew'},
+      executor_tasks:{
+        opencode:{registered:true,enabled:true,state:'READY',last_run:observedAt,last_result:'0X00000000'},
+        antigravity:{registered:true,enabled:false,state:'DISABLED',last_run:observedAt,last_result:'0X00000000'},
+        codex:{registered:true,enabled:true,state:'RUNNING',last_run:observedAt,last_result:'0X00000000'},
+      }},
     native_worker:{latest_task:{request_id:requestId,kind:'opencode_edit',source_pr:505,
       source_sha:w1Sha,state:'FINISHED_NOT_ACCEPTANCE'}},
     workers:[task,{worker_id:'W2',status:'BLOCKED',task_id:'W2_PANEL_TEST',
@@ -607,6 +612,10 @@ test('renderer separates closed W1 source history from live worker status and sh
   panel.render(null,resources,null,now,{status:'READY',coordination:'SHARED_LOCKED',remaining:40,
     lastError:null,lastSuccessAt:now,resetAt:null,pauseUntil:null,indefinite:false});
   assert.match(domElements.get('pr-state').textContent,/已關閉未合併/);
+  assert.match(domElements.get('native-executor-tasks').textContent,/W1 OpenCode：READY（啟用）/);
+  assert.match(domElements.get('native-executor-tasks').textContent,/W2 Antigravity：DISABLED（停用）/);
+  assert.match(domElements.get('native-executor-tasks').textContent,/W3 Codex：RUNNING（啟用）/);
+  assert.match(domElements.get('native-executor-tasks').textContent,/不代表模型工作/);
   assert.match(domElements.get('pr-state').textContent,/歷史來源/);
   assert.match(domElements.get('pr-state').textContent,/PR #505/);
   assert.doesNotMatch(domElements.get('pr-state').textContent,/CANDIDATE_PR_IDENTITY_UNKNOWN/);
