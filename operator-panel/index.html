@@ -2621,14 +2621,17 @@
       ? checkSummary : null;
     const apiErrors = Object.entries(resources).filter(([,r]) => r.error).map(([key,r]) => key + ':' + r.error);
     const overall = document.getElementById('overall');
+    const rateLimited=rateState?.status === 'RATE_LIMITED';
     if (overall) overall.className = 'panel overview ' +
-      (osFreshness === 'FRESH' ? 'fresh' : osFreshness === 'STALE' ? 'stale' : 'unknown');
+      (rateLimited ? 'unknown' : osFreshness === 'FRESH' ? 'fresh' : osFreshness === 'STALE' ? 'stale' : 'unknown');
     const githubReadLabel = rateState?.status === 'RATE_LIMITED' ? 'GitHub API 額度耗盡／讀取暫停'
+      : rateState?.status === 'COOLDOWN' ? 'GitHub API 冷卻中／讀取暫停'
       : issueResource.error ? 'GitHub 讀取錯誤：' + issueResource.error
       : issueReadFreshness === 'FRESH' ? 'GitHub Issue 可讀'
         : issueReadFreshness === 'STALE' ? 'GitHub Issue 讀回已過期' : 'GitHub Issue 未確認';
     badge('github-state', issueReadFreshness,
-      githubReadLabel, issueResource.error ? 'bad'
+      githubReadLabel, rateState?.status === 'RATE_LIMITED' ? 'bad'
+        : rateState?.status === 'COOLDOWN' ? 'warn' : issueResource.error ? 'bad'
         : issueReadFreshness === 'FRESH' ? 'good' : issueReadFreshness === 'STALE' ? 'warn' : 'neutral');
     text('overall-title',rateState?.status === 'RATE_LIMITED'
       ? 'GitHub API 額度暫時耗盡。監控讀取已暫停，Win11 實際工作狀態目前未知。'
