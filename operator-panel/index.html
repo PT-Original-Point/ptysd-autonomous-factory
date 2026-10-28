@@ -217,6 +217,7 @@
       <div class="field"><strong>進度／已證實步驟</strong><span id="w1-progress">未確認</span></div>
       <div class="field"><strong>錯誤或阻擋</strong><span id="w1-blocker">未確認</span></div>
       <div class="field"><strong>程式修改</strong><span id="w1-changes">未確認</span></div>
+      <div class="field"><strong>Codex 來源驗收</strong><span id="w1-source-acceptance">UNKNOWN</span></div>
       <div class="field"><strong>Commit／PR／CI</strong><span id="w1-delivery">未確認</span></div>
       <div class="field"><strong>下一步負責人</strong><span id="w1-next">未確認</span></div>
       <div class="worker-foot"><span id="w1-source" class="source-tag">來源／新鮮度未確認</span></div>
@@ -284,9 +285,10 @@
           <dt>來源 PR／精確 SHA</dt><dd id="w1-dispatch-source">UNKNOWN</dd>
           <dt>規格檔／SHA-256</dt><dd id="w1-dispatch-spec">UNKNOWN</dd>
           <dt>原始 Worker 終態</dt><dd id="w1-dispatch-worker-terminal">UNKNOWN</dd>
+          <dt>Codex 來源驗收</dt><dd id="w1-dispatch-codex-source-acceptance">UNKNOWN</dd>
           <dt>Codex 差異核對</dt><dd id="w1-dispatch-reconciliation">UNKNOWN</dd>
           <dt>結果 PR／合併提交／歷史 CI</dt><dd id="w1-dispatch-result">UNKNOWN</dd>
-          <dt>正式接受</dt><dd id="w1-dispatch-acceptance">UNKNOWN</dd>
+          <dt>Worker task_acceptance</dt><dd id="w1-dispatch-acceptance">UNKNOWN</dd>
           <dt>完整收據進度</dt><dd id="w1-dispatch-progress">UNKNOWN</dd>
           <dt>收據工具與 SHA 溯源</dt><dd id="w1-dispatch-receipt-provenance">UNKNOWN</dd>
           <dt>差異／測試／交付</dt><dd id="w1-dispatch-delivery">UNKNOWN</dd>
@@ -414,6 +416,8 @@
   const JOB_MARKER = 'PTYSD_NATIVE_JOB_V1\n';
   const RECEIPT_MARKER = 'PTYSD_NATIVE_RECEIPT_V1\n';
   const ACCEPTANCE_MARKER = 'PTYSD_V53R4_W2_PANEL_ACCEPTANCE_V1\n';
+  const W1_SOURCE_ACCEPTANCE_MARKER = 'PTYSD_V53R4_R6_W1_SOURCE_ACCEPTANCE_AFTER_MERGE_V1';
+  const W1_PATCH_IDENTITY_MARKER = 'PTYSD_V53R4_R6_W1_SOURCE_PATCH_BYTE_IDENTITY_RECONCILIATION_V1';
   const DIRECT_CLI_DELIVERY_MARKER = 'PTYSD_W2_DIRECT_CLI_DELIVERY_V1\n';
   const HISTORICAL_ATTEMPT_ID = '24331e45-62db-4f55-ad40-87776a799c5d';
   const DIRECT_CLI_COMMENT_ID = 6438594849;
@@ -616,12 +620,13 @@
     }
     return null;
   }
-  function latestSchema6Job(comments) {
+  function latestSchema6Job(comments, kind = null) {
     const jobs = [];
     for (const c of (Array.isArray(comments) ? comments : [])) {
       if (!c?.body || !DISPATCHERS.has(c.user?.login || '')) continue;
       const job = parseMarked(c.body, JOB_MARKER);
-      if (job?.schema === 6 && validJob(job)) jobs.push({ id:Number(c.id), job, comment:c });
+      if (job?.schema === 6 && (!kind || job.kind === kind) && validJob(job))
+        jobs.push({ id:Number(c.id), job, comment:c });
     }
     jobs.sort((a,b) => a.id - b.id);
     return jobs.at(-1) || null;
@@ -701,15 +706,7 @@
       typeof job.model === 'string' && job.model.length <= 160 &&
       typeof job.variant === 'string' && job.variant.length <= 60;
     if (job.schema === 6) return JSON.stringify(keys) === JSON.stringify(schema6) &&
-      job.kind === 'antigravity_edit' &&
-      /^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(job.spec_path || '') &&
-      /^[a-f0-9]{64}$/.test(job.spec_sha256 || '') &&
-      job.model === 'gemini-3.8-flash-high' && job.variant === 'high' &&
-      Number.isSafeInteger(job.source_pr) && job.source_pr >= 1 &&
-      Number.isSafeInteger(job.goal_comment_id) && job.goal_comment_id >= 1 &&
-      /^[a-f0-9]{64}$/.test(job.goal_body_sha256 || '') &&
-      Array.isArray(job.edit_paths) && job.edit_paths.length > 0 &&
-      job.edit_paths.every(validEditPath);
+      validSchema6DispatchJob(job);
     return false;
   }
   function latestTask(comments, mainSha) {
@@ -855,6 +852,19 @@
       task_source_sha:task.source_sha, job_comment_id:task.job_comment_id,
       task_state:task.state, attempt_id:task.attempt_id,
       source_pr:task.source_pr } : null;
+  }
+  function schema6TaskSource(comments, id, goalIdentity, sourceComplete) {
+    if (!sourceComplete || !goalIdentity || !['W1','W2'].includes(id)) return null;
+    const kind=id === 'W1' ? 'opencode_edit' : 'antigravity_edit';
+    const latest=latestSchema6Job(comments,kind);
+    const job=latest?.job;
+    if (!job || goalIdentity.id !== job.goal_comment_id ||
+        !DISPATCHERS.has(goalIdentity.author || '') ||
+        goalIdentity.body_sha256 !== job.goal_body_sha256) return null;
+    return {task_id:job.request_id,request_id:job.request_id,task_kind:job.kind,kind:job.kind,
+      task_source_sha:job.source_sha,source_sha:job.source_sha,source_pr:job.source_pr,
+      task_comment_id:latest.id,job_comment_id:latest.id,task_state:'ISSUE_310_SCHEMA6',
+      jobComment:latest.comment};
   }
   function summarizeChecks(data, expectedSha, prNumber) {
     if (!object(data) || !Array.isArray(data.check_runs) ||
@@ -1719,16 +1729,18 @@
     if (summary.status === 'COMPLETED_WITH_SKIPS') return '檢查已結束；略過／neutral 不計為成功';
     return '精確 HEAD 檢查未知';
   }
-  function workerCardData(id, record, classification, snapshot, formalTask = null) {
+  function workerCardData(id, record, classification, snapshot, formalTask = null, sourceAcceptance = null) {
     const prefix = id.toLowerCase();
     const oc = snapshot?.opencode_v2 || {};
     const nativeWorker = snapshot?.native_worker || {};
     const currentTask = id === 'W1' ? nativeWorker.current_task : null;
     const latestTask = id === 'W1' ? nativeWorker.latest_task : null;
     const taskId = record?.task_id || (id === 'W1'
-      ? currentTask?.request_id || formalTask?.job?.request_id || latestTask?.request_id : null);
+      ? currentTask?.request_id || formalTask?.job?.request_id || latestTask?.request_id ||
+        (sourceAcceptance?.status === 'ACCEPTED' ? sourceAcceptance.requestId : null) : null);
     const taskKind = record?.task_kind || (id === 'W1'
-      ? currentTask?.kind || formalTask?.job?.kind || latestTask?.kind : null);
+      ? currentTask?.kind || formalTask?.job?.kind || latestTask?.kind ||
+        (sourceAcceptance?.status === 'ACCEPTED' ? 'opencode_edit' : null) : null);
     const taskState = id === 'W1' ? currentTask?.state || formalTask?.state || latestTask?.state : null;
     const activity = record?.activity_observed_at || (id === 'W1' ? oc.activity_observed_at || oc.last_tool_activity_at : null);
     const taskText = taskId
@@ -1755,9 +1767,18 @@
       ? classification.reason : id === 'W3'
         ? '需 Codex 有效 request_id、Human 手動轉送及 Zero Risk 真實工具回傳。'
         : '未回報受信任阻擋代碼。');
+    const matchedW1SourceAcceptance=id === 'W1' && sourceAcceptance?.status === 'ACCEPTED' &&
+      sourceAcceptance.requestId === taskId && (!record ||
+        sourceAcceptance.attemptId === record.attempt_id &&
+        sourceAcceptance.sourceSha === String(record.task_source_sha || '').toLowerCase())
+      ? sourceAcceptance : null;
     const modified = id === 'W3'
       ? 'UNKNOWN：Zero Risk 真實檔案差異須同 request MCP 完成回傳及 Codex 收件核對；#407 宣稱僅屬候選。'
-      : workerChangeLabel(id, record, oc);
+      : matchedW1SourceAcceptance && !record
+        ? 'Codex 已核對 schema-6 W1 成果來源並接受 PR #' +
+          matchedW1SourceAcceptance.resultPr + '；目前沒有相符的 Win11 Worker 快照，' +
+          '原 Worker task_acceptance／外部效果仍為 UNKNOWN。'
+      : workerChangeLabel(id, record, oc, matchedW1SourceAcceptance);
     const commit = safeSha(record?.commit_sha || (id === 'W1' ? nativeWorker.remote_commit || oc.remote_commit : null));
     const pr = Number.isSafeInteger(record?.pr_number) && record.pr_number > 0 ? '#' + record.pr_number : null;
     const deliveryParts = [];
@@ -1775,9 +1796,19 @@
       progress:steps,
       blocker:String(blocker),
       changes:modified,
+      sourceAcceptance:matchedW1SourceAcceptance
+        ? 'Codex source accepted: ' + matchedW1SourceAcceptance.label + '；Worker task_acceptance=' +
+          String(record?.task_acceptance || 'UNKNOWN') + '；external_effects=' +
+          String(record?.external_effects || 'UNKNOWN') + '；live_acceptance=NOT_CLAIMED'
+        : 'UNKNOWN：沒有與目前 W1 request／attempt／來源 SHA 配對的 Codex source acceptance',
       delivery:id === 'W3'
         ? 'UNKNOWN：#407 的 Commit／PR／交付狀態是候選；尚無同 request 的 Zero Risk 完成回傳與 Codex 收件驗證。'
-        : deliveryParts.join('；'),
+        : matchedW1SourceAcceptance
+          ? deliveryParts.join('；') + '；Codex source delivery：PR #' + matchedW1SourceAcceptance.resultPr +
+            ' SOURCE_ACCEPTED；tested head ' + matchedW1SourceAcceptance.resultHead +
+            '；merge commit ' + matchedW1SourceAcceptance.mergeCommit +
+            '；精確 HEAD CI 已由 #407 source readback 確認'
+          : deliveryParts.join('；'),
       next:record?.next_owner || (id === 'W3' ? 'Codex 建 request_id；Human 手動轉送' : '未確認'),
       source:id === 'W3' ? 'Issue #407 workers 候選欄位；Zero Risk MCP 直接證據 UNKNOWN' :
         record ? 'Issue #407 workers 記錄 · ' + classification.status :
@@ -1785,7 +1816,16 @@
           : 'Issue #407 未提供此角色的當前證據 · UNKNOWN',
     };
   }
-  function workerChangeLabel(id, record, opencode) {
+  function workerChangeLabel(id, record, opencode, sourceAcceptance = null) {
+    if (id === 'W1' && sourceAcceptance?.status === 'ACCEPTED' &&
+        sourceAcceptance.requestId === record?.task_id &&
+        sourceAcceptance.attemptId === record?.attempt_id &&
+        sourceAcceptance.sourceSha === String(record?.task_source_sha || '').toLowerCase()) {
+      const count = Number.isSafeInteger(record?.changed_files_count) && record.changed_files_count > 0
+        ? `收據記錄 ${record.changed_files_count} 個檔案` : '檔案數未確認';
+      return `Worker 收據回報已擷取差異（${count}）；Codex 已核對同一差異並接受來源 PR #${sourceAcceptance.resultPr}。` +
+        '原始 Worker 終態仍為 FINISHED_NOT_ACCEPTANCE，外部效果仍為 UNKNOWN。';
+    }
     if (record?.code_changes === 'DIFF_CAPTURED_UNVERIFIED') {
       const count = Number.isSafeInteger(record.changed_files_count) && record.changed_files_count > 0
         ? `收據記錄 ${record.changed_files_count} 個檔案` : '檔案數未確認';
@@ -1842,6 +1882,124 @@
     }
     return {id,created_at:comment.created_at || null,metadata,sections};
   }
+  function markedReadbackComment(comment, marker, recordType) {
+    const id=Number(comment?.id);
+    if (!Number.isSafeInteger(id) || id < 1 || !DISPATCHERS.has(comment?.user?.login || '') ||
+        typeof comment?.body !== 'string' || !comment.body.startsWith(marker + '\n')) return null;
+    const fields={};
+    for (const line of comment.body.split(/\r?\n/)) {
+      const split=line.indexOf('=');
+      if (split > 0) fields[line.slice(0,split).trim()]=line.slice(split+1).trim();
+    }
+    return fields.record_type === recordType ? {id,fields,body:comment.body} : null;
+  }
+  function readbackLineFields(body, key) {
+    const line=String(body || '').split(/\r?\n/).find(value =>
+      value.trim().startsWith(key + '='));
+    if (!line) return null;
+    const fields={};
+    for (const segment of line.split(';')) {
+      const split=segment.indexOf('=');
+      if (split > 0) fields[segment.slice(0,split).trim()]=segment.slice(split+1).trim();
+    }
+    return fields;
+  }
+  function w1SourceAcceptanceData(comments, job, receiptItem, reconciliation, jobCommentId) {
+    const receipt=receiptItem?.receipt;
+    const sourceSha=String(job?.source_sha || '').toLowerCase();
+    if (!job || job.kind !== 'opencode_edit' || !safeSha(sourceSha) || !receiptItem ||
+        receipt?.state !== 'FINISHED' || receipt.request_id !== job.request_id ||
+        String(receipt.source_sha || '').toLowerCase() !== sourceSha ||
+        !/^[a-f0-9]{64}$/i.test(receipt.diff_sha256 || '') ||
+        !Number.isSafeInteger(receipt.diff_bytes) || receipt.diff_bytes <= 0 ||
+        !reconciliation || !String(reconciliation.diffReconciliation || '').startsWith('PASS') ||
+        !reconciliation.resultPr || !Number.isSafeInteger(jobCommentId) || jobCommentId < 1) return null;
+    const sourcePr=job.source_pr;
+    const receiptId=Number(receiptItem.id);
+    const reconciliationId=Number(reconciliation.id);
+    if (!Number.isSafeInteger(sourcePr) || sourcePr < 1 || !Number.isSafeInteger(receiptId) ||
+        !Number.isSafeInteger(reconciliationId) || reconciliationId <= receiptId) return null;
+
+    const accepted=[];
+    for (const comment of comments || []) {
+      const parsed=markedReadbackComment(comment,W1_SOURCE_ACCEPTANCE_MARKER,
+        'ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_ORIGINAL_WORKER_OR_LIVE_ACCEPTANCE');
+      if (!parsed || parsed.id <= reconciliationId) continue;
+      const fields=parsed.fields;
+      const sourceLine=readbackLineFields(parsed.body,'source_spec_pr');
+      const resultLine=readbackLineFields(parsed.body,'result_pr');
+      const mainAtAcceptance=safeSha(fields.current_main);
+      if (fields.repo !== REPO || fields.human_goal_comment_id !== '6188322050' ||
+          fields.request_id !== job.request_id || fields.task_comment_id !== String(jobCommentId) ||
+          fields.attempt_id !== receipt.attempt_id || fields.model !== receipt.model ||
+          fields.session_id !== receipt.session_id ||
+          fields.worker_diff_sha256 !== String(receipt.diff_sha256).toLowerCase() ||
+          sourceLine?.source_spec_pr !== String(sourcePr) ||
+          String(sourceLine?.head || '').toLowerCase() !== sourceSha ||
+          !safeSha(sourceLine?.merge_commit) ||
+          !Number.isSafeInteger(Number(resultLine?.result_pr)) ||
+          Number(resultLine.result_pr) !== reconciliation.resultPr.number ||
+          !safeSha(resultLine?.head) || !safeSha(resultLine?.merge_commit) ||
+          String(resultLine.merge_commit).toLowerCase() !== reconciliation.resultPr.head ||
+          reconciliation.resultPr.checks === 'UNKNOWN' ||
+          fields.current_main_contains_both_merges !== 'TRUE' ||
+          fields.current_main_blobs_match_pr590_merge !== 'TRUE' ||
+          fields.source_acceptance !== 'PASS_FOR_PR590_REVIEWED_SOURCE_AND_MERGED_INTEGRATION' ||
+          !/^\d+_passed;0_failed;0_skipped$/.test(fields.focused_test || '') ||
+          fields.git_diff_check !== 'PASS' || !String(fields.semantic_review || '').startsWith('PASS_') ||
+          fields.live_acceptance !== 'NOT_CLAIMED' ||
+          fields.worker_model_external_effects !== 'UNKNOWN_AS_ORIGINAL_TERMINAL_RECORDED' ||
+          !mainAtAcceptance) continue;
+
+      for (const identityComment of comments || []) {
+        const identity=markedReadbackComment(identityComment,W1_PATCH_IDENTITY_MARKER,
+          'ADDITIVE_CODEX_SOURCE_RECONCILIATION_NOT_ORIGINAL_WORKER_TERMINAL_OR_LIVE_ACCEPTANCE');
+        if (!identity || identity.id <= parsed.id) continue;
+        const proof=identity.fields;
+        const identitySource=readbackLineFields(identity.body,'source_pr');
+        const identityResult=readbackLineFields(identity.body,'result_pr');
+        if (proof.request_id !== job.request_id || proof.task_comment_id !== String(jobCommentId) ||
+            proof.attempt_id !== receipt.attempt_id ||
+            proof.worker_diff_sha256 !== String(receipt.diff_sha256).toLowerCase() ||
+            proof.worker_diff_bytes !== String(receipt.diff_bytes) ||
+            proof.worker_diff_byte_identity !== 'CONFIRMED_AGAINST_PR590_GIT_DIFF' ||
+            proof.pr590_git_diff_sha256 !== String(receipt.diff_sha256).toLowerCase() ||
+            proof.pr590_git_diff_bytes !== String(receipt.diff_bytes) || proof.byte_identical !== 'true' ||
+            identitySource?.source_pr !== String(sourcePr) ||
+            String(identitySource?.source_head || '').toLowerCase() !== sourceSha ||
+            Number(identityResult?.result_pr) !== reconciliation.resultPr.number ||
+            String(identityResult?.result_head || '').toLowerCase() !== String(resultLine.head).toLowerCase() ||
+            String(proof.merge_commit || '').toLowerCase() !== String(resultLine.merge_commit).toLowerCase() ||
+            proof.current_main_contains_merge !== 'true' || proof.current_blobs_match_merge !== 'true' ||
+            proof['check-native-only'] !== 'SUCCESS' ||
+            proof['csg-trusted-verifier-hosted'] !== 'SUCCESS' ||
+            proof['v2-native-windows'] !== 'SUCCESS' ||
+            proof['csg-trusted-verifier'] !== 'CANCELLED_NOT_COUNTED_AS_PASS' ||
+            proof['bounded-driver-acceptance'] !== 'SKIPPED' ||
+            proof.original_worker_terminal !== 'FINISHED_NOT_ACCEPTANCE;unchanged' ||
+            proof.original_worker_task_acceptance !== 'UNKNOWN;external_effects=UNKNOWN' ||
+            proof.live_acceptance !== 'NOT_CLAIMED' ||
+            proof.source_acceptance !== 'SUPPORTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR590_SOURCE') continue;
+        accepted.push({acceptance:parsed,identity,resultHead:String(resultLine.head).toLowerCase(),
+          resultPr:reconciliation.resultPr.number,mergeCommit:String(resultLine.merge_commit).toLowerCase(),
+          sourcePr,sourceSha,requestId:job.request_id,attemptId:receipt.attempt_id,
+          workerDiffSha256:String(receipt.diff_sha256).toLowerCase(),readbackMainSha:mainAtAcceptance,
+          focusedTest:fields.focused_test || 'UNKNOWN',
+          checks:'check-native-only=SUCCESS; csg-trusted-verifier-hosted=SUCCESS; ' +
+            'v2-native-windows=SUCCESS; bounded-driver-acceptance=SKIPPED; ' +
+            'csg-trusted-verifier=CANCELLED_NOT_COUNTED_AS_PASS',
+          externalEffects:'UNKNOWN',liveAcceptance:'NOT_CLAIMED'});
+      }
+    }
+    accepted.sort((a,b)=>a.acceptance.id-b.acceptance.id || a.identity.id-b.identity.id);
+    const match=accepted.at(-1);
+    if (!match) return null;
+    return {...match,status:'ACCEPTED',acceptanceCommentId:match.acceptance.id,
+      patchIdentityCommentId:match.identity.id,
+      label:`PR #${match.resultPr} SOURCE_ACCEPTED; merged source ${match.mergeCommit}; ` +
+        `focused tests ${match.focusedTest.replaceAll('_passed',' passed').replaceAll('_failed',' failed').replaceAll('_skipped',' skipped')}; ` +
+        `${match.checks}; #407 source acceptance #${match.acceptance.id} and byte identity #${match.identity.id}`};
+  }
   function reconciliationForTask(comments, workerId, job, receiptItem, now = Date.now()) {
     const name=workerId === 'W1' ? 'W1_EDITFILE_TELEMETRY'
       : workerId === 'W2' ? 'W2_ARTIFACT_RECOVERY' : null;
@@ -1860,7 +2018,13 @@
           Number(parsed.id) <= Number(receiptItem.id) ||
           !Number.isFinite(Date.parse(parsed.created_at || '')) ||
           Date.parse(parsed.created_at) > now) continue;
-      if (workerId === 'W1' && section.diff_sha256 !== receiptItem.receipt.diff_sha256) continue;
+      if (workerId === 'W1') {
+        const reportedDiffShas=[section.diff_sha256,section.worker_diff_sha256]
+          .filter(value => typeof value === 'string' && value.length > 0)
+          .map(value => value.toLowerCase());
+        const expectedDiffSha=String(receiptItem.receipt.diff_sha256 || '').toLowerCase();
+        if (!reportedDiffShas.length || reportedDiffShas.some(value => value !== expectedDiffSha)) continue;
+      }
       if (workerId === 'W2' && section.last_original_receipt !== String(receiptItem.id)) continue;
       candidates.push({...parsed,section});
     }
@@ -1898,12 +2062,16 @@
     return fields.map(([name,value]) => name + '=' + (value === undefined || value === null
       ? 'UNKNOWN' : String(value))).join('；');
   }
-  function dispatchCardData(id, snapshot, comments, resources, classification, now, lifecycle = null) {
-    const task=dispatchTaskSource(snapshot,id);
+  function dispatchCardData(id, snapshot, comments, resources, classification, now, lifecycle = null,
+      goalComments = [], goalIdentity = null, goalSourceComplete = false) {
+    const observedTask=dispatchTaskSource(snapshot,id);
+    const observedTaskId=observedTask?.task_id || observedTask?.request_id;
+    const task=observedTaskId ? observedTask
+      : schema6TaskSource(goalComments,id,goalIdentity,goalSourceComplete);
     const record=workerRecord(snapshot,id);
     const taskId=task?.task_id || task?.request_id || null;
     const commentId=task?.task_comment_id || task?.job_comment_id;
-    const resource=resources.dispatches?.[id] || null;
+    const resource=resources.dispatches?.[id] || (task?.jobComment ? {data:task.jobComment} : null);
     const fallbackState=classification?.status || 'UNKNOWN';
     const w3Stages={
       formal:'UNKNOWN：尚無同來源可核對的 Zero Risk 正式派工；request_id／Agent ID 只是識別線索。',
@@ -1918,7 +2086,7 @@
       jobUrl:null, receiptUrl:null, prUrl:null, resultPrUrl:null, reconciliationUrl:null,
       summaryTask:'沒有有效正式任務',summaryProgress:'目前沒有可核對任務執行證據。',
       summaryBlocker:'未派工；目前工作狀態 UNKNOWN。',shortStatus:'未派工',hasTask:false,
-      receiptProvenance:'UNKNOWN：尚無同一任務已配對收據',w3Stages,record};
+      receiptProvenance:'UNKNOWN：尚無同一任務已配對收據',codexSourceAcceptance:null,w3Stages,record};
     if (!taskId) {
       return { ...base, label:'UNKNOWN／沒有可核對的正式派工', task:'沒有同來源 request_id；未證實曾派工。',
         progress:id === 'W3' ? '沒有 Zero Risk request_id／Human 轉送／工具回傳證據。'
@@ -1978,6 +2146,8 @@
       const latest=receipts.latest;
       const receipt=latest?.receipt || null;
       const reconciliation=reconciliationForTask(comments,id,job,latest,now);
+      base.codexSourceAcceptance=id === 'W1'
+        ? w1SourceAcceptanceData(comments,job,latest,reconciliation,commentId) : null;
       base.receiptProvenance=receiptProvenance(latest);
       base.status=fallbackState;
       base.hasTask=true;
@@ -2040,7 +2210,10 @@
           base.resultPr.head + '；' +
           '對帳時 CI ' + base.resultPr.checks +
           '（SKIPPED／CANCELLED 不計 PASS 或 FAILED）；#407 留言 #' + reconciliation.id +
-          '；正式產品接受另列。'
+          (base.codexSourceAcceptance
+            ? '；Codex source acceptance 另列為 ACCEPTED；原始 Worker task_acceptance=' +
+              base.formalAcceptance + '；external_effects=' + base.codexSourceAcceptance.externalEffects + '。'
+            : '；Codex source acceptance 與 Worker task_acceptance 分開核對。')
         : id === 'W2' && reconciliation
           ? '原收據 ZERO_DIFF 與同 attempt 工具流／三檔回收證據衝突；' +
             reconciliation.externalEffectClass + '／外部效果 ' + reconciliation.externalEffects +
@@ -2053,12 +2226,19 @@
       base.summaryProgress=id === 'W1'
         ? 'Worker ' + base.workerTerminal + '；Codex 差異核對 ' +
           (reconciliation?.diffReconciliation || 'UNKNOWN') +
-          (base.resultPr ? '；#407 記錄結果 PR #' + base.resultPr.number + ' 已合併（正式驗收另列）' : '')
+          (base.resultPr ? '；#407 記錄結果 PR #' + base.resultPr.number + ' 已合併' : '') +
+          (base.codexSourceAcceptance ? '；Codex source acceptance 已確認' : '') +
+          '；Worker task_acceptance=' + String(receipt?.task_acceptance || task.task_acceptance || 'UNKNOWN') +
+          '；external_effects=' + String(receipt?.external_effects || 'UNKNOWN')
         : id === 'W2' && reconciliation
           ? 'BLOCKED；回收證據待核對；' + reconciliation.externalEffectClass + '；不得重播原模型 Session。'
           : base.progress;
       base.summaryBlocker=id === 'W1'
-        ? '原始 Worker 終態不等於正式接受：' + base.formalAcceptance
+        ? base.codexSourceAcceptance
+          ? 'Codex source acceptance=ACCEPTED via PR #' + base.codexSourceAcceptance.resultPr +
+            '；原始 Worker task_acceptance=' + base.formalAcceptance +
+            '；external_effects=' + base.codexSourceAcceptance.externalEffects
+          : 'Codex source acceptance 待核對；原始 Worker task_acceptance=' + base.formalAcceptance
         : id === 'W2' && reconciliation
           ? 'ZERO_DIFF 與三檔回收資料衝突；同一 Host 獨立核對尚未完成。'
           : receipt?.blocker_code || (fallbackState === 'BLOCKED' ? String(task.blocker_code || '阻擋原因未知') : '未確認');
@@ -2123,6 +2303,8 @@
     }
     text(prefix + 'delivery',data?.delivery);
     text(prefix + 'worker-terminal',data?.workerTerminal || 'UNKNOWN');
+    text(prefix + 'codex-source-acceptance',data?.codexSourceAcceptance?.label ||
+      'UNKNOWN：沒有與目前 W1 request／attempt／來源 SHA 配對的 Codex source acceptance');
     text(prefix + 'reconciliation',id === 'W1'
       ? '差異核對 ' + (data?.diffReconciliation || 'UNKNOWN') +
         (data?.reconciliation ? '；對帳留言 #' + data.reconciliation.id +
@@ -2275,6 +2457,16 @@
     }
     for (const key of ['task','session','activity','progress','blocker','changes','delivery','next','source'])
       text(id.toLowerCase() + '-' + key, data[key]);
+    if (id === 'W1') text('w1-source-acceptance',data?.sourceAcceptance);
+  }
+  function w1SourceHarvestLabel(data) {
+    if (data?.codexSourceAcceptance?.status === 'ACCEPTED')
+      return 'W1 Codex source accepted via PR #' + data.codexSourceAcceptance.resultPr +
+        '；原始 Worker task_acceptance=' + data.formalAcceptance +
+        '；external_effects=' + data.codexSourceAcceptance.externalEffects;
+    if (data?.formalAcceptance === 'UNKNOWN：沒有獨立正式產品接受證據')
+      return 'W1 Codex source acceptance 待確認；Worker task_acceptance=UNKNOWN';
+    return 'W1 Worker task_acceptance=' + String(data?.formalAcceptance || 'UNKNOWN');
   }
   function parseDirectCliComment(comment) {
     if (!comment || typeof comment.body !== 'string') return null;
@@ -2310,7 +2502,7 @@
   }
   function w2EvidenceData(goalComments, issueComments, mainSha, goalIdentity = null,
       goalSourceComplete = true, issueSourceComplete = true) {
-    const latest = goalSourceComplete ? latestSchema6Job(goalComments) : null;
+    const latest = goalSourceComplete ? latestSchema6Job(goalComments,'antigravity_edit') : null;
     const currentJob = latest?.job || null;
     const goalReferenceVerified = Boolean(currentJob && goalIdentity &&
       goalIdentity.id === currentJob.goal_comment_id &&
@@ -2664,6 +2856,12 @@
       W2: classifyWorker(workerRecord(snapshot, 'W2'), osFreshness, now),
       W3: classifyW3(workerRecord(snapshot, 'W3'), osFreshness, now),
     };
+    const goalComments = Array.isArray(resources.goal?.latestComments)
+      ? [...resources.goal.latestComments]
+      : Array.isArray(resources.goal?.data) ? [...resources.goal.data] : [];
+    const goalAuthorityComment = resources.goalAuthority?.data;
+    if (goalAuthorityComment && !goalComments.some(c => Number(c?.id) === Number(goalAuthorityComment.id)))
+      goalComments.push(goalAuthorityComment);
     const dispatchData = {};
     for (const id of ['W1','W2','W3']) {
       const task=dispatchTaskSource(snapshot,id);
@@ -2682,20 +2880,16 @@
               lifecycle:'UNKNOWN',identity_matches:false,source_sha_matches:false,checks_allowed:false};
         }
       }
-      dispatchData[id]=dispatchCardData(id,snapshot,comments,resources,records[id],now,lifecycle);
+      dispatchData[id]=dispatchCardData(id,snapshot,comments,resources,records[id],now,lifecycle,
+        goalComments,resources.goal?.identity || null,resources.goal?.latestComplete === true);
       renderDispatchCard(id,dispatchData[id]);
     }
     const cardData = {};
     for (const id of ['W1','W2','W3'])
       cardData[id] = workerCardData(id, id === 'W1' ? explicitW1 : workerRecord(snapshot,id),
-        records[id], snapshot, id === 'W1' ? githubTask : null);
+        records[id], snapshot, id === 'W1' ? githubTask : null,
+        id === 'W1' ? dispatchData.W1.codexSourceAcceptance : null);
     for (const id of ['W1','W2','W3']) renderWorker(id, cardData[id],dispatchData[id]);
-    const goalComments = Array.isArray(resources.goal?.latestComments)
-      ? [...resources.goal.latestComments]
-      : Array.isArray(resources.goal?.data) ? [...resources.goal.data] : [];
-    const goalAuthorityComment = resources.goalAuthority?.data;
-    if (goalAuthorityComment && !goalComments.some(c => Number(c?.id) === Number(goalAuthorityComment.id)))
-      goalComments.push(goalAuthorityComment);
     const w2Evidence = w2EvidenceData(goalComments, comments, safeSha(main?.sha),
       resources.goal?.identity || null,resources.goal?.latestComplete === true,
       resources.issue?.latestComplete === true);
@@ -2808,8 +3002,7 @@
       : osFreshness === 'FRESH' ? '此快照沒有明確 BLOCKED 車道；UNKNOWN 車道仍分開列示。'
         : '目前阻擋車道 UNKNOWN；最後快照已過期。');
     text('codex-harvest',[
-      dispatchData.W1.formalAcceptance === 'UNKNOWN：沒有獨立正式產品接受證據'
-        ? 'W1 正式接受待確認' : 'W1 ' + dispatchData.W1.formalAcceptance,
+      w1SourceHarvestLabel(dispatchData.W1),
       dispatchData.W2.externalEffectClass === 'PARTIAL_OR_AMBIGUOUS'
         ? 'W2 回收證據待同一 Host 核對；不得重播' : 'W2 ' + dispatchData.W2.summaryBlocker,
       dispatchData.W3.hasTask
@@ -2826,7 +3019,9 @@
       : '本次快照未提供新的受信 schema-6 Worker 派工。';
     const independentCodexSummary='這只描述正式 Worker 佇列，不代表 Codex GOAL 沒有 READY；Codex 仍可依 #310 授權續做獨立、互不衝突的 pre-Production R4 來源工程。';
     const laneFollowUp=dispatchData.W1.resultPr
-      ? '後續核對 W1 正式接受與 W2 同 Host 回收證據；W2 未知效果不得重播，W3 只按既有 Human 轉送流程。'
+      ? (dispatchData.W1.codexSourceAcceptance
+        ? 'W1 source acceptance 已核對；原始 Worker task_acceptance／外部效果仍保持 UNKNOWN；W2 未知效果不得重播，W3 只按既有 Human 轉送流程。'
+        : '後續核對 W1 Codex source acceptance 與 W2 同 Host 回收證據；W2 未知效果不得重播，W3 只按既有 Human 轉送流程。')
       : '後續核對 W1 diff／CI；W2 保留未知效果、不重播；W3 無有效 request_id 時不派工。';
     text('codex-next',workerQueueSummary + independentCodexSummary + laneFollowUp);
     const registration = snapshot?.github?.runner_registration;
@@ -2959,8 +3154,9 @@
     candidatePrPin, candidatePullIdentityMatches, candidatePullLifecycle,
     classifyWorker, classifyW1, classifyW3, workerRecord, workerCardData,
     workerChangeLabel, normalizeFormalTask, classifyRecentEvents,
-    validSchema6DispatchJob, validSchema6DispatchComment, dispatchTaskSource, dispatchReceipt,
-    dispatchCardData, renderDispatchCard, render,
+    validSchema6DispatchJob, validSchema6DispatchComment, dispatchTaskSource, schema6TaskSource,
+    dispatchReceipt,
+    dispatchCardData, renderDispatchCard, w1SourceHarvestLabel, render,
     freshnessOfSnapshot, createApiClient, createResourceStore, renderRateStatus,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
     w2EvidenceData, renderW2Evidence, hashHumanGoalComment, validDirectCliDelivery,
