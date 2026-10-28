@@ -41,6 +41,8 @@ no new process stays resident between polls.
   A saved exact-attempt terminal receipt may be replayed, without rerunning work.
 * This is single-host by contract. Task Scheduler `IgnoreNew` keeps one local
   scheduled run; do not install a second host worker on the same queue.
+* The native five-minute dispatcher is allowed to start and continue on battery
+  power. Its existing interactive-token identity and logon boundary are unchanged.
 
 ## Native Windows installer (one-time, NOT executed by ChatGPT Web)
 

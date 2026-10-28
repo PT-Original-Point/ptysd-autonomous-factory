@@ -237,7 +237,15 @@ function Get-WorkerRuntimeTaskDefinitionSha256 {
     $durationNode = $triggerNodes[0].SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='Duration']")
     $executionLimitNode = $settingsNode.SelectSingleNode("./*[local-name()='ExecutionTimeLimit']")
     $multipleInstancesNode = $settingsNode.SelectSingleNode("./*[local-name()='MultipleInstancesPolicy']")
+    $disallowStartIfOnBatteriesNode = $settingsNode.SelectSingleNode("./*[local-name()='DisallowStartIfOnBatteries']")
+    $stopIfGoingOnBatteriesNode = $settingsNode.SelectSingleNode("./*[local-name()='StopIfGoingOnBatteries']")
     $startWhenAvailableNode = $settingsNode.SelectSingleNode("./*[local-name()='StartWhenAvailable']")
+    if ($null -eq $disallowStartIfOnBatteriesNode -or
+        [string]$disallowStartIfOnBatteriesNode.InnerText -ine 'false' -or
+        $null -eq $stopIfGoingOnBatteriesNode -or
+        [string]$stopIfGoingOnBatteriesNode.InnerText -ine 'false') {
+        throw 'WORKER_RUNTIME_TASK_POWER_POLICY_MISMATCH'
+    }
     if ($null -eq $intervalNode -or [string]$intervalNode.InnerText -cne 'PT5M' -or
         $null -eq $durationNode -or [string]$durationNode.InnerText -cne 'P3650D' -or
         $null -eq $executionLimitNode -or [string]$executionLimitNode.InnerText -cne 'PT15M' -or
@@ -277,6 +285,12 @@ function Get-WorkerRuntimeTaskReadback([bool]$ExpectedEnabled, [string]$Expected
         throw 'WORKER_RUNTIME_TASK_PRINCIPAL_IDENTITY_UNKNOWN'
     } finally {
         if ($null -ne $currentIdentity) { $currentIdentity.Dispose() }
+    }
+    if ($task.Settings.DisallowStartIfOnBatteries -isnot [bool] -or
+        $task.Settings.DisallowStartIfOnBatteries -ne $false -or
+        $task.Settings.StopIfGoingOnBatteries -isnot [bool] -or
+        $task.Settings.StopIfGoingOnBatteries -ne $false) {
+        throw 'WORKER_RUNTIME_TASK_POWER_POLICY_MISMATCH'
     }
     $actions = @($task.Actions)
     if (@($actions).Count -ne 1 -or
@@ -900,7 +914,8 @@ if ($Mode -eq 'Install') {
     $action = New-ScheduledTaskAction -Execute $wscript -Argument $argsLine -WorkingDirectory $homeDir
     $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
         -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
-    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -StartWhenAvailable
+    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 15) `
+        -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     $username = $env:USERDOMAIN + '\' + $env:USERNAME
     $principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -ErrorAction Stop | Out-Null

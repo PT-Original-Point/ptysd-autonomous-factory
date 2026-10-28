@@ -73,6 +73,9 @@ assert.doesNotMatch(installer, /New-ScheduledTaskAction\s+-Execute\s+\$node\b/i,
   'installer never registers a visible Node console action');
 assert.match(installer, /Arguments\s+-ne\s+\$argsLine/i,
   'task readback verifies the exact wrapper arguments');
+assert.match(installBlock,
+  /New-ScheduledTaskSettingsSet[\s\S]*?-AllowStartIfOnBatteries[\s\S]*?-DontStopIfGoingOnBatteries/i,
+  'the native five-minute dispatcher remains runnable when the host switches to battery power');
 
 const refreshBlock = installer.slice(installer.indexOf('function Invoke-WorkerRuntimeRefresh'),
   installer.indexOf('function Require-Command'));
