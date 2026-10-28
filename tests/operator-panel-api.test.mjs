@@ -611,6 +611,19 @@ test('renderer separates closed W1 source history from live worker status and sh
   assert.equal(lifecycle.identity_matches,true);
   panel.render(null,resources,null,now,{status:'READY',coordination:'SHARED_LOCKED',remaining:40,
     lastError:null,lastSuccessAt:now,resetAt:null,pauseUntil:null,indefinite:false});
+  panel.render(null,resources,null,now,{status:'RATE_LIMITED',coordination:'SHARED_LOCKED',remaining:0,
+    lastError:'GITHUB_RATE_LIMIT_EXHAUSTED',lastSuccessAt:now,resetAt:now+60_000,
+    pauseUntil:now+60_000,indefinite:false});
+  assert.equal(domElements.get('github-state').className,'badge bad',
+    'a global GitHub rate pause must not color the cached Issue badge as healthy');
+  assert.match(domElements.get('github-state').textContent,/額度耗盡/);
+  assert.equal(domElements.get('overall').className,'panel overview unknown',
+    'the overview must not keep a healthy color while its own copy says live status is unknown');
+  panel.render(null,resources,null,now,{status:'COOLDOWN',coordination:'SHARED_LOCKED',remaining:10,
+    lastError:'GITHUB_API_COOLDOWN',lastSuccessAt:now,resetAt:now+30_000,
+    pauseUntil:now+30_000,indefinite:false});
+  assert.equal(domElements.get('github-state').className,'badge warn');
+  assert.match(domElements.get('github-state').textContent,/冷卻中/);
   assert.match(domElements.get('pr-state').textContent,/已關閉未合併/);
   assert.match(domElements.get('native-executor-tasks').textContent,/W1 OpenCode：READY（啟用）/);
   assert.match(domElements.get('native-executor-tasks').textContent,/W2 Antigravity：DISABLED（停用）/);
@@ -1460,6 +1473,15 @@ test('mobile overview keeps its GitHub state badge within the card', () => {
   assert.match(mobileCss, /\.overview-copy\s*\{[^}]*overflow-wrap:\s*anywhere/);
   assert.match(mobileCss,
     /\.overview-head\s*>\s*\.badge\s*\{[^}]*max-width:\s*100%[^}]*white-space:\s*normal[^}]*overflow-wrap:\s*anywhere/);
+});
+
+test('mobile section heading stacks its supporting text for readable width', () => {
+  const start = html.indexOf('@media (max-width:700px)');
+  const end = html.indexOf('@media (max-width:440px)', start);
+  assert.ok(start >= 0 && end > start, 'mobile layout rules are present');
+  const mobileCss = html.slice(start, end);
+  assert.match(mobileCss, /\.section\s*\{[^}]*flex-direction:\s*column[^}]*align-items:\s*flex-start/);
+  assert.match(mobileCss, /\.section\s+h2\s*,\s*\.section\s+p\s*\{[^}]*margin:\s*0/);
 });
 
 test('operator panel documentation binds live PR data to task evidence, not a fixed historical PR', () => {
