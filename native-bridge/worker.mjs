@@ -822,12 +822,18 @@ function observationWorkerRecords(comments, config, workerLogin, mainSha, candid
     const status = ['QUEUED_NOT_STARTED', 'STARTED_UNVERIFIED', 'WAITING_ELIGIBILITY']
       .includes(task.state) ? 'PENDING'
       : ['BLOCKED', 'STALE_SOURCE', 'AMBIGUOUS_DUPLICATE'].includes(task.state) ? 'BLOCKED' : 'UNKNOWN';
+    // A valid queued W2 task is effect-free, but the current global model gate
+    // is enough to explain why it has no STARTED receipt. Keep it PENDING and
+    // scoped to W2; do not turn this lane denial into a factory-wide stop.
+    const queueWaitsForModelGate = workerId === 'W2' && task.state === 'QUEUED_NOT_STARTED' &&
+      config.enable_antigravity_model_runs === false;
     const blocker = task.state === 'STALE_SOURCE' ? 'STALE_CANDIDATE_SOURCE'
       : task.state === 'SOURCE_UNKNOWN' ? 'CANDIDATE_PR_READBACK_UNKNOWN'
         : task.state === 'AMBIGUOUS_DUPLICATE' ? 'DUPLICATE_TASK_REQUEST_AMBIGUOUS'
           : task.state === 'STARTED_UNVERIFIED' ? 'STARTED_WITHOUT_VERIFIED_MODEL_ACTIVITY'
             : task.state === 'WAITING_ELIGIBILITY' || task.state === 'BLOCKED'
-              ? task.outcome : undefined;
+              ? task.outcome : queueWaitsForModelGate
+                ? 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED' : undefined;
     const taskSource = `Issue #310 comment ${task.job_comment_id}` +
       (task.source_pr ? `; PR #${task.source_pr}@${task.source_sha}` : `; main@${task.source_sha}`);
     const hasCapturedDiff = task.coding_state === 'DIFF_CAPTURED_UNVERIFIED';
@@ -835,7 +841,8 @@ function observationWorkerRecords(comments, config, workerLogin, mainSha, candid
       task_kind: task.kind, task_source: taskSource, task_source_sha: task.source_sha,
       task_comment_id: task.job_comment_id, ...(task.source_pr ? { source_pr: task.source_pr } : {}),
       ...(task.attempt_id ? { attempt_id: task.attempt_id } : {}), task_state: task.state,
-      model_eligibility: task.state === 'WAITING_ELIGIBILITY' ? 'WAITING' : 'UNKNOWN',
+      model_eligibility: task.state === 'WAITING_ELIGIBILITY' || queueWaitsForModelGate
+        ? 'WAITING' : 'UNKNOWN',
       code_changes: hasCapturedDiff ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNPROVEN',
       files_modified: hasCapturedDiff ? 'COUNT_REPORTED_UNVERIFIED' : 'UNPROVEN',
       ...(hasCapturedDiff ? { coding_state: task.coding_state,
@@ -853,6 +860,7 @@ function observationWorkerRecords(comments, config, workerLogin, mainSha, candid
       next_owner: task.state === 'STALE_SOURCE' ? 'Codex：核對新來源後再評估，不重播舊任務'
         : task.state === 'FINISHED_NOT_ACCEPTANCE' ? 'Codex：驗證交付證據與語意結果'
           : task.state === 'WAITING_ELIGIBILITY' ? '重新檢查資格；不自動重播未知效果'
+            : queueWaitsForModelGate ? 'W2 Worker：資格恢復後重新評估；不建立重複任務'
             : 'Codex：核對此任務的即時執行證據' });
   }
   records.push({ worker_id: 'W3', status: 'UNKNOWN',

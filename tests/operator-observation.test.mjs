@@ -1106,7 +1106,7 @@ test('browser shows the shared rate-limit pause, recovery countdown, and histori
   assert.equal(elements.get('w3-badge').textContent,'狀態未確認');
 });
 
-async function publishReceiptProjection(rows) {
+async function publishReceiptProjection(rows, { enableAntigravityModelRuns } = {}) {
   const at = Date.now();
   const host = 'DESKTOP-1B6PD2P';
   const mainSha = 'e'.repeat(40);
@@ -1124,15 +1124,16 @@ async function publishReceiptProjection(rows) {
       edit_paths: ['native-bridge/v2-readiness.mjs'], source_pr: row.sourcePr,
       goal_comment_id: 6188322050, goal_body_sha256: goalBodySha,
     };
-    const changedFiles = row.files;
-    const terminal = workerReceipt(job.request_id, row.attemptId, row.state, job, {
-      outcome: row.outcome, exit_code: row.state === 'BLOCKED' ? -1 : 0,
-      diff_sha256: row.diffSha, diff_bytes: row.bytes, changed_files: changedFiles,
-      coding_state: 'DIFF_CAPTURED_UNVERIFIED', scope_valid: row.scopeValid,
-    });
     const jobId = 700 + index * 2;
     comments.push({ id: jobId, user: { login: 't14210184' }, body: JOB_MARKER + JSON.stringify(job) });
-    comments.push({ id: jobId + 1, user: { login: 't14210184' }, body: RECEIPT_MARKER + JSON.stringify(terminal) });
+    if (!row.queued) {
+      const terminal = workerReceipt(job.request_id, row.attemptId, row.state, job, {
+        outcome: row.outcome, exit_code: row.state === 'BLOCKED' ? -1 : 0,
+        diff_sha256: row.diffSha, diff_bytes: row.bytes, changed_files: row.files,
+        coding_state: 'DIFF_CAPTURED_UNVERIFIED', scope_valid: row.scopeValid,
+      });
+      comments.push({ id: jobId + 1, user: { login: 't14210184' }, body: RECEIPT_MARKER + JSON.stringify(terminal) });
+    }
     heads.set(row.sourcePr, row.sourceSha);
   });
   const prior = observation({
@@ -1148,6 +1149,7 @@ async function publishReceiptProjection(rows) {
     'antigravity-quota.mjs', 'codex-continuation.mjs', 'operator-observation.mjs', 'captured-process.mjs',
     'safe-error-code.mjs', 'windows-executor.mjs'];
   const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
+    enable_antigravity_model_runs: enableAntigravityModelRuns,
     dispatchers: ['t14210184'], state_dir: 'unused' };
   const dependencies = {
     now: () => new Date(at),
@@ -1169,6 +1171,29 @@ async function publishReceiptProjection(rows) {
   return publishOperatorObservation(config, 't14210184', comments, mainSha,
     dependencies, heads);
 }
+
+test('queued W2 observation names the disabled model gate without inventing an attempt or blocking W1', async () => {
+  const result = await publishReceiptProjection([
+    { kind: 'opencode_edit', requestId: 'W1_QUEUE_WITH_W2_DISABLED_20261028',
+      sourceSha: 'b'.repeat(40), sourcePr: 505, queued: true },
+    { kind: 'antigravity_edit', requestId: 'W2_QUEUE_WITH_MODEL_DISABLED_20261028',
+      sourceSha: 'c'.repeat(40), sourcePr: 586, queued: true },
+  ], { enableAntigravityModelRuns: false });
+  assert.equal(result.status, 'UPDATED');
+  const w1 = result.observation.workers.find(item => item.worker_id === 'W1');
+  assert.equal(w1.status, 'PENDING');
+  assert.equal(w1.model_eligibility, 'UNKNOWN');
+  assert.equal(Object.hasOwn(w1, 'blocker_code'), false,
+    'the W2 lane flag must not block an independent W1 task');
+  const w2 = result.observation.workers.find(item => item.worker_id === 'W2');
+  assert.equal(w2.status, 'PENDING');
+  assert.equal(w2.task_state, 'QUEUED_NOT_STARTED');
+  assert.equal(Object.hasOwn(w2, 'attempt_id'), false);
+  assert.equal(w2.model_eligibility, 'WAITING');
+  assert.equal(w2.blocker_code, 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED');
+  assert.equal(w2.code_changes, 'UNPROVEN');
+  assert.equal(w2.files_modified, 'UNPROVEN');
+});
 
 test('worker observation reports captured W1 and blocked W2 diffs as unverified, never active or accepted', async () => {
   const result = await publishReceiptProjection([
