@@ -625,6 +625,25 @@ test('renderer separates closed W1 source history from live worker status and sh
   assert.match(domElements.get('codex-harvest').textContent,/W1 正式接受待確認/);
 });
 
+test('an empty formal schema-6 queue is not presented as no READY Codex Goal work', () => {
+  assert.match(html,/正式派工／Codex GOAL 續工/);
+  const empty={data:null,fetchedAt:baseTime,error:null,url:''};
+  const resources={
+    issue:{data:[],fetchedAt:baseTime,error:null,url:urls.issue},
+    pr:empty,main:{data:{sha:head},fetchedAt:baseTime,error:null,url:urls.main},checks:empty,
+    dispatches:{W1:{data:null,fetchedAt:baseTime,error:null},
+      W2:{data:null,fetchedAt:baseTime,error:null},W3:{data:null,fetchedAt:baseTime,error:null}},
+    dispatchPulls:{},dispatchChecks:{},
+  };
+  panel.render(null,resources,null,baseTime,{status:'READY',coordination:'SHARED_LOCKED',
+    remaining:40,lastError:null,lastSuccessAt:baseTime,resetAt:null,pauseUntil:null,indefinite:false});
+  const next=domElements.get('codex-next').textContent;
+  assert.match(next,/schema-6/i);
+  assert.match(next,/Codex.*GOAL|GOAL.*Codex/);
+  assert.match(next,/不代表|不能推導/);
+  assert.doesNotMatch(next,/下一個 READY：UNKNOWN/);
+});
+
 test('recent events join #310 schema-6 dispatches to exact #407 request, source, kind, and attempt receipts', () => {
   const w1Request='W1_EDITFILE_TELEMETRY_20261023_9C8247675F914DCBBC708DD2AB90A6C2';
   const w1Sha='221e0c0e4524e07bc06a2aae431fdd34d121b73d';
