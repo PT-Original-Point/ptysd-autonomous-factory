@@ -627,7 +627,8 @@ test('renderer separates closed W1 source history from live worker status and sh
   assert.match(domElements.get('pr-state').textContent,/已關閉未合併/);
   assert.match(domElements.get('native-executor-tasks').textContent,/W1 OpenCode：READY（啟用）/);
   assert.match(domElements.get('native-executor-tasks').textContent,/W2 Antigravity：DISABLED（停用）/);
-  assert.match(domElements.get('native-executor-tasks').textContent,/W3 Codex：RUNNING（啟用）/);
+  assert.match(domElements.get('native-executor-tasks').textContent,/Codex 主控：RUNNING（啟用）/);
+  assert.doesNotMatch(domElements.get('native-executor-tasks').textContent,/W3 Codex/);
   assert.match(domElements.get('native-executor-tasks').textContent,/不代表模型工作/);
   assert.match(domElements.get('pr-state').textContent,/歷史來源/);
   assert.match(domElements.get('pr-state').textContent,/PR #505/);
