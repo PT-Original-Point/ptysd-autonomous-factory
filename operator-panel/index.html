@@ -193,6 +193,7 @@
       <div class="field"><strong>原生工作階段（Session）</strong><span id="w2-native-session">未確認</span></div>
       <div class="field"><strong>原生驗收與效果</strong><span id="w2-native-acceptance">未確認</span></div>
       <div class="field"><strong>單次直接 CLI 紀錄（非原生 Worker）</strong><span id="w2-direct-cli">未確認</span></div>
+      <div class="field"><strong>直接 CLI 交付脈絡</strong><span id="w2-direct-delivery">未確認</span></div>
       <div class="field"><strong>直接 CLI 程式差異</strong><span id="w2-direct-diff">未確認</span></div>
       <div class="field"><strong>直接 CLI 測試結果</strong><span id="w2-direct-tests">未確認</span></div>
       <div class="field"><strong>歷史嘗試（2026-10-22）</strong><span id="w2-historical">未確認</span></div>
@@ -282,8 +283,11 @@
   const JOB_MARKER = 'PTYSD_NATIVE_JOB_V1\n';
   const RECEIPT_MARKER = 'PTYSD_NATIVE_RECEIPT_V1\n';
   const ACCEPTANCE_MARKER = 'PTYSD_V53R4_W2_PANEL_ACCEPTANCE_V1\n';
+  const DIRECT_CLI_DELIVERY_MARKER = 'PTYSD_W2_DIRECT_CLI_DELIVERY_V1\n';
   const HISTORICAL_ATTEMPT_ID = '24331e45-62db-4f55-ad40-87776a799c5d';
   const DIRECT_CLI_COMMENT_ID = 6438594849;
+  const DIRECT_CLI_SESSION_ID = 'be190416-e85f-4f68-b33a-5d05f54d7072';
+  const DIRECT_CLI_ORIGINAL_PR = 576;
   const HUMAN_GOAL_MARKER = /<!--\s*PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_\d{8}\s*-->/m;
   const GOAL_INDEX_POLL_MS = 60 * 60 * 1000;
   const GOAL_LATEST_POLL_MS = 15 * 60 * 1000;
@@ -452,6 +456,26 @@
       ['SUCCESS','FAILURE','PENDING','UNKNOWN','SKIPPED'].includes(value.exact_head_ci) &&
       !!tests &&
       ['NONE','UNKNOWN','OBSERVED'].includes(value.external_effects);
+  }
+  function validDirectCliDelivery(value, directCli = null) {
+    if (!object(value) || value.schema !== 1 || value.project_id !== PROJECT ||
+        value.record_type !== 'ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT' ||
+        value.direct_cli_comment_id !== DIRECT_CLI_COMMENT_ID ||
+        value.direct_cli_session_id !== DIRECT_CLI_SESSION_ID ||
+        (directCli?.session_id && value.direct_cli_session_id !== directCli.session_id) ||
+        value.original_pr !== DIRECT_CLI_ORIGINAL_PR ||
+        (directCli?.pull_request && value.original_pr !== directCli.pull_request) ||
+        value.provenance !== 'DIRECT_CLI_NOT_NATIVE_WORKER' ||
+        value.native_worker_job !== 'NOT_CREATED' ||
+        value.native_worker_attempt !== 'NOT_CREATED' ||
+        value.original_pr_state !== 'CLOSED_UNMERGED' ||
+        !Number.isSafeInteger(value.combined_delivery_pr) || value.combined_delivery_pr <= 0 ||
+        !safeSha(value.merge_commit_sha) ||
+        !safeSha(value.main_after_merge) ||
+        value.external_effects !== 'UNKNOWN') return false;
+    if (directCli?.diff_sha256 && value.direct_cli_diff_sha256 &&
+        value.direct_cli_diff_sha256 !== directCli.diff_sha256) return false;
+    return true;
   }
   function validJob(job) {
     if (!object(job) || job.project_id !== PROJECT || job.host !== 'DESKTOP-1B6PD2P' ||
@@ -1530,7 +1554,7 @@
         !body.includes('native_worker_attempt=NOT_CREATED')) return null;
     const sessionMatch = body.match(/session_id=([a-f0-9-]{36})/i);
     if (!sessionMatch) return null;
-    const prMatch = body.match(/\bReplacement PR\s*#(\d+)\s+is\s+OPEN\b/i);
+    const prMatch = body.match(/\bReplacement PR\s*#(\d+)\s+is\s+OPEN\b/i) || body.match(/\bPR\s*#(\d+)/i);
     const fileMatch = body.match(/Gemini changed only\s+`?([^`\s;:]+)`?(?=[:;\s])/i);
     const diffShaMatch = body.match(/diff\s+SHA-256=([a-f0-9]{64})/i);
     const diffLinesMatch = body.match(/\+(\d+)\/-(\d+)/);
@@ -1549,6 +1573,7 @@
         fullTestsMatch ? 'Full: ' + fullTestsMatch[1].trim() : null].filter(Boolean).join('; ') || null,
       model: modelMatch ? modelMatch[1].trim() : null,
       status: statusMatch ? statusMatch[1].trim() : null,
+      deliveryReadback: null,
     };
   }
   function w2EvidenceData(goalComments, issueComments, mainSha, goalIdentity = null,
@@ -1612,6 +1637,21 @@
           directCli = parsed;
           break;
         }
+      }
+    }
+
+    if (directCli) {
+      const candidateDeliveries = [];
+      for (const c of (issueComments || [])) {
+        if (!c?.body || !DISPATCHERS.has(c.user?.login || '')) continue;
+        const delivery = parseMarked(c.body, DIRECT_CLI_DELIVERY_MARKER);
+        if (validDirectCliDelivery(delivery, directCli)) {
+          candidateDeliveries.push({ id: Number(c.id), delivery });
+        }
+      }
+      candidateDeliveries.sort((a, b) => a.id - b.id);
+      if (candidateDeliveries.length) {
+        directCli.deliveryReadback = candidateDeliveries.at(-1).delivery;
       }
     }
 
@@ -1704,6 +1744,13 @@
       ' · session_id=' + (direct.session_id || '未知') + ' · status=' + (direct.status || '未知') +
       ' · PR #' + (direct.pull_request || '未知') +
       '（單次直接 Antigravity CLI 執行，非原生 Worker 任務）');
+
+    const delivery = direct?.deliveryReadback;
+    if (delivery) {
+      text('w2-direct-delivery', `PR #${delivery.original_pr} ${delivery.original_pr_state} · 後續結合 PR #${delivery.combined_delivery_pr} MERGED（merge commit ${delivery.merge_commit_sha} · main ${delivery.main_after_merge}）`);
+    } else {
+      text('w2-direct-delivery', '交付狀態 UNKNOWN（無相符 direct-CLI 交付脈絡紀錄）');
+    }
 
     if (direct) {
       const file = direct.changed_file ? `修改檔案：${direct.changed_file}` : '檔案未確認';
@@ -2068,7 +2115,7 @@
     classifyWorker, classifyW1, workerRecord, workerChangeLabel, normalizeFormalTask, classifyRecentEvents,
     freshnessOfSnapshot, createApiClient, createResourceStore, renderRateStatus,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
-    w2EvidenceData, renderW2Evidence, hashHumanGoalComment,
+    w2EvidenceData, renderW2Evidence, hashHumanGoalComment, validDirectCliDelivery,
     constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS,
       MANUAL_SYNC_MIN_MS, LOW_REMAINING_THRESHOLD, MAX_LIVE_AGE_MS },
   };
