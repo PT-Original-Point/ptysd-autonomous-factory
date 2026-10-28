@@ -579,6 +579,19 @@
     try { const value = JSON.parse(body.slice(marker.length)); return object(value) ? value : null; }
     catch { return null; }
   }
+  function parseMarkedAfterHeading(body, marker) {
+    const exact=parseMarked(body,marker);
+    if (exact || typeof body !== 'string' || typeof marker !== 'string' || !marker.endsWith('\n'))
+      return exact;
+    const markerLine=marker.slice(0,-1);
+    const lines=body.split(/\r?\n/);
+    const indexes=[];
+    for (let i=0;i<lines.length;i++) if (lines[i].trim() === markerLine) indexes.push(i);
+    if (indexes.length !== 1) return null;
+    const prefix=lines.slice(0,indexes[0]).map(line=>line.trim()).filter(Boolean);
+    if (prefix.some(line=>!/^#{1,6}\s+\S/.test(line))) return null;
+    return parseMarked(lines.slice(indexes[0]).join('\n'),marker);
+  }
   function validEditPath(p) {
     if (typeof p !== 'string' || !p || p !== p.trim()) return false;
     if (p.startsWith('/') || p.startsWith('\\') || /^[a-zA-Z]:/.test(p)) return false;
@@ -2330,7 +2343,7 @@
       const candidateAcceptances = [];
       for (const c of (issueComments || [])) {
         if (!c?.body) continue;
-        const acc = parseMarked(c.body, ACCEPTANCE_MARKER);
+        const acc = parseMarkedAfterHeading(c.body, ACCEPTANCE_MARKER);
         if (validW2Acceptance(acc) &&
             (DISPATCHERS.has(c.user?.login || '') || RECEIPT_AUTHORS.has(c.user?.login || '')) &&
             acc.request_id === currentJob.request_id &&
@@ -2361,7 +2374,7 @@
       const candidateDeliveries = [];
       for (const c of (issueComments || [])) {
         if (!c?.body || !DISPATCHERS.has(c.user?.login || '')) continue;
-        const delivery = parseMarked(c.body, DIRECT_CLI_DELIVERY_MARKER);
+        const delivery = parseMarkedAfterHeading(c.body, DIRECT_CLI_DELIVERY_MARKER);
         if (validDirectCliDelivery(delivery, directCli)) {
           candidateDeliveries.push({ id: Number(c.id), delivery });
         }
