@@ -358,7 +358,7 @@
     <article class="panel infra-card">
       <h3>主控 Codex</h3><span id="codex-badge" class="badge neutral">狀態未確認</span>
       <p id="codex-detail" class="infra-summary">沒有可被動讀取的 Codex 原生活動來源。</p>
-      <dl class="facts"><dt>目前能否接單</dt><dd id="codex-task">未確認</dd><dt>Codex Executor 主機狀態</dt><dd id="codex-executor">未確認</dd><dt>上一項可核對成果</dt><dd id="codex-completed">未確認</dd><dt>局部阻擋車道</dt><dd id="codex-blocked">未確認</dd><dt>待回收工作</dt><dd id="codex-harvest">未確認</dd><dt>主控程序／工具活動</dt><dd id="codex-evidence">未確認</dd><dt>最後觀測／有效期限</dt><dd id="codex-observed">未確認</dd><dt>下一個 READY</dt><dd id="codex-next">未確認</dd></dl>
+      <dl class="facts"><dt>目前能否接單</dt><dd id="codex-task">未確認</dd><dt>Codex Executor 主機狀態</dt><dd id="codex-executor">未確認</dd><dt>上一項可核對成果</dt><dd id="codex-completed">未確認</dd><dt>局部阻擋車道</dt><dd id="codex-blocked">未確認</dd><dt>待回收工作</dt><dd id="codex-harvest">未確認</dd><dt>主控程序／工具活動</dt><dd id="codex-evidence">未確認</dd><dt>最後觀測／有效期限</dt><dd id="codex-observed">未確認</dd><dt>正式派工／Codex GOAL 續工</dt><dd id="codex-next">未確認</dd></dl>
     </article>
     <article class="panel infra-card">
       <h3>Win11 Native Worker／Task Scheduler</h3><span id="native-badge" class="badge neutral">未確認</span>
@@ -2801,9 +2801,14 @@
       ? '觀測 ' + readTime(snapshot.observed_at) + '；到期 ' + readTime(snapshot.expires_at) +
         '；' + osFreshness
       : 'UNKNOWN：沒有可讀回的 Win11 觀測時間與有效期限');
-    text('codex-next',dispatchData.W1.resultPr
-      ? '下一個 READY：UNKNOWN（尚無新鮮受信佇列項目）。可執行的後續是核對 W1 正式驗收、W2 同 Host 回收證據；W3 須有有效 request_id 才能轉送。'
-      : '下一個 READY：UNKNOWN（尚無新鮮受信佇列項目）。先核對 W1 diff／CI；W2 保留未知效果、不重播；W3 無有效 request_id 時不派工。');
+    const workerQueueSummary=dispatchData.W1.resultPr
+      ? '最近可核對的 W1 成果為 PR #' + dispatchData.W1.resultPr.number + '；本次未確認更新的 schema-6 Worker 派工。'
+      : '本次快照未提供新的受信 schema-6 Worker 派工。';
+    const independentCodexSummary='這只描述正式 Worker 佇列，不代表 Codex GOAL 沒有 READY；Codex 仍可依 #310 授權續做獨立、互不衝突的 pre-Production R4 來源工程。';
+    const laneFollowUp=dispatchData.W1.resultPr
+      ? '後續核對 W1 正式接受與 W2 同 Host 回收證據；W2 未知效果不得重播，W3 只按既有 Human 轉送流程。'
+      : '後續核對 W1 diff／CI；W2 保留未知效果、不重播；W3 無有效 request_id 時不派工。';
+    text('codex-next',workerQueueSummary + independentCodexSummary + laneFollowUp);
     const registration = snapshot?.github?.runner_registration;
     text('runner-registration',osFreshness === 'FRESH' && registration?.status === 'FRESH' &&
       Number.isSafeInteger(registration.count)
