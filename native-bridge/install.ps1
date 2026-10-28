@@ -772,6 +772,34 @@ function Require-Command([string]$Name) {
     if (-not $entry.Source) { throw ('COMMAND_WITHOUT_SOURCE: ' + $Name) }
     return $entry.Source
 }
+function Get-QualifiedOpenCodeV2([string]$NodeExecutable) {
+    if (-not $NodeExecutable -or -not (Test-Path -LiteralPath $NodeExecutable -PathType Leaf)) {
+        return [pscustomobject]@{ ready = $false; bin = $null; version = $null; candidates_checked = -1; status = 'NODE_UNAVAILABLE' }
+    }
+    $probe = "import { qualifyOpenCodeV2 } from './opencode-v2.mjs'; console.log(JSON.stringify(qualifyOpenCodeV2(process.env, true)));"
+    $output = $null
+    $probeExit = -1
+    Push-Location -LiteralPath $PSScriptRoot
+    try {
+        $output = & $NodeExecutable --input-type=module --eval $probe 2>$null
+        $probeExit = $LASTEXITCODE
+    } catch {
+        return [pscustomobject]@{ ready = $false; bin = $null; version = $null; candidates_checked = -1; status = 'QUALIFIER_EXECUTION_FAILED' }
+    } finally {
+        Pop-Location
+    }
+    $json = (@($output) -join "`n").Trim()
+    if ($probeExit -ne 0 -or -not $json) {
+        return [pscustomobject]@{ ready = $false; bin = $null; version = $null; candidates_checked = -1; status = 'QUALIFIER_EXECUTION_FAILED' }
+    }
+    try { $result = $json | ConvertFrom-Json -ErrorAction Stop }
+    catch { return [pscustomobject]@{ ready = $false; bin = $null; version = $null; candidates_checked = -1; status = 'QUALIFIER_OUTPUT_INVALID' } }
+    if ($result.ready -eq $true) {
+        return [pscustomobject]@{ ready = $true; bin = $result.bin; version = $result.version; candidates_checked = $result.candidates_checked; status = 'QUALIFIED' }
+    }
+    $status = if ([int]$result.candidates_checked -eq 0) { 'NOT_FOUND' } else { 'NOT_QUALIFIED' }
+    return [pscustomobject]@{ ready = $false; bin = $null; version = $null; candidates_checked = $result.candidates_checked; status = $status }
+}
 function Get-TaskOptional {
     # Exact visible task identity. If the provider refuses enumeration, fail-closed;
     # registration itself also rejects an ACL-hidden name collision.
@@ -792,9 +820,20 @@ if ($Mode -eq 'Audit') {
     Write-Output ('PROJECT_ID=' + $project)
     Write-Output ('HOST=' + $env:COMPUTERNAME)
     Write-Output ('ISSUE_NUMBER_ARGUMENT=' + $IssueNumber)
-    foreach ($bin in @('node.exe','gh.exe','opencode.exe','opencode.cmd')) {
-        try { Write-Output ($bin + '=' + (Require-Command $bin)) }
-        catch { Write-Output ($bin + '=UNAVAILABLE') }
+    $node = $null
+    try { $node = Require-Command 'node.exe'; Write-Output ('node.exe=' + $node) }
+    catch { Write-Output 'node.exe=UNAVAILABLE' }
+    try { Write-Output ('gh.exe=' + (Require-Command 'gh.exe')) }
+    catch { Write-Output 'gh.exe=UNAVAILABLE' }
+    if ($node) {
+        $openCode = Get-QualifiedOpenCodeV2 $node
+        if ($openCode.ready) {
+            Write-Output ('OPENCODE_V2_CLI_QUALIFIED=' + $openCode.bin + ';VERSION=' + $openCode.version + ';SIGNATURE=VALID')
+        } else {
+            Write-Output ('OPENCODE_V2_CLI_UNAVAILABLE=' + $openCode.status + ';CANDIDATES_CHECKED=' + $openCode.candidates_checked)
+        }
+    } else {
+        Write-Output 'OPENCODE_V2_CLI_UNAVAILABLE=NODE_UNAVAILABLE'
     }
     Write-Output ('CONFIG_EXISTS=' + (Test-Path -LiteralPath $configPath))
     Inspect-Task
@@ -832,23 +871,8 @@ if ($Mode -eq 'Install') {
     if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw 'WORKSPACE_MUST_BE_UNDER_USER_HOME' }
     if (-not (Test-Path -LiteralPath $full -PathType Container)) { throw 'WORKSPACE_NOT_FOUND' }
     $null = Require-Command 'gh.exe'
-    # The first queued job is native ping and does NOT launch OpenCode.
-    # Desktop application is not a proof of a working CLI; npm may expose opencode.cmd.
-    # Leave model work disabled until a separately verified CLI is available.
-    $optionalCli = $null
-    foreach ($candidate in @('opencode.exe', 'opencode.cmd', 'opencode')) {
-        $candidateCommand = Get-Command $candidate -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -ne $candidateCommand -and $candidateCommand.Source) {
-            $optionalCli = $candidateCommand.Source
-            break
-        }
-    }
-    if ($null -eq $optionalCli) {
-        Write-Output 'OPENCODE_CLI_NOT_FOUND_PING_ONLY'
-    } else {
-        Write-Output ('OPENCODE_CLI_FOUND=' + $optionalCli)
-        Write-Output 'OPENCODE_PLAN_NOT_YET_LIVE_VERIFIED'
-    }
+    # The first queued job is native ping and does NOT launch OpenCode. CLI qualification
+    # uses the pinned wrapper Node and shared Authenticode/V2 resolver; it grants no model authorization.
     if (-not (Test-GhAuthenticated 'gh.exe')) { throw 'GH_AUTH_NOT_READY_HUMAN_OAUTH_GATE' }
     foreach ($runtimeFile in $runtimeFiles) {
         $sourcePath = Join-Path $PSScriptRoot $runtimeFile
@@ -866,6 +890,15 @@ if ($Mode -eq 'Install') {
     $node = $nodeMatch.Groups[1].Value
     if (-not [IO.Path]::IsPathRooted($node) -or -not (Test-Path -LiteralPath $node -PathType Leaf)) {
         throw 'HIDDEN_WORKER_NODE_EXECUTABLE_MISSING'
+    }
+    $openCode = Get-QualifiedOpenCodeV2 $node
+    if ($openCode.ready) {
+        Write-Output ('OPENCODE_V2_CLI_QUALIFIED=' + $openCode.bin + ';VERSION=' + $openCode.version + ';SIGNATURE=VALID')
+        Write-Output 'OPENCODE_PLAN_NOT_YET_LIVE_VERIFIED'
+    } elseif ($openCode.status -eq 'NOT_FOUND') {
+        Write-Output 'OPENCODE_V2_CLI_NOT_FOUND_PING_ONLY'
+    } else {
+        Write-Output ('OPENCODE_V2_CLI_NOT_QUALIFIED_PING_ONLY=' + $openCode.status + ';CANDIDATES_CHECKED=' + $openCode.candidates_checked)
     }
     if (-not (Test-Path -LiteralPath $wscript -PathType Leaf)) { throw 'WINDOWS_SCRIPT_HOST_NOT_FOUND' }
     New-Item -ItemType Directory -Force -Path $homeDir | Out-Null
