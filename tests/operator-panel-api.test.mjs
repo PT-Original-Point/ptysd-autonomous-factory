@@ -1475,6 +1475,15 @@ test('mobile overview keeps its GitHub state badge within the card', () => {
     /\.overview-head\s*>\s*\.badge\s*\{[^}]*max-width:\s*100%[^}]*white-space:\s*normal[^}]*overflow-wrap:\s*anywhere/);
 });
 
+test('mobile section heading stacks its supporting text for readable width', () => {
+  const start = html.indexOf('@media (max-width:700px)');
+  const end = html.indexOf('@media (max-width:440px)', start);
+  assert.ok(start >= 0 && end > start, 'mobile layout rules are present');
+  const mobileCss = html.slice(start, end);
+  assert.match(mobileCss, /\.section\s*\{[^}]*flex-direction:\s*column[^}]*align-items:\s*flex-start/);
+  assert.match(mobileCss, /\.section\s+h2\s*,\s*\.section\s+p\s*\{[^}]*margin:\s*0/);
+});
+
 test('operator panel documentation binds live PR data to task evidence, not a fixed historical PR', () => {
   const readme = readFileSync(new URL('../operator-panel/README.md', import.meta.url), 'utf8')
     .replace(/\s+/g, ' ');
