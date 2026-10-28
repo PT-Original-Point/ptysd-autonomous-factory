@@ -72,7 +72,7 @@ try {
     $hiddenWorker = Join-Path $testRoot 'HiddenWorker.vbs'
     $homeDir = $testRoot
     $global:MockWorkerTaskXml = @'
-<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><Enabled>true</Enabled><ExecutionTimeLimit>PT15M</ExecutionTimeLimit><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable></Settings><Triggers><TimeTrigger><StartBoundary>2026-10-27T00:00:00</StartBoundary><Repetition><Interval>PT5M</Interval><Duration>P3650D</Duration></Repetition></TimeTrigger></Triggers></Task>
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><Enabled>true</Enabled><ExecutionTimeLimit>PT15M</ExecutionTimeLimit><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable></Settings><Triggers><TimeTrigger><StartBoundary>2026-10-27T00:00:00</StartBoundary><Repetition><Interval>PT5M</Interval><Duration>P3650D</Duration></Repetition></TimeTrigger></Triggers></Task>
 '@
     function global:Export-ScheduledTask {
         [CmdletBinding()]
@@ -90,7 +90,8 @@ try {
         Principal=[pscustomobject]@{ UserId=[Security.Principal.WindowsIdentity]::GetCurrent().Name;
             LogonType='Interactive'; RunLevel='Limited' }
         Settings=[pscustomobject]@{ Enabled=$false; MultipleInstances='IgnoreNew';
-            ExecutionTimeLimit='PT15M'; StartWhenAvailable=$true }
+            ExecutionTimeLimit='PT15M'; StartWhenAvailable=$true;
+            DisallowStartIfOnBatteries=$false; StopIfGoingOnBatteries=$false }
         Actions=@([pscustomobject]@{ Execute=$wscript; Arguments='//B //NoLogo "' + $hiddenWorker + '"'; WorkingDirectory=$homeDir })
     }
 
@@ -98,6 +99,18 @@ try {
     $global:MockWorkerTaskXml = $global:MockWorkerTaskXml.Replace('<Enabled>true</Enabled>', '<Enabled>false</Enabled>')
     $disabledHash = Get-WorkerRuntimeTaskDefinitionSha256
     Assert-Equal $disabledHash $enabledHash 'task definition fingerprint excludes only temporary enabled state'
+    $global:MockWorkerTaskXml = $global:MockWorkerTaskXml.Replace(
+        '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>',
+        '<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>')
+    Assert-Throws { Get-WorkerRuntimeTaskDefinitionSha256 } 'WORKER_RUNTIME_TASK_POWER_POLICY_MISMATCH' `
+        'battery power must not suppress the five-minute dispatcher'
+    $global:MockWorkerTaskXml = $global:MockWorkerTaskXml.Replace(
+        '<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>',
+        '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>')
+    $global:MockWorkerTask.Settings.StopIfGoingOnBatteries = $true
+    Assert-Throws { Get-WorkerRuntimeTaskReadback -ExpectedEnabled $false -ExpectedState 'Disabled' } `
+        'WORKER_RUNTIME_TASK_POWER_POLICY_MISMATCH' 'battery transition must not stop the dispatcher'
+    $global:MockWorkerTask.Settings.StopIfGoingOnBatteries = $false
     $global:MockWorkerTaskXml = $global:MockWorkerTaskXml.Replace('PT5M', 'PT10M')
     Assert-Throws { Get-WorkerRuntimeTaskReadback -ExpectedEnabled $false -ExpectedState 'Disabled' `
         -ExpectedDefinitionSha256 $enabledHash } 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' `
