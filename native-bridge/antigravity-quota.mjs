@@ -56,23 +56,33 @@ function formatUtcTimestamp(milliseconds) {
 
 function normalizeUtcTimestamp(val) {
   if (typeof val === 'string') {
-    if (!val.trim()) throw createQuotaError('INVALID_TIMESTAMP');
-    const isoDate = val.match(/^(\d{4})-(\d{2})-(\d{2})(?:T|t|$)/);
-    if (isoDate) {
-      const [, yearText, monthText, dayText] = isoDate;
-      const year = Number(yearText);
-      const month = Number(monthText);
-      const day = Number(dayText);
-      const calendarDate = new Date(0);
-      calendarDate.setUTCFullYear(year, month - 1, day);
-      calendarDate.setUTCHours(0, 0, 0, 0);
-      if (month < 1 || month > 12 || day < 1 ||
-          calendarDate.getUTCFullYear() !== year ||
-          calendarDate.getUTCMonth() !== month - 1 ||
-          calendarDate.getUTCDate() !== day) {
-        throw createQuotaError('INVALID_TIMESTAMP');
-      }
+    const match = val.match(/^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:([Zz])|([+-])(\d{2}):(\d{2}))$/);
+    if (!match) throw createQuotaError('INVALID_TIMESTAMP');
+
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const calendarDate = new Date(0);
+    calendarDate.setUTCFullYear(year, month - 1, day);
+    calendarDate.setUTCHours(0, 0, 0, 0);
+    if (month < 1 || month > 12 || day < 1 ||
+        calendarDate.getUTCFullYear() !== year ||
+        calendarDate.getUTCMonth() !== month - 1 ||
+        calendarDate.getUTCDate() !== day) {
+      throw createQuotaError('INVALID_TIMESTAMP');
     }
+
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    const second = Number(match[6]);
+    if (hour > 23 || minute > 59 || second > 59) {
+      throw createQuotaError('INVALID_TIMESTAMP');
+    }
+    if (match[9] !== undefined &&
+        (Number(match[10]) > 23 || Number(match[11]) > 59)) {
+      throw createQuotaError('INVALID_TIMESTAMP');
+    }
+
     const ms = Date.parse(val);
     if (!Number.isFinite(ms)) throw createQuotaError('INVALID_TIMESTAMP');
     return formatUtcTimestamp(ms);

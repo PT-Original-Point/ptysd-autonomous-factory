@@ -526,3 +526,50 @@ test('official Antigravity JSON usage bucket labels parse with absent nested com
     err => err.code === 'DUPLICATE_REQUIRED_BUCKET',
   );
 });
+
+test('positive: normalizes explicit timezone timestamps to the expected UTC instant', () => {
+  const cases = [
+    ['2026-10-28T12:00:00Z', '2026-10-28T12:00:00.000Z'],
+    ['2026-10-28T12:00:00+08:00', '2026-10-28T04:00:00.000Z'],
+    ['2026-10-28T12:00:00-04:00', '2026-10-28T16:00:00.000Z'],
+    ['2026-10-28T12:00:00.125+08:00', '2026-10-28T04:00:00.125Z'],
+  ];
+
+  for (const [resetTime, expected] of cases) {
+    const usage = makeValidUsageEnvelope();
+    usage.command.data.groups[0].buckets[0].reset_time = resetTime;
+    const snapshot = parseAntigravityQuotaSnapshot(usage, makeValidCreditsEnvelope());
+    assert.equal(snapshot.gemini_weekly_reset_time, expected);
+  }
+});
+
+test('positive: preserves numeric epoch-millisecond and Date timestamp behavior', () => {
+  const epochMilliseconds = Date.UTC(2026, 9, 28, 12, 0, 0);
+  const usage = makeValidUsageEnvelope();
+  usage.command.data.groups[0].buckets[0].reset_time = epochMilliseconds;
+  usage.command.data.groups[0].buckets[1].reset_time = new Date(epochMilliseconds + 125);
+
+  const snapshot = parseAntigravityQuotaSnapshot(usage, makeValidCreditsEnvelope());
+  assert.equal(snapshot.gemini_weekly_reset_time, '2026-10-28T12:00:00.000Z');
+  assert.equal(snapshot.gemini_5h_reset_time, '2026-10-28T12:00:00.125Z');
+});
+
+test('negative: rejects date-only and timezone-free timestamp strings with a sanitized error', () => {
+  const invalidTimestamps = [
+    '2026-10-28',
+    '2026-10-28T12:00:00',
+    '2026-10-28T12:00:00.125',
+    '2026-10-28T12:00:00+24:00',
+    '2026-10-28T12:00:00+08:60',
+  ];
+
+  for (const resetTime of invalidTimestamps) {
+    const usage = makeValidUsageEnvelope();
+    usage.command.data.groups[0].buckets[0].reset_time = resetTime;
+    assert.throws(
+      () => parseAntigravityQuotaSnapshot(usage, makeValidCreditsEnvelope()),
+      error => error.code === 'INVALID_TIMESTAMP' && error.message === 'INVALID_TIMESTAMP' &&
+        !error.message.includes(resetTime),
+    );
+  }
+});
