@@ -69,6 +69,25 @@ function validRuntimeDeployment(value) {
   return false;
 }
 
+function validW4Readback(value) {
+  const keys = ['pi_version', 'profile_configured', 'vault_present',
+    'runtime_ready_marker_present', 'task_registered', 'task_enabled', 'process_count',
+    'provider_paid_hardstop', 'zero_charge_canary'];
+  if (!object(value) || JSON.stringify(Object.keys(value).sort()) !==
+        JSON.stringify(keys.slice().sort()) ||
+      !(value.pi_version === null || /^\d+\.\d+\.\d+$/.test(value.pi_version)) ||
+      ![null, true, false].includes(value.profile_configured) ||
+      ![null, true, false].includes(value.vault_present) ||
+      ![null, true, false].includes(value.runtime_ready_marker_present) ||
+      ![null, true, false].includes(value.task_registered) ||
+      ![null, true, false].includes(value.task_enabled) ||
+      !(value.process_count === null ||
+        (Number.isSafeInteger(value.process_count) && value.process_count >= 0)) ||
+      !['UNKNOWN', 'VERIFIED'].includes(value.provider_paid_hardstop) ||
+      !['UNKNOWN', 'VERIFIED'].includes(value.zero_charge_canary)) return false;
+  return true;
+}
+
 function normalizeLegacyRuntimeDeployment(value) {
   const deployment = value.runtime_deployment;
   if (!object(deployment) || !object(deployment.component_sha256)) return value;
@@ -121,6 +140,8 @@ export function parseOperatorObservation(body) {
       (value.source?.main_sha !== undefined && !SHA1.test(value.source.main_sha || '')) ||
       (value.source?.comment_id !== undefined &&
         (!Number.isSafeInteger(value.source.comment_id) || value.source.comment_id < 1)) ||
+      (value.windows?.w4 !== undefined && value.windows.w4 !== null &&
+        !validW4Readback(value.windows.w4)) ||
       (value.runtime_deployment !== undefined && !validRuntimeDeployment(value.runtime_deployment)) ||
       !validTime(value.expires_at) || containsForbiddenKey(value)) return null;
   const observed = Date.parse(value.observed_at);
@@ -336,6 +357,58 @@ try {
   $runnerServiceCount = $runnerServices.Count
   $runnerServiceRunning = @($runnerServices | Where-Object { $_.Status -eq 'Running' }).Count
 } catch {}
+$w4Root = Join-Path $env:LOCALAPPDATA 'PTYSD\W4'
+$w4Agent = Join-Path $w4Root 'pi-agent'
+$w4Private = Join-Path $w4Root 'private'
+$w4PackageLock = Join-Path $w4Root 'pi-cli\package-lock.json'
+$w4PiVersion = $null
+$w4ProfileConfigured = $null
+$w4VaultPresent = Test-Path -LiteralPath (Join-Path $w4Private 'whatstoken-w4.dpapi') -PathType Leaf
+$w4ReadyMarkerPresent = Test-Path -LiteralPath (Join-Path $w4Root 'W4_CONDITIONAL_READY.json') -PathType Leaf
+try {
+  if (Test-Path -LiteralPath $w4PackageLock -PathType Leaf) {
+    $lock = Get-Content -LiteralPath $w4PackageLock -Raw | ConvertFrom-Json
+    $candidateVersion = $lock.packages.'node_modules/@earendil-works/pi-coding-agent'.version
+    if ([string]$candidateVersion -match '^\d+\.\d+\.\d+$') { $w4PiVersion = [string]$candidateVersion }
+  }
+  $modelsPath = Join-Path $w4Agent 'models.json'
+  $settingsPath = Join-Path $w4Agent 'settings.json'
+  if ((Test-Path -LiteralPath $modelsPath -PathType Leaf) -and
+      (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+    $modelsConfig = Get-Content -LiteralPath $modelsPath -Raw | ConvertFrom-Json
+    $settingsConfig = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+    $providerConfig = $modelsConfig.providers.'whatstoken-w4'
+    $targetModels = @($providerConfig.models | Where-Object { $_.id -eq 'deepseek-v4-1-flash-1017' })
+    $expectedTools = @('read','edit','write')
+    $actualTools = @($settingsConfig.defaultTools)
+    $w4ProfileConfigured = $providerConfig.baseUrl -eq 'https://www.whatstoken.ai/v1' -and
+      $providerConfig.api -eq 'openai-completions' -and $providerConfig.authHeader -eq $true -and
+      [string]$providerConfig.apiKey -like '!powershell.exe*' -and $targetModels.Count -eq 1 -and
+      [string]$settingsConfig.defaultProvider -eq 'whatstoken-w4' -and
+      [string]$settingsConfig.defaultModel -eq 'deepseek-v4-1-flash-1017' -and
+      ($actualTools -join ',') -eq ($expectedTools -join ',') -and
+      $settingsConfig.cacheWarming -eq 'off' -and $settingsConfig.retry.enabled -eq $false
+  } else { $w4ProfileConfigured = $false }
+} catch { $w4ProfileConfigured = $false }
+$w4TaskMatches = @(Get-ExactTask 'PTYSD-W4-Pi')
+$w4Task = if ($w4TaskMatches.Count -eq 1) { $w4TaskMatches[0] } else { $null }
+$w4TaskEnabled = if ($w4Task) { [bool]$w4Task.Settings.Enabled } else { $false }
+$w4PiProcessCount = $null
+try {
+  $w4PiProcessCount = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction Stop |
+    Where-Object { $_.CommandLine -match '(?i)[\\/]pi-coding-agent[\\/]dist[\\/]bundle[\\/]cli\.js' }).Count
+} catch {}
+$w4 = [pscustomobject]@{
+  pi_version = $w4PiVersion
+  profile_configured = $w4ProfileConfigured
+  vault_present = [bool]$w4VaultPresent
+  runtime_ready_marker_present = [bool]$w4ReadyMarkerPresent
+  task_registered = ($w4TaskMatches.Count -eq 1)
+  task_enabled = $w4TaskEnabled
+  process_count = $w4PiProcessCount
+  provider_paid_hardstop = 'UNKNOWN'
+  zero_charge_canary = 'UNKNOWN'
+}
 $native = $null
 if ($task) {
   $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
@@ -383,6 +456,7 @@ if ($task) {
   opencode_process_count = $opencodeCount
   runner_service_count = $runnerServiceCount
   runner_service_running = $runnerServiceRunning
+  w4 = $w4
 } | ConvertTo-Json -Compress -Depth 5
 `;
 
@@ -464,6 +538,21 @@ export function collectWindowsObservation({
       opencode_process_count: raw.opencode_process_count,
       runner_service_count: raw.runner_service_count,
       runner_service_running: raw.runner_service_running,
+      w4: object(raw.w4) ? {
+        pi_version: typeof raw.w4.pi_version === 'string' && /^\d+\.\d+\.\d+$/.test(raw.w4.pi_version)
+          ? raw.w4.pi_version : null,
+        profile_configured: typeof raw.w4.profile_configured === 'boolean'
+          ? raw.w4.profile_configured : null,
+        vault_present: typeof raw.w4.vault_present === 'boolean' ? raw.w4.vault_present : null,
+        runtime_ready_marker_present: typeof raw.w4.runtime_ready_marker_present === 'boolean'
+          ? raw.w4.runtime_ready_marker_present : null,
+        task_registered: typeof raw.w4.task_registered === 'boolean' ? raw.w4.task_registered : null,
+        task_enabled: typeof raw.w4.task_enabled === 'boolean' ? raw.w4.task_enabled : null,
+        process_count: Number.isSafeInteger(raw.w4.process_count) && raw.w4.process_count >= 0
+          ? raw.w4.process_count : null,
+        provider_paid_hardstop: raw.w4.provider_paid_hardstop === 'VERIFIED' ? 'VERIFIED' : 'UNKNOWN',
+        zero_charge_canary: raw.w4.zero_charge_canary === 'VERIFIED' ? 'VERIFIED' : 'UNKNOWN',
+      } : null,
     };
   } catch {
     return { status: 'UNKNOWN', observed_at: now(), error: 'WINDOWS_READBACK_FAILED' };

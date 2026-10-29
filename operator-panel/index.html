@@ -61,7 +61,7 @@
     .section { margin:24px 0 10px; display:flex; justify-content:space-between;
       align-items:baseline; gap:12px }
     .section p { color:var(--muted); font-size:13px }
-    .worker-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px }
+    .worker-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px }
     .worker-card { min-width:0; min-height:390px; display:flex; flex-direction:column }
     .worker-head { display:grid; grid-template-columns:minmax(0,1fr) minmax(122px,42%);
       align-items:start; gap:10px; margin-bottom:10px }
@@ -202,10 +202,10 @@
   </section>
 
   <div class="section">
-    <h2>三個 Worker 車道</h2>
+    <h2>四個 Worker 車道</h2>
     <p>施工狀態與 GitHub 交付分開顯示；缺少當前證據時不沿用歷史「施工中」。</p>
   </div>
-  <section class="worker-grid" aria-label="W1 W2 W3 Worker 狀態">
+  <section class="worker-grid" aria-label="W1 W2 W3 W4 Worker 狀態">
     <article class="panel worker-card">
       <div class="worker-head">
         <div><div class="worker-title-line"><div><span class="worker-id">W1</span><h2 class="worker-name">OpenCode</h2></div><span id="w1-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">OpenCode CLI V2</span><div class="worker-latest"><span id="w1-header-progress">最新任務進度未確認</span><time id="w1-last-event">最後任務事件：未確認</time></div></div>
@@ -263,6 +263,21 @@
       <div class="field"><strong>下一步負責人</strong><span id="w3-next">未確認</span></div>
       <div class="worker-foot"><span id="w3-source" class="source-tag">來源／新鮮度未確認</span></div>
       </div>
+    </article>
+    <article class="panel worker-card">
+      <div class="worker-head">
+        <div><span class="worker-id">W4</span><h2 class="worker-name">Pi Coding Agent</h2><span class="worker-harness">WhatsTokenAI；須通過零扣費與付費硬停止驗證</span></div>
+        <span id="w4-badge" class="badge neutral">未確認</span>
+      </div>
+      <div class="field"><strong>正式任務</strong><span id="w4-task">未確認</span></div>
+      <div class="field"><strong>工作階段／執行者</strong><span id="w4-session">未確認</span></div>
+      <div class="field"><strong>最近有證據的活動</strong><span id="w4-activity">未確認</span></div>
+      <div class="field"><strong>進度／已證實步驟</strong><span id="w4-progress">未確認</span></div>
+      <div class="field"><strong>錯誤或阻擋</strong><span id="w4-blocker">未確認</span></div>
+      <div class="field"><strong>程式修改</strong><span id="w4-changes">未確認</span></div>
+      <div class="field"><strong>Commit／PR／CI</strong><span id="w4-delivery">未確認</span></div>
+      <div class="field"><strong>下一步負責人</strong><span id="w4-next">未確認</span></div>
+      <div class="worker-foot"><span id="w4-source" class="source-tag">來源／新鮮度未確認</span></div>
     </article>
   </section>
 
@@ -2855,6 +2870,7 @@
         : classifyW1(oc, worker, osFreshness, now, githubTask),
       W2: classifyWorker(workerRecord(snapshot, 'W2'), osFreshness, now),
       W3: classifyW3(workerRecord(snapshot, 'W3'), osFreshness, now),
+      W4: classifyWorker(workerRecord(snapshot, 'W4'), osFreshness, now),
     };
     const goalComments = Array.isArray(resources.goal?.latestComments)
       ? [...resources.goal.latestComments]
@@ -2885,18 +2901,19 @@
       renderDispatchCard(id,dispatchData[id]);
     }
     const cardData = {};
-    for (const id of ['W1','W2','W3'])
+    for (const id of ['W1','W2','W3','W4'])
       cardData[id] = workerCardData(id, id === 'W1' ? explicitW1 : workerRecord(snapshot,id),
         records[id], snapshot, id === 'W1' ? githubTask : null,
         id === 'W1' ? dispatchData.W1.codexSourceAcceptance : null);
-    for (const id of ['W1','W2','W3']) renderWorker(id, cardData[id],dispatchData[id]);
+    for (const id of ['W1','W2','W3']) renderWorker(id, cardData[id], dispatchData[id]);
+    renderWorker('W4', cardData.W4);
     const w2Evidence = w2EvidenceData(goalComments, comments, safeSha(main?.sha),
       resources.goal?.identity || null,resources.goal?.latestComplete === true,
       resources.issue?.latestComplete === true);
     renderW2Evidence(w2Evidence);
     const verifiedCount = osFreshness === 'FRESH'
       ? Object.values(records).filter(record => record.status === 'RUNNING_VERIFIED').length : null;
-    text('metric-workers', verifiedCount === null ? '未確認（Win11 觀測未知／過期）' : String(verifiedCount) + '／3 有近期施工證據');
+    text('metric-workers', verifiedCount === null ? '未確認（Win11 觀測未知／過期）' : String(verifiedCount) + '／4 有近期施工證據');
     const blocked = osFreshness === 'FRESH'
       ? Object.values(records).filter(record => record.status === 'BLOCKED').length : null;
     text('metric-blocked', blocked === null ? '未確認' : String(blocked) + ' 個 Worker 明確受阻');

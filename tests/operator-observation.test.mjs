@@ -55,6 +55,27 @@ test('operator snapshot requires exact project identity, time bounds, and de-ide
     /INVALID_OPERATOR_OBSERVATION/);
 });
 
+test('W4 OS readback accepts only the bounded allowlist and preserves UNKNOWN billing evidence', () => {
+  const w4 = {
+    pi_version: '1.4.0', profile_configured: true, vault_present: false,
+    runtime_ready_marker_present: false, task_registered: false, task_enabled: false,
+    process_count: 0, provider_paid_hardstop: 'UNKNOWN', zero_charge_canary: 'UNKNOWN',
+  };
+  assert.deepEqual(parseOperatorObservation(encodeOperatorObservation(observation({
+    windows: { status: 'FRESH', w4 },
+  }))).windows.w4, w4);
+  for (const invalid of [
+    { ...w4, command_line: 'must not be published' },
+    { ...w4, provider_paid_hardstop: 'PASS' },
+    { ...w4, process_count: -1 },
+    { ...w4, pi_version: 'unknown' },
+  ]) {
+    assert.throws(() => encodeOperatorObservation(observation({
+      windows: { status: 'FRESH', w4: invalid },
+    })), /INVALID_OPERATOR_OBSERVATION/);
+  }
+});
+
 test('operator snapshot rejects malformed source main SHA but keeps legacy snapshots without it readable', () => {
   for (const main_sha of ['not-a-git-sha', 'g'.repeat(40), 'a'.repeat(39)]) {
     const malformed = observation({ source: { ...observation().source, main_sha } });
@@ -329,6 +350,12 @@ test('Windows collector reads only named PTYSD tasks and publishes only allowlis
     opencode_process_count: 0,
     runner_service_count: 1,
     runner_service_running: 1,
+    w4: {
+      pi_version: '1.4.0', profile_configured: true, vault_present: false,
+      runtime_ready_marker_present: false, task_registered: false, task_enabled: false,
+      process_count: 0, provider_paid_hardstop: 'UNKNOWN', zero_charge_canary: 'UNKNOWN',
+      command_line: 'must not be published',
+    },
     executor_tasks: {
       opencode: { registered: true, enabled: true, state: 'Ready',
         last_run: new Date(now - 5 * 60 * 1000).toISOString(), last_result: '0x00000000' },
@@ -364,6 +391,11 @@ test('Windows collector reads only named PTYSD tasks and publishes only allowlis
   assert.equal(live.native_task.action_kind, 'WINDOWLESS_LAUNCHER');
   assert.equal(live.opencode_process_count, 0);
   assert.equal(live.runner_service_running, 1);
+  assert.deepEqual(live.w4, {
+    pi_version: '1.4.0', profile_configured: true, vault_present: false,
+    runtime_ready_marker_present: false, task_registered: false, task_enabled: false,
+    process_count: 0, provider_paid_hardstop: 'UNKNOWN', zero_charge_canary: 'UNKNOWN',
+  });
   assert.deepEqual(live.executor_tasks, {
     opencode: { registered: true, enabled: true, state: 'READY',
       last_run: new Date(now - 5 * 60 * 1000).toISOString(), last_result: '0X00000000' },
@@ -377,6 +409,8 @@ test('Windows collector reads only named PTYSD tasks and publishes only allowlis
   const collectorSource = readFileSync(new URL('../native-bridge/operator-observation.mjs', import.meta.url), 'utf8');
   assert.match(collectorSource, /Get-ExactTask 'PTYSD-Native-OpenCode'/);
   assert.match(collectorSource, /Get-ExactTask 'PTYSD-Factory-Monitor'/);
+  assert.match(collectorSource, /Get-ExactTask 'PTYSD-W4-Pi'/);
+  assert.match(collectorSource, /\$expectedTools = @\('read','edit','write'\)/);
   assert.match(collectorSource, /PTYSD-OpenCode-Executor/);
   assert.match(collectorSource, /PTYSD-Antigravity-Executor/);
   assert.match(collectorSource, /PTYSD-Codex-Executor/);
@@ -998,7 +1032,10 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
       native_task:{registered:true,enabled:true,state:'READY',action_kind:'WINDOWLESS_LAUNCHER',
         identity_class:'INTERACTIVE_LIMITED',multiple_instances:'IGNORENEW',
         trigger_interval_minutes:5,last_run:observedAt,last_result:'0x00000000'},
-      runner_service_count:1,runner_service_running:1},
+      runner_service_count:1,runner_service_running:1,
+      w4:{pi_version:'1.4.0',profile_configured:true,vault_present:false,
+        runtime_ready_marker_present:false,task_registered:false,task_enabled:false,process_count:0,
+        provider_paid_hardstop:'UNKNOWN',zero_charge_canary:'UNKNOWN'}},
     native_worker:{current_task:null,latest_task:{request_id:'PTYSD_PANEL_RENDER_TEST_20261016',
       kind:'opencode_edit',source_pr:437,source_sha:sha,state:'QUEUED_NOT_STARTED'}},
     opencode_v2:{installed_version:'opencode v2.0.27',process_count:0,
@@ -1010,6 +1047,8 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
         'opencode-v2.mjs':'2'.repeat(64),'v2-readiness.mjs':'3'.repeat(64),
         'antigravity-quota.mjs':'6'.repeat(64),
         'captured-process.mjs':'4'.repeat(64),'windows-executor.mjs':'5'.repeat(64)}},
+    workers:[{worker_id:'W4',status:'BLOCKED',blocker_code:'W4_KEY_NOT_ENROLLED',
+      model_eligibility:'UNKNOWN',next_owner:'Human: local secure one-time input'}],
   });
   const comments=[{id:42,body:encodeOperatorObservation(snapshot),
     user:{login:'wfvupu1212'},created_at:observedAt,
@@ -1052,12 +1091,15 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
   vm.runInNewContext(script,{window,document,Date:TestDate,Number,String,Array,JSON,RegExp,AbortController});
   await new Promise(resolve => setTimeout(resolve,20));
   assert.match(elements.get('overall').className,/fresh/);
-  assert.match(elements.get('metric-workers').textContent,/0／3/);
+  assert.match(elements.get('metric-workers').textContent,/0／4/);
   assert.equal(elements.get('w1-badge').textContent,'狀態未確認');
   assert.equal(elements.get('w1-activity').textContent,'沒有可核對的近期活動時間',
     'process observation time alone is not model or tool activity');
   assert.equal(elements.get('w2-badge').textContent,'狀態未確認');
   assert.equal(elements.get('w3-badge').textContent,'狀態未確認');
+  assert.equal(elements.get('w4-badge').textContent,'工作遇阻');
+  assert.equal(elements.get('w4-blocker').textContent,'W4_KEY_NOT_ENROLLED');
+  assert.doesNotMatch(elements.get('w4-changes').textContent,/已證實/);
   assert.equal(elements.get('runner-badge').textContent,'等待檢查結果');
   assert.match(elements.get('runner-checks').textContent,/成功 3／失敗 0／queued 0／pending 1/);
   assert.match(elements.get('runner-checks').textContent,/略過或 neutral 1/);
@@ -1174,7 +1216,10 @@ async function publishReceiptProjection(rows, { enableAntigravityModelRuns } = {
     now: () => new Date(at),
     collectWindowsObservation: () => ({ status: 'FRESH', observed_at: new Date(at).toISOString(),
       native_task: { registered: true, enabled: true, state: 'READY' },
-      opencode_process_count: 0, runner_service_count: 0, runner_service_running: false }),
+      opencode_process_count: 0, runner_service_count: 0, runner_service_running: false,
+      w4: { pi_version: '1.4.0', profile_configured: true, vault_present: false,
+        runtime_ready_marker_present: false, task_registered: false, task_enabled: false,
+        process_count: 0, provider_paid_hardstop: 'UNKNOWN', zero_charge_canary: 'UNKNOWN' } }),
     collectRuntimeDeployment: () => ({ status: 'UNKNOWN', observed_at: new Date(at).toISOString(),
       bundle_sha256: '3'.repeat(64), component_sha256: Object.fromEntries(runtimeFiles.map(name => [name, null])),
       reason_code: 'RUNTIME_FILES_UNAVAILABLE' }),
@@ -1247,6 +1292,11 @@ test('worker observation reports captured W1 and blocked W2 diffs as unverified,
   assert.equal(w2.files_modified, 'COUNT_REPORTED_UNVERIFIED');
   assert.equal(w2.changed_files_count, 3);
   assert.equal(w2.delivery_status, 'BLOCKED_DIFF_CAPTURED_UNVERIFIED');
+  const w4 = result.observation.workers.find(item => item.worker_id === 'W4');
+  assert.equal(w4.status, 'BLOCKED');
+  assert.equal(w4.blocker_code, 'W4_KEY_NOT_ENROLLED');
+  assert.equal(w4.model_eligibility, 'UNKNOWN');
+  assert.equal(JSON.stringify(w4).includes('whatstoken-w4.dpapi'), false);
 });
 
 test('worker observation rejects invalid diff digest or scope claims and keeps changes unproven', async () => {

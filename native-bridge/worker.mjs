@@ -805,7 +805,8 @@ function latestOperatorJob(comments, config, workerLogin, mainSha, candidateSour
     exit_code: Number.isSafeInteger(last?.exit_code) ? last.exit_code : null,
     ...(capturedDiff || {}) };
 }
-function observationWorkerRecords(comments, config, workerLogin, mainSha, candidateSourceShas) {
+function observationWorkerRecords(comments, config, workerLogin, mainSha, candidateSourceShas,
+  windows = null) {
   const records = [];
   for (const [workerId, kinds] of [
     ['W1', new Set(['opencode_edit'])],
@@ -866,6 +867,40 @@ function observationWorkerRecords(comments, config, workerLogin, mainSha, candid
   records.push({ worker_id: 'W3', status: 'UNKNOWN',
     blocker_code: 'W3_ZERO_RISK_HANDOFF_NOT_IN_NATIVE_SNAPSHOT',
     model_eligibility: 'UNKNOWN', next_owner: 'Codex 建立有效請求；Human 手動轉送 Zero Risk' });
+  const w4 = windows?.status === 'FRESH' ? windows.w4 : null;
+  let w4Blocker = 'W4_OS_OBSERVATION_UNKNOWN';
+  let w4Status = 'UNKNOWN';
+  if (w4?.profile_configured === false) {
+    w4Status = 'UNCONFIGURED';
+    w4Blocker = 'W4_PROFILE_NOT_CONFIGURED';
+  } else if (w4?.profile_configured === true && w4.vault_present !== true) {
+    w4Status = 'BLOCKED';
+    w4Blocker = 'W4_KEY_NOT_ENROLLED';
+  } else if (w4?.profile_configured === true && w4.zero_charge_canary !== 'VERIFIED') {
+    w4Status = 'BLOCKED';
+    w4Blocker = 'W4_ZERO_CHARGE_CANARY_UNVERIFIED';
+  } else if (w4?.profile_configured === true && w4.provider_paid_hardstop !== 'VERIFIED') {
+    w4Status = 'BLOCKED';
+    w4Blocker = 'W4_PROVIDER_PAID_HARDSTOP_UNKNOWN';
+  } else if (w4?.profile_configured === true && w4.runtime_ready_marker_present !== true) {
+    w4Status = 'BLOCKED';
+    w4Blocker = 'W4_CONDITIONAL_ACCEPTANCE_PENDING';
+  } else if (w4?.profile_configured === true &&
+      (w4.task_registered !== true || w4.task_enabled !== true)) {
+    w4Status = 'BLOCKED';
+    w4Blocker = 'W4_NATIVE_TASK_NOT_ENABLED';
+  } else if (w4?.profile_configured === true) {
+    w4Blocker = 'W4_TRUSTED_TASK_RECEIPT_NOT_OBSERVED';
+  }
+  const w4NextOwner = w4Blocker === 'W4_KEY_NOT_ENROLLED'
+    ? 'Human：僅在本機隱藏提示輸入一次 W4 專用 Key'
+    : w4Blocker === 'W4_PROVIDER_PAID_HARDSTOP_UNKNOWN' ||
+        w4Blocker === 'W4_ZERO_CHARGE_CANARY_UNVERIFIED'
+      ? 'Codex：核對同一供應商的硬停止與零扣費收據；保持排程關閉'
+      : 'Codex：完成 W4 條件驗收並核對原生 Issue #407 收據';
+  records.push({ worker_id: 'W4', status: w4Status,
+    ...(w4Status === 'UNCONFIGURED' ? { configured: false } : {}),
+    blocker_code: w4Blocker, model_eligibility: 'UNKNOWN', next_owner: w4NextOwner });
   return records;
 }
 function operatorPublisherError(code, identity) {
@@ -979,7 +1014,8 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
       remote_commit: null, pull_request: null, ci: 'UNKNOWN',
     },
     workers: operatorPublisherStageValue('WORKER_RECORDS',
-      () => observationWorkerRecords(comments, config, workerLogin, mainSha, candidateSourceShas),
+      () => observationWorkerRecords(comments, config, workerLogin, mainSha, candidateSourceShas,
+        windows),
       publisherIdentity),
     github: {
       observed_at: observedAt, main_sha: mainSha,

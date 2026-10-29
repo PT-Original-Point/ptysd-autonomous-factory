@@ -990,6 +990,16 @@ test('W1 source acceptance is shown separately without upgrading the original Wo
   }
 });
 
+test('four worker cards stay in the worker grid and dispatch cards stay in their own grid', () => {
+  const workerGrid = html.match(/<section class="worker-grid"[\s\S]*?<\/section>/)?.[0] || '';
+  const dispatchGrid = html.match(/<section class="dispatch-grid"[\s\S]*?<\/section>/)?.[0] || '';
+  assert.equal((workerGrid.match(/class="panel worker-card"/g) || []).length, 4);
+  assert.deepEqual([...workerGrid.matchAll(/id="(w[1-4])-badge"/g)].map(match => match[1]),
+    ['w1','w2','w3','w4']);
+  assert.equal((dispatchGrid.match(/class="panel dispatch-card"/g) || []).length, 3);
+  assert.doesNotMatch(dispatchGrid, /class="panel worker-card"/);
+});
+
 test('dispatch layout uses two readable desktop columns, collapsible technical detail, and a compact W3 empty state', () => {
   assert.match(html, /\.dispatch-grid\s*\{[^}]*repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(html, /\.worker-title-line\s*\{[^}]*flex-wrap:\s*wrap/);
