@@ -1138,6 +1138,188 @@ test('W1 current additive reconciliation renders the exact merged result without
   assert.equal(mismatchedGoal.formalAcceptance,'UNKNOWN');
 });
 
+test('W1 additive source acceptance rejects independent identity, source, diff, check, path, and blob mutations', () => {
+  const requestId='W1_ADDITIVE_NEGATIVE_COVERAGE_20261029_7B3F2C9A';
+  const attemptId='4d7c1e29-8b3a-4f61-9c25-1a6e0b7d2f84';
+  const sourceSha='2c5e8a1f9b3d4e6c7a0f5b2d8e1a3c6f9d4b7e2a';
+  const workerDiff='9a3f6c1e4d7b2a5f8c0e3d6b9a2f5c8e1d4b7a0f3c6e9d2b5a8f1c4e7d0b3a6f';
+  const diffBytes=4821;
+  const sourcePr=703;
+  const resultPr=742;
+  const resultHead='5e0b3d8a1c6f4e9b2d7a0c5f8e3b6d1a4c9f2e7b';
+  const resultMerge='7d2a5f8e1b4c9d6a3f0e7b2c5a8d1f4e6b9c0a3d';
+  const blobSha='3a6c9f2e5b8d1a4c7f0e3b6d9a2c5f8e1b4d7a0c';
+  const jobCommentId=6512345001;
+  const receiptId=6512345002;
+  const reconciliationId=6512345003;
+  const sessionId='ses_5d8c2f1a9b7e3d6c4a0f8e2b6d9c1a5f';
+  const model='opencode/deepseek-v4.1-flash-free';
+  const changedFile='tests/operator-panel-api.test.mjs';
+  const jobCreatedAt='2026-11-01T08:00:00Z';
+  const receiptCreatedAt='2026-11-01T08:30:00Z';
+  const reconciliationCreatedAt='2026-11-01T09:00:00Z';
+  const now=Date.parse('2026-11-01T12:00:00Z');
+
+  const buildFixture=(resultNumber) => {
+    const job={schema:6,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+      request_id:requestId,kind:'opencode_edit',source_sha:sourceSha,
+      spec_path:'native-bridge/tasks/w1-additive-negative-coverage.md',
+      spec_sha256:'d'.repeat(64),model,variant:null,edit_paths:[changedFile],
+      source_pr:sourcePr,goal_comment_id:6188322050,goal_body_sha256:'c'.repeat(64)};
+    const jobComment={id:jobCommentId,user:{login:'t14210184'},created_at:jobCreatedAt,
+      body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job)};
+    const receipt={schema:1,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+      request_id:requestId,attempt_id:attemptId,state:'FINISHED',kind:'opencode_edit',
+      source_sha:sourceSha,outcome:'V2_EDIT_DIFF_CAPTURED_UNVERIFIED',model_invoked:true,
+      tool_execution_count:7,model,session_id:sessionId,diff_sha256:workerDiff,diff_bytes:diffBytes,
+      changed_files_count:1,external_effects:'UNKNOWN'};
+    const terminal={id:receiptId,user:{login:'t14210184'},created_at:receiptCreatedAt,
+      body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(receipt)};
+    const checks=`pr_${resultNumber}_checks=check-native-only=SUCCESS;` +
+      'csg-trusted-verifier-hosted=SUCCESS;v2-native-windows=SUCCESS;' +
+      'csg-trusted-verifier=PENDING_NOT_COUNTED_AS_PASS;bounded-driver-acceptance=SKIPPED';
+    const body=[
+      'PTYSD_V53R4_R2_EVIDENCE_RECONCILIATION_V1',
+      'record_type=ADDITIVE_CODEX_SOURCE_AND_DIFF_RECONCILIATION_NOT_NATIVE_WORKER_RECEIPT',
+      `repo=${repository}`,
+      'project_id=CHATGPT_GLOBAL_SKILL_GOVERNANCE',
+      'human_goal_comment_id=6188322050',
+      'W1_EDITFILE_TELEMETRY',
+      `request_id=${requestId}`,
+      `task_comment_id=${jobCommentId}`,
+      `attempt_id=${attemptId}`,
+      `source_pr=${sourcePr}`,
+      `source_head=${sourceSha}`,
+      `model=${model}`,
+      `session_id=${sessionId}`,
+      `worker_diff_sha256=${workerDiff}`,
+      `diff_sha256=${workerDiff}`,
+      `diff_bytes=${diffBytes}`,
+      `changed_files=${changedFile}`,
+      'changed_files_count=1',
+      'diff_reconciliation=PASS_ADDITIVE_NEGATIVE_COVERAGE',
+      'codex_review=PASS_ADDITIVE_NEGATIVE_COVERAGE',
+      `source_acceptance=ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR_${resultNumber}`,
+      'original_terminal_state=FINISHED_NOT_ACCEPTANCE',
+      `integration=PR_${resultNumber}_MERGED`,
+      `integration_commit=${resultMerge}`,
+      `pr_${resultNumber}_head=${resultHead}`,
+      checks,
+      `current_main_after_merge=${resultMerge}`,
+      `merged_file_blob=${changedFile}:${blobSha}`,
+      'focused_test=node --test tests/operator-panel-api.test.mjs;7_total;5_passed;0_failed;2_skipped',
+      'git_diff_check=PASS',
+      'worker_task_acceptance=UNKNOWN;external_effects=UNKNOWN',
+      'live_acceptance=NOT_CLAIMED',
+    ].join('\n');
+    const reconciliation={id:reconciliationId,user:{login:'t14210184'},
+      created_at:reconciliationCreatedAt,body};
+    const task={worker_id:'W1',task_id:requestId,task_kind:'opencode_edit',
+      task_source_sha:sourceSha,source_pr:sourcePr,task_comment_id:jobCommentId,
+      attempt_id:attemptId,task_state:'FINISHED_NOT_ACCEPTANCE',
+      code_changes:'DIFF_CAPTURED_UNVERIFIED',changed_files_count:1,diff_sha256:workerDiff,
+      task_acceptance:'UNKNOWN',external_effects:'UNKNOWN'};
+    const snapshot={workers:[task],native_worker:{latest_task:{request_id:requestId,
+      kind:'opencode_edit',source_pr:sourcePr,source_sha:sourceSha,state:'FINISHED_NOT_ACCEPTANCE'}}};
+    return {comments:[terminal,reconciliation],jobComment,snapshot,
+      resources:{dispatches:{W1:{data:jobComment}}},body,checks};
+  };
+
+  const cardFor=(fixture,comments=fixture.comments,resources=fixture.resources) =>
+    panel.dispatchCardData('W1',fixture.snapshot,comments,resources,{status:'UNKNOWN'},now,
+      {lifecycle:'MERGED',status:'MERGED'},[],null,false);
+  const replaceLine=(body,key,value) => body.split('\n').map(line =>
+    line.startsWith(key + '=') ? key + '=' + value : line).join('\n');
+  const removeLine=(body,key) => body.split('\n').filter(line =>
+    !line.startsWith(key + '=')).join('\n');
+
+  const fixture=buildFixture(resultPr);
+  const data=cardFor(fixture);
+  assert.ok(data.codexSourceAcceptance,
+    'the additive reconciliation is recognized only with the complete exact binding');
+  assert.equal(data.codexSourceAcceptance.status,'ACCEPTED');
+  assert.equal(data.codexSourceAcceptance.resultPr,resultPr);
+  assert.equal(data.codexSourceAcceptance.resultHead,resultHead);
+  assert.equal(data.codexSourceAcceptance.mergeCommit,resultMerge);
+  assert.equal(data.codexSourceAcceptance.sourcePr,sourcePr);
+  assert.equal(data.codexSourceAcceptance.sourceSha,sourceSha);
+  assert.equal(data.codexSourceAcceptance.requestId,requestId);
+  assert.equal(data.codexSourceAcceptance.attemptId,attemptId);
+  assert.equal(data.codexSourceAcceptance.workerDiffSha256,workerDiff);
+  assert.match(data.codexSourceAcceptance.checks,/check-native-only=SUCCESS/);
+  assert.match(data.codexSourceAcceptance.checks,/csg-trusted-verifier-hosted=SUCCESS/);
+  assert.match(data.codexSourceAcceptance.checks,/v2-native-windows=SUCCESS/);
+  assert.match(data.codexSourceAcceptance.focusedTest,/5_passed;0_failed;2_skipped/);
+  assert.equal(data.reconciliation.codexReview,'PASS_ADDITIVE_NEGATIVE_COVERAGE');
+  assert.equal(data.resultPr.number,resultPr);
+  assert.equal(data.workerTerminal,'FINISHED_NOT_ACCEPTANCE');
+  assert.equal(data.formalAcceptance,'UNKNOWN');
+  assert.equal(data.externalEffects,'UNKNOWN');
+  assert.equal(data.codexSourceAcceptance.liveAcceptance,'NOT_CLAIMED');
+  panel.renderDispatchCard('W1',data);
+  assert.match(domElements.get('w1-dispatch-codex-source-acceptance').textContent,
+    new RegExp(`PR #${resultPr} SOURCE_ACCEPTED`));
+  assert.match(domElements.get('w1-dispatch-result').textContent,
+    new RegExp(`結果 PR #${resultPr}`));
+  assert.equal(domElements.get('w1-dispatch-result-link').href,
+    `https://github.com/${repository}/pull/${resultPr}`);
+  assert.match(domElements.get('w1-dispatch-acceptance').textContent,/UNKNOWN/);
+
+  const otherFixture=buildFixture(resultPr + 29);
+  const otherData=cardFor(otherFixture);
+  assert.equal(otherData.codexSourceAcceptance.resultPr,resultPr + 29,
+    'the additive acceptance follows the fixture result PR instead of a fixed PR number');
+  assert.match(otherData.codexSourceAcceptance.label,
+    new RegExp(`PR #${resultPr + 29} SOURCE_ACCEPTED`));
+
+  const otherDiff='f'.repeat(64);
+  const mutations=[
+    ['request identity', body => replaceLine(body,'request_id',requestId + '_MISMATCH')],
+    ['task comment identity', body => replaceLine(body,'task_comment_id',String(jobCommentId + 1))],
+    ['attempt identity', body => replaceLine(body,'attempt_id','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')],
+    ['project identity', body => replaceLine(body,'project_id','CHATGPT_GLOBAL_SKILL_GOVERNANCE_ALT')],
+    ['GOAL identity', body => replaceLine(body,'human_goal_comment_id','6188322051')],
+    ['repository identity', body => replaceLine(body,'repo','other/project')],
+    ['source SHA', body => replaceLine(body,'source_head','e'.repeat(40))],
+    ['source PR', body => replaceLine(body,'source_pr',String(sourcePr + 1))],
+    ['worker diff SHA', body => replaceLine(
+      replaceLine(body,'worker_diff_sha256',otherDiff),'diff_sha256',otherDiff)],
+    ['worker diff byte count', body => replaceLine(body,'diff_bytes',String(diffBytes + 1))],
+    ['forged source acceptance', body => replaceLine(body,'source_acceptance',
+      `ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR_${resultPr + 1}`)],
+    ['integration versus result PR metadata', body => replaceLine(body,'integration',
+      `PR_${resultPr + 1}_MERGED`)],
+    ['failed required trusted check', body =>
+      body.replace('v2-native-windows=SUCCESS','v2-native-windows=FAILURE')],
+    ['missing required trusted check', body => body.replace(fixture.checks,
+      `pr_${resultPr}_checks=check-native-only=SUCCESS;v2-native-windows=SUCCESS;` +
+      'csg-trusted-verifier=PENDING_NOT_COUNTED_AS_PASS;bounded-driver-acceptance=SKIPPED')],
+    ['failed focused test summary', body => replaceLine(body,'focused_test',
+      'node --test tests/operator-panel-api.test.mjs;7_total;5_passed;1_failed;1_skipped')],
+    ['missing focused test summary', body => removeLine(body,'focused_test')],
+    ['failed Codex review', body => replaceLine(body,'codex_review','FAIL_ADDITIVE_NEGATIVE_COVERAGE')],
+    ['changed path outside pinned edit paths', body =>
+      replaceLine(body,'changed_files','native-bridge/worker.mjs')],
+    ['invalid merged blob identity', body =>
+      replaceLine(body,'merged_file_blob',`${changedFile}:not-a-blob`)],
+    ['missing merged blob identity', body => removeLine(body,'merged_file_blob')],
+  ];
+  for (const [label,mutate] of mutations) {
+    const mutatedBody=mutate(fixture.body);
+    assert.notEqual(mutatedBody,fixture.body,`${label} must change the valid additive fixture`);
+    const rejected=cardFor(fixture,fixture.comments.map(comment =>
+      comment.id === reconciliationId ? {...comment,body:mutatedBody} : comment));
+    assert.equal(rejected.codexSourceAcceptance,null,
+      `${label} must not be recognized as Codex source acceptance`);
+    assert.equal(rejected.workerTerminal,'FINISHED_NOT_ACCEPTANCE',
+      `${label} must preserve the original Worker terminal`);
+    assert.equal(rejected.formalAcceptance,'UNKNOWN',
+      `${label} must preserve Worker task_acceptance=UNKNOWN`);
+    assert.equal(rejected.externalEffects,'UNKNOWN',
+      `${label} must preserve external_effects=UNKNOWN`);
+  }
+});
+
 test('dispatch layout uses two readable desktop columns, collapsible technical detail, and a compact W3 empty state', () => {
   assert.match(html, /\.dispatch-grid\s*\{[^}]*repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(html, /\.worker-title-line\s*\{[^}]*flex-wrap:\s*wrap/);
