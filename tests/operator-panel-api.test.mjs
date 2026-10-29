@@ -6,6 +6,8 @@ import { TextEncoder } from 'node:util';
 import { runInNewContext } from 'node:vm';
 
 const html = readFileSync(new URL('../operator-panel/index.html', import.meta.url), 'utf8');
+const v2QualificationWorkflow = readFileSync(
+  new URL('../.github/workflows/v53r4-v2-cli-qualification.yml', import.meta.url), 'utf8');
 const inlineScript = html.match(/<script>\s*([\s\S]*?)<\/script>/i)?.[1];
 assert.ok(inlineScript, 'operator panel inline module exists');
 const windowObject = { __PTYSD_TEST__: true };
@@ -1160,11 +1162,12 @@ test('W1 additive source acceptance rejects independent identity, source, diff, 
   const reconciliationCreatedAt='2026-11-01T09:00:00Z';
   const now=Date.parse('2026-11-01T12:00:00Z');
 
-  const buildFixture=(resultNumber) => {
+  const buildFixture=(resultNumber, changedFilePath=changedFile,
+    v2Status='v2-native-windows=NOT_APPLICABLE_PATH_FILTERED') => {
     const job={schema:6,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
       request_id:requestId,kind:'opencode_edit',source_sha:sourceSha,
       spec_path:'native-bridge/tasks/w1-additive-negative-coverage.md',
-      spec_sha256:'d'.repeat(64),model,variant:null,edit_paths:[changedFile],
+      spec_sha256:'d'.repeat(64),model,variant:null,edit_paths:[changedFilePath],
       source_pr:sourcePr,goal_comment_id:6188322050,goal_body_sha256:'c'.repeat(64)};
     const jobComment={id:jobCommentId,user:{login:'t14210184'},created_at:jobCreatedAt,
       body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job)};
@@ -1176,7 +1179,7 @@ test('W1 additive source acceptance rejects independent identity, source, diff, 
     const terminal={id:receiptId,user:{login:'t14210184'},created_at:receiptCreatedAt,
       body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(receipt)};
     const checks=`pr_${resultNumber}_checks=check-native-only=SUCCESS;` +
-      'csg-trusted-verifier-hosted=SUCCESS;v2-native-windows=SUCCESS;' +
+      `csg-trusted-verifier-hosted=SUCCESS;${v2Status};` +
       'csg-trusted-verifier=PENDING_NOT_COUNTED_AS_PASS;bounded-driver-acceptance=SKIPPED';
     const body=[
       'PTYSD_V53R4_R2_EVIDENCE_RECONCILIATION_V1',
@@ -1195,7 +1198,7 @@ test('W1 additive source acceptance rejects independent identity, source, diff, 
       `worker_diff_sha256=${workerDiff}`,
       `diff_sha256=${workerDiff}`,
       `diff_bytes=${diffBytes}`,
-      `changed_files=${changedFile}`,
+      `changed_files=${changedFilePath}`,
       'changed_files_count=1',
       'diff_reconciliation=PASS_ADDITIVE_NEGATIVE_COVERAGE',
       'codex_review=PASS_ADDITIVE_NEGATIVE_COVERAGE',
@@ -1206,7 +1209,7 @@ test('W1 additive source acceptance rejects independent identity, source, diff, 
       `pr_${resultNumber}_head=${resultHead}`,
       checks,
       `current_main_after_merge=${resultMerge}`,
-      `merged_file_blob=${changedFile}:${blobSha}`,
+      `merged_file_blob=${changedFilePath}:${blobSha}`,
       'focused_test=node --test tests/operator-panel-api.test.mjs;7_total;5_passed;0_failed;2_skipped',
       'git_diff_check=PASS',
       'worker_task_acceptance=UNKNOWN;external_effects=UNKNOWN',
@@ -1248,7 +1251,7 @@ test('W1 additive source acceptance rejects independent identity, source, diff, 
   assert.equal(data.codexSourceAcceptance.workerDiffSha256,workerDiff);
   assert.match(data.codexSourceAcceptance.checks,/check-native-only=SUCCESS/);
   assert.match(data.codexSourceAcceptance.checks,/csg-trusted-verifier-hosted=SUCCESS/);
-  assert.match(data.codexSourceAcceptance.checks,/v2-native-windows=SUCCESS/);
+  assert.match(data.codexSourceAcceptance.checks,/v2-native-windows=NOT_APPLICABLE_PATH_FILTERED/);
   assert.match(data.codexSourceAcceptance.focusedTest,/5_passed;0_failed;2_skipped/);
   assert.equal(data.reconciliation.codexReview,'PASS_ADDITIVE_NEGATIVE_COVERAGE');
   assert.equal(data.resultPr.number,resultPr);
@@ -1264,6 +1267,35 @@ test('W1 additive source acceptance rejects independent identity, source, diff, 
   assert.equal(domElements.get('w1-dispatch-result-link').href,
     `https://github.com/${repository}/pull/${resultPr}`);
   assert.match(domElements.get('w1-dispatch-acceptance').textContent,/UNKNOWN/);
+
+  const nativePathFixture=buildFixture(resultPr + 31,'native-bridge/v2-readiness.mjs',
+    'v2-native-windows=SUCCESS');
+  assert.ok(panel.validSchema6DispatchComment(nativePathFixture.jobComment),
+    'native workflow scope is a valid schema-6 task path');
+  const nativePathData=cardFor(nativePathFixture);
+  assert.ok(nativePathData.codexSourceAcceptance,
+    'a change covered by the V2 workflow requires its successful exact-head check');
+  assert.equal(nativePathData.codexSourceAcceptance.status,'ACCEPTED');
+  assert.match(nativePathData.codexSourceAcceptance.checks,/v2-native-windows=SUCCESS/);
+  const nativePathWithoutCheck=buildFixture(resultPr + 32,'native-bridge/v2-readiness.mjs',
+    'v2-native-windows=NOT_APPLICABLE_PATH_FILTERED');
+  assert.equal(cardFor(nativePathWithoutCheck).codexSourceAcceptance,null,
+    'a V2 workflow path cannot be exempted as path-filtered');
+  const filteredPathWithoutMarker=buildFixture(resultPr + 33,changedFile,'');
+  assert.equal(cardFor(filteredPathWithoutMarker).codexSourceAcceptance,null,
+    'an excluded path still requires an explicit non-applicable marker');
+  const filteredPathWithContradictoryChecks=buildFixture(resultPr + 34,changedFile,
+    'v2-native-windows=NOT_APPLICABLE_PATH_FILTERED;v2-native-windows=SUCCESS');
+  assert.equal(cardFor(filteredPathWithContradictoryChecks).codexSourceAcceptance,null,
+    'conflicting V2 status markers are rejected');
+
+  const panelFilterBlock=html.match(/const V2_NATIVE_WORKFLOW_PATH_FILTERS = \[([\s\S]*?)\];/);
+  assert.ok(panelFilterBlock,'panel declares the V2 workflow filter contract');
+  const panelFilters=[...panelFilterBlock[1].matchAll(/'([^']+)'/g)].map(match => match[1]);
+  const workflowFilters=[...v2QualificationWorkflow.matchAll(/^\s{6}- '([^']+)'$/gm)]
+    .map(match => match[1]);
+  assert.deepEqual(panelFilters,workflowFilters,
+    'the panel applicability rules stay aligned with the actual workflow path filters');
 
   const otherFixture=buildFixture(resultPr + 29);
   const otherData=cardFor(otherFixture);
@@ -1290,9 +1322,9 @@ test('W1 additive source acceptance rejects independent identity, source, diff, 
     ['integration versus result PR metadata', body => replaceLine(body,'integration',
       `PR_${resultPr + 1}_MERGED`)],
     ['failed required trusted check', body =>
-      body.replace('v2-native-windows=SUCCESS','v2-native-windows=FAILURE')],
+      body.replace('csg-trusted-verifier-hosted=SUCCESS','csg-trusted-verifier-hosted=FAILURE')],
     ['missing required trusted check', body => body.replace(fixture.checks,
-      `pr_${resultPr}_checks=check-native-only=SUCCESS;v2-native-windows=SUCCESS;` +
+      `pr_${resultPr}_checks=check-native-only=SUCCESS;v2-native-windows=NOT_APPLICABLE_PATH_FILTERED;` +
       'csg-trusted-verifier=PENDING_NOT_COUNTED_AS_PASS;bounded-driver-acceptance=SKIPPED')],
     ['failed focused test summary', body => replaceLine(body,'focused_test',
       'node --test tests/operator-panel-api.test.mjs;7_total;5_passed;1_failed;1_skipped')],

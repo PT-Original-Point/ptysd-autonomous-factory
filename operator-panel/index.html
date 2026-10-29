@@ -418,6 +418,20 @@
   const ACCEPTANCE_MARKER = 'PTYSD_V53R4_W2_PANEL_ACCEPTANCE_V1\n';
   const W1_SOURCE_ACCEPTANCE_MARKER = 'PTYSD_V53R4_R6_W1_SOURCE_ACCEPTANCE_AFTER_MERGE_V1';
   const W1_PATCH_IDENTITY_MARKER = 'PTYSD_V53R4_R6_W1_SOURCE_PATCH_BYTE_IDENTITY_RECONCILIATION_V1';
+  const V2_NATIVE_WORKFLOW_PATH_FILTERS = [
+    'native-bridge/**',
+    'tests/native-bridge.test.mjs',
+    'tests/native-worker-install-bundle.test.mjs',
+    'tests/native-worker-runtime-refresh.test.ps1',
+    'tests/opencode-v2.test.mjs',
+    'tests/v2-readiness.test.mjs',
+    'tests/v2-cli-contract-smoke.mjs',
+    'tests/v2-config-source-smoke.mjs',
+    'tests/v2-provider-policy-deny-smoke.mjs',
+    'tests/v2-permission-evaluator-windows.mjs',
+    'package.json',
+    '.github/workflows/v53r4-v2-cli-qualification.yml',
+  ];
   const DIRECT_CLI_DELIVERY_MARKER = 'PTYSD_W2_DIRECT_CLI_DELIVERY_V1\n';
   const HISTORICAL_ATTEMPT_ID = '24331e45-62db-4f55-ad40-87776a799c5d';
   const DIRECT_CLI_COMMENT_ID = 6438594849;
@@ -1955,11 +1969,17 @@
       const testPassed=Number(testCounts?.[2]);
       const testSkipped=Number(testCounts?.[3]);
       const testsValid=Boolean(testCounts) && testTotal === testPassed + testSkipped;
+      const v2NativeApplies=changedFiles.some(path => V2_NATIVE_WORKFLOW_PATH_FILTERS.some(filter =>
+        filter.endsWith('/**') ? path.startsWith(filter.slice(0,-3) + '/') : path === filter));
+      const expectedV2Check=v2NativeApplies
+        ? 'v2-native-windows=SUCCESS' : 'v2-native-windows=NOT_APPLICABLE_PATH_FILTERED';
+      const v2CheckEntries=[...checkSet].filter(value => value.startsWith('v2-native-windows='));
+      const v2CheckValid=v2CheckEntries.length === 1 && v2CheckEntries[0] === expectedV2Check;
       const changesValid=Number.isSafeInteger(changedFilesCount) && changedFilesCount > 0 &&
         changedFilesCount === changedFiles.length && changedFiles.every(path => allowedFiles.includes(path)) &&
         changedFiles.every(path => /^[a-f0-9]{40}$/.test(mergedBlobs.get(path) || ''));
-      const checksValid=['check-native-only=SUCCESS','csg-trusted-verifier-hosted=SUCCESS',
-        'v2-native-windows=SUCCESS'].every(value => checkSet.has(value));
+      const checksValid=['check-native-only=SUCCESS','csg-trusted-verifier-hosted=SUCCESS']
+        .every(value => checkSet.has(value)) && v2CheckValid;
       if (reconciliationId > receiptId && reconciliation.metadata?.repo === REPO &&
           reconciliation.metadata?.project_id === PROJECT &&
           String(reconciliation.metadata?.human_goal_comment_id || '') === String(job.goal_comment_id) &&
