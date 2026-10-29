@@ -690,6 +690,56 @@ test('closed candidate PR is reported as non-dispatchable with its observed SHA'
   } finally { fixture.cleanup(); }
 });
 
+test('candidate edit jobs remain source-pinned after an exact official PR merge', async () => {
+  const host = hostname().toUpperCase();
+  const sourceSha = 'c'.repeat(40), mergeSha = 'e'.repeat(40);
+  const candidate = withHumanGoal({ schema: 6, project_id: PROJECT, host,
+    request_id: 'PTYSD_MERGED_EDIT_PR_SOURCE_20261021', kind: 'antigravity_edit',
+    source_sha: sourceSha, spec_path: 'native-bridge/tasks/w2-quota-canary.md',
+    spec_sha256: hash, model: ANTIGRAVITY_V2_MODEL, variant: 'high',
+    edit_paths: ['src/w2-quota-canary.mjs'], source_pr: 461 });
+  const comment = { ...com(10, encoded(candidate), 't14210184'),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+  const repo = { id: 1352411536, full_name: REPO };
+  const mergedPull = { number: 461, state: 'closed', merged: true,
+    merged_at: '2026-10-21T12:00:00Z', merge_commit_sha: mergeSha,
+    base: { ref: 'main', repo }, head: { sha: sourceSha, repo } };
+  const goal = humanGoalComment();
+  const logs = [];
+  const comments = [comment];
+  const mergedSources = await readPinnedCandidateSources(comments, ['t14210184'], 'worker', host,
+    path => path.endsWith('/6188322050') ? goal : mergedPull,
+    message => logs.push(message), [], () => [goal]);
+  assert.equal(mergedSources.get(461), sourceSha,
+    'a verified merge keeps the exact PR head available as the pinned task source');
+  assert.equal(selectNext(comments, ['t14210184'], 'worker', host,
+    'f'.repeat(40), [], mergedSources)?.job.request_id, candidate.request_id);
+
+  const unmergedLogs = [];
+  const closedUnmerged = await readPinnedCandidateSources(comments, ['t14210184'], 'worker', host,
+    path => path.endsWith('/6188322050') ? goal : { ...mergedPull, merged: false,
+      merged_at: null, merge_commit_sha: null },
+    message => unmergedLogs.push(message), [], () => [goal]);
+  assert.equal(closedUnmerged.size, 0,
+    'a closed PR without GitHub merge evidence remains non-dispatchable');
+  assert.ok(unmergedLogs.includes(`CANDIDATE_SOURCE_NOT_DISPATCHABLE_${candidate.request_id}_PR_461_` +
+    `REASON_PR_NOT_OPEN_EXPECTED_SHA_${sourceSha}_OBSERVED_SHA_${sourceSha}_NO_DISPATCH`));
+
+  const missingMergeEvidence = await readPinnedCandidateSources(comments, ['t14210184'], 'worker', host,
+    path => path.endsWith('/6188322050') ? goal : { ...mergedPull, merged_at: null },
+    undefined, [], () => [goal]);
+  assert.equal(missingMergeEvidence.size, 0,
+    'the merged flag alone is insufficient without timestamp and merge SHA readback');
+
+  const changedHead = await readPinnedCandidateSources(comments, ['t14210184'], 'worker', host,
+    path => path.endsWith('/6188322050') ? goal : { ...mergedPull,
+      head: { ...mergedPull.head, sha: 'd'.repeat(40) } },
+    undefined, [], () => [goal]);
+  assert.equal(selectNext(comments, ['t14210184'], 'worker', host,
+    'f'.repeat(40), [], changedHead), null,
+  'merge acceptance does not weaken exact PR-head SHA binding');
+});
+
 test('an unresolved W2 STARTED attempt is not replayed after its pinned source drifts', () => {
   const host = 'DESKTOP-1B6PD2P';
   const w2Job = withHumanGoal({ schema: 6, project_id: PROJECT, host,

@@ -411,12 +411,18 @@ function resolvedAttemptState(comments, started, workerLogin) {
 function candidatePullRequestSourceStatus(job, pull) {
   const repositoryName = REPO.toLowerCase();
   const observedSha = SHA.test(pull?.head?.sha || '') ? pull.head.sha.toLowerCase() : null;
+  const mergedSource = pull?.state === 'closed' && pull.merged === true &&
+    typeof pull.merged_at === 'string' && pull.merged_at.length > 0 &&
+    SHA.test(pull.merge_commit_sha || '');
   let reason = null;
   if (!([5, 6].includes(job?.schema) && Number.isSafeInteger(job?.source_pr)))
     reason = 'JOB_SOURCE_BINDING_INVALID';
   else if (!pull || typeof pull !== 'object') reason = 'PR_READBACK_INVALID';
   else if (pull.number !== job.source_pr) reason = 'PR_NUMBER_MISMATCH';
-  else if (pull.state !== 'open') reason = 'PR_NOT_OPEN';
+  // A queued task may survive until its exact source PR is merged. Permit that
+  // immutable source only when GitHub supplies closed-merge evidence; closed,
+  // unmerged PRs remain ineligible.
+  else if (pull.state !== 'open' && !mergedSource) reason = 'PR_NOT_OPEN';
   else if (pull.base?.ref !== 'main') reason = 'BASE_NOT_MAIN';
   else if (pull.base?.repo?.id !== OFFICIAL_REPOSITORY_ID) reason = 'BASE_REPOSITORY_ID_MISMATCH';
   else if (pull.head?.repo?.id !== OFFICIAL_REPOSITORY_ID) reason = 'HEAD_REPOSITORY_ID_MISMATCH';
