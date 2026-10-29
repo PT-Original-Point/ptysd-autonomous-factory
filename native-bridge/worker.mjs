@@ -358,8 +358,8 @@ function hasIsolatedW2ScopedEditDiff(receipt, job) {
     Number.isSafeInteger(fileToolEvents) &&
     validAntigravityFileChangeTargetEvidence(targets) &&
     targets.status === 'CANDIDATE_ROOT_ONLY' && targets.tool_count > 0 &&
-    targets.target_count === targets.tool_count &&
-    targets.candidate_root_count === targets.tool_count &&
+    targets.target_count > 0 &&
+    targets.candidate_root_count === targets.target_count &&
     targets.registered_root_count === 0 && targets.outside_or_unknown_root_count === 0 &&
     targets.relative_or_unknown_root_count === 0 && targets.unidentified_tool_count === 0 &&
     fileToolEvents === targets.tool_count &&

@@ -844,6 +844,60 @@ test('a terminal W2 candidate-root-only diff releases only the W2 same-path writ
     'a complete, isolated W2 diff frees the path lease without accepting the prior task');
 });
 
+test('a terminal W2 multi-target candidate-root-only diff releases the same-path writer lease', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = commit;
+  const makeEdit = requestId => withHumanGoal({
+    schema: 6, project_id: PROJECT, host, request_id: requestId, kind: 'antigravity_edit',
+    source_sha: sourceSha, spec_path: 'native-bridge/tasks/w2-panel.md', spec_sha256: hash,
+    model: ANTIGRAVITY_V2_MODEL, variant: 'high',
+    edit_paths: ['operator-panel/index.html'], source_pr: 461,
+  });
+  const prior = makeEdit('PTYSD_W2_PRIOR_MULTI_TARGET_ISOLATED_DIFF');
+  const nextW2 = makeEdit('PTYSD_W2_NEXT_MULTI_TARGET_ISOLATED_DIFF');
+  const isolatedReceipt = receipt(prior.request_id,
+    '55555555-5555-4555-8555-555555555556', 'BLOCKED', prior, {
+      model_invoked: true,
+      session_id: '66666666-6666-4666-8666-666666666667',
+      external_effects: 'UNKNOWN',
+      source_diff_evidence: 'CAPTURED',
+      task_acceptance: 'UNKNOWN',
+      coding_state: 'DIFF_CAPTURED_UNVERIFIED',
+      scope_valid: true,
+      diff_sha256: 'c'.repeat(64),
+      diff_bytes: 18413,
+      changed_files: ['operator-panel/index.html'],
+      tool_execution_evidence: 'OBSERVED',
+      tool_execution_count: 64,
+      file_change_tool_evidence: 'OBSERVED',
+      file_change_tool_completed_count: 19,
+      file_change_tool_failed_count: 4,
+      file_change_tool_incomplete_count: 0,
+      file_change_target_evidence: {
+        status: 'CANDIDATE_ROOT_ONLY', tool_count: 23, target_count: 27,
+        candidate_root_count: 27, registered_root_count: 0,
+        outside_or_unknown_root_count: 0, relative_or_unknown_root_count: 0,
+        unidentified_tool_count: 0,
+      },
+      permission_mode_evidence: 'REQUEST_REVIEW_CONFIRMED',
+      tool_policy_evidence: 'W2_NONFILE_ACTIONS_DENIED',
+      cli_binary_integrity_evidence: 'MATCHED',
+      forbidden_tool_execution_evidence: 'NOT_OBSERVED',
+    });
+  const comments = [
+    { ...com(801, encoded(prior)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    { ...com(802, encoded(nextW2)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(803, RECEIPT_MARKER + JSON.stringify(isolatedReceipt), 'worker'),
+  ];
+  assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(isolatedReceipt)));
+  assert.equal(isolatedReceipt.external_effects, 'UNKNOWN');
+  assert.equal(isolatedReceipt.task_acceptance, 'UNKNOWN');
+  const next = selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[461, sourceSha]]));
+  assert.equal(next?.id, 802,
+    'verified multi-target candidate-root evidence frees the same-path W2 lease');
+});
+
 test('candidate-root lease release fails closed for mixed targets and other Worker lanes', () => {
   const host = 'DESKTOP-1B6PD2P';
   const sourceSha = commit;
