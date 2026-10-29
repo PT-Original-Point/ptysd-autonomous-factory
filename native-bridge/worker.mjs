@@ -317,6 +317,12 @@ function hasBlockingRequestReceipt(entries) {
   }
   return false;
 }
+function receiptMayBlockReplay(login, workerLogin, dispatchers) {
+  // A trusted dispatcher may have published an earlier native Worker receipt
+  // before the local GitHub CLI identity changed. Count it only as a replay
+  // blocker; Worker acceptance and live activity remain tied to workerLogin.
+  return login === workerLogin || dispatchers.includes(login);
+}
 function hasRequestBoundScopedEditDiff(receipt, job) {
   // Schema-1 terminals written before source_diff_evidence was introduced can
   // still prove a complete, request-bound diff through their scope, digest,
@@ -450,7 +456,7 @@ function staleCandidateSourceEntries(comments, dispatchers, workerLogin, host, c
         { job, body: comment.body, id: comment.id, duplicate: false });
       else if (jobs.get(job.request_id).body !== comment.body) jobs.get(job.request_id).duplicate = true;
     }
-    if (login === workerLogin) {
+    if (receiptMayBlockReplay(login, workerLogin, dispatchers)) {
       const receipt = parseReceipt(comment.body);
       if (receipt) {
         if (!receipts.has(receipt.request_id)) receipts.set(receipt.request_id, []);
@@ -606,7 +612,7 @@ export async function readPinnedCandidateSources(comments, dispatchers, workerLo
         { job, body: comment.body, duplicate: false });
       else if (jobs.get(job.request_id).body !== comment.body) jobs.get(job.request_id).duplicate = true;
     }
-    if (login === workerLogin) {
+    if (receiptMayBlockReplay(login, workerLogin, dispatchers)) {
       const receipt = parseReceipt(comment.body);
       if (receipt) {
         if (!receipts.has(receipt.request_id)) receipts.set(receipt.request_id, []);
@@ -688,7 +694,7 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
       else if (jobs.get(j.request_id).content !== c.body) jobs.get(j.request_id).duplicate = true;
     }
     const r = parseReceipt(c.body);
-    if (r && login === workerLogin) {
+    if (r && receiptMayBlockReplay(login, workerLogin, dispatchers)) {
       if (!receipts.has(r.request_id)) receipts.set(r.request_id, []);
       receipts.get(r.request_id).push({ id: c.id, receipt: r });
     }
