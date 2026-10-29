@@ -21,13 +21,19 @@ const SENSITIVE_VALUE = /(?:\b[A-Z]:\\|\\\\[^\\\s]+\\|\bgh[pousr]_[A-Za-z0-9_]{2
 const DEPLOYED_RUNTIME_FILES = [
   'worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs', 'codex-continuation.mjs',
   'antigravity-quota.mjs',
-  'operator-observation.mjs', 'captured-process.mjs', 'safe-error-code.mjs', 'windows-executor.mjs',
+  'operator-observation.mjs', 'captured-process.mjs', 'safe-error-code.mjs', 'executor.mjs',
+  'windows-executor.mjs',
 ];
 const PREVIOUS_DEPLOYED_RUNTIME_FILES = [
   'worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs', 'codex-continuation.mjs',
-  'operator-observation.mjs', 'captured-process.mjs', 'safe-error-code.mjs', 'windows-executor.mjs',
+  'antigravity-quota.mjs', 'operator-observation.mjs', 'captured-process.mjs',
+  'safe-error-code.mjs', 'windows-executor.mjs',
 ];
 const LEGACY_DEPLOYED_RUNTIME_FILES = [
+  'worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs', 'codex-continuation.mjs',
+  'operator-observation.mjs', 'captured-process.mjs', 'safe-error-code.mjs', 'windows-executor.mjs',
+];
+const EARLIEST_LEGACY_DEPLOYED_RUNTIME_FILES = [
   'worker.mjs', 'operator-observation.mjs', 'codex-continuation.mjs', 'safe-error-code.mjs',
 ];
 const SHA1 = /^[a-f0-9]{40}$/i;
@@ -73,7 +79,8 @@ function normalizeLegacyRuntimeDeployment(value) {
   const deployment = value.runtime_deployment;
   if (!object(deployment) || !object(deployment.component_sha256)) return value;
   const componentNames = Object.keys(deployment.component_sha256).sort();
-  const previousSets = [PREVIOUS_DEPLOYED_RUNTIME_FILES, LEGACY_DEPLOYED_RUNTIME_FILES]
+  const previousSets = [PREVIOUS_DEPLOYED_RUNTIME_FILES, LEGACY_DEPLOYED_RUNTIME_FILES,
+    EARLIEST_LEGACY_DEPLOYED_RUNTIME_FILES]
     .map(names => [...names].sort());
   const isPreviousSet = previousSets.some(names => componentNames.length === names.length &&
     componentNames.every((name, index) => name === names[index]));

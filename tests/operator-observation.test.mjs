@@ -78,6 +78,19 @@ test('operator snapshot rejects malformed source main SHA but keeps legacy snaps
   assert.equal(migratedRuntime.runtime_deployment.reason_code, 'RUNTIME_FILES_UNAVAILABLE');
   assert.equal(migratedRuntime.runtime_deployment.component_sha256['antigravity-quota.mjs'], null);
 
+  const priorExecutorRuntimeFiles = [...priorRuntimeFiles, 'antigravity-quota.mjs'];
+  const priorExecutorRuntime = observation({ runtime_deployment: {
+    status: 'MANIFEST_MATCHED', observed_at: new Date(now).toISOString(),
+    source_main_sha: 'a'.repeat(40), deployment_pr: 462, deployment_pr_head: 'b'.repeat(40),
+    bundle_sha256: 'c'.repeat(64),
+    component_sha256: Object.fromEntries(priorExecutorRuntimeFiles.map(name => [name, 'd'.repeat(64)])),
+  } });
+  const migratedExecutorRuntime = parseOperatorObservation(
+    OPERATOR_MARKER + JSON.stringify(priorExecutorRuntime));
+  assert.equal(migratedExecutorRuntime.runtime_deployment.status, 'UNKNOWN',
+    'a manifest that omitted the shared Executor cannot attest the refreshed runtime');
+  assert.equal(migratedExecutorRuntime.runtime_deployment.component_sha256['executor.mjs'], null);
+
   const legacySource = { ...observation().source };
   delete legacySource.main_sha;
   const legacy = observation({ source: legacySource });
@@ -1025,7 +1038,8 @@ test('browser renderer shows exact-head 3/1/1 checks and fails closed on API err
         'codex-continuation.mjs':'f'.repeat(64),'safe-error-code.mjs':'1'.repeat(64),
         'opencode-v2.mjs':'2'.repeat(64),'v2-readiness.mjs':'3'.repeat(64),
         'antigravity-quota.mjs':'6'.repeat(64),
-        'captured-process.mjs':'4'.repeat(64),'windows-executor.mjs':'5'.repeat(64)}},
+        'captured-process.mjs':'4'.repeat(64),'executor.mjs':'7'.repeat(64),
+        'windows-executor.mjs':'5'.repeat(64)}},
   });
   const comments=[{id:42,body:encodeOperatorObservation(snapshot),
     user:{login:'wfvupu1212'},created_at:observedAt,
@@ -1182,7 +1196,7 @@ async function publishReceiptProjection(rows, { enableAntigravityModelRuns, enab
   comments.unshift(obsComment);
   const runtimeFiles = ['worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs',
     'antigravity-quota.mjs', 'codex-continuation.mjs', 'operator-observation.mjs', 'captured-process.mjs',
-    'safe-error-code.mjs', 'windows-executor.mjs'];
+    'safe-error-code.mjs', 'executor.mjs', 'windows-executor.mjs'];
   const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
     enable_v2_model_runs: enableV2ModelRuns,
     enable_antigravity_model_runs: enableAntigravityModelRuns,
