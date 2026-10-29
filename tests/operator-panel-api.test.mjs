@@ -996,6 +996,111 @@ test('W1 source acceptance is shown separately without upgrading the original Wo
   }
 });
 
+test('W1 current additive reconciliation renders the exact merged result without upgrading Worker acceptance', () => {
+  const requestId='W1_SCHEMA6_GOAL_ROUTE_ISOLATION_20261029_4E8C3F80D2A44F859644D1EAA79E592B';
+  const attemptId='66843969-4669-4b80-8a3b-ae16d640fc74';
+  const sourceSha='f396f33915cc4a264deaa780260ca8a857562a04';
+  const workerDiff='87e91957261f2548a5c768beee48ada5e7af227affeda9a4e562746e67c35d80';
+  const resultHead='bd809b9b4df42176632e5510443fc20c8cf21cc6';
+  const resultMerge='3f3ff87a263a6b770bbe57e55e49ed126dfd1ffc';
+  const jobCommentId=6485401935;
+  const receiptId=6485617466;
+  const reconciliationId=6485843644;
+  const job={schema:6,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+    request_id:requestId,kind:'opencode_edit',source_sha:sourceSha,
+    spec_path:'native-bridge/tasks/w1-schema6-codex-claim-independence.md',
+    spec_sha256:'3eb5db201e77460d2b70a69b9a72cd2042f4b1311c46100284e82fcdfea97e29',
+    model:'opencode/deepseek-v4.1-flash-free',variant:null,
+    edit_paths:['tests/native-bridge.test.mjs'],source_pr:605,
+    goal_comment_id:6188322050,
+    goal_body_sha256:'2f1829da0e1f5105a384be03904b2289c57c05e8a44215c4824fb6b8631d8f7b'};
+  const jobComment={id:jobCommentId,user:{login:'t14210184'},created_at:'2026-10-29T01:30:32Z',
+    body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job)};
+  const receipt={schema:1,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+    request_id:requestId,attempt_id:attemptId,state:'FINISHED',kind:'opencode_edit',source_sha:sourceSha,
+    outcome:'V2_EDIT_DIFF_CAPTURED_UNVERIFIED',model_invoked:true,tool_execution_count:48,
+    model:'opencode/deepseek-v4.1-flash-free',session_id:'ses_e7aacddf2ffe8A1pX0K75fOSc2',
+    diff_sha256:workerDiff,diff_bytes:3399,changed_files_count:1,external_effects:'UNKNOWN'};
+  const terminal={id:receiptId,user:{login:'t14210184'},created_at:'2026-10-29T01:47:34Z',
+    body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(receipt)};
+  const reconciliation={id:reconciliationId,user:{login:'t14210184'},created_at:'2026-10-29T02:14:04Z',
+    body:[
+      'PTYSD_V53R4_R2_EVIDENCE_RECONCILIATION_V1',
+      'record_type=ADDITIVE_CODEX_SOURCE_AND_DIFF_RECONCILIATION_NOT_NATIVE_WORKER_RECEIPT',
+      'repo=PT-Original-Point/ptysd-autonomous-factory',
+      'project_id=CHATGPT_GLOBAL_SKILL_GOVERNANCE',
+      'human_goal_comment_id=6188322050',
+      'W1_EDITFILE_TELEMETRY',`request_id=${requestId}`,`task_comment_id=${jobCommentId}`,
+      `attempt_id=${attemptId}`,'source_pr=605',`source_head=${sourceSha}`,
+      'model=opencode/deepseek-v4.1-flash-free','session_id=ses_e7aacddf2ffe8A1pX0K75fOSc2',
+      `worker_diff_sha256=${workerDiff}`,'diff_sha256='+workerDiff,'diff_bytes=3399',
+      'changed_files=tests/native-bridge.test.mjs','changed_files_count=1',
+      'diff_reconciliation=PASS_WORKER_PATCH_MATCHES_MERGED_PR_AFTER_NORMALIZING_STANDARD_GIT_INDEX_ABBREVIATION',
+      'codex_review=PASS_SCHEMA4_GUARD_RETAINED_AND_SCHEMA6_OPENCode_ROUTE_REMAINS_ELIGIBLE',
+      'source_acceptance=ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR_606',
+      'original_terminal_state=FINISHED_NOT_ACCEPTANCE','integration=PR_606_MERGED',
+      `integration_commit=${resultMerge}`,`pr_606_head=${resultHead}`,
+      'pr_606_checks=check-native-only=SUCCESS;csg-trusted-verifier-hosted=SUCCESS;v2-native-windows=SUCCESS;csg-trusted-verifier=PENDING_NOT_COUNTED_AS_PASS;bounded-driver-acceptance=SKIPPED',
+      `current_main_after_merge=${resultMerge}`,
+      'merged_file_blob=tests/native-bridge.test.mjs:6a022df74791c8b8765fcbe4d6fb6bceb94bb268',
+      'focused_test=node --test tests/native-bridge.test.mjs;75_total;72_passed;0_failed;3_skipped',
+      'git_diff_check=PASS','worker_task_acceptance=UNKNOWN;external_effects=UNKNOWN',
+      'live_acceptance=NOT_CLAIMED',
+    ].join('\n')};
+  const task={worker_id:'W1',task_id:requestId,task_kind:'opencode_edit',task_source_sha:sourceSha,
+    source_pr:605,task_comment_id:jobCommentId,attempt_id:attemptId,
+    task_state:'FINISHED_NOT_ACCEPTANCE',code_changes:'DIFF_CAPTURED_UNVERIFIED',
+    changed_files_count:1,diff_sha256:workerDiff,task_acceptance:'UNKNOWN',external_effects:'UNKNOWN'};
+  const snapshot={workers:[task],native_worker:{latest_task:{request_id:requestId,
+    kind:'opencode_edit',source_pr:605,source_sha:sourceSha,state:'FINISHED_NOT_ACCEPTANCE'}}};
+  const comments=[terminal,reconciliation];
+  const resources={dispatches:{W1:{data:jobComment}}};
+  const now=Date.parse('2026-10-30T00:00:00Z');
+  const data=panel.dispatchCardData('W1',snapshot,comments,resources,{status:'UNKNOWN'},now,
+    {lifecycle:'MERGED',status:'MERGED'},[],null,false);
+
+  assert.ok(data.codexSourceAcceptance,
+    'the current exact #407 reconciliation is recognized as Codex source acceptance');
+  assert.equal(data.codexSourceAcceptance.status,'ACCEPTED');
+  assert.equal(data.codexSourceAcceptance.acceptanceCommentId,reconciliationId);
+  assert.equal(data.codexSourceAcceptance.patchIdentityCommentId,null,
+    'the current additive reconciliation has no separate byte-identity comment');
+  assert.equal(data.codexSourceAcceptance.resultPr,606);
+  assert.equal(data.codexSourceAcceptance.resultHead,resultHead);
+  assert.equal(data.codexSourceAcceptance.mergeCommit,resultMerge);
+  assert.equal(data.workerTerminal,'FINISHED_NOT_ACCEPTANCE');
+  assert.equal(data.formalAcceptance,'UNKNOWN');
+  assert.equal(data.externalEffects,'UNKNOWN');
+  assert.equal(data.codexSourceAcceptance.liveAcceptance,'NOT_CLAIMED');
+  panel.renderDispatchCard('W1',data);
+  assert.match(domElements.get('w1-dispatch-codex-source-acceptance').textContent,/PR #606 SOURCE_ACCEPTED/);
+  assert.match(domElements.get('w1-dispatch-codex-source-acceptance').textContent,/PENDING_NOT_COUNTED_AS_PASS/);
+  assert.match(domElements.get('w1-dispatch-acceptance').textContent,/UNKNOWN/);
+
+  const rejectedBodies=[
+    reconciliation.body.replace('v2-native-windows=SUCCESS','v2-native-windows=FAILURE'),
+    reconciliation.body.replace('0_failed;3_skipped','1_failed;2_skipped'),
+    reconciliation.body.replace(requestId,requestId+'_MISMATCH'),
+    reconciliation.body.replace('repo=PT-Original-Point/ptysd-autonomous-factory','repo=other/project'),
+    reconciliation.body.replace('human_goal_comment_id=6188322050','human_goal_comment_id=6188322051'),
+    reconciliation.body.replace('worker_task_acceptance=UNKNOWN;external_effects=UNKNOWN',
+      'worker_task_acceptance=ACCEPTED;external_effects=UNKNOWN'),
+    reconciliation.body.replace('changed_files=tests/native-bridge.test.mjs',
+      'changed_files=native-bridge/worker.mjs'),
+    reconciliation.body.replace('6a022df74791c8b8765fcbe4d6fb6bceb94bb268','not-a-blob'),
+  ];
+  for (const body of rejectedBodies) {
+    const rejected=panel.dispatchCardData('W1',snapshot,comments.map(comment =>
+      comment.id === reconciliationId ? {...comment,body} : comment),resources,
+      {status:'UNKNOWN'},now,{lifecycle:'MERGED',status:'MERGED'},[],null,false);
+    assert.equal(rejected.codexSourceAcceptance,null,
+      'a failed trusted check, failed test, mismatched request, upgraded Worker claim, or invalid main blob is rejected');
+    assert.equal(rejected.workerTerminal,'FINISHED_NOT_ACCEPTANCE');
+    assert.equal(rejected.formalAcceptance,'UNKNOWN');
+    assert.equal(rejected.externalEffects,'UNKNOWN');
+  }
+});
+
 test('dispatch layout uses two readable desktop columns, collapsible technical detail, and a compact W3 empty state', () => {
   assert.match(html, /\.dispatch-grid\s*\{[^}]*repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(html, /\.worker-title-line\s*\{[^}]*flex-wrap:\s*wrap/);
