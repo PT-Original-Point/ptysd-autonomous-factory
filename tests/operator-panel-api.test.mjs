@@ -2093,11 +2093,12 @@ test('W2 source acceptance binds the exact blocked attempt, diff, result PR, and
     head:{sha:'453ab048718632b1cf94ba885858b3eb272b1a84',
       repo:{id:1352411536,full_name:'PT-Original-Point/ptysd-autonomous-factory'}},
   };
+  const trustedActionsApp={id:15368,slug:'github-actions',name:'GitHub Actions'};
   const resultChecks={check_runs:[
     {id:901,name:'check-native-only',head_sha:'453ab048718632b1cf94ba885858b3eb272b1a84',
-      status:'completed',conclusion:'success'},
+      status:'completed',conclusion:'success',app:trustedActionsApp},
     {id:902,name:'csg-trusted-verifier-hosted',head_sha:'453ab048718632b1cf94ba885858b3eb272b1a84',
-      status:'completed',conclusion:'success'},
+      status:'completed',conclusion:'success',app:trustedActionsApp},
   ]};
   const issueComments=[
     {id:6493900836,user:{login:'t14210184'},
@@ -2296,9 +2297,10 @@ test('W2 additive FINISHED acceptance supports the canonical fields and reads an
     head:{sha:resultHead,
       repo:{id:1352411536,full_name:'PT-Original-Point/ptysd-autonomous-factory'}},
   };
+  const trustedActionsApp={id:15368,slug:'github-actions',name:'GitHub Actions'};
   const resultChecks={check_runs:[
-    {id:40904904767,name:'check-native-only',head_sha:resultHead,status:'completed',conclusion:'success'},
-    {id:40904904738,name:'csg-trusted-verifier-hosted',head_sha:resultHead,status:'completed',conclusion:'success'},
+    {id:40904904767,name:'check-native-only',head_sha:resultHead,status:'completed',conclusion:'success',app:trustedActionsApp},
+    {id:40904904738,name:'csg-trusted-verifier-hosted',head_sha:resultHead,status:'completed',conclusion:'success',app:trustedActionsApp},
   ]};
   const issueComments=[
     {id:6505800965,user:{login:'t14210184'},body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(receipt)},
@@ -2319,6 +2321,22 @@ test('W2 additive FINISHED acceptance supports the canonical fields and reads an
   assert.match(domElements.get('w2-native-acceptance').textContent,/結果 PR #645 OPEN_HEAD_ONLY/);
   assert.match(domElements.get('w2-native-acceptance').textContent,/Worker task_acceptance=UNKNOWN/);
   assert.match(domElements.get('w2-native-acceptance').textContent,/external_effects=UNKNOWN/);
+
+  const mergedAfterHead=panel.w2EvidenceData(goalComments,issueComments,'e'.repeat(40),goalIdentity,true,true,
+    {requestId,attemptId},{...resultPull,state:'closed',merged:true,merged_at:'2026-10-30T03:30:00Z',
+      merge_commit_sha:'d'.repeat(40)},resultChecks);
+  assert.equal(mergedAfterHead.native.codexAcceptance.sourceAcceptance.result_pr_state,
+    'MERGED_AFTER_HEAD_ACCEPTANCE');
+  assert.equal(mergedAfterHead.native.codexAcceptance.sourceAcceptance.merge_commit,'d'.repeat(40));
+  assert.equal(mergedAfterHead.native.codexAcceptance.sourceAcceptance.main_readback,null,
+    'a PR merge commit is not presented as a current main ref readback');
+
+  const wrongCheckApp=panel.w2EvidenceData(goalComments,issueComments,head,goalIdentity,true,true,
+    {requestId,attemptId},resultPull,{check_runs:resultChecks.check_runs.map(run=>
+      run.name==='csg-trusted-verifier-hosted'
+        ? {...run,app:{id:999999,slug:'untrusted-app',name:'Untrusted App'}} : run)});
+  assert.equal(wrongCheckApp.native.codexAcceptance,null,
+    'a same-named successful check from a different GitHub App cannot satisfy trusted CI');
 
   const rejected=body=>panel.w2EvidenceData(goalComments,[issueComments[0],
     {...sourceComment,body}],head,goalIdentity,true,true,{requestId,attemptId},resultPull,resultChecks)

@@ -785,7 +785,9 @@
     const verified=[];
     for (const name of required) {
       const runs=checkData.check_runs.filter(run => run?.name === name &&
-        safeSha(run.head_sha)?.toLowerCase() === head)
+        safeSha(run.head_sha)?.toLowerCase() === head &&
+        Number(run?.app?.id) === 15368 && run?.app?.slug === 'github-actions' &&
+        run?.app?.name === 'GitHub Actions')
         .sort((a,b)=>(Number(a.id)||0)-(Number(b.id)||0));
       const latest=runs.at(-1);
       if (!latest || latest.status !== 'completed' || latest.conclusion !== 'success') return null;
@@ -884,7 +886,7 @@
         result_pr:resultPr, result_head:resultHead,
         result_pr_state:blockedTerminal ? 'MERGED' : (pullMerged ? 'MERGED_AFTER_HEAD_ACCEPTANCE' : 'OPEN_HEAD_ONLY'),
         merge_commit:blockedTerminal ? mergeCommit : (pullMerged ? pullMerge : null),
-        main_readback:blockedTerminal ? mainReadback : (pullMerged ? pullMerge : null),
+        main_readback:blockedTerminal ? mainReadback : null,
         result_base_sha:resultBaseSha,
         exact_head_checks:exactChecks.join('; '),
         result_checks:verifiedChecks,
@@ -3192,7 +3194,7 @@
       const source = codex?.sourceAcceptance;
       const sourceSummary = source
         ? ` · Diff SHA-256=${source.diff_sha256} · 結果 PR #${source.result_pr} ${source.result_pr_state} · ` +
-          `head ${source.result_head} · ${source.merge_commit ? 'merge ' + source.merge_commit + ' · main readback ' + source.main_readback : 'merge ' + (source.runtime_deployment === 'NOT_PERFORMED' ? 'NOT_PERFORMED' : 'UNKNOWN') + ' · runtime ' + (source.runtime_deployment || 'UNKNOWN')} · ` +
+          `head ${source.result_head} · ${source.merge_commit ? 'merge ' + source.merge_commit + ' · main readback ' + (source.main_readback || 'UNKNOWN') : 'merge ' + (source.runtime_deployment === 'NOT_PERFORMED' ? 'NOT_PERFORMED' : 'UNKNOWN') + ' · runtime ' + (source.runtime_deployment || 'UNKNOWN')} · ` +
           `收據 checks ${source.exact_head_checks} · GitHub 精確 HEAD checks ${source.result_checks} · legacy ${source.legacy_check} · ` +
           `測試 ${source.source_test}`
         : '';
