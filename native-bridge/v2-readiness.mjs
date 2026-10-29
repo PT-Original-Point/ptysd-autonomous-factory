@@ -251,7 +251,15 @@ export function antigravityV2ReadinessExecutionFailure(readiness) {
     return 'ANTIGRAVITY_PROJECT_SCOPE_UNVERIFIED';
   if (!readiness || readiness.status !== 'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH' ||
       readiness.model !== ANTIGRAVITY_V2_MODEL || readiness.signature_verified !== true ||
-      !Array.isArray(readiness.issues))
+      !Array.isArray(readiness.issues) ||
+      readiness.inference_executed !== false ||
+      readiness.credential_values_collected !== false ||
+      !readiness.model_catalog || typeof readiness.model_catalog !== 'object' ||
+      Array.isArray(readiness.model_catalog) ||
+      readiness.model_catalog.status !== 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT' ||
+      readiness.model_catalog.pinned_model_cataloged !== true ||
+      (readiness.model_catalog.catalog_count !== undefined && (!Number.isInteger(readiness.model_catalog.catalog_count) || readiness.model_catalog.catalog_count <= 0)) ||
+      (readiness.model_catalog.catalog_sha256 !== undefined && (typeof readiness.model_catalog.catalog_sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(readiness.model_catalog.catalog_sha256))))
     return 'ANTIGRAVITY_CLI_NOT_QUALIFIED';
   if (!['EFFECTIVE_CONFIG_VERIFIED_NO_MODEL', 'DOCUMENTED_CLI_SETTINGS_NO_G1_OVERRIDE']
     .includes(readiness.effective_config_evidence))
@@ -666,7 +674,8 @@ export function runAntigravityV2Readiness(bin, directory, runner = runAntigravit
   try {
     const models = metadataText(runner(bin, [...projectArgs, 'models'], options));
     result.model_catalog = summarizeAntigravityV2Models(models);
-    if (!result.model_catalog.pinned_model_cataloged)
+    if (!result.model_catalog.pinned_model_cataloged ||
+        result.model_catalog.status !== 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT')
       result.issues.push('PINNED_MODEL_NOT_CONFIRMED_IN_CATALOG');
   } catch {
     result.model_catalog = { status: 'MODEL_LIST_UNAVAILABLE', catalog_count: null,
@@ -698,7 +707,11 @@ export function runAntigravityV2Readiness(bin, directory, runner = runAntigravit
     result.model_flag_supported && result.add_dir_flag_supported && result.sandbox_flag_supported &&
     result.mode_flag_supported && result.accept_edits_mode_supported &&
     (!projectArgs.length || result.project_flag_supported);
-  if (result.version && flagsConfirmed && result.model_catalog?.pinned_model_cataloged === true)
+  if (result.version && flagsConfirmed &&
+      result.model_catalog?.pinned_model_cataloged === true &&
+      result.model_catalog?.status === 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT' &&
+      result.inference_executed === false &&
+      result.credential_values_collected === false)
     result.status = 'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH';
   else if (result.issues.length) result.status = 'METADATA_QUALIFICATION_INCOMPLETE';
   return result;

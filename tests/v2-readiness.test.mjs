@@ -464,6 +464,10 @@ test('Antigravity metadata readiness requires explicit no-G1 setting and leaves 
     effective_config_evidence: 'EFFECTIVE_CONFIG_VERIFIED_NO_MODEL',
     credit_fallback_setting: 'CREDIT_FALLBACK_DISABLED', authentication_checked: true,
     authentication_evidence: 'AUTHENTICATED_QUOTA_READ', tool_policy_evidence: 'W2_NONFILE_ACTIONS_DENIED',
+    inference_executed: false, credential_values_collected: false,
+    model_catalog: { status: 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT', pinned_model_cataloged: true,
+      catalog_count: 2, catalog_sha256: createHash('sha256').update('gemini-3.8-flash-high').digest('hex') },
+    entitlement: 'UNKNOWN', cost: 'UNKNOWN',
     gemini_aggregate_quota: { status: 'GEMINI_AGGREGATE_QUOTA_READ',
       source: 'GEMINI_MODELS_AGGREGATE', weekly_remaining_percent: 95,
       five_hour_remaining_percent: 99 } };
@@ -492,6 +496,183 @@ test('Antigravity metadata readiness requires explicit no-G1 setting and leaves 
   assert.equal(antigravityV2ReadinessExecutionFailure({...ready,
     gemini_aggregate_quota:{...ready.gemini_aggregate_quota,weekly_remaining_percent:null}}),
   'ANTIGRAVITY_AGGREGATE_QUOTA_UNKNOWN');
+});
+
+test('Antigravity execution failure rejects absent, malformed, mismatched, and false model_catalog', () => {
+  const ready = { status: 'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH',
+    model: 'gemini-3.8-flash-high', signature_verified: true, issues: [],
+    project_scope_evidence: 'PROJECT_WORKSPACE_MATCHED',
+    effective_config_evidence: 'EFFECTIVE_CONFIG_VERIFIED_NO_MODEL',
+    credit_fallback_setting: 'CREDIT_FALLBACK_DISABLED', authentication_checked: true,
+    authentication_evidence: 'AUTHENTICATED_QUOTA_READ', tool_policy_evidence: 'W2_NONFILE_ACTIONS_DENIED',
+    inference_executed: false, credential_values_collected: false,
+    model_catalog: { status: 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT', pinned_model_cataloged: true,
+      catalog_count: 2, catalog_sha256: createHash('sha256').update('gemini-3.8-flash-high').digest('hex') },
+    entitlement: 'UNKNOWN', cost: 'UNKNOWN',
+    gemini_aggregate_quota: { status: 'GEMINI_AGGREGATE_QUOTA_READ',
+      source: 'GEMINI_MODELS_AGGREGATE', weekly_remaining_percent: 95,
+      five_hour_remaining_percent: 99 } };
+
+  assert.equal(antigravityV2ReadinessExecutionFailure(ready), null);
+
+  // 1. Absent model_catalog
+  assert.equal(antigravityV2ReadinessExecutionFailure({ ...ready, model_catalog: null }),
+    'ANTIGRAVITY_CLI_NOT_QUALIFIED');
+  assert.equal(antigravityV2ReadinessExecutionFailure({ ...ready, model_catalog: undefined }),
+    'ANTIGRAVITY_CLI_NOT_QUALIFIED');
+  const { model_catalog: _omittedCatalog, ...withoutCatalog } = ready;
+  assert.equal(antigravityV2ReadinessExecutionFailure(withoutCatalog),
+    'ANTIGRAVITY_CLI_NOT_QUALIFIED');
+
+  // 2. Malformed model_catalog
+  for (const malformed of [
+    'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT',
+    123,
+    true,
+    false,
+    [],
+    ['gemini-3.8-flash-high'],
+    {},
+    { status: 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT' },
+    { pinned_model_cataloged: true },
+    { status: 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT', pinned_model_cataloged: true, catalog_count: -1 },
+    { status: 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT', pinned_model_cataloged: true, catalog_count: 0 },
+    { status: 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT', pinned_model_cataloged: true, catalog_count: '2' },
+    { status: 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT', pinned_model_cataloged: true, catalog_sha256: 'invalid-sha' },
+    { status: 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT', pinned_model_cataloged: true, catalog_sha256: 123 },
+  ]) {
+    assert.equal(antigravityV2ReadinessExecutionFailure({ ...ready, model_catalog: malformed }),
+      'ANTIGRAVITY_CLI_NOT_QUALIFIED',
+      `malformed model_catalog ${JSON.stringify(malformed)} must fail qualification`);
+  }
+
+  // 3. Mismatched status
+  for (const mismatchedStatus of [
+    'PINNED_MODEL_NOT_CATALOGED',
+    'MODEL_LIST_UNAVAILABLE',
+    'MODEL_CATALOG_UNRECOGNIZED',
+    'MODEL_LIST_OVERSIZED_OR_INVALID',
+    'PUBLIC_CATALOG_IDS_PARSED_NOT_USABLE_PROOF',
+    'UNKNOWN_STATUS',
+  ]) {
+    assert.equal(antigravityV2ReadinessExecutionFailure({
+      ...ready,
+      model_catalog: { ...ready.model_catalog, status: mismatchedStatus },
+    }), 'ANTIGRAVITY_CLI_NOT_QUALIFIED', `mismatched status ${mismatchedStatus} must fail qualification`);
+  }
+
+  // 4. False or non-boolean pinned_model_cataloged
+  for (const invalidPinned of [false, 'true', 1, 0, null, undefined]) {
+    assert.equal(antigravityV2ReadinessExecutionFailure({
+      ...ready,
+      model_catalog: { ...ready.model_catalog, pinned_model_cataloged: invalidPinned },
+    }), 'ANTIGRAVITY_CLI_NOT_QUALIFIED', `non-true pinned_model_cataloged (${invalidPinned}) must fail qualification`);
+  }
+});
+
+test('Antigravity execution failure requires inference_executed and credential_values_collected to be exactly false', () => {
+  const ready = { status: 'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH',
+    model: 'gemini-3.8-flash-high', signature_verified: true, issues: [],
+    project_scope_evidence: 'PROJECT_WORKSPACE_MATCHED',
+    effective_config_evidence: 'EFFECTIVE_CONFIG_VERIFIED_NO_MODEL',
+    credit_fallback_setting: 'CREDIT_FALLBACK_DISABLED', authentication_checked: true,
+    authentication_evidence: 'AUTHENTICATED_QUOTA_READ', tool_policy_evidence: 'W2_NONFILE_ACTIONS_DENIED',
+    inference_executed: false, credential_values_collected: false,
+    model_catalog: { status: 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT', pinned_model_cataloged: true,
+      catalog_count: 2, catalog_sha256: createHash('sha256').update('gemini-3.8-flash-high').digest('hex') },
+    entitlement: 'UNKNOWN', cost: 'UNKNOWN',
+    gemini_aggregate_quota: { status: 'GEMINI_AGGREGATE_QUOTA_READ',
+      source: 'GEMINI_MODELS_AGGREGATE', weekly_remaining_percent: 95,
+      five_hour_remaining_percent: 99 } };
+
+  // Negative cases for inference_executed
+  for (const nonFalse of [true, 'false', null, undefined, 0, 1, {}, []]) {
+    assert.equal(antigravityV2ReadinessExecutionFailure({ ...ready, inference_executed: nonFalse }),
+      'ANTIGRAVITY_CLI_NOT_QUALIFIED',
+      `inference_executed: ${JSON.stringify(nonFalse)} must fail qualification`);
+  }
+  const { inference_executed: _omittedInference, ...withoutInference } = ready;
+  assert.equal(antigravityV2ReadinessExecutionFailure(withoutInference),
+    'ANTIGRAVITY_CLI_NOT_QUALIFIED', 'omitted inference_executed must fail qualification');
+
+  // Negative cases for credential_values_collected
+  for (const nonFalse of [true, 'false', null, undefined, 0, 1, {}, []]) {
+    assert.equal(antigravityV2ReadinessExecutionFailure({ ...ready, credential_values_collected: nonFalse }),
+      'ANTIGRAVITY_CLI_NOT_QUALIFIED',
+      `credential_values_collected: ${JSON.stringify(nonFalse)} must fail qualification`);
+  }
+  const { credential_values_collected: _omittedCreds, ...withoutCreds } = ready;
+  assert.equal(antigravityV2ReadinessExecutionFailure(withoutCreds),
+    'ANTIGRAVITY_CLI_NOT_QUALIFIED', 'omitted credential_values_collected must fail qualification');
+
+  // Both non-false
+  assert.equal(antigravityV2ReadinessExecutionFailure({
+    ...ready,
+    inference_executed: true,
+    credential_values_collected: true,
+  }), 'ANTIGRAVITY_CLI_NOT_QUALIFIED');
+});
+
+test('Antigravity preflight keeps entitlement and cost UNKNOWN and leaks no raw details', () => {
+  const ready = { status: 'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH',
+    model: 'gemini-3.8-flash-high', signature_verified: true, issues: [],
+    project_scope_evidence: 'PROJECT_WORKSPACE_MATCHED',
+    effective_config_evidence: 'EFFECTIVE_CONFIG_VERIFIED_NO_MODEL',
+    credit_fallback_setting: 'CREDIT_FALLBACK_DISABLED', authentication_checked: true,
+    authentication_evidence: 'AUTHENTICATED_QUOTA_READ', tool_policy_evidence: 'W2_NONFILE_ACTIONS_DENIED',
+    inference_executed: false, credential_values_collected: false,
+    model_catalog: { status: 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT', pinned_model_cataloged: true,
+      catalog_count: 2, catalog_sha256: createHash('sha256').update('gemini-3.8-flash-high').digest('hex') },
+    entitlement: 'UNKNOWN', cost: 'UNKNOWN',
+    gemini_aggregate_quota: { status: 'GEMINI_AGGREGATE_QUOTA_READ',
+      source: 'GEMINI_MODELS_AGGREGATE', weekly_remaining_percent: 95,
+      five_hour_remaining_percent: 99 } };
+
+  // Positive readback passes with no execution failure
+  assert.equal(antigravityV2ReadinessExecutionFailure(ready), null);
+  assert.equal(ready.entitlement, 'UNKNOWN');
+  assert.equal(ready.cost, 'UNKNOWN');
+  assert.equal(ready.inference_executed, false);
+  assert.equal(ready.credential_values_collected, false);
+
+  // Return value is strictly an existing safe reason code, never exposing internals
+  const failureReason = antigravityV2ReadinessExecutionFailure({ ...ready, model_catalog: null });
+  assert.equal(failureReason, 'ANTIGRAVITY_CLI_NOT_QUALIFIED');
+  assert.equal(typeof failureReason, 'string');
+  assert.ok(/^[A-Z0-9_]+$/.test(failureReason), 'failure reason must be an existing safe code format');
+});
+
+test('Antigravity readiness fails qualification when pinned model is absent from model catalog', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'pty-agy-missing-model-'));
+  const settingsDir = join(profile, '.gemini', 'antigravity-cli');
+  mkdirSync(settingsDir, { recursive: true });
+  writeFileSync(join(settingsDir, 'settings.json'), JSON.stringify({
+    useG1Credits: false,
+    permissions: { deny: ['command(*)', 'unsandboxed(*)', 'read_url(*)', 'execute_url(*)', 'mcp(*)'] },
+  }));
+  const help = '--project --add-dir --print --output-format stream-json --model --effort --sandbox --mode accept-edits';
+  const runner = (_bin, args) => {
+    const rest = args[0] === `--project=${testProjectId}` ? args.slice(1) : args;
+    if (rest[0] === '--version') return '1.4.2';
+    if (rest[0] === '--help') return help;
+    if (rest[0] === 'models') return 'gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n';
+    if (rest[0] === '--print' && rest[1] === '/usage') return validAntigravityUsage;
+    throw new Error('Unexpected command');
+  };
+  try {
+    writeAntigravityProject(profile, testProjectId, process.cwd());
+    const result = runAntigravityV2Readiness(process.execPath, process.cwd(), runner,
+      { USERPROFILE: profile, PATH: 'clean' }, () => true, testProjectId);
+    assert.equal(result.model_catalog.status, 'PINNED_MODEL_NOT_CATALOGED');
+    assert.equal(result.model_catalog.pinned_model_cataloged, false);
+    assert.equal(result.inference_executed, false);
+    assert.equal(result.credential_values_collected, false);
+    assert.equal(result.entitlement, 'UNKNOWN');
+    assert.equal(result.cost, 'UNKNOWN');
+    assert.equal(antigravityV2ReadinessExecutionFailure(result), 'ANTIGRAVITY_CLI_NOT_QUALIFIED');
+  } finally {
+    rmSync(profile, { recursive: true, force: true });
+  }
 });
 
 test('Antigravity readiness reads only the bounded credit flag and keeps cost UNKNOWN', () => {
