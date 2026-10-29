@@ -2276,3 +2276,189 @@ test('completed W2 antigravity_edit attempt is not executed again after executor
     f.dispose();
   }
 });
+
+test('completed W1 opencode_edit attempt is not executed again after executor task relaunch', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler executor lifecycle is Windows-only');
+  const f = fixture();
+  const attemptId = '00000000-0000-4000-8000-000000000101';
+  let source;
+  try {
+    source = sourceRepository(f.root, 'opencode-restart-recovery');
+    const specPath = 'native-bridge/tasks/w1-opencode-executor-restart-no-replay.md';
+    const specFile = join(source.workspace, 'native-bridge', 'tasks',
+      'w1-opencode-executor-restart-no-replay.md');
+    mkdirSync(join(source.workspace, 'native-bridge', 'tasks'), { recursive: true });
+    writeFileSync(specFile,
+      'Synthetic W1 one-shot restart recovery; no model or provider invocation is permitted.',
+      { flag: 'wx' });
+    const specBytes = readFileSync(specFile);
+    const spec = specBytes.toString('utf8');
+    source.git(['add', '--', specPath]);
+    source.git(['commit', '--quiet', '-m', 'pin synthetic W1 task spec']);
+    source.sourceSha = source.git(['rev-parse', 'HEAD']).trim();
+    const job = {
+      ...modelJob(spec),
+      schema: 6,
+      request_id: 'PTYSD_OPENCODE_ONE_SHOT_RECOVERY_20261029',
+      kind: 'opencode_edit',
+      source_sha: source.sourceSha,
+      spec_path: specPath,
+      spec_sha256: createHash('sha256').update(specBytes).digest('hex'),
+      edit_paths: ['README.md'],
+      source_pr: 635,
+      goal_comment_id: 6188322050,
+      goal_body_sha256: 'c'.repeat(64),
+    };
+    const bundle = createExecutorSourceBundle({
+      workspace: source.workspace,
+      descriptor: f.descriptor,
+      job,
+      attemptId,
+      filesystemPath: localPathMap(f),
+    });
+    const pendingPath = join(f.manifestDir, `${attemptId}.pending.json`);
+    writeFileSync(pendingPath, JSON.stringify(
+      makeExecutorManifest(job, spec, attemptId, bundle.sha256)), { flag: 'wx' });
+
+    const sourceHeadBefore = source.git(['rev-parse', 'HEAD']).trim();
+    const sourceTreeBefore = source.git(['ls-tree', '-r', '--full-tree', 'HEAD']).trim();
+    const sourceStatusBefore = source.git(['status', '--porcelain=v1', '--untracked-files=all']).trim();
+    const sourceReadmeBefore = readFileSync(join(source.workspace, 'README.md'));
+    let executeCalls = 0;
+    let captured;
+    const config = {
+      project_id: PROJECT,
+      repo: REPO,
+      host: hostname().toUpperCase(),
+      executor_runtime: {
+        user_sid: EXECUTOR_SID,
+        publisher_sid: PUBLISHER_SID,
+        manifest_dir: f.manifestDir,
+        results_dir: f.resultsDir,
+      },
+      workspace: source.workspace,
+      state_dir: f.resultsDir,
+      enable_v2_model_runs: true,
+    };
+
+    const firstResult = await executePendingManifest({
+      manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID,
+      filesystemPath: localPathMap(f),
+      config,
+      execute: async (_receivedSpec, executionConfig, receivedJob, receivedAttemptId) => {
+        executeCalls++;
+        assert.equal(receivedJob.schema, 6);
+        assert.equal(receivedJob.kind, 'opencode_edit');
+        assert.equal(receivedJob.request_id, job.request_id);
+        assert.equal(receivedAttemptId, attemptId);
+        assert.notEqual(executionConfig.workspace, source.workspace,
+          'candidate edits remain outside the registered source checkout');
+        assert.equal(executionConfig.workspace, candidateWorkspacePath(f.resultsDir, attemptId));
+        assert.equal(execFileSync('git', ['-C', executionConfig.workspace, 'rev-parse', 'HEAD'], {
+          encoding: 'utf8', windowsHide: true, shell: false,
+        }).trim(), sourceHeadBefore);
+
+        writeFileSync(join(executionConfig.workspace, 'README.md'),
+          'pinned source fixture with synthetic W1 edit\n');
+        captured = await captureScopedEditDiff({
+          workspace: executionConfig.workspace,
+          state_dir: f.resultsDir,
+          job,
+          attempt_id: attemptId,
+        });
+        assert.equal(captured.scope_valid, true);
+        assert.deepEqual(captured.changed_files, ['README.md']);
+
+        return {
+          outcome: 'SYNTHETIC_OPENCODE_EDIT_RESULT_NOT_ACCEPTANCE',
+          exit_code: 0,
+          scope_valid: captured.scope_valid,
+          diff_sha256: captured.sha256,
+          diff_bytes: captured.bytes,
+          changed_files: captured.changed_files,
+          model_invoked: false,
+          external_effects: 'UNKNOWN',
+          task_acceptance: 'UNKNOWN',
+          local_evidence: {
+            edit_diff: {
+              file: captured.file,
+              sha256: captured.sha256,
+              bytes: captured.bytes,
+              changed_files: captured.changed_files,
+              allowed_paths: ['README.md'],
+              scope_valid: captured.scope_valid,
+              execution_source: 'SYNTHETIC_TEST_STUB',
+            },
+          },
+        };
+      },
+    });
+
+    assert.equal(executeCalls, 1, 'first synthetic execution consumes the attempt once');
+    assert.equal(firstResult.terminal_state, 'FINISHED');
+    assert.equal(firstResult.outcome, 'EXECUTOR_RESULT_PERSISTED_NOT_SEMANTIC_ACCEPTANCE');
+    assert.equal(existsSync(pendingPath), false, 'pending manifest is consumed');
+    const runningPath = join(f.manifestDir, `${attemptId}.running.json`);
+    assert.equal(existsSync(runningPath), true, 'running marker persists for reconciliation');
+
+    const resultPath = executorResultPath(f.resultsDir, job.request_id, attemptId);
+    assert.equal(firstResult.result_path, resultPath);
+    assert.equal(existsSync(resultPath), true, 'completed attempt result is persisted');
+    const saved = JSON.parse(readFileSync(resultPath, 'utf8'));
+    assert.equal(saved.request_id, job.request_id);
+    assert.equal(saved.attempt_id, attemptId);
+    assert.equal(saved.terminal.state, 'FINISHED');
+    assert.equal(saved.terminal.outcome, 'SYNTHETIC_OPENCODE_EDIT_RESULT_NOT_ACCEPTANCE');
+    assert.equal(saved.terminal.kind, 'opencode_edit');
+    assert.equal(saved.terminal.source_sha, sourceHeadBefore);
+    assert.equal(saved.terminal.diff_sha256, captured.sha256);
+    assert.equal(saved.terminal.diff_bytes, captured.bytes);
+    assert.equal(saved.terminal.changed_files_count, 1);
+    assert.equal(saved.terminal.model_invoked, false,
+      'the synthetic stub is not represented as a real model invocation');
+    assert.equal(saved.terminal.task_acceptance, 'UNKNOWN');
+
+    const runningBytesBefore = readFileSync(runningPath);
+    const resultBytesBefore = readFileSync(resultPath);
+    const secondResult = await executePendingManifest({
+      manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID,
+      filesystemPath: localPathMap(f),
+      config,
+      execute: async () => {
+        executeCalls++;
+        throw new Error('must not re-execute completed W1 attempt');
+      },
+    });
+
+    assert.equal(secondResult.outcome, 'NO_PENDING_EXECUTOR_MANIFEST');
+    assert.equal(secondResult.exit_code, 0);
+    assert.equal(executeCalls, 1, 'relaunch does not invoke the execution stub again');
+    const activeAttempts = readdirSync(f.manifestDir).filter(name =>
+      /^[a-f0-9-]{36}\.(?:pending|running)\.json$/i.test(name));
+    assert.deepEqual(activeAttempts, [`${attemptId}.running.json`],
+      'relaunch creates no replacement attempt');
+    assert.deepEqual(readFileSync(runningPath), runningBytesBefore,
+      'the original running marker bytes are unchanged');
+    assert.deepEqual(readFileSync(resultPath), resultBytesBefore,
+      'the original result bytes are unchanged');
+
+    assert.equal(source.git(['rev-parse', 'HEAD']).trim(), sourceHeadBefore,
+      'registered source HEAD is unchanged');
+    assert.equal(source.git(['ls-tree', '-r', '--full-tree', 'HEAD']).trim(), sourceTreeBefore,
+      'registered source tree is unchanged');
+    assert.equal(source.git(['status', '--porcelain=v1', '--untracked-files=all']).trim(),
+      sourceStatusBefore, 'registered source status is unchanged');
+    assert.deepEqual(readFileSync(join(source.workspace, 'README.md')), sourceReadmeBefore,
+      'registered source file bytes are unchanged');
+  } finally {
+    if (source) {
+      try {
+        cleanupExecutorAttempt({ ...f.descriptor, manifest_dir: f.manifestDir,
+          results_dir: f.resultsDir }, attemptId);
+      } catch {}
+    }
+    f.dispose();
+  }
+});
