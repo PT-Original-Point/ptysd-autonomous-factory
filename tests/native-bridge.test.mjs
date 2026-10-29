@@ -2091,7 +2091,7 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
-test('a disabled W2 lane does not starve an independently eligible schema-6 W1 OpenCode edit', async () => {
+test('a disabled W2 lane does not starve a new W1 edit after a prior terminal W1 receipt', async () => {
   const root=mkdtempSync(join(homedir(),'.ptysd-w1-after-disabled-w2-test-'));
   try {
     const workspace=join(root,'workspace'),opencodeWorkspace=join(root,'opencode-workspace'),stateDir=join(root,'state');
@@ -2099,12 +2099,18 @@ test('a disabled W2 lane does not starve an independently eligible schema-6 W1 O
     mkdirSync(join(opencodeWorkspace,'src'),{recursive:true});
     const host=hostname().toUpperCase();
     const w2Spec='Synthetic W2 request that must remain queued without model execution.';
+    const priorW1Spec='A prior W1 request has a terminal receipt and must not be replayed.';
     const w1Spec='Edit only src/w1-after-disabled-w2.mjs for this synthetic task.';
     const w2Job=withHumanGoal({schema:6,project_id:PROJECT,host,
       request_id:'PTYSD_W2_DISABLED_BEFORE_W1_20261029',kind:'antigravity_edit',
       source_sha:commit,spec_path:'native-bridge/tasks/w2-before-w1.md',spec_sha256:h(w2Spec),
       model:ANTIGRAVITY_V2_MODEL,variant:'high',
       edit_paths:['src/w2-before-w1.mjs'],source_pr:448});
+    const priorW1Job=withHumanGoal({schema:6,project_id:PROJECT,host,
+      request_id:'PTYSD_W1_PREVIOUS_TERMINAL_BEFORE_NEXT_20261030',kind:'opencode_edit',
+      source_sha:commit,spec_path:'native-bridge/tasks/w1-prior-terminal.md',spec_sha256:h(priorW1Spec),
+      model:'opencode/deepseek-v4.1-flash-free',variant:'free',
+      edit_paths:['src/w1-prior-terminal.mjs'],source_pr:437});
     const w1Job=withHumanGoal({schema:6,project_id:PROJECT,host,
       request_id:'PTYSD_W1_AFTER_DISABLED_W2_20261029',kind:'opencode_edit',
       source_sha:commit,spec_path:'native-bridge/tasks/w1-after-w2.md',spec_sha256:h(w1Spec),
@@ -2112,9 +2118,19 @@ test('a disabled W2 lane does not starve an independently eligible schema-6 W1 O
       edit_paths:['src/w1-after-disabled-w2.mjs'],source_pr:437});
     const w2Comment={...com(410,encoded(w2Job),'t14210184'),
       issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
-    const w1Comment={...com(411,encoded(w1Job),'t14210184'),
+    const priorW1Comment={...com(411,encoded(priorW1Job),'t14210184'),
       issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
-    const comments=[w2Comment,w1Comment];
+    const priorW1Terminal=receipt(priorW1Job.request_id,
+      '88888888-8888-4888-8888-888888888888','FINISHED',priorW1Job,{
+        outcome:'V2_EDIT_DIFF_CAPTURED_UNVERIFIED',exit_code:0,model_invoked:true,
+        session_id:'77777777-7777-4777-8777-777777777777',external_effects:'UNKNOWN',
+        source_diff_evidence:'CAPTURED',task_acceptance:'UNKNOWN',
+        coding_state:'DIFF_CAPTURED_UNVERIFIED',scope_valid:true,
+        diff_sha256:'d'.repeat(64),diff_bytes:96,changed_files:['src/w1-prior-terminal.mjs']});
+    const priorW1ReceiptComment=com(412,RECEIPT_MARKER+JSON.stringify(priorW1Terminal),'worker');
+    const w1Comment={...com(413,encoded(w1Job),'t14210184'),
+      issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+    const comments=[w2Comment,priorW1Comment,priorW1ReceiptComment,w1Comment];
     const w1Executor=executorDescriptorForLane('OpenCode',1001);
     const w2Executor=executorDescriptorForLane('Antigravity',1003);
     const config={repo:REPO,project_id:PROJECT,host,issue:407,workspace,state_dir:stateDir,
@@ -2142,9 +2158,11 @@ test('a disabled W2 lane does not starve an independently eligible schema-6 W1 O
         if(uri===`repos/${REPO}/pulls/437`)return pullFor(437);
         const commentMatch=uri.match(new RegExp(`^repos/${REPO.replaceAll('/','\\/')}/issues/comments/(\\d+)$`));
         if(commentMatch)return comments.find(item=>item.id===Number(commentMatch[1]));
-        if(uri.startsWith(`repos/${REPO}/contents/`))
-          return {encoding:'base64',content:Buffer.from(
-            uri.includes('w2-before-w1.md')?w2Spec:w1Spec).toString('base64')};
+        if(uri.startsWith(`repos/${REPO}/contents/`)) {
+          const spec=uri.includes('w2-before-w1.md')?w2Spec
+            :uri.includes('w1-prior-terminal.md')?priorW1Spec:w1Spec;
+          return {encoding:'base64',content:Buffer.from(spec).toString('base64')};
+        }
         throw new Error(`UNEXPECTED_W1_AFTER_DISABLED_W2_API_${uri}`);
       },
       commentsRead:()=>comments,
@@ -2206,6 +2224,12 @@ test('a disabled W2 lane does not starve an independently eligible schema-6 W1 O
       'the W2 gate was evaluated before continuing to W1');
     assert.ok(!logs.some(value=>value.startsWith('OPENCODE_LANE_WAITING_ELIGIBILITY_')),
       'the eligible W1 lane was not denied');
+    assert.equal(posted.filter(item=>item.request_id===priorW1Job.request_id).length,0,
+      'the prior terminal W1 request is not replayed by this fresh Worker poll');
+    assert.equal(comments.filter(item=>parseReceipt(item.body)?.request_id===priorW1Job.request_id).length,1,
+      'the prior W1 receipt, including UNKNOWN effects, remains preserved');
+    assert.equal(priorW1Terminal.external_effects,'UNKNOWN');
+    assert.equal(priorW1Terminal.task_acceptance,'UNKNOWN');
     assert.equal(posted.filter(item=>item.request_id===w2Job.request_id).length,0,
       'W2 remains unclaimed with no STARTED receipt');
     assert.equal(posted.filter(item=>item.kind==='antigravity_edit').length,0);
