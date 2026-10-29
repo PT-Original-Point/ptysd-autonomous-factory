@@ -187,7 +187,7 @@
     <div class="metrics" aria-label="工廠總覽">
       <div class="metric"><span class="metric-label">Win11 有效觀測</span><span id="metric-observed" class="metric-value">未確認</span></div>
       <div class="metric"><span class="metric-label">最近 GitHub 讀回</span><span id="metric-synced" class="metric-value">未確認</span></div>
-      <div class="metric"><span class="metric-label">目前證實施工 Worker</span><span id="metric-workers" class="metric-value">未確認</span></div>
+      <div class="metric"><span class="metric-label">Worker 活動／正式回收</span><span id="metric-workers" class="metric-value">未確認</span></div>
       <div class="metric"><span class="metric-label">需要 Human 處理</span><span id="metric-human" class="metric-value">未確認</span></div>
       <div class="metric"><span class="metric-label">正式 main HEAD</span><span id="metric-main" class="metric-value">未確認</span></div>
       <div class="metric"><span class="metric-label">已知 Worker 阻擋</span><span id="metric-blocked" class="metric-value">未確認</span></div>
@@ -208,7 +208,7 @@
   <section class="worker-grid" aria-label="W1 W2 W3 Worker 狀態">
     <article class="panel worker-card">
       <div class="worker-head">
-        <div><div class="worker-title-line"><div><span class="worker-id">W1</span><h2 class="worker-name">OpenCode</h2></div><span id="w1-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">OpenCode CLI V2</span><div class="worker-latest"><span id="w1-header-progress">最新任務進度未確認</span><time id="w1-last-event">最後任務事件：未確認</time></div></div>
+        <div><div class="worker-title-line"><div><span class="worker-id">W1</span><h2 class="worker-name">OpenCode</h2></div><span id="w1-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">OpenCode CLI V2</span><span id="w1-model-switch" class="worker-harness">模型執行開關：UNKNOWN</span><div class="worker-latest"><span id="w1-header-progress">最新任務進度未確認</span><time id="w1-last-event">最後任務事件：未確認</time></div></div>
         <div class="worker-live"><span class="worker-live-label">即時施工</span><span id="w1-badge" class="badge neutral">狀態未確認</span></div>
       </div>
       <div class="field"><strong>正式任務</strong><span id="w1-task">未確認</span></div>
@@ -224,7 +224,7 @@
     </article>
     <article class="panel worker-card">
       <div class="worker-head">
-        <div><div class="worker-title-line"><div><span class="worker-id">W2</span><h2 class="worker-name">Antigravity</h2></div><span id="w2-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">只接受已核准的原生執行證據</span><div class="worker-latest"><span id="w2-header-progress">最新任務進度未確認</span><time id="w2-last-event">最後任務事件：未確認</time></div></div>
+        <div><div class="worker-title-line"><div><span class="worker-id">W2</span><h2 class="worker-name">Antigravity</h2></div><span id="w2-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">只接受已核准的原生執行證據</span><span id="w2-model-switch" class="worker-harness">模型執行開關：UNKNOWN</span><div class="worker-latest"><span id="w2-header-progress">最新任務進度未確認</span><time id="w2-last-event">最後任務事件：未確認</time></div></div>
         <div class="worker-live"><span class="worker-live-label">即時施工</span><span id="w2-badge" class="badge neutral">狀態未確認</span></div>
       </div>
       <div class="field"><strong>原生派工（Issue #310 schema-6）</strong><span id="w2-native-task">未確認</span></div>
@@ -1717,6 +1717,14 @@
         day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }) : '未確認';
   }
   function safeSha(value) { return /^[a-f0-9]{40}$/i.test(value || '') ? value : null; }
+  function modelExecutionSwitchLabel(id, record) {
+    if (id === 'W3') return null;
+    if (record?.model_execution_switch === 'ENABLED')
+      return '模型執行開關：啟用；不代表本次已派工或模型資格可用';
+    if (record?.model_execution_switch === 'DISABLED')
+      return '模型執行開關：停用；目前不派發新的模型工作';
+    return '模型執行開關：UNKNOWN';
+  }
   function ciLabel(summary) {
     if (!summary) return 'CI 未確認';
     if (summary.status === 'QUEUED') return '有檢查排隊等待 Runner';
@@ -1789,6 +1797,7 @@
       : 'CI 歸屬未確認');
     return {
       prefix, classification,
+      modelExecutionSwitch:modelExecutionSwitchLabel(id,record),
       task:taskText, session:sessionText,
       activity:id === 'W3' ? 'Zero Risk MCP 活動時間 UNKNOWN；#407 候選時間 ' +
         (activity ? readTime(activity) : '未確認')
@@ -2084,6 +2093,8 @@
       model:'UNKNOWN', source:'UNKNOWN', spec:'UNKNOWN', progress:'UNKNOWN', delivery:'UNKNOWN',
       next:task?.next_owner || record?.next_owner || '未確認', eventAt:null,
       jobUrl:null, receiptUrl:null, prUrl:null, resultPrUrl:null, reconciliationUrl:null,
+      requestId:null, expectedAttemptId:null, receiptAttemptId:null, receiptState:null,
+      hasBoundReceipt:false,
       summaryTask:'沒有有效正式任務',summaryProgress:'目前沒有可核對任務執行證據。',
       summaryBlocker:'未派工；目前工作狀態 UNKNOWN。',shortStatus:'未派工',hasTask:false,
       receiptProvenance:'UNKNOWN：尚無同一任務已配對收據',codexSourceAcceptance:null,w3Stages,record};
@@ -2142,9 +2153,16 @@
       }
       const jobAt=Number.isFinite(Date.parse(resource.data.created_at || ''))
         ? resource.data.created_at : null;
-      const receipts=dispatchReceipt(comments,job,task.attempt_id,commentId,now);
+      const expectedAttemptId=/^[a-f0-9-]{36}$/i.test(task.attempt_id || '')
+        ? task.attempt_id : null;
+      base.requestId=job.request_id;
+      base.expectedAttemptId=expectedAttemptId;
+      const receipts=dispatchReceipt(comments,job,expectedAttemptId,commentId,now);
       const latest=receipts.latest;
       const receipt=latest?.receipt || null;
+      base.hasBoundReceipt=receipts.status === 'MATCHED' && Boolean(receipt);
+      base.receiptAttemptId=base.hasBoundReceipt ? receipt.attempt_id : null;
+      base.receiptState=base.hasBoundReceipt ? receipt.state : null;
       const reconciliation=reconciliationForTask(comments,id,job,latest,now);
       base.codexSourceAcceptance=id === 'W1'
         ? w1SourceAcceptanceData(comments,job,latest,reconciliation,commentId) : null;
@@ -2457,6 +2475,7 @@
     }
     for (const key of ['task','session','activity','progress','blocker','changes','delivery','next','source'])
       text(id.toLowerCase() + '-' + key, data[key]);
+    text(id.toLowerCase() + '-model-switch',data?.modelExecutionSwitch);
     if (id === 'W1') text('w1-source-acceptance',data?.sourceAcceptance);
   }
   function w1SourceHarvestLabel(data) {
@@ -2501,7 +2520,7 @@
     };
   }
   function w2EvidenceData(goalComments, issueComments, mainSha, goalIdentity = null,
-      goalSourceComplete = true, issueSourceComplete = true) {
+      goalSourceComplete = true, issueSourceComplete = true, expectedAttemptBinding = null) {
     const latest = goalSourceComplete ? latestSchema6Job(goalComments,'antigravity_edit') : null;
     const currentJob = latest?.job || null;
     const goalReferenceVerified = Boolean(currentJob && goalIdentity &&
@@ -2510,6 +2529,8 @@
       goalIdentity.body_sha256 === currentJob.goal_body_sha256);
 
     let matchedReceipt = null;
+    let matchedReceiptCommentId = null;
+    let receiptResolution = currentJob ? 'NO_MATCHING_RECEIPT' : 'NO_JOB';
     if (currentJob) {
       const candidateReceipts = [];
       for (const c of (issueComments || [])) {
@@ -2521,14 +2542,42 @@
             receipt.request_id === currentJob.request_id &&
             receipt.source_sha === currentJob.source_sha &&
             receipt.kind === currentJob.kind &&
-            /^[a-f0-9-]{36}$/.test(receipt.attempt_id || '') &&
+            /^[a-f0-9-]{36}$/i.test(receipt.attempt_id || '') &&
+            Number.isSafeInteger(Number(c.id)) && Number(c.id) > 0 &&
             ['STARTED','WAITING','FINISHED','BLOCKED'].includes(receipt.state)) {
           candidateReceipts.push({ id: Number(c.id), receipt });
         }
       }
       candidateReceipts.sort((a, b) => a.id - b.id);
-      if (candidateReceipts.length) {
-        matchedReceipt = candidateReceipts.at(-1).receipt;
+      const bindingRequestId=expectedAttemptBinding?.requestId;
+      const bindingAttemptId=expectedAttemptBinding?.attemptId;
+      const snapshotRequestMismatch=typeof bindingRequestId === 'string' && bindingRequestId &&
+        bindingRequestId !== currentJob.request_id;
+      if (snapshotRequestMismatch) {
+        receiptResolution='SNAPSHOT_REQUEST_MISMATCH';
+      } else {
+        const attemptIds=[...new Set(candidateReceipts.map(item => item.receipt.attempt_id))];
+        const hasExpectedAttempt=bindingRequestId === currentJob.request_id &&
+          typeof bindingAttemptId === 'string' && bindingAttemptId.length > 0;
+        const expectedAttemptId=hasExpectedAttempt &&
+          /^[a-f0-9-]{36}$/i.test(bindingAttemptId) ? bindingAttemptId : null;
+        let selectedAttemptId=null;
+        if (hasExpectedAttempt && !expectedAttemptId) {
+          receiptResolution='EXPECTED_ATTEMPT_INVALID';
+        } else if (expectedAttemptId) {
+          if (attemptIds.includes(expectedAttemptId)) selectedAttemptId=expectedAttemptId;
+          else receiptResolution='EXPECTED_ATTEMPT_NOT_FOUND';
+        } else if (attemptIds.length === 1) {
+          selectedAttemptId=attemptIds[0];
+        } else if (attemptIds.length > 1) {
+          receiptResolution='MULTIPLE_ATTEMPTS_UNBOUND';
+        }
+        if (selectedAttemptId) {
+          const selected=candidateReceipts.filter(item => item.receipt.attempt_id === selectedAttemptId).at(-1);
+          matchedReceipt=selected?.receipt || null;
+          matchedReceiptCommentId=selected?.id ?? null;
+          receiptResolution=expectedAttemptId ? 'MATCHED_EXPECTED_ATTEMPT' : 'MATCHED_UNIQUE_ATTEMPT';
+        }
       }
     }
 
@@ -2611,11 +2660,26 @@
         jobCommentId: latest?.id ?? null,
         goalReferenceVerified,
         receipt: matchedReceipt,
+        receiptCommentId: matchedReceiptCommentId,
+        receiptResolution,
         codexAcceptance: matchedAcceptance,
       },
       directCli,
       historical,
     };
+  }
+  function workerMetricSummary(records, dispatchData, w2Evidence, osFresh, sourcesComplete) {
+    const values=Array.isArray(records) ? records : object(records) ? Object.values(records) : [];
+    const active=values.filter(record => record?.status === 'RUNNING_VERIFIED').length;
+    const activity=osFresh && values.length
+      ? `目前施工 ${active}／${values.length}` : '目前施工 UNKNOWN';
+    if (!sourcesComplete)
+      return `${activity}；W1/W2 原生收據 UNKNOWN；Codex 來源接受 UNKNOWN`;
+    const receipts=Number(dispatchData?.W1?.hasBoundReceipt === true) +
+      Number(Boolean(w2Evidence?.native?.receipt));
+    const accepted=Number(dispatchData?.W1?.codexSourceAcceptance?.status === 'ACCEPTED') +
+      Number(w2Evidence?.native?.codexAcceptance?.codex_source_acceptance === 'ACCEPTED');
+    return `${activity}；W1/W2 精確收據 ${receipts}／2；Codex 來源接受 ${accepted}／2`;
   }
   function renderW2Evidence(evidence) {
     const native = evidence?.native || {};
@@ -2637,6 +2701,14 @@
     if (receipt?.attempt_id) {
       const lifecycle = receipt.state === 'FINISHED' ? 'FINISHED（生命週期結束；非驗收）' : receipt.state;
       text('w2-native-attempt', `批次 ${receipt.attempt_id} · ${lifecycle}${receipt.outcome ? ' · ' + receipt.outcome : ''}`);
+    } else if (native.receiptResolution === 'MULTIPLE_ATTEMPTS_UNBOUND') {
+      text('w2-native-attempt', '同一 request 有多個 attempt；尚無精確 attempt 綁定，未自動挑選');
+    } else if (native.receiptResolution === 'EXPECTED_ATTEMPT_NOT_FOUND') {
+      text('w2-native-attempt', '指定 attempt 的 #407 收據未讀回；不改配其他 attempt');
+    } else if (native.receiptResolution === 'EXPECTED_ATTEMPT_INVALID') {
+      text('w2-native-attempt', '快照中的 attempt 身分格式無效；不改配其他 attempt');
+    } else if (native.receiptResolution === 'SNAPSHOT_REQUEST_MISMATCH') {
+      text('w2-native-attempt', 'Win11 快照 request 與最新 #310 W2 任務不同；收據未跨任務配對');
     } else if (!native.issueSourceComplete) {
       text('w2-native-attempt', 'Issue #407 最新／相符收據分頁未核對；attempt 狀態未知');
     } else {
@@ -2645,6 +2717,14 @@
 
     if (receipt?.session_id) {
       text('w2-native-session', String(receipt.session_id));
+    } else if (native.receiptResolution === 'MULTIPLE_ATTEMPTS_UNBOUND') {
+      text('w2-native-session', '多個 attempt 未唯一綁定；Session UNKNOWN');
+    } else if (native.receiptResolution === 'EXPECTED_ATTEMPT_NOT_FOUND') {
+      text('w2-native-session', '指定 attempt 收據未讀回；Session UNKNOWN');
+    } else if (native.receiptResolution === 'EXPECTED_ATTEMPT_INVALID') {
+      text('w2-native-session', 'attempt 身分無效；Session 不可核對');
+    } else if (native.receiptResolution === 'SNAPSHOT_REQUEST_MISMATCH') {
+      text('w2-native-session', 'request 不一致；Session 不跨任務配對');
     } else if (!native.issueSourceComplete) {
       text('w2-native-session', 'Issue #407 收據分頁未核對；原生 Session 未知');
     } else {
@@ -2657,6 +2737,14 @@
       const testSummary = tests ? ` · 測試 ${tests.passed}/${tests.total} · 失敗 ${tests.failed} · 略過 ${tests.skipped}` : '';
       const codexAcc = codex ? `Codex source_acceptance=${codex.codex_source_acceptance} · CI=${codex.exact_head_ci}${testSummary} · external_effects=${codex.external_effects || 'UNKNOWN'}` : 'Codex 驗收紀錄未讀回';
       text('w2-native-acceptance', `${workerAcc}；${codexAcc}`);
+    } else if (native.receiptResolution === 'MULTIPLE_ATTEMPTS_UNBOUND') {
+      text('w2-native-acceptance', '多個 attempt 未唯一綁定；Worker 終態與 Codex source acceptance 保留 UNKNOWN');
+    } else if (native.receiptResolution === 'EXPECTED_ATTEMPT_NOT_FOUND') {
+      text('w2-native-acceptance', '指定 attempt 收據未讀回；Worker 終態與 Codex source acceptance 保留 UNKNOWN');
+    } else if (native.receiptResolution === 'EXPECTED_ATTEMPT_INVALID') {
+      text('w2-native-acceptance', 'attempt 身分無效；Worker 終態與 Codex source acceptance 保留 UNKNOWN');
+    } else if (native.receiptResolution === 'SNAPSHOT_REQUEST_MISMATCH') {
+      text('w2-native-acceptance', 'request 身分不一致；不跨任務套用 Worker 或 Codex 接受結果');
     } else {
       text('w2-native-acceptance', '未確認');
     }
@@ -2892,11 +2980,14 @@
     for (const id of ['W1','W2','W3']) renderWorker(id, cardData[id],dispatchData[id]);
     const w2Evidence = w2EvidenceData(goalComments, comments, safeSha(main?.sha),
       resources.goal?.identity || null,resources.goal?.latestComplete === true,
-      resources.issue?.latestComplete === true);
+      resources.issue?.latestComplete === true,
+      dispatchData.W2?.requestId ? {requestId:dispatchData.W2.requestId,
+        attemptId:dispatchData.W2.expectedAttemptId} : null);
     renderW2Evidence(w2Evidence);
-    const verifiedCount = osFreshness === 'FRESH'
-      ? Object.values(records).filter(record => record.status === 'RUNNING_VERIFIED').length : null;
-    text('metric-workers', verifiedCount === null ? '未確認（Win11 觀測未知／過期）' : String(verifiedCount) + '／3 有近期施工證據');
+    const workerSourcesComplete=issueReadFreshness === 'FRESH' &&
+      resources.issue?.latestComplete === true && resources.goal?.latestComplete === true;
+    text('metric-workers',workerMetricSummary(records,dispatchData,w2Evidence,
+      osFreshness === 'FRESH',workerSourcesComplete));
     const blocked = osFreshness === 'FRESH'
       ? Object.values(records).filter(record => record.status === 'BLOCKED').length : null;
     text('metric-blocked', blocked === null ? '未確認' : String(blocked) + ' 個 Worker 明確受阻');
@@ -3159,7 +3250,8 @@
     dispatchCardData, renderDispatchCard, w1SourceHarvestLabel, render,
     freshnessOfSnapshot, createApiClient, createResourceStore, renderRateStatus,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
-    w2EvidenceData, renderW2Evidence, hashHumanGoalComment, validDirectCliDelivery,
+    w2EvidenceData, renderW2Evidence, workerMetricSummary, modelExecutionSwitchLabel,
+    hashHumanGoalComment, validDirectCliDelivery,
     constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS,
       MANUAL_SYNC_MIN_MS, LOW_REMAINING_THRESHOLD, MAX_LIVE_AGE_MS },
   };

@@ -1125,7 +1125,7 @@ test('browser shows the shared rate-limit pause, recovery countdown, and histori
   assert.equal(elements.get('w3-badge').textContent,'狀態未確認');
 });
 
-async function publishReceiptProjection(rows, { enableAntigravityModelRuns } = {}) {
+async function publishReceiptProjection(rows, { enableAntigravityModelRuns, enableV2ModelRuns = true } = {}) {
   const at = Date.now();
   const host = 'DESKTOP-1B6PD2P';
   const mainSha = 'e'.repeat(40);
@@ -1168,6 +1168,7 @@ async function publishReceiptProjection(rows, { enableAntigravityModelRuns } = {
     'antigravity-quota.mjs', 'codex-continuation.mjs', 'operator-observation.mjs', 'captured-process.mjs',
     'safe-error-code.mjs', 'windows-executor.mjs'];
   const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
+    enable_v2_model_runs: enableV2ModelRuns,
     enable_antigravity_model_runs: enableAntigravityModelRuns,
     dispatchers: ['t14210184'], state_dir: 'unused' };
   const dependencies = {
@@ -1202,6 +1203,7 @@ test('queued W2 observation names the disabled model gate without inventing an a
   const w1 = result.observation.workers.find(item => item.worker_id === 'W1');
   assert.equal(w1.status, 'PENDING');
   assert.equal(w1.model_eligibility, 'UNKNOWN');
+  assert.equal(w1.model_execution_switch, 'ENABLED');
   assert.equal(Object.hasOwn(w1, 'blocker_code'), false,
     'the W2 lane flag must not block an independent W1 task');
   const w2 = result.observation.workers.find(item => item.worker_id === 'W2');
@@ -1209,9 +1211,20 @@ test('queued W2 observation names the disabled model gate without inventing an a
   assert.equal(w2.task_state, 'QUEUED_NOT_STARTED');
   assert.equal(Object.hasOwn(w2, 'attempt_id'), false);
   assert.equal(w2.model_eligibility, 'WAITING');
+  assert.equal(w2.model_execution_switch, 'DISABLED');
   assert.equal(w2.blocker_code, 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED');
   assert.equal(w2.code_changes, 'UNPROVEN');
   assert.equal(w2.files_modified, 'UNPROVEN');
+});
+
+test('idle W2 snapshot exposes the disabled model switch without inventing a task blocker or attempt', async () => {
+  const result = await publishReceiptProjection([], { enableAntigravityModelRuns:false });
+  assert.equal(result.status, 'UPDATED');
+  const w2 = result.observation.workers.find(item => item.worker_id === 'W2');
+  assert.equal(w2.status, 'UNKNOWN');
+  assert.equal(w2.blocker_code, 'NO_CURRENT_W2_TASK');
+  assert.equal(w2.model_execution_switch, 'DISABLED');
+  assert.equal(Object.hasOwn(w2, 'attempt_id'), false);
 });
 
 test('worker observation reports captured W1 and blocked W2 diffs as unverified, never active or accepted', async () => {
