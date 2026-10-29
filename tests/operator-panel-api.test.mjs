@@ -1099,6 +1099,14 @@ test('W1 current additive reconciliation renders the exact merged result without
     assert.equal(rejected.formalAcceptance,'UNKNOWN');
     assert.equal(rejected.externalEffects,'UNKNOWN');
   }
+  const mismatchedGoalJob={...job,goal_comment_id:6188322051};
+  const mismatchedGoalResources={dispatches:{W1:{data:{...jobComment,
+    body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(mismatchedGoalJob)}}}};
+  const mismatchedGoal=panel.dispatchCardData('W1',snapshot,comments,mismatchedGoalResources,
+    {status:'UNKNOWN'},now,{lifecycle:'MERGED',status:'MERGED'},[],null,false);
+  assert.equal(mismatchedGoal.codexSourceAcceptance,null,
+    'the reconciliation GOAL identity must match the dispatched task identity');
+  assert.equal(mismatchedGoal.formalAcceptance,'UNKNOWN');
 });
 
 test('dispatch layout uses two readable desktop columns, collapsible technical detail, and a compact W3 empty state', () => {

@@ -1962,7 +1962,7 @@
         'v2-native-windows=SUCCESS'].every(value => checkSet.has(value));
       if (reconciliationId > receiptId && reconciliation.metadata?.repo === REPO &&
           reconciliation.metadata?.project_id === PROJECT &&
-          reconciliation.metadata?.human_goal_comment_id === '6188322050' &&
+          String(reconciliation.metadata?.human_goal_comment_id || '') === String(job.goal_comment_id) &&
           reconciledFields.request_id === job.request_id &&
           reconciledFields.task_comment_id === String(jobCommentId) &&
           reconciledFields.attempt_id === receipt.attempt_id &&
