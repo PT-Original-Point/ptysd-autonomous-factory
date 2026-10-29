@@ -2145,21 +2145,47 @@ test('completed W2 antigravity_edit attempt is not executed again after executor
     const runningBytesBefore = readFileSync(runningPath);
     const resultBytesBefore = readFileSync(resultPath);
 
-    // Simulate new Task Scheduler process relaunching the executor task
-    const secondResult = await executePendingManifest({
-      manifestDir: f.manifestDir,
-      currentSid: () => EXECUTOR_SID,
-      filesystemPath: localPathMap(f),
-      config,
-      execute: async () => {
-        executeCalls++;
-        throw new Error('must not re-execute completed attempt');
-      },
+    // Launch a distinct Node process to model Task Scheduler starting a new
+    // executor instance. The child has no access to the first process's module
+    // state; its only recovery evidence is the persisted mailbox and result.
+    const replayMarker = join(f.resultsDir, 'unexpected-replay.txt');
+    const childSource = `
+      import { writeFileSync } from 'node:fs';
+      const payload = JSON.parse(process.argv.at(-1));
+      const { executePendingManifest } = await import(payload.moduleUrl);
+      const paths = new Map([
+        [payload.config.executor_runtime.manifest_dir.toLowerCase(), payload.manifestDir],
+        [payload.config.executor_runtime.results_dir.toLowerCase(), payload.resultsDir],
+      ]);
+      const result = await executePendingManifest({
+        manifestDir: payload.manifestDir,
+        currentSid: () => payload.executorSid,
+        filesystemPath: value => paths.get(String(value).toLowerCase()) ?? value,
+        config: payload.config,
+        execute: async () => {
+          writeFileSync(payload.replayMarker, 'unexpected provider execution');
+          throw new Error('must not re-execute completed attempt');
+        },
+      });
+      process.stdout.write(JSON.stringify({ pid: process.pid, result }));
+    `;
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', childSource,
+      JSON.stringify({ moduleUrl:new URL('../native-bridge/executor.mjs', import.meta.url).href,
+        manifestDir:f.manifestDir, resultsDir:f.resultsDir, executorSid:EXECUTOR_SID,
+        replayMarker, config })], {
+      encoding:'utf8', windowsHide:true, shell:false, timeout:15000,
+      stdio:['ignore','pipe','pipe'],
     });
-
+    assert.equal(child.error, undefined, child.error?.message);
+    assert.equal(child.status, 0, child.stderr || child.stdout);
+    const relaunched = JSON.parse(child.stdout);
+    assert.notEqual(relaunched.pid, process.pid, 'recovery ran in a separate Node process');
+    const secondResult = relaunched.result;
     assert.equal(secondResult.outcome, 'NO_PENDING_EXECUTOR_MANIFEST',
-      'relaunched process reports no pending manifest');
+      'new executor process reports no pending manifest');
     assert.equal(secondResult.exit_code, 0);
+    assert.equal(existsSync(replayMarker), false,
+      'the new process does not call the provider execution adapter');
     assert.equal(executeCalls, 1, 'stub is never called a second time');
 
     const activeAttempts = readdirSync(f.manifestDir).filter(name =>
