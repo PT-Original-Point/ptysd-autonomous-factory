@@ -855,6 +855,75 @@ test('candidate-root lease release fails closed for mixed targets and other Work
   'the W2 lease exception does not change cross-lane path arbitration');
 });
 
+test('a terminal W1 edit releases its path lease so the next distinct W1 request is selected once', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = 'c'.repeat(40);
+  const sourcePr = 437;
+  const makeRequest = requestId => withHumanGoal({ schema: 6, project_id: PROJECT, host,
+    request_id: requestId, kind: 'opencode_edit', source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/w1-next-request-after-terminal.md', spec_sha256: hash,
+    model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+    edit_paths: ['native-bridge/worker.mjs'], source_pr: sourcePr });
+  const older = makeRequest('PTYSD_W1_TERMINAL_THEN_NEXT');
+  const newer = makeRequest('PTYSD_W1_DISTINCT_NEXT_READY');
+  assert.notEqual(older.request_id, newer.request_id);
+  assert.equal(older.source_pr, newer.source_pr, 'both requests bind the same exact PR');
+  assert.equal(older.source_sha, newer.source_sha, 'both requests bind the same exact PR head');
+  assert.deepEqual(older.edit_paths, newer.edit_paths,
+    'the sequential requests contend for the same path lease');
+  assert.ok(parseJob(encoded(older)));
+  assert.ok(parseJob(encoded(newer)));
+
+  const attemptId = '99999999-9999-4999-8999-999999999999';
+  const finished = receipt(older.request_id, attemptId, 'FINISHED', older, {
+    outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED', exit_code: 0,
+    model_invoked: true, session_id: '77777777-7777-4777-8777-777777777777',
+    // A terminal attempt still carries UNKNOWN acceptance and effects. Only the
+    // complete, request-bound scoped diff releases the same-path writer lease.
+    external_effects: 'UNKNOWN', source_diff_evidence: 'CAPTURED',
+    task_acceptance: 'UNKNOWN', coding_state: 'DIFF_CAPTURED_UNVERIFIED',
+    scope_valid: true, diff_sha256: 'd'.repeat(64), diff_bytes: 96,
+    changed_files: ['native-bridge/worker.mjs'],
+  });
+  assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify(finished))?.state, 'FINISHED');
+  assert.equal(finished.external_effects, 'UNKNOWN');
+  assert.equal(finished.task_acceptance, 'UNKNOWN');
+  assert.equal(finished.source_pr, sourcePr);
+  assert.equal(finished.source_diff_evidence, 'CAPTURED');
+  assert.equal(finished.coding_state, 'DIFF_CAPTURED_UNVERIFIED');
+  assert.equal(finished.scope_valid, true);
+  assert.equal(finished.edit_paths_sha256, h(JSON.stringify(older.edit_paths)));
+  assert.equal(finished.changed_files_sha256, h(JSON.stringify(['native-bridge/worker.mjs'])));
+
+  const olderComment = { ...com(901, encoded(older)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+  const newerComment = { ...com(902, encoded(newer)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+  const attemptComment = com(903, RECEIPT_MARKER + JSON.stringify(finished), 'worker');
+  const comments = [olderComment, attemptComment, newerComment];
+  const before = structuredClone(comments);
+  const sources = new Map([[sourcePr, sourceSha]]);
+
+  const selected = selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [], sources);
+  assert.equal(selected?.id, newerComment.id);
+  assert.equal(selected?.job.request_id, newer.request_id);
+  assert.equal(selected?.originalBody, newerComment.body);
+  assert.notEqual(selected?.job.request_id, older.request_id,
+    'the terminal prior W1 request is not replayed');
+
+  assert.deepEqual(comments, before,
+    'selection neither rewrites nor replays the terminal prior request or attempt');
+  assert.equal(comments.filter(comment =>
+    parseJob(comment.body)?.request_id === newer.request_id).length, 1,
+  'the newer READY request is present exactly once');
+  assert.equal(comments.filter(comment =>
+    parseReceipt(comment.body)?.request_id === older.request_id).length, 1,
+  'the prior attempt retains exactly its one terminal receipt');
+  assert.equal(comments.some(comment =>
+    parseReceipt(comment.body)?.request_id === newer.request_id), false,
+  'selecting the newer request does not invent an attempt receipt');
+});
+
 test('fresh OS publication does not carry stale W1 activity or incident state into the new snapshot', async () => {
   const staleAt = Date.now() - 24 * 60 * 60 * 1000;
   const prior = seededOperatorObservation(OPERATOR_COMMENT_ID, 17, commit, staleAt);
