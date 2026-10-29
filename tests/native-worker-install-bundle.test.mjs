@@ -121,6 +121,30 @@ assert.match(refreshBlock, /configWriteLockPath[\s\S]*?FileShare\]::None/i,
 assert.match(installer, /WORKER_RUNTIME_REFRESH_PARTIAL_STATE_REVIEW_REQUIRED/,
   'unreconciled failures are reported as partial state instead of success');
 
+test('Worker installation preserves the five-minute and logon recovery triggers with safe catch-up settings', () => {
+  const scheduleStart = installBlock.indexOf('$trigger = New-ScheduledTaskTrigger -Once');
+  assert.notEqual(scheduleStart, -1, 'install mode defines the native recurring trigger');
+  const registerStart = installBlock.indexOf('Register-ScheduledTask -TaskName $taskName', scheduleStart);
+  assert.notEqual(registerStart, -1, 'install mode registers the native Worker task');
+  const schedule = installBlock.slice(scheduleStart, registerStart);
+
+  assert.match(schedule,
+    /\$trigger\s*=\s*New-ScheduledTaskTrigger\s+-Once[\s\S]*?-RepetitionInterval\s+\(New-TimeSpan\s+-Minutes\s+5\)[\s\S]*?-RepetitionDuration\s+\(New-TimeSpan\s+-Days\s+3650\)/i,
+    'the Worker receives its five-minute recurring trigger');
+  assert.match(schedule,
+    /\$logonTrigger\s*=\s*New-ScheduledTaskTrigger\s+-AtLogOn\s+-User\s+\$username/i,
+    'recovery is triggered at logon for the already selected Windows user');
+  assert.match(schedule,
+    /\$settings\s*=\s*New-ScheduledTaskSettingsSet\s+-MultipleInstances\s+IgnoreNew\s+-ExecutionTimeLimit\s+\(New-TimeSpan\s+-Minutes\s+15\)[\s\S]*?-StartWhenAvailable\b[\s\S]*?-AllowStartIfOnBatteries\b[\s\S]*?-DontStopIfGoingOnBatteries\b/i,
+    'missed runs catch up without overlap and remain eligible on battery power');
+  assert.match(schedule,
+    /\$principal\s*=\s*New-ScheduledTaskPrincipal\s+-UserId\s+\$username\s+-LogonType\s+Interactive\s+-RunLevel\s+Limited/i,
+    'the task keeps its existing interactive, least-privilege identity');
+  assert.match(installBlock,
+    /Register-ScheduledTask\s+-TaskName\s+\$taskName\s+-Action\s+\$action\s+-Trigger\s+@\(\$trigger,\s*\$logonTrigger\)[\s\S]{0,180}-Settings\s+\$settings\s+-Principal\s+\$principal/i,
+    'both recovery triggers and the guarded settings are registered together');
+});
+
 test('Windows executor accepts omitted default RunLevel only with exact native Limited readback', () => {
   const sid = 'S-1-5-21-101-202-303-1001';
   const root = mkdtempSync(join(tmpdir(), 'pty-w2-runlevel-'));
