@@ -2153,14 +2153,9 @@ test('completed W2 antigravity_edit attempt is not executed again after executor
       import { writeFileSync } from 'node:fs';
       const payload = JSON.parse(process.argv.at(-1));
       const { executePendingManifest } = await import(payload.moduleUrl);
-      const paths = new Map([
-        [payload.config.executor_runtime.manifest_dir.toLowerCase(), payload.manifestDir],
-        [payload.config.executor_runtime.results_dir.toLowerCase(), payload.resultsDir],
-      ]);
       const result = await executePendingManifest({
         manifestDir: payload.manifestDir,
         currentSid: () => payload.executorSid,
-        filesystemPath: value => paths.get(String(value).toLowerCase()) ?? value,
         config: payload.config,
         execute: async () => {
           writeFileSync(payload.replayMarker, 'unexpected provider execution');
