@@ -28,13 +28,16 @@ function staticLocalImportClosure(entry) {
   return [...found].sort();
 }
 
-const required = staticLocalImportClosure('worker.mjs');
+const required = new Set([
+  ...staticLocalImportClosure('worker.mjs'),
+  ...staticLocalImportClosure('executor.mjs'),
+]);
 const bundleBlock = installer.match(/\$runtimeFiles\s*=\s*@\(([\s\S]*?)\)/i);
 assert.ok(bundleBlock, 'installer declares its complete worker runtime file bundle');
 const bundled = [...bundleBlock[1].matchAll(/['"]([^'"]+\.mjs)['"]/g)]
   .map(match => match[1]).sort();
-assert.deepEqual(bundled, required,
-  'installed worker runtime contains the exact recursive static import closure');
+assert.deepEqual(bundled, [...required].sort(),
+  'installed runtime contains the exact recursive import closures of Worker and shared Executor');
 assert.match(installer, /Copy-Item\s+-LiteralPath\s+\$sourcePath\s+-Destination\s+\$targetPath/i,
   'installer copies each declared module to the runtime directory');
 assert.match(installer, /Get-FileHash[\s\S]*?\$sourcePath[\s\S]*?Get-FileHash[\s\S]*?\$targetPath/i,

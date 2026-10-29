@@ -45,6 +45,7 @@ $runtimeFiles = @(
     'operator-observation.mjs',
     'captured-process.mjs',
     'safe-error-code.mjs',
+    'executor.mjs',
     'windows-executor.mjs'
 )
 
