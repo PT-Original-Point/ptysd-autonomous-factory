@@ -1072,6 +1072,52 @@ test('candidate edit jobs are runnable only from the exact open same-repository 
   }
 });
 
+test('schema-6 OpenCode candidate edit is not gated by the schema-4 Codex scoped-action requirement', async () => {
+  // The schema-4-only Codex continuation path still demands one unique
+  // **Codex 下一動作** section in the bound Human GOAL body.
+  assert.deepEqual(codexScopedActionStatus(humanGoalBody),
+    { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' });
+  const goalSha = h(humanGoalBody);
+  const codexSpec = '# schema-4 scoped-action guard probe\n';
+  const schema4Job = { schema: 4, project_id: PROJECT, host: 'DESKTOP-1B6PD2P',
+    request_id: `PTYSD_HUMAN_GOAL_6188322050_${goalSha.slice(0, 42).toUpperCase()}`,
+    kind: 'codex_plan', source_sha: commit,
+    spec_path: 'native-bridge/tasks/human-goal-source-only.md', spec_sha256: h(codexSpec),
+    model: 'gpt-6.1-sol', reasoning_effort: 'medium',
+    write_paths: ['native-bridge/worker.mjs'], goal_comment_id: 6188322050,
+    goal_body_sha256: goalSha, goal_author: 't14210184',
+    goal_marker: 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015' };
+  assert.throws(() => makeCodexExecutorRequest(schema4Job,
+    '00000000-0000-4000-8000-000000000001', codexSpec,
+    join(homedir(), 'synthetic-codex-source.bundle'), 'c'.repeat(64),
+    { repo: REPO, issue: 310, comment_id: 6188322050, author: 't14210184',
+      body_sha256: goalSha, body: humanGoalBody,
+      fetched_at: '2026-10-29T00:00:00.000Z' }), /HUMAN_GOAL_SCOPED_ACTION_MISSING/);
+
+  // The same byte-pinned GOAL still authorizes a schema-6 OpenCode candidate
+  // edit because that path never consults the schema-4 Codex scoped action.
+  const host = 'DESKTOP-1B6PD2P';
+  const job = withHumanGoal({ project_id: PROJECT, host,
+    request_id: 'PTYSD_OPENCODE_EDIT_NO_CODEX_ACTION_20261029', kind: 'opencode_edit',
+    source_sha: commit, spec_path: 'native-bridge/tasks/edit-worker.md',
+    spec_sha256: hash, model: 'opencode/spark', variant: 'high',
+    edit_paths: ['native-bridge/worker.mjs'], source_pr: 437 });
+  const comments = [com(10, encoded(job), 't14210184')];
+  const goal = humanGoalComment();
+  const pull = { number: 437, state: 'open',
+    base: { ref: 'main', repo: { id: 1352411536, full_name: REPO } },
+    head: { sha: commit, repo: { id: 1352411536, full_name: REPO } } };
+  const reads = [];
+  const sources = await readPinnedCandidateSources(comments, ['t14210184'], 'worker', host,
+    path => { reads.push(path); return path.endsWith('/6188322050') ? goal : pull; },
+    undefined, [], () => [goal]);
+  assert.deepEqual(reads,
+    [`repos/${REPO}/issues/comments/6188322050`, `repos/${REPO}/pulls/437`]);
+  assert.equal(sources.get(437), commit);
+  assert.equal(selectNext(comments, ['t14210184'], 'worker', host, 'c'.repeat(40), [], sources)
+    ?.job.request_id, job.request_id);
+});
+
 test('candidate observation distinguishes unknown PR readback from stale and current source', async () => {
   const host='DESKTOP-1B6PD2P', dispatcher='dispatcher', publisher='publisher';
   const candidate=withHumanGoal({schema:5,project_id:PROJECT,host,request_id:'PTYSD_OBSERVE_CANDIDATE_20261016',
