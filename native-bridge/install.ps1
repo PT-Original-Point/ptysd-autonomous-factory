@@ -433,7 +433,8 @@ function Assert-WorkerRuntimeTrustedRuns([string]$RunPagesJson, [string]$Expecte
 }
 
 function Assert-WorkerRuntimeAcceptedPrAncestry([string]$GitExe, [string]$RepoRoot,
-    [string]$AcceptedPrHead, [string]$MergeCommitSha, [string]$SourceMainSha) {
+    [string]$AcceptedPrHead, [string]$MergeCommitSha, [string]$SourceMainSha,
+    [string[]]$RuntimeFiles) {
     foreach ($sha in @($AcceptedPrHead,$MergeCommitSha,$SourceMainSha)) {
         if ($sha -notmatch '^[0-9a-fA-F]{40}$') { throw 'WORKER_RUNTIME_ACCEPTED_PR_SHA_INVALID' }
     }
@@ -445,13 +446,22 @@ function Assert-WorkerRuntimeAcceptedPrAncestry([string]$GitExe, [string]$RepoRo
         return
     } catch {
         # GitHub rebase and squash merges can rewrite the PR head commit. If so,
-        # accept only an exact tree match to the provider-reported merge commit.
-        $acceptedTree = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$RepoRoot,'rev-parse',
-            ($AcceptedPrHead + '^{tree}')) 'WORKER_RUNTIME_ACCEPTED_PR_TREE_READBACK_FAILED'
-        $mergeTree = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$RepoRoot,'rev-parse',
-            ($MergeCommitSha + '^{tree}')) 'WORKER_RUNTIME_MERGE_TREE_READBACK_FAILED'
-        if ($acceptedTree -cne $mergeTree) {
-            throw 'WORKER_RUNTIME_ACCEPTED_PR_MERGE_TREE_MISMATCH'
+        # unrelated later source files may be present on main. Require every
+        # runtime module changed or shipped by this accepted PR to survive the
+        # provider-reported merge commit byte-for-byte; the caller separately
+        # verifies that the PR bundle still matches the current source main.
+        if ($null -eq $RuntimeFiles -or $RuntimeFiles.Count -eq 0) {
+            throw 'WORKER_RUNTIME_ACCEPTED_PR_RUNTIME_BUNDLE_SCOPE_REQUIRED'
+        }
+        foreach ($file in $RuntimeFiles) {
+            $gitPath = Get-WorkerRuntimeGitPath $file
+            $acceptedBlob = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$RepoRoot,'rev-parse',
+                ($AcceptedPrHead + ':' + $gitPath)) 'WORKER_RUNTIME_ACCEPTED_PR_RUNTIME_BLOB_READBACK_FAILED'
+            $mergeBlob = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$RepoRoot,'rev-parse',
+                ($MergeCommitSha + ':' + $gitPath)) 'WORKER_RUNTIME_MERGE_RUNTIME_BLOB_READBACK_FAILED'
+            if ($acceptedBlob -cne $mergeBlob) {
+                throw ('WORKER_RUNTIME_ACCEPTED_PR_RUNTIME_BUNDLE_MISMATCH:' + $gitPath)
+            }
         }
     }
 }
@@ -504,7 +514,8 @@ function Assert-WorkerRuntimeSource([string]$GitExe, [string]$GhExe) {
         ('repos/' + $repo + '/actions/runs?head_sha=' + $AcceptedPrHead + '&per_page=100'),
         '--paginate','--slurp') 'WORKER_RUNTIME_CI_READBACK_FAILED'
     Assert-WorkerRuntimeTrustedRuns $runsJson $AcceptedPrHead
-    Assert-WorkerRuntimeAcceptedPrAncestry $GitExe $repoRoot $AcceptedPrHead ([string]$pr.merge_commit_sha) $SourceMainSha
+    Assert-WorkerRuntimeAcceptedPrAncestry $GitExe $repoRoot $AcceptedPrHead ([string]$pr.merge_commit_sha) `
+        $SourceMainSha $runtimeFiles
     foreach ($file in $runtimeFiles) {
         $gitPath = Get-WorkerRuntimeGitPath $file
         $mainBlob = Invoke-WorkerRuntimeCommandText $GitExe @('-C',$repoRoot,'rev-parse',($SourceMainSha + ':' + $gitPath)) `

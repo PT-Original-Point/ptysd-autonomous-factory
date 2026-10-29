@@ -92,10 +92,11 @@ assert.match(installer, /ValidateSet\([^)]*RefreshRuntimeModules/i,
   'Worker runtime refresh is an explicit installer mode');
 assert.ok(refreshBlock.includes('Assert-WorkerRuntimeSource $git $gh'),
   'refresh requires a clean exact-main source tree and same-source provider readback');
-assert.ok(mergeAncestryBlock.includes('merge-base') && mergeAncestryBlock.includes("^{tree}") &&
-  mergeAncestryBlock.includes('WORKER_RUNTIME_ACCEPTED_PR_MERGE_TREE_MISMATCH') &&
+assert.ok(mergeAncestryBlock.includes('merge-base') && mergeAncestryBlock.includes('$RuntimeFiles') &&
+  mergeAncestryBlock.includes('Get-WorkerRuntimeGitPath $file') &&
+  mergeAncestryBlock.includes('WORKER_RUNTIME_ACCEPTED_PR_RUNTIME_BUNDLE_MISMATCH') &&
   refreshSourceBlock.includes('Assert-WorkerRuntimeAcceptedPrAncestry'),
-  'refresh requires the merge commit on main and exact tree equivalence when GitHub rewrites the accepted PR head');
+  'refresh requires the merge commit on main and exact runtime-module equivalence when GitHub rewrites the accepted PR head');
 assert.ok(mergeAncestryBlock.includes("return ('native-bridge/' + $File)") &&
   refreshSourceBlock.includes('Get-WorkerRuntimeGitPath $file') &&
   refreshSourceBlock.includes("$SourceMainSha + ':' + $gitPath") &&
