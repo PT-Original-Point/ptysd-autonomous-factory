@@ -1930,6 +1930,65 @@
         !Number.isSafeInteger(reconciliationId) || reconciliationId <= receiptId) return null;
 
     const accepted=[];
+    const reconciledFields=reconciliation.section || {};
+    if (reconciliation.recordType === 'ADDITIVE_CODEX_SOURCE_AND_DIFF_RECONCILIATION_NOT_NATIVE_WORKER_RECEIPT') {
+      const integration=String(reconciledFields.integration || '').match(/^PR_(\d+)_MERGED$/);
+      const resultPr=integration ? Number(integration[1]) : null;
+      const resultHead=safeSha(reconciliation.resultPr?.resultHead);
+      const mergeCommit=safeSha(reconciliation.resultPr?.head);
+      const currentMain=safeSha(reconciledFields.current_main_after_merge);
+      const checks=String(reconciliation.resultPr?.checks || '');
+      const checkSet=new Set(checks.split(';').map(value => value.trim()).filter(Boolean));
+      const focusedTest=String(reconciledFields.focused_test || '');
+      const testCounts=focusedTest.match(/(?:^|;)(\d+)_total;(\d+)_passed;0_failed;(\d+)_skipped$/);
+      const changedFiles=String(reconciledFields.changed_files || '').split(',')
+        .map(value => value.trim()).filter(Boolean);
+      const changedFilesCount=Number(reconciledFields.changed_files_count);
+      const allowedFiles=Array.isArray(job.edit_paths) ? job.edit_paths : [];
+      const blobEntries=String(reconciledFields.merged_file_blob || '').split(',')
+        .map(value => value.trim()).filter(Boolean);
+      const mergedBlobs=new Map(blobEntries.map(value => {
+        const split=value.lastIndexOf(':');
+        return split > 0 ? [value.slice(0,split),value.slice(split + 1).toLowerCase()] : ['', ''];
+      }));
+      const testTotal=Number(testCounts?.[1]);
+      const testPassed=Number(testCounts?.[2]);
+      const testSkipped=Number(testCounts?.[3]);
+      const testsValid=Boolean(testCounts) && testTotal === testPassed + testSkipped;
+      const changesValid=Number.isSafeInteger(changedFilesCount) && changedFilesCount > 0 &&
+        changedFilesCount === changedFiles.length && changedFiles.every(path => allowedFiles.includes(path)) &&
+        changedFiles.every(path => /^[a-f0-9]{40}$/.test(mergedBlobs.get(path) || ''));
+      const checksValid=['check-native-only=SUCCESS','csg-trusted-verifier-hosted=SUCCESS',
+        'v2-native-windows=SUCCESS'].every(value => checkSet.has(value));
+      if (reconciliationId > receiptId && reconciliation.metadata?.repo === REPO &&
+          reconciliation.metadata?.project_id === PROJECT &&
+          reconciliation.metadata?.human_goal_comment_id === '6188322050' &&
+          reconciledFields.request_id === job.request_id &&
+          reconciledFields.task_comment_id === String(jobCommentId) &&
+          reconciledFields.attempt_id === receipt.attempt_id &&
+          reconciledFields.model === receipt.model &&
+          reconciledFields.session_id === receipt.session_id &&
+          String(reconciledFields.source_pr) === String(sourcePr) &&
+          String(reconciledFields.source_head || '').toLowerCase() === sourceSha &&
+          String(reconciledFields.worker_diff_sha256 || '').toLowerCase() === String(receipt.diff_sha256).toLowerCase() &&
+          Number(reconciledFields.diff_bytes) === receipt.diff_bytes &&
+          Number.isSafeInteger(resultPr) && resultPr === reconciliation.resultPr?.number &&
+          resultHead && mergeCommit && mergeCommit === reconciliation.resultPr?.head && currentMain &&
+          String(reconciledFields.integration_commit || '').toLowerCase() === mergeCommit &&
+          reconciledFields.diff_reconciliation?.startsWith('PASS_') &&
+          reconciledFields.codex_review?.startsWith('PASS_') &&
+          reconciledFields.source_acceptance ===
+            `ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR_${resultPr}` &&
+          reconciledFields.original_terminal_state === 'FINISHED_NOT_ACCEPTANCE' &&
+          reconciledFields.worker_task_acceptance === 'UNKNOWN;external_effects=UNKNOWN' &&
+          reconciledFields.live_acceptance === 'NOT_CLAIMED' &&
+          reconciledFields.git_diff_check === 'PASS' && testsValid && changesValid && checksValid) {
+        accepted.push({acceptance:{id:reconciliationId},identity:null,resultHead,resultPr,mergeCommit,
+          sourcePr,sourceSha,requestId:job.request_id,attemptId:receipt.attempt_id,
+          workerDiffSha256:String(receipt.diff_sha256).toLowerCase(),readbackMainSha:currentMain,
+          focusedTest,checks,externalEffects:'UNKNOWN',liveAcceptance:'NOT_CLAIMED'});
+      }
+    }
     for (const comment of comments || []) {
       const parsed=markedReadbackComment(comment,W1_SOURCE_ACCEPTANCE_MARKER,
         'ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_ORIGINAL_WORKER_OR_LIVE_ACCEPTANCE');
@@ -2000,14 +2059,16 @@
           externalEffects:'UNKNOWN',liveAcceptance:'NOT_CLAIMED'});
       }
     }
-    accepted.sort((a,b)=>a.acceptance.id-b.acceptance.id || a.identity.id-b.identity.id);
+    accepted.sort((a,b)=>a.acceptance.id-b.acceptance.id ||
+      Number(a.identity?.id || 0)-Number(b.identity?.id || 0));
     const match=accepted.at(-1);
     if (!match) return null;
+    const identityLabel=match.identity ? ` and byte identity #${match.identity.id}` : '';
     return {...match,status:'ACCEPTED',acceptanceCommentId:match.acceptance.id,
-      patchIdentityCommentId:match.identity.id,
+      patchIdentityCommentId:match.identity?.id || null,
       label:`PR #${match.resultPr} SOURCE_ACCEPTED; merged source ${match.mergeCommit}; ` +
         `focused tests ${match.focusedTest.replaceAll('_passed',' passed').replaceAll('_failed',' failed').replaceAll('_skipped',' skipped')}; ` +
-        `${match.checks}; #407 source acceptance #${match.acceptance.id} and byte identity #${match.identity.id}`};
+        `${match.checks}; #407 source acceptance/reconciliation #${match.acceptance.id}${identityLabel}`};
   }
   function reconciliationForTask(comments, workerId, job, receiptItem, now = Date.now()) {
     const name=workerId === 'W1' ? 'W1_EDITFILE_TELEMETRY'
@@ -2044,10 +2105,12 @@
     if (workerId === 'W1') {
       const result=String(fields.integration || '').match(/^PR_(\d+)_MERGED$/);
       const resultNumber=result ? Number(result[1]) : null;
-      return {id:match.id,created_at:match.created_at,diffReconciliation:fields.diff_reconciliation || 'UNKNOWN',
+      return {id:match.id,created_at:match.created_at,recordType:match.metadata.record_type || 'UNKNOWN',
+        metadata:match.metadata,section:fields,diffReconciliation:fields.diff_reconciliation || 'UNKNOWN',
         codexReview:fields.codex_review || 'UNKNOWN',workerTerminal:fields.original_terminal_state || 'UNKNOWN',
         resultPr:resultNumber && Number.isSafeInteger(resultNumber) && safeSha(fields.integration_commit)
           ? {number:resultNumber,head:safeSha(fields.integration_commit),
+            resultHead:safeSha(fields['pr_' + resultNumber + '_head']),
             checks:fields['pr_' + resultNumber + '_checks'] || 'UNKNOWN'} : null};
     }
     const recoveredFileHashes=Object.entries(fields).filter(([key,value]) =>
