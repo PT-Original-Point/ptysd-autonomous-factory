@@ -3241,7 +3241,7 @@
 
     const delivery = direct?.deliveryReadback;
     if (delivery) {
-      text('w2-direct-delivery', `PR #${delivery.original_pr} ${delivery.original_pr_state} · 後續結合 PR #${delivery.combined_delivery_pr} MERGED（merge commit ${delivery.merge_commit_sha} · main ${delivery.main_after_merge}）`);
+      text('w2-direct-delivery', `PR #${delivery.original_pr} ${delivery.original_pr_state} · 後續結合 PR #${delivery.combined_delivery_pr} MERGED（merge commit ${delivery.merge_commit_sha} · 合併當時 main 讀回 ${delivery.main_after_merge}）`);
     } else {
       text('w2-direct-delivery', '交付狀態 UNKNOWN（無相符 direct-CLI 交付脈絡紀錄）');
     }

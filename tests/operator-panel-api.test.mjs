@@ -2094,6 +2094,7 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
   assert.match(domElements.get('w2-direct-delivery').textContent,/PR #576.*CLOSED_UNMERGED/);
   assert.match(domElements.get('w2-direct-delivery').textContent,/PR #578.*MERGED/);
   assert.match(domElements.get('w2-direct-delivery').textContent,/737fa98390549c12bda2e42466311b42c2198ef6/);
+  assert.match(domElements.get('w2-direct-delivery').textContent,/合併當時 main 讀回 1268cdbf5cc56bb7ac3b7fe7fdb9d74adb039e49/);
   const mismatchedLineage = panel.w2EvidenceData(goalComments,issueComments.map(c =>
     c.id === 6449891925 ? {...c,body:'PTYSD_W2_DIRECT_CLI_DELIVERY_V1\n'+JSON.stringify({
       ...directDeliveryReadback,direct_cli_session_id:'different-session'})} : c),head,goalIdentity);
