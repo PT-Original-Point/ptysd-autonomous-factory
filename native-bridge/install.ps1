@@ -1,7 +1,7 @@
 # Windows PowerShell 5.1 native, least-privilege, version-neutral OpenCode ingress.
 [CmdletBinding()]
 param(
-    [ValidateSet('Audit','Install','RunOnce','RefreshRuntimeModules','Uninstall')][string]$Mode = 'Audit',
+    [ValidateSet('Audit','Install','RunOnce','RefreshRuntimeModules','RefreshTaskLogonTrigger','Uninstall')][string]$Mode = 'Audit',
     [ValidateRange(1,99999999)][int]$IssueNumber = 1,
     [string]$Workspace = '',
     [string]$TrustedDispatcher = 't14210184',
@@ -225,8 +225,11 @@ function Write-WorkerRuntimeAtomicReplacement([byte[]]$Bytes, [string]$Destinati
 }
 
 function Get-WorkerRuntimeTaskDefinitionSha256 {
-    try { $text = Export-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop }
-    catch { throw 'WORKER_RUNTIME_TASK_XML_READBACK_UNKNOWN' }
+    param([switch]$AllowLegacyTimeOnly, [string]$TaskXml = '')
+    if ([string]::IsNullOrWhiteSpace($TaskXml)) {
+        try { $text = Export-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop }
+        catch { throw 'WORKER_RUNTIME_TASK_XML_READBACK_UNKNOWN' }
+    } else { $text = $TaskXml }
     if ([string]::IsNullOrWhiteSpace([string]$text)) { throw 'WORKER_RUNTIME_TASK_XML_READBACK_UNKNOWN' }
     try { [xml]$document = [string]$text }
     catch { throw 'WORKER_RUNTIME_TASK_XML_INVALID' }
@@ -234,14 +237,26 @@ function Get-WorkerRuntimeTaskDefinitionSha256 {
     $timeTriggerNodes = @($triggerNodes | Where-Object { $_.LocalName -ceq 'TimeTrigger' })
     $logonTriggerNodes = @($triggerNodes | Where-Object { $_.LocalName -ceq 'LogonTrigger' })
     $settingsNode = $document.SelectSingleNode("//*[local-name()='Settings']")
-    if ($triggerNodes.Count -ne 2 -or $timeTriggerNodes.Count -ne 1 -or
-        $logonTriggerNodes.Count -ne 1 -or
+    $isCurrentTriggerSet = $triggerNodes.Count -eq 2 -and $timeTriggerNodes.Count -eq 1 -and
+        $logonTriggerNodes.Count -eq 1
+    $isLegacyTriggerSet = $AllowLegacyTimeOnly -and $triggerNodes.Count -eq 1 -and
+        $timeTriggerNodes.Count -eq 1 -and $logonTriggerNodes.Count -eq 0
+    if ((-not $isCurrentTriggerSet -and -not $isLegacyTriggerSet) -or
         $null -eq $settingsNode) { throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' }
+    foreach ($triggerNode in @($timeTriggerNodes) + @($logonTriggerNodes)) {
+        $enabledNodes = @($triggerNode.SelectNodes("./*[local-name()='Enabled']"))
+        if ($enabledNodes.Count -gt 1 -or ($enabledNodes.Count -eq 1 -and
+            [string]$enabledNodes[0].InnerText -ine 'true')) {
+            throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH'
+        }
+    }
     $expectedLogonUser = $env:USERDOMAIN + '\' + $env:USERNAME
-    $logonUserNode = $logonTriggerNodes[0].SelectSingleNode("./*[local-name()='UserId']")
-    if ($null -eq $logonUserNode -or
-        [string]$logonUserNode.InnerText -ine $expectedLogonUser) {
-        throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH'
+    if ($isCurrentTriggerSet) {
+        $logonUserNode = $logonTriggerNodes[0].SelectSingleNode("./*[local-name()='UserId']")
+        if ($null -eq $logonUserNode -or
+            [string]$logonUserNode.InnerText -ine $expectedLogonUser) {
+            throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH'
+        }
     }
     $intervalNode = $timeTriggerNodes[0].SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='Interval']")
     $durationNode = $timeTriggerNodes[0].SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='Duration']")
@@ -270,8 +285,102 @@ function Get-WorkerRuntimeTaskDefinitionSha256 {
     return Get-WorkerRuntimeBytesSha256 $bytes
 }
 
+function Get-WorkerRuntimeTaskDefinitionWithoutLogonTriggerSha256([string]$TaskXml) {
+    if ([string]::IsNullOrWhiteSpace($TaskXml)) { throw 'WORKER_RUNTIME_TASK_XML_READBACK_UNKNOWN' }
+    try { [xml]$document = $TaskXml }
+    catch { throw 'WORKER_RUNTIME_TASK_XML_INVALID' }
+    foreach ($node in @($document.SelectNodes("//*[local-name()='Triggers']/*[local-name()='LogonTrigger']"))) {
+        $null = $node.ParentNode.RemoveChild($node)
+    }
+    $bytes = ([Text.UTF8Encoding]::new($false)).GetBytes($document.OuterXml)
+    return Get-WorkerRuntimeBytesSha256 $bytes
+}
+
+function Get-WorkerRuntimeTaskTriggerState([string]$TaskXml) {
+    $definitionSha256 = Get-WorkerRuntimeTaskDefinitionSha256 -AllowLegacyTimeOnly -TaskXml $TaskXml
+    try { [xml]$document = $TaskXml }
+    catch { throw 'WORKER_RUNTIME_TASK_XML_INVALID' }
+    $triggerNodes = @($document.SelectNodes("//*[local-name()='Triggers']/*"))
+    $logonTriggerNodes = @($triggerNodes | Where-Object { $_.LocalName -ceq 'LogonTrigger' })
+    $triggerKind = if ($logonTriggerNodes.Count -eq 1) { 'CURRENT_TIME_AND_LOGON' } else { 'LEGACY_TIME_ONLY' }
+    return [pscustomobject]@{
+        TriggerKind = $triggerKind
+        DefinitionSha256 = $definitionSha256
+        WithoutLogonTriggerSha256 = Get-WorkerRuntimeTaskDefinitionWithoutLogonTriggerSha256 $TaskXml
+    }
+}
+
+function Assert-WorkerRuntimeTaskTimeTriggerMatchesXml([object]$TimeTrigger, [string]$TaskXml) {
+    if ($null -eq $TimeTrigger -or [string]$TimeTrigger.CimClass.CimClassName -cne 'MSFT_TaskTimeTrigger') {
+        throw 'WORKER_RUNTIME_TASK_TRIGGER_OBJECT_MISMATCH'
+    }
+    try { [xml]$document = $TaskXml }
+    catch { throw 'WORKER_RUNTIME_TASK_XML_INVALID' }
+    $timeTriggerNodes = @($document.SelectNodes("//*[local-name()='Triggers']/*[local-name()='TimeTrigger']"))
+    if ($timeTriggerNodes.Count -ne 1) { throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' }
+    $xmlTrigger = $timeTriggerNodes[0]
+    $startBoundaryNode = $xmlTrigger.SelectSingleNode("./*[local-name()='StartBoundary']")
+    $intervalNode = $xmlTrigger.SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='Interval']")
+    $durationNode = $xmlTrigger.SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='Duration']")
+    $stopAtDurationEndNode = $xmlTrigger.SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='StopAtDurationEnd']")
+    $enabledProperty = $TimeTrigger.PSObject.Properties['Enabled']
+    $startBoundaryProperty = $TimeTrigger.PSObject.Properties['StartBoundary']
+    $repetitionProperty = $TimeTrigger.PSObject.Properties['Repetition']
+    if ($null -eq $enabledProperty -or $enabledProperty.Value -isnot [bool] -or
+        $enabledProperty.Value -ne $true -or $null -eq $startBoundaryNode -or
+        $null -eq $startBoundaryProperty -or
+        [string]$startBoundaryProperty.Value -cne [string]$startBoundaryNode.InnerText -or
+        $null -eq $intervalNode -or $null -eq $durationNode -or
+        $null -eq $repetitionProperty -or $null -eq $repetitionProperty.Value -or
+        [string]$TimeTrigger.Repetition.Interval -cne [string]$intervalNode.InnerText -or
+        [string]$TimeTrigger.Repetition.Duration -cne [string]$durationNode.InnerText) {
+        throw 'WORKER_RUNTIME_TASK_TRIGGER_OBJECT_MISMATCH'
+    }
+    $stopProperty = $TimeTrigger.Repetition.PSObject.Properties['StopAtDurationEnd']
+    if ($null -eq $stopAtDurationEndNode -or $null -eq $stopProperty -or
+        $stopProperty.Value -isnot [bool] -or
+        [string]$stopProperty.Value.ToString().ToLowerInvariant() -cne
+            [string]$stopAtDurationEndNode.InnerText.ToLowerInvariant()) {
+        throw 'WORKER_RUNTIME_TASK_TRIGGER_OBJECT_MISMATCH'
+    }
+}
+
+function Assert-WorkerRuntimeTaskLogonTriggerMatchesXml([object]$Task, [string]$TaskXml) {
+    if ($null -eq $Task) { throw 'WORKER_RUNTIME_TASK_TRIGGER_OBJECT_MISMATCH' }
+    $triggers = @($Task.Triggers)
+    $timeTriggers = @($triggers | Where-Object {
+        $null -ne $_.PSObject.Properties['CimClass'] -and
+            [string]$_.CimClass.CimClassName -ceq 'MSFT_TaskTimeTrigger'
+    })
+    $logonTriggers = @($triggers | Where-Object {
+        $null -ne $_.PSObject.Properties['CimClass'] -and
+            [string]$_.CimClass.CimClassName -ceq 'MSFT_TaskLogonTrigger'
+    })
+    if ($triggers.Count -ne 2 -or $timeTriggers.Count -ne 1 -or $logonTriggers.Count -ne 1) {
+        throw 'WORKER_RUNTIME_TASK_TRIGGER_OBJECT_MISMATCH'
+    }
+    try { [xml]$document = $TaskXml }
+    catch { throw 'WORKER_RUNTIME_TASK_XML_INVALID' }
+    $xmlLogonTriggers = @($document.SelectNodes("//*[local-name()='Triggers']/*[local-name()='LogonTrigger']"))
+    if ($xmlLogonTriggers.Count -ne 1) { throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' }
+    $xmlUserNode = $xmlLogonTriggers[0].SelectSingleNode("./*[local-name()='UserId']")
+    $xmlEnabledNodes = @($xmlLogonTriggers[0].SelectNodes("./*[local-name()='Enabled']"))
+    $enabledProperty = $logonTriggers[0].PSObject.Properties['Enabled']
+    $userIdProperty = $logonTriggers[0].PSObject.Properties['UserId']
+    $expectedUser = $env:USERDOMAIN + '\' + $env:USERNAME
+    if ($null -eq $xmlUserNode -or [string]$xmlUserNode.InnerText -ine $expectedUser -or
+        $xmlEnabledNodes.Count -gt 1 -or ($xmlEnabledNodes.Count -eq 1 -and
+            [string]$xmlEnabledNodes[0].InnerText -ine 'true') -or
+        $null -eq $enabledProperty -or $enabledProperty.Value -isnot [bool] -or
+        $enabledProperty.Value -ne $true -or $null -eq $userIdProperty -or
+        [string]$userIdProperty.Value -ine [string]$xmlUserNode.InnerText) {
+        throw 'WORKER_RUNTIME_TASK_TRIGGER_OBJECT_MISMATCH'
+    }
+}
+
 function Get-WorkerRuntimeTaskReadback([bool]$ExpectedEnabled, [string]$ExpectedState,
-    [string]$ExpectedDefinitionSha256 = '', [string[]]$AdditionalStates = @()) {
+    [string]$ExpectedDefinitionSha256 = '', [string[]]$AdditionalStates = @(),
+    [switch]$AllowLegacyTimeOnly) {
     $task = Get-TaskOptional
     if ($null -eq $task -or $task.TaskPath -cne '\' -or
         ([string]$task.State -cne $ExpectedState -and [string]$task.State -notin $AdditionalStates)) {
@@ -315,9 +424,26 @@ function Get-WorkerRuntimeTaskReadback([bool]$ExpectedEnabled, [string]$Expected
         $task.Settings.StartWhenAvailable -ne $true) {
         throw 'WORKER_RUNTIME_TASK_IDENTITY_MISMATCH'
     }
-    $definitionHash = Get-WorkerRuntimeTaskDefinitionSha256
+    $taskXml = ''
+    try { $taskXml = [string](Export-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop) }
+    catch { throw 'WORKER_RUNTIME_TASK_XML_READBACK_UNKNOWN' }
+    $definitionHash = Get-WorkerRuntimeTaskDefinitionSha256 -AllowLegacyTimeOnly:$AllowLegacyTimeOnly -TaskXml $taskXml
     if ($ExpectedDefinitionSha256 -and $definitionHash -cne $ExpectedDefinitionSha256.ToLowerInvariant()) {
         throw 'WORKER_RUNTIME_TASK_DEFINITION_CHANGED'
+    }
+    $taskTriggers = @($task.Triggers)
+    $timeTriggers = @($taskTriggers | Where-Object {
+        $null -ne $_.PSObject.Properties['CimClass'] -and
+            [string]$_.CimClass.CimClassName -ceq 'MSFT_TaskTimeTrigger'
+    })
+    if ($timeTriggers.Count -ne 1) { throw 'WORKER_RUNTIME_TASK_TRIGGER_OBJECT_MISMATCH' }
+    Assert-WorkerRuntimeTaskTimeTriggerMatchesXml $timeTriggers[0] $taskXml
+    $triggerNodes = @(([xml]$taskXml).SelectNodes("//*[local-name()='Triggers']/*"))
+    $logonTriggerNodes = @($triggerNodes | Where-Object { $_.LocalName -ceq 'LogonTrigger' })
+    if ($logonTriggerNodes.Count -eq 1) {
+        Assert-WorkerRuntimeTaskLogonTriggerMatchesXml $task $taskXml
+    } elseif (-not $AllowLegacyTimeOnly -or $taskTriggers.Count -ne 1) {
+        throw 'WORKER_RUNTIME_TASK_TRIGGER_OBJECT_MISMATCH'
     }
     return [pscustomobject]@{ Task = $task; DefinitionSha256 = $definitionHash }
 }
@@ -830,6 +956,133 @@ function Get-TaskOptional {
     if ($matches.Count -eq 0) { return $null }
     return $matches[0]
 }
+
+function Add-WorkerRuntimeTaskLogonTrigger([object]$Task, [string]$ExpectedTaskXml) {
+    if ($null -eq $Task -or $Task.TaskName -cne $taskName -or $Task.TaskPath -cne '\') {
+        throw 'WORKER_RUNTIME_TASK_IDENTITY_MISMATCH'
+    }
+    $triggerProperty = $Task.PSObject.Properties['Triggers']
+    if ($null -eq $triggerProperty) { throw 'WORKER_RUNTIME_TASK_TRIGGER_READBACK_UNKNOWN' }
+    $triggers = @($triggerProperty.Value)
+    if ($triggers.Count -ne 1) { throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' }
+    $timeTrigger = $triggers[0]
+    $cimClassProperty = $timeTrigger.PSObject.Properties['CimClass']
+    if ($null -eq $cimClassProperty -or $null -eq $cimClassProperty.Value -or
+        [string]$cimClassProperty.Value.CimClassName -cne 'MSFT_TaskTimeTrigger') {
+        throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH'
+    }
+    Assert-WorkerRuntimeTaskTimeTriggerMatchesXml $timeTrigger $ExpectedTaskXml
+    $username = $env:USERDOMAIN + '\' + $env:USERNAME
+    $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $username -ErrorAction Stop
+    Set-ScheduledTask -TaskName $taskName -TaskPath '\' -Trigger @($timeTrigger,$logonTrigger) `
+        -ErrorAction Stop | Out-Null
+}
+
+function Invoke-WorkerRuntimeTaskLogonTriggerRefresh {
+    if ($env:COMPUTERNAME.ToUpperInvariant() -ne $expectedHost) { throw 'WRONG_HOST_STOP' }
+    if (-not (Test-GhAuthenticated 'gh.exe')) { throw 'GH_AUTH_NOT_READY_HUMAN_OAUTH_GATE' }
+    foreach ($path in @($homeDir,$configPath,$hiddenWorker)) { Assert-WorkerRuntimePathChain $path }
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw 'WORKER_RUNTIME_CONFIG_REQUIRED' }
+    $gh = Require-Command 'gh.exe'
+    $git = Require-Command 'git.exe'
+    if (-not (Test-Path -LiteralPath $hiddenWorker -PathType Leaf) -or
+        (Get-WorkerRuntimeFileSha256 $hiddenWorker) -cne $hiddenWorkerSha256.ToLowerInvariant()) {
+        throw 'HIDDEN_WORKER_WRAPPER_MISSING_OR_UNVERIFIED'
+    }
+    $wrapperText = [IO.File]::ReadAllText($hiddenWorker)
+    $nodeMatch = [regex]::Match($wrapperText, '(?m)^\s*commandLine\s*=\s*"""([^"\r\n]+)"{2}')
+    if (-not $nodeMatch.Success) { throw 'HIDDEN_WORKER_NODE_COMMAND_UNREADABLE' }
+    $node = $nodeMatch.Groups[1].Value
+    if (-not [IO.Path]::IsPathRooted($node) -or -not (Test-Path -LiteralPath $node -PathType Leaf)) {
+        throw 'HIDDEN_WORKER_NODE_EXECUTABLE_MISSING'
+    }
+
+    $null = Assert-WorkerRuntimeSource $git $gh
+    Assert-WorkerRuntimeNoActiveProcess $node
+    $taskReadback = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $true -ExpectedState 'Ready' `
+        -AllowLegacyTimeOnly
+    $taskXml = ''
+    try { $taskXml = [string](Export-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop) }
+    catch { throw 'WORKER_RUNTIME_TASK_XML_READBACK_UNKNOWN' }
+    $preState = Get-WorkerRuntimeTaskTriggerState $taskXml
+    if ($taskReadback.DefinitionSha256 -cne $preState.DefinitionSha256) {
+        throw 'WORKER_RUNTIME_TASK_CHANGED_DURING_PREFLIGHT'
+    }
+    if ($preState.TriggerKind -ceq 'CURRENT_TIME_AND_LOGON') {
+        $null = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $true -ExpectedState 'Ready' `
+            -ExpectedDefinitionSha256 $preState.DefinitionSha256
+        Write-Output 'WORKER_TASK_LOGON_TRIGGER=ALREADY_PRESENT_NO_CHANGE'
+        Write-Output 'WORKER_RUNTIME_TASK_MUTATION=NONE'
+        return
+    }
+
+    $backupRoot = Join-Path $homeDir 'backups'
+    if (Test-Path -LiteralPath $backupRoot) {
+        $backupRootItem = Get-Item -LiteralPath $backupRoot -Force -ErrorAction Stop
+        if (-not $backupRootItem.PSIsContainer -or
+            (($backupRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw 'WORKER_RUNTIME_BACKUP_ROOT_INVALID'
+        }
+    } else { $null = New-Item -ItemType Directory -Path $backupRoot -ErrorAction Stop }
+    Assert-WorkerRuntimePathChain $backupRoot
+    $operationId = [guid]::NewGuid().ToString('N')
+    $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
+    $backupPath = Join-Path $backupRoot ('native-opencode-task-before-logon-trigger-' + $stamp + '-' +
+        $operationId + '.xml')
+    $backupBytes = ([Text.UTF8Encoding]::new($false)).GetBytes($taskXml)
+    Write-WorkerRuntimeNewFile $backupPath $backupBytes
+    if ((Get-WorkerRuntimeFileSha256 $backupPath) -cne (Get-WorkerRuntimeBytesSha256 $backupBytes)) {
+        throw 'WORKER_RUNTIME_TASK_BACKUP_READBACK_MISMATCH'
+    }
+
+    # Re-read the exact task immediately before the native write. A concurrent
+    # scheduler or operator change must stop this one-shot migration.
+    Assert-WorkerRuntimeNoActiveProcess $node
+    $latestReadback = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $true -ExpectedState 'Ready' `
+        -ExpectedDefinitionSha256 $preState.DefinitionSha256 -AllowLegacyTimeOnly
+    $latestXml = ''
+    try { $latestXml = [string](Export-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop) }
+    catch { throw 'WORKER_RUNTIME_TASK_XML_READBACK_UNKNOWN' }
+    $latestState = Get-WorkerRuntimeTaskTriggerState $latestXml
+    if ($latestState.TriggerKind -cne 'LEGACY_TIME_ONLY' -or
+        $latestState.DefinitionSha256 -cne $preState.DefinitionSha256 -or
+        $latestState.WithoutLogonTriggerSha256 -cne $preState.WithoutLogonTriggerSha256) {
+        throw 'WORKER_RUNTIME_TASK_CHANGED_BEFORE_TRIGGER_WRITE'
+    }
+
+    $writeError = ''
+    try { Add-WorkerRuntimeTaskLogonTrigger $latestReadback.Task $latestXml }
+    catch { $writeError = $_.Exception.Message }
+
+    # Set-ScheduledTask can report an error after applying a definition. Always
+    # reconcile the same task before classifying the outcome; never retry here.
+    try {
+        $afterXml = [string](Export-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop)
+        $afterState = Get-WorkerRuntimeTaskTriggerState $afterXml
+        $afterReadback = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $true -ExpectedState 'Ready' `
+            -ExpectedDefinitionSha256 $afterState.DefinitionSha256 -AllowLegacyTimeOnly
+    } catch {
+        throw ('WORKER_RUNTIME_TASK_TRIGGER_UPGRADE_OUTCOME_UNKNOWN;BACKUP=' + $backupPath)
+    }
+    if ($afterState.TriggerKind -cne 'CURRENT_TIME_AND_LOGON' -or
+        $afterState.WithoutLogonTriggerSha256 -cne $preState.WithoutLogonTriggerSha256) {
+        if ($afterState.TriggerKind -ceq 'LEGACY_TIME_ONLY' -and
+            $afterState.DefinitionSha256 -ceq $preState.DefinitionSha256) {
+            throw ('WORKER_RUNTIME_TASK_TRIGGER_UPGRADE_NOT_APPLIED;BACKUP=' + $backupPath +
+                ';ERROR=' + $writeError)
+        }
+        throw ('WORKER_RUNTIME_TASK_TRIGGER_UPGRADE_OUTCOME_UNKNOWN;BACKUP=' + $backupPath)
+    }
+    Write-Output ('WORKER_TASK_LOGON_TRIGGER=ADDED_FOR_CURRENT_USER;USER=' +
+        ($env:USERDOMAIN + '\' + $env:USERNAME))
+    Write-Output ('WORKER_TASK_DEFINITION_BEFORE_SHA256=' + $preState.DefinitionSha256)
+    Write-Output ('WORKER_TASK_DEFINITION_AFTER_SHA256=' + $afterReadback.DefinitionSha256)
+    Write-Output ('WORKER_TASK_BACKUP=' + $backupPath)
+    Write-Output ('WORKER_TASK_BACKUP_SHA256=' + (Get-WorkerRuntimeFileSha256 $backupPath))
+    Write-Output 'WORKER_RUNTIME_MODULES=UNCHANGED;MODEL_EXECUTION=NOT_INVOKED'
+    if ($writeError) { Write-Output 'WORKER_TASK_TRIGGER_WRITE=ERROR_RECONCILED_FROM_EXACT_READBACK' }
+}
+
 function Inspect-Task {
     $task = Get-TaskOptional
     if ($null -eq $task) { Write-Output 'NATIVE_TASK=ABSENT'; return }
@@ -876,6 +1129,10 @@ if ($Mode -eq 'Uninstall') {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
     if ($null -ne (Get-TaskOptional)) { throw 'TASK_UNREGISTER_READBACK_FAILED' }
     Write-Output 'NATIVE_TASK_REMOVED_LOCAL_EVIDENCE_RETAINED'
+    return
+}
+if ($Mode -eq 'RefreshTaskLogonTrigger') {
+    Invoke-WorkerRuntimeTaskLogonTriggerRefresh
     return
 }
 if ($Mode -eq 'RefreshRuntimeModules') {
