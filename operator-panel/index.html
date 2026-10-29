@@ -3103,9 +3103,18 @@
     text('native-action',task.registered === false ? 'PTYSD-Native-OpenCode 未註冊'
       : task.registered === true ? String(task.action_kind || 'Action 未知') + '；' + String(task.state || '狀態未知')
         : '未確認');
+    const recovery = ['INTERACTIVE_LIMITED','INTERACTIVE_HIGHEST'].includes(task.identity_class)
+      ? task.start_when_available === true ? '互動登入後補跑已啟用；首次登入前不保證'
+        : task.start_when_available === false ? '互動登入後補跑未啟用'
+          : '互動登入後補跑設定未知'
+      : task.identity_class === 'UNKNOWN' ? '登入恢復條件未知'
+        : task.start_when_available === true ? '錯過排程補跑已啟用'
+          : task.start_when_available === false ? '錯過排程補跑未啟用'
+            : '錯過排程補跑設定未知';
     text('native-identity',(task.identity_class || '身分未知') + '；單實例 ' +
       (task.multiple_instances || '未知') + '；週期 ' +
-      (task.trigger_interval_minutes ? task.trigger_interval_minutes + ' 分鐘' : '未知'));
+      (task.trigger_interval_minutes ? task.trigger_interval_minutes + ' 分鐘' : '未知') +
+      '；重啟恢復 ' + recovery);
     text('native-last','最近 ' + readTime(task.last_run) + '；結果 ' + (task.last_result || '未確認'));
     const executorTaskLanes=[['opencode','W1 OpenCode'],['antigravity','W2 Antigravity'],['codex','Codex 主控']];
     const executorTaskSummary=osFreshness !== 'FRESH' || !object(windows.executor_tasks)
