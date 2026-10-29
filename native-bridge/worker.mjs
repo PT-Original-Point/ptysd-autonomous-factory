@@ -29,7 +29,7 @@ import { runCapturedProcess, terminateProcessTree } from './captured-process.mjs
 import { safeErrorCode } from './safe-error-code.mjs';
 import { assertExecutorTaskReady, cleanupExecutorAttempt, createExecutorSourceBundle,
   createPinnedSourceBundle, dispatchToExecutor, executorResultPath, triggerPendingExecutorAttempt,
-  validateExecutorRoutingMap, validateExecutorDescriptor } from './windows-executor.mjs';
+  readExecutorWorkspace, validateExecutorRoutingMap, validateExecutorDescriptor } from './windows-executor.mjs';
 
 export const PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
 export const REPO = 'PT-Original-Point/ptysd-autonomous-factory';
@@ -805,7 +805,8 @@ function latestOperatorJob(comments, config, workerLogin, mainSha, candidateSour
     exit_code: Number.isSafeInteger(last?.exit_code) ? last.exit_code : null,
     ...(capturedDiff || {}) };
 }
-function observationWorkerRecords(comments, config, workerLogin, mainSha, candidateSourceShas) {
+function observationWorkerRecords(comments, config, workerLogin, mainSha, candidateSourceShas,
+  preflightBlockers = new Map()) {
   const records = [];
   for (const [workerId, kinds] of [
     ['W1', new Set(['opencode_edit'])],
@@ -838,7 +839,8 @@ function observationWorkerRecords(comments, config, workerLogin, mainSha, candid
           : task.state === 'STARTED_UNVERIFIED' ? 'STARTED_WITHOUT_VERIFIED_MODEL_ACTIVITY'
             : task.state === 'WAITING_ELIGIBILITY' || task.state === 'BLOCKED'
               ? task.outcome : queueWaitsForModelGate
-                ? 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED' : undefined;
+                ? 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED'
+                : preflightBlockers.get(task.request_id);
     const taskSource = `Issue #310 comment ${task.job_comment_id}` +
       (task.source_pr ? `; PR #${task.source_pr}@${task.source_sha}` : `; main@${task.source_sha}`);
     const hasCapturedDiff = task.coding_state === 'DIFF_CAPTURED_UNVERIFIED';
@@ -847,7 +849,8 @@ function observationWorkerRecords(comments, config, workerLogin, mainSha, candid
       task_comment_id: task.job_comment_id, ...(task.source_pr ? { source_pr: task.source_pr } : {}),
       ...(task.attempt_id ? { attempt_id: task.attempt_id } : {}), task_state: task.state,
       model_execution_switch: modelExecutionSwitch,
-      model_eligibility: task.state === 'WAITING_ELIGIBILITY' || queueWaitsForModelGate
+      model_eligibility: task.state === 'WAITING_ELIGIBILITY' || queueWaitsForModelGate ||
+        preflightBlockers.has(task.request_id)
         ? 'WAITING' : 'UNKNOWN',
       code_changes: hasCapturedDiff ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNPROVEN',
       files_modified: hasCapturedDiff ? 'COUNT_REPORTED_UNVERIFIED' : 'UNPROVEN',
@@ -867,6 +870,7 @@ function observationWorkerRecords(comments, config, workerLogin, mainSha, candid
         : task.state === 'FINISHED_NOT_ACCEPTANCE' ? 'Codex：驗證交付證據與語意結果'
           : task.state === 'WAITING_ELIGIBILITY' ? '重新檢查資格；不自動重播未知效果'
             : queueWaitsForModelGate ? 'W2 Worker：資格恢復後重新評估；不建立重複任務'
+              : preflightBlockers.has(task.request_id) ? 'Codex：修復並讀回原生派工阻擋'
             : 'Codex：核對此任務的即時執行證據' });
   }
   records.push({ worker_id: 'W3', status: 'UNKNOWN',
@@ -902,7 +906,8 @@ function operatorPublisherStageValue(stage, read, identity) {
   catch (error) { throw operatorPublisherStageError(stage, error, identity); }
 }
 export async function publishOperatorObservation(config, workerLogin, comments, mainSha,
-  dependencies = {}, candidateSourceShas = new Map(), issueCommentsCount = null) {
+  dependencies = {}, candidateSourceShas = new Map(), issueCommentsCount = null,
+  preflightBlockers = new Map()) {
   const marked = comments.filter(c =>
     typeof c?.body === 'string' && c.body.startsWith('PTYSD_OPERATOR_OBSERVATION_V1\n'));
   if (!marked.length) return { status: 'NOT_SEEDED' };
@@ -943,7 +948,8 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
   const nextOwner = operatorPublisherStageValue('NEXT_OWNER', () => (
     windows.status !== 'FRESH' ? 'OS_OBSERVATION_UNKNOWN'
     : windows.native_task.enabled === false ? 'NATIVE_SCHEDULER_REPAIR'
-      : activeTask?.state === 'QUEUED_NOT_STARTED' ? 'NATIVE_WORKER'
+      : activeTask && preflightBlockers.has(activeTask.request_id) ? 'CODEX_REPAIR_NATIVE_PREFLIGHT'
+        : activeTask?.state === 'QUEUED_NOT_STARTED' ? 'NATIVE_WORKER'
         : activeTask?.state === 'STARTED_UNVERIFIED' ? 'VERIFY_ACTIVE_WORK'
           : ['SOURCE_UNKNOWN', 'STALE_SOURCE'].includes(latestTask?.state)
             ? 'VERIFY_CANDIDATE_SOURCE'
@@ -985,7 +991,8 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
       remote_commit: null, pull_request: null, ci: 'UNKNOWN',
     },
     workers: operatorPublisherStageValue('WORKER_RECORDS',
-      () => observationWorkerRecords(comments, config, workerLogin, mainSha, candidateSourceShas),
+      () => observationWorkerRecords(comments, config, workerLogin, mainSha, candidateSourceShas,
+        preflightBlockers),
       publisherIdentity),
     github: {
       observed_at: observedAt, main_sha: mainSha,
@@ -2766,44 +2773,15 @@ export async function runWorker(configInput, adapters = {}) {
   let next = selected.next;
   if (selected.unresolvedRequestId)
     log(`CODEX_LOCAL_CLAIM_UNRECONCILED_${selected.unresolvedRequestId}_NO_REPLAY`);
-  let observation;
-  try {
-    observation = await publishOperatorObservation(
-      config, me, comments, head, adapters.observationDependencies, candidateSourceShas,
-      Number.isSafeInteger(issue.comments) && issue.comments >= 0 ? issue.comments : null,
-    );
-  } catch (error) {
-    // Status publishing failure must not block a valid queued task.
-    const errorCode = safeErrorCode(error, 'OPERATOR_OBSERVATION_UPDATE_UNKNOWN');
-    try {
-      persistOperatorObservationDiagnostic(config, 'UNKNOWN', head, errorCode,
-        error?.operator_identity);
-    } catch {
-      log('OPERATOR_OBSERVATION_DIAGNOSTIC_WRITE_FAILED');
-    }
-    log(`OPERATOR_OBSERVATION_UPDATE_UNKNOWN_${errorCode}`);
-  }
-  if (observation) {
-    let errorCode = null;
-    try {
-      errorCode = persistOperatorObservationDiagnostic(
-        config, observation.status, head, observation.error || observation.reason,
-        observation.publisher_identity,
-      );
-    } catch {
-      log('OPERATOR_OBSERVATION_DIAGNOSTIC_WRITE_FAILED');
-    }
-    if (observation.status === 'UPDATED') log('OPERATOR_OBSERVATION_UPDATED');
-    else if (observation.status === 'NOT_SEEDED')
-      log(`OPERATOR_OBSERVATION_NOT_SEEDED_${errorCode || 'OPERATOR_OBSERVATION_NOT_SEEDED'}`);
-    else log(`OPERATOR_OBSERVATION_UPDATE_UNKNOWN_${errorCode || 'OPERATOR_OBSERVATION_UPDATE_UNKNOWN'}`);
-  }
   let waitingEligibility = null;
   let preparedSourceBundle = null;
   let preparedExecutor = null;
+  let preparedWorkspace = null;
+  const preflightBlockers = new Map();
   while (next) {
     preparedSourceBundle = null;
     preparedExecutor = null;
+    preparedWorkspace = null;
     if (next.job.kind === 'codex_plan') {
       const gate = codexExecutionGate(next.job, config);
       let reason = null;
@@ -2845,12 +2823,6 @@ export async function runWorker(configInput, adapters = {}) {
       if (!reason && !preparedExecutor) reason = executorRouteFailure(config, next.job.kind);
       if (!reason && next.job.kind === 'opencode_edit')
         reason = opencodeExecutorIsolationFailure(preparedExecutor);
-      if (!reason && next.job.kind === 'opencode_edit') {
-        try { buildV2ScopedEditConfig(config.workspace, next.job.edit_paths); }
-        catch (error) {
-          reason = `EDIT_SCOPE_${safeErrorCode(error, 'INVALID')}`;
-        }
-      }
       if (!reason) {
         try {
           // The OpenCode verifier's contract is throw-on-failure and return the
@@ -2861,12 +2833,26 @@ export async function runWorker(configInput, adapters = {}) {
           reason = `EXECUTOR_TASK_${safeErrorCode(error)}`;
         }
       }
+      if (!reason && next.job.kind === 'opencode_edit') {
+        try {
+          preparedWorkspace = (adapters.readExecutorWorkspace ?? readExecutorWorkspace)(
+            preparedExecutor, { projectId: config.project_id, host: config.host });
+        } catch (error) {
+          reason = `EXECUTOR_WORKSPACE_${safeErrorCode(error, 'READBACK_UNKNOWN')}`;
+        }
+      }
+      if (!reason && next.job.kind === 'opencode_edit') {
+        try { buildV2ScopedEditConfig(preparedWorkspace, next.job.edit_paths); }
+        catch (error) {
+          reason = `EDIT_SCOPE_${safeErrorCode(error, 'INVALID')}`;
+        }
+      }
       if (!reason && isEditExecutionKind(next.job.kind) &&
           preparedExecutor.source_bundle_per_attempt !== true)
         reason = 'EXECUTOR_SOURCE_BUNDLE_PER_ATTEMPT_REQUIRED';
       if (!reason && preparedExecutor.source_bundle_per_attempt === true) {
         try {
-          const bundle = createSourceBundle({ workspace: config.workspace,
+          const bundle = createSourceBundle({ workspace: preparedWorkspace ?? config.workspace,
             descriptor: preparedExecutor, job: next.job, attemptId: randomUUID() });
           if (bundle.source_sha !== next.job.source_sha || !HASH.test(bundle.sha256 || ''))
             throw new Error('EXECUTOR_SOURCE_BUNDLE_IDENTITY_MISMATCH');
@@ -2877,6 +2863,7 @@ export async function runWorker(configInput, adapters = {}) {
       }
       if (reason) {
         const modelLane = next.job.kind === 'antigravity_edit' ? 'ANTIGRAVITY' : 'OPENCODE';
+        preflightBlockers.set(next.job.request_id, reason);
         waitingEligibility ??= modelLane === 'ANTIGRAVITY' ? reason : `OPENCODE_${reason}`;
         log(`${modelLane}_LANE_WAITING_ELIGIBILITY_${reason}`);
         // Eligibility is effect-free and request-specific. Skip only this exact
@@ -2890,6 +2877,39 @@ export async function runWorker(configInput, adapters = {}) {
       }
     }
     break;
+  }
+  let observation;
+  try {
+    observation = await publishOperatorObservation(
+      config, me, comments, head, adapters.observationDependencies, candidateSourceShas,
+      Number.isSafeInteger(issue.comments) && issue.comments >= 0 ? issue.comments : null,
+      preflightBlockers,
+    );
+  } catch (error) {
+    // Status publishing failure must not block a valid queued task.
+    const errorCode = safeErrorCode(error, 'OPERATOR_OBSERVATION_UPDATE_UNKNOWN');
+    try {
+      persistOperatorObservationDiagnostic(config, 'UNKNOWN', head, errorCode,
+        error?.operator_identity);
+    } catch {
+      log('OPERATOR_OBSERVATION_DIAGNOSTIC_WRITE_FAILED');
+    }
+    log(`OPERATOR_OBSERVATION_UPDATE_UNKNOWN_${errorCode}`);
+  }
+  if (observation) {
+    let errorCode = null;
+    try {
+      errorCode = persistOperatorObservationDiagnostic(
+        config, observation.status, head, observation.error || observation.reason,
+        observation.publisher_identity,
+      );
+    } catch {
+      log('OPERATOR_OBSERVATION_DIAGNOSTIC_WRITE_FAILED');
+    }
+    if (observation.status === 'UPDATED') log('OPERATOR_OBSERVATION_UPDATED');
+    else if (observation.status === 'NOT_SEEDED')
+      log(`OPERATOR_OBSERVATION_NOT_SEEDED_${errorCode || 'OPERATOR_OBSERVATION_NOT_SEEDED'}`);
+    else log(`OPERATOR_OBSERVATION_UPDATE_UNKNOWN_${errorCode || 'OPERATOR_OBSERVATION_UPDATE_UNKNOWN'}`);
   }
   if (!next) {
     const waitingReason = waitingEligibility ?? humanGoalWaitingReason;

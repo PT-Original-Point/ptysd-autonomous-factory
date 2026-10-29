@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, rmSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve, win32 } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, rmSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, posix, resolve, win32 } from 'node:path';
 
 const SID = /^S-1-(?:\d+-)+\d+$/i;
 const ATTEMPT = /^[a-f0-9-]{36}$/;
@@ -9,6 +9,7 @@ const REQUEST = /^[A-Z][A-Z0-9_-]{7,79}$/;
 const SHA = /^[a-f0-9]{40}$/i;
 const HASH = /^[a-f0-9]{64}$/i;
 const RESERVED_SIDS = new Set(['S-1-5-18', 'S-1-5-19', 'S-1-5-20', 'S-1-5-32-544']);
+const NATIVE_REPOSITORY = 'PT-Original-Point/ptysd-autonomous-factory';
 
 function fail(code) { const error = new Error(code); error.code = code; throw error; }
 function xmlEscape(value) {
@@ -334,6 +335,43 @@ export function assertPhysicalDirectory(path, code) {
   if (!stat.isDirectory() || stat.isSymbolicLink()) fail(code);
 }
 
+// Resolve the repository checkout owned by this Executor lane. The Worker
+// config's workspace may belong to another lane, so it must not be used as a
+// source object store for an OpenCode or Antigravity attempt.
+export function readExecutorWorkspace(descriptor, { projectId, host,
+  read = readFileSync } = {}) {
+  validateExecutorDescriptor(descriptor);
+  const usesWindowsRoot = /^[a-z]:[\\/]/i.test(descriptor.manifest_dir) ||
+    descriptor.manifest_dir.startsWith('\\\\');
+  const pathApi = usesWindowsRoot ? win32 : posix;
+  const laneRoot = pathApi.dirname(descriptor.manifest_dir);
+  if (pathApi.basename(descriptor.manifest_dir).toLowerCase() !== 'manifests' ||
+      normalizedWindowsPath(descriptor.results_dir) !== normalizedWindowsPath(pathApi.join(laneRoot, 'results')) ||
+      normalizedWindowsPath(descriptor.config_path) !== normalizedWindowsPath(
+        pathApi.join(laneRoot, 'executor-config.json')))
+    fail('EXECUTOR_LANE_DIRECTORY_BINDING_INVALID');
+  let configInfo;
+  try { configInfo = lstatSync(descriptor.config_path); }
+  catch { fail('EXECUTOR_CONFIG_READBACK_UNAVAILABLE'); }
+  if (!configInfo.isFile() || configInfo.isSymbolicLink())
+    fail('EXECUTOR_CONFIG_NOT_REGULAR_FILE');
+  let executorConfig;
+  try { executorConfig = JSON.parse(read(descriptor.config_path, 'utf8')); }
+  catch { fail('EXECUTOR_CONFIG_READBACK_INVALID'); }
+  if (!executorConfig || executorConfig.repo !== NATIVE_REPOSITORY ||
+      executorConfig.project_id !== projectId ||
+      typeof executorConfig.host !== 'string' || executorConfig.host.toUpperCase() !== host.toUpperCase())
+    fail('EXECUTOR_CONFIG_IDENTITY_MISMATCH');
+  const expectedWorkspace = pathApi.join(laneRoot, 'workspace');
+  if (typeof executorConfig.workspace !== 'string' ||
+      !pathApi.isAbsolute(executorConfig.workspace) ||
+      normalizedWindowsPath(executorConfig.workspace) !== normalizedWindowsPath(expectedWorkspace))
+    fail('EXECUTOR_WORKSPACE_PATH_MISMATCH');
+  assertPhysicalDirectory(expectedWorkspace, 'EXECUTOR_SOURCE_WORKSPACE_UNAVAILABLE');
+  try { return realpathSync.native(expectedWorkspace); }
+  catch { fail('EXECUTOR_SOURCE_WORKSPACE_READBACK_FAILED'); }
+}
+
 function executorMailboxState(manifestDir) {
   assertPhysicalDirectory(manifestDir, 'EXECUTOR_MANIFEST_DIRECTORY_UNAVAILABLE');
   const active = readdirSync(manifestDir).filter(name =>
@@ -443,9 +481,66 @@ export function createExecutorSourceBundle({ workspace, descriptor, job, attempt
     fail('EXECUTOR_SOURCE_BUNDLE_IDENTITY_INVALID');
   const manifestDir = filesystemPath(descriptor.manifest_dir);
   assertPhysicalDirectory(manifestDir, 'EXECUTOR_MANIFEST_DIRECTORY_UNAVAILABLE');
-  return createPinnedSourceBundle({ workspace, bundlePath: candidateBundlePath(manifestDir, attemptId),
-    sourceSha: job.source_sha, attemptId, filesystemPath: value => value,
-    refNamespace: 'executor-bundles', execFile });
+  const sourceWorkspace = resolve(workspace);
+  assertPhysicalDirectory(sourceWorkspace, 'EXECUTOR_SOURCE_WORKSPACE_UNAVAILABLE');
+  const options = { encoding: 'utf8', windowsHide: true, shell: false, timeout: 120000,
+    maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] };
+  const runGit = (args, code) => {
+    try { return String(execFile('git', ['-C', sourceWorkspace, ...args], options)).trim(); }
+    catch { fail(code); }
+  };
+  let sourceAvailable = false;
+  try {
+    sourceAvailable = runGit(['rev-parse', '--verify', `${job.source_sha}^{commit}`],
+      'EXECUTOR_SOURCE_COMMIT_UNAVAILABLE').toLowerCase() === job.source_sha.toLowerCase();
+  } catch { /* A pinned PR ref may supply this exact commit below. */ }
+
+  let fetchRef = null;
+  let fetchedSha = null;
+  const bundlePath = candidateBundlePath(manifestDir, attemptId);
+  try {
+    if (!sourceAvailable) {
+      if (!Number.isSafeInteger(job.source_pr) || job.source_pr < 1)
+        fail('EXECUTOR_SOURCE_COMMIT_UNAVAILABLE');
+      const remote = runGit(['remote', 'get-url', 'origin'], 'EXECUTOR_SOURCE_REMOTE_READ_FAILED');
+      const allowedRemotes = new Set([
+        'https://github.com/pt-original-point/ptysd-autonomous-factory.git',
+        'https://github.com/pt-original-point/ptysd-autonomous-factory',
+        'git@github.com:pt-original-point/ptysd-autonomous-factory.git',
+        'git@github.com:pt-original-point/ptysd-autonomous-factory',
+        'ssh://git@github.com/pt-original-point/ptysd-autonomous-factory.git',
+        'ssh://git@github.com/pt-original-point/ptysd-autonomous-factory',
+      ]);
+      if (!allowedRemotes.has(remote.toLowerCase())) fail('EXECUTOR_SOURCE_REMOTE_NOT_TRUSTED');
+      fetchRef = `refs/pty-native/fetched-candidates/${attemptId}`;
+      if (runGit(['for-each-ref', '--format=%(refname)', fetchRef],
+        'EXECUTOR_SOURCE_FETCH_REF_READ_FAILED'))
+        fail('EXECUTOR_SOURCE_FETCH_REF_ALREADY_EXISTS');
+      runGit(['fetch', '--no-tags', '--no-write-fetch-head', 'origin',
+        `refs/pull/${job.source_pr}/head:${fetchRef}`], 'EXECUTOR_SOURCE_PULL_REF_FETCH_FAILED');
+      fetchedSha = runGit(['rev-parse', '--verify', `${fetchRef}^{commit}`],
+        'EXECUTOR_SOURCE_PULL_REF_READBACK_FAILED');
+      if (fetchedSha.toLowerCase() !== job.source_sha.toLowerCase())
+        fail('EXECUTOR_SOURCE_PULL_REF_SHA_MISMATCH');
+    }
+    return createPinnedSourceBundle({ workspace: sourceWorkspace, bundlePath,
+      sourceSha: job.source_sha, attemptId, filesystemPath: value => value,
+      refNamespace: 'executor-bundles', execFile });
+  } catch (error) {
+    try { rmSync(bundlePath, { force: true }); } catch { /* no attempt may reference a partial bundle */ }
+    throw error;
+  } finally {
+    if (fetchRef) {
+      try {
+        const cleanupArgs = ['update-ref', '-d', fetchRef];
+        if (fetchedSha) cleanupArgs.push(fetchedSha);
+        runGit(cleanupArgs, 'EXECUTOR_SOURCE_FETCH_REF_CLEANUP_FAILED');
+      } catch {
+        try { rmSync(bundlePath, { force: true }); } catch { /* fail closed */ }
+        fail('EXECUTOR_SOURCE_FETCH_REF_CLEANUP_FAILED');
+      }
+    }
+  }
 }
 
 export function assertExecutorTaskReady(descriptor, {
