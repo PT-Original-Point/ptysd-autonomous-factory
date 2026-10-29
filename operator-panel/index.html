@@ -1996,6 +1996,9 @@
       const fields=parsed.fields;
       const sourceLine=readbackLineFields(parsed.body,'source_spec_pr');
       const resultLine=readbackLineFields(parsed.body,'result_pr');
+      const resultPrNo=Number(reconciliation.resultPr.number);
+      if (!Number.isSafeInteger(resultPrNo) || resultPrNo < 1) continue;
+      const resultPrKey=String(resultPrNo);
       const mainAtAcceptance=safeSha(fields.current_main);
       if (fields.repo !== REPO || fields.human_goal_comment_id !== '6188322050' ||
           fields.request_id !== job.request_id || fields.task_comment_id !== String(jobCommentId) ||
@@ -2006,13 +2009,13 @@
           String(sourceLine?.head || '').toLowerCase() !== sourceSha ||
           !safeSha(sourceLine?.merge_commit) ||
           !Number.isSafeInteger(Number(resultLine?.result_pr)) ||
-          Number(resultLine.result_pr) !== reconciliation.resultPr.number ||
+          Number(resultLine.result_pr) !== resultPrNo ||
           !safeSha(resultLine?.head) || !safeSha(resultLine?.merge_commit) ||
           String(resultLine.merge_commit).toLowerCase() !== reconciliation.resultPr.head ||
           reconciliation.resultPr.checks === 'UNKNOWN' ||
           fields.current_main_contains_both_merges !== 'TRUE' ||
-          fields.current_main_blobs_match_pr590_merge !== 'TRUE' ||
-          fields.source_acceptance !== 'PASS_FOR_PR590_REVIEWED_SOURCE_AND_MERGED_INTEGRATION' ||
+          fields['current_main_blobs_match_pr' + resultPrKey + '_merge'] !== 'TRUE' ||
+          fields.source_acceptance !== 'PASS_FOR_PR' + resultPrKey + '_REVIEWED_SOURCE_AND_MERGED_INTEGRATION' ||
           !/^\d+_passed;0_failed;0_skipped$/.test(fields.focused_test || '') ||
           fields.git_diff_check !== 'PASS' || !String(fields.semantic_review || '').startsWith('PASS_') ||
           fields.live_acceptance !== 'NOT_CLAIMED' ||
@@ -2030,9 +2033,9 @@
             proof.attempt_id !== receipt.attempt_id ||
             proof.worker_diff_sha256 !== String(receipt.diff_sha256).toLowerCase() ||
             proof.worker_diff_bytes !== String(receipt.diff_bytes) ||
-            proof.worker_diff_byte_identity !== 'CONFIRMED_AGAINST_PR590_GIT_DIFF' ||
-            proof.pr590_git_diff_sha256 !== String(receipt.diff_sha256).toLowerCase() ||
-            proof.pr590_git_diff_bytes !== String(receipt.diff_bytes) || proof.byte_identical !== 'true' ||
+            proof.worker_diff_byte_identity !== 'CONFIRMED_AGAINST_PR' + resultPrKey + '_GIT_DIFF' ||
+            proof['pr' + resultPrKey + '_git_diff_sha256'] !== String(receipt.diff_sha256).toLowerCase() ||
+            proof['pr' + resultPrKey + '_git_diff_bytes'] !== String(receipt.diff_bytes) || proof.byte_identical !== 'true' ||
             identitySource?.source_pr !== String(sourcePr) ||
             String(identitySource?.source_head || '').toLowerCase() !== sourceSha ||
             Number(identityResult?.result_pr) !== reconciliation.resultPr.number ||
@@ -2047,7 +2050,7 @@
             proof.original_worker_terminal !== 'FINISHED_NOT_ACCEPTANCE;unchanged' ||
             proof.original_worker_task_acceptance !== 'UNKNOWN;external_effects=UNKNOWN' ||
             proof.live_acceptance !== 'NOT_CLAIMED' ||
-            proof.source_acceptance !== 'SUPPORTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR590_SOURCE') continue;
+            proof.source_acceptance !== 'SUPPORTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR' + resultPrKey + '_SOURCE') continue;
         accepted.push({acceptance:parsed,identity,resultHead:String(resultLine.head).toLowerCase(),
           resultPr:reconciliation.resultPr.number,mergeCommit:String(resultLine.merge_commit).toLowerCase(),
           sourcePr,sourceSha,requestId:job.request_id,attemptId:receipt.attempt_id,

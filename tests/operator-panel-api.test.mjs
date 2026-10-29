@@ -978,12 +978,29 @@ test('W1 source acceptance is shown separately without upgrading the original Wo
   assert.match(domElements.get('w1-dispatch-codex-source-acceptance').textContent,/SOURCE_ACCEPTED/);
   assert.match(domElements.get('w1-dispatch-acceptance').textContent,/UNKNOWN/);
 
+  const futurePrComments=comments.map(comment=>({...comment,body:comment.body
+    .replaceAll('PR_590','PR_612').replaceAll('pr_590','pr_612')
+    .replaceAll('PR590','PR612').replaceAll('pr590','pr612')
+    .replaceAll('result_pr=590','result_pr=612')}));
+  const futurePrData=panel.dispatchCardData('W1',snapshot,futurePrComments,
+    {dispatches:{W1:{data:jobComment}}},{status:'UNKNOWN'},Date.parse('2026-10-29T03:00:00Z'),
+    {lifecycle:'MERGED',status:'MERGED',checks_allowed:false});
+  assert.equal(futurePrData.codexSourceAcceptance.status,'ACCEPTED',
+    'the legacy readback format binds dynamically to another result PR number');
+  assert.equal(futurePrData.codexSourceAcceptance.resultPr,612);
+  assert.equal(futurePrData.formalAcceptance,'UNKNOWN');
+  assert.equal(futurePrData.workerTerminal,'FINISHED_NOT_ACCEPTANCE');
+  assert.equal(futurePrData.externalEffects,'UNKNOWN');
   const rejectedCases=[
     comments.map(c=>c.id===acceptanceId ? {...c,body:c.body.replace(attemptId,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')} : c),
     comments.map(c=>c.id===identityId ? {...c,user:{login:'untrusted-user'}} : c),
     comments.map(c=>c.id===identityId ? {...c,body:c.body.replace('byte_identical=true','byte_identical=false')} : c),
     comments.map(c=>c.id===identityId ? {...c,body:c.body.replace('v2-native-windows=SUCCESS','v2-native-windows=FAILURE')} : c),
     comments.map(c=>c.id===acceptanceId ? {...c,body:c.body.replace('focused_test=45_passed;0_failed;0_skipped','focused_test=45_passed;1_failed;0_skipped')} : c),
+    comments.map(c=>c.id===acceptanceId ? {...c,body:c.body.replace('source_spec_pr=589; head='+sourceSha,'source_spec_pr=589; head='+'e'.repeat(40))} : c),
+    comments.map(c=>c.id===acceptanceId ? {...c,body:c.body.replace('result_pr=590; head='+resultHead,'result_pr=590; head='+'c'.repeat(40))} : c),
+    comments.map(c=>c.id===acceptanceId ? {...c,body:c.body.replace('source_acceptance=PASS_FOR_PR590_REVIEWED_SOURCE_AND_MERGED_INTEGRATION','source_acceptance=PASS_FOR_PR591_REVIEWED_SOURCE_AND_MERGED_INTEGRATION')} : c),
+    comments.map(c=>c.id===identityId ? {...c,body:c.body.replace('worker_diff_sha256='+workerDiff,'worker_diff_sha256='+'d'.repeat(64))} : c),
   ];
   for (const invalidComments of rejectedCases) {
     const rejected=panel.dispatchCardData('W1',snapshot,invalidComments,
