@@ -2021,7 +2021,7 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
   assert.match(domElements.get('w2-direct-cli').textContent,/非原生 Worker/);
   assert.match(domElements.get('w2-historical').textContent,/歷史/);
   for (const id of ['w2-native-task','w2-native-attempt','w2-native-session',
-    'w2-native-acceptance','w2-direct-cli','w2-direct-delivery','w2-direct-diff','w2-direct-tests','w2-historical'])
+    'w2-native-acceptance','w2-direct-cli','w2-direct-delivery','w2-direct-diff','w2-direct-tests','w2-historical','w2-model-eligibility','w2-last-result'])
     assert.match(html,new RegExp(`id=["']${id}["']`),`panel contains ${id}`);
 });
 
@@ -2222,6 +2222,166 @@ test('W2 source acceptance binds the exact blocked attempt, diff, result PR, and
   assert.equal(cycleEvidence.native.codexAcceptance.sourceAcceptance.result_pr,629);
 });
 
+test('W2 additive FINISHED acceptance supports the canonical fields and reads an open result PR exact HEAD', async () => {
+  const requestId='W2_PANEL_QUEUE_TERMINAL_ELIGIBILITY_20261030_A4BAE486B75D4B6BAEB87B6F74652754';
+  const sourceSha='cf1d8c636dba20bbd368f234342654a8db954814';
+  const attemptId='f0766d35-15b9-4f2b-b0f4-2c63ba643ed8';
+  const sessionId='68eedbf7-4342-4ce1-b0fe-21cde61f2802';
+  const diffSha='7c1d7fa00be818d23f7cda72fb4d079f844cc1311144fb13fc8c20eb335d3030';
+  const goalBodySha='2f1829da0e1f5105a384be03904b2289c57c05e8a44215c4824fb6b8631d8f7b';
+  const resultHead='c'.repeat(40);
+  const resultBaseSha='b'.repeat(40);
+  const resultPrNumber=645;
+  const editPaths=['operator-panel/index.html','tests/operator-panel-api.test.mjs'];
+  const job={
+    schema:6, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
+    request_id:requestId, kind:'antigravity_edit', source_sha:sourceSha,
+    spec_path:'native-bridge/tasks/w2-panel-current-queue-terminal-eligibility.md',
+    spec_sha256:'ef47124e43ecd5eccdd587d1a6f2fc2078412c6c87fb244c8c3706d565875850',
+    model:'gemini-3.8-flash-high', variant:'high', edit_paths:editPaths, source_pr:644,
+    goal_comment_id:6188322050, goal_body_sha256:goalBodySha,
+  };
+  const receipt={
+    schema:1, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
+    request_id:requestId, attempt_id:attemptId, state:'FINISHED', kind:'antigravity_edit',
+    source_sha:sourceSha, source_pr:644,
+    outcome:'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED_FILE_TOOL_FAILURES_RETAINED',
+    session_id:sessionId, diff_sha256:diffSha, diff_bytes:30841,
+    task_acceptance:'UNKNOWN', external_effects:'UNKNOWN',
+  };
+  const goalComments=[
+    {id:6188322050,user:{login:'t14210184'},issue_url:apiRoot+'/issues/310',
+      body:'Human authorized bounded pre-Production construction.'},
+    {id:6505121134,user:{login:'t14210184'},body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job)},
+  ];
+  const sourceBody=[
+    'PTYSD_V53R4_W2_SOURCE_ACCEPTANCE_V1',
+    'record_type=ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_MERGE_OR_RUNTIME_ACCEPTANCE',
+    'repo=PT-Original-Point/ptysd-autonomous-factory',
+    'project_id=CHATGPT_GLOBAL_SKILL_GOVERNANCE',
+    'human_goal_comment_id=6188322050',
+    'goal_body_sha256='+goalBodySha,
+    'prestate_latest_issue407_comment=6505800965',
+    'request_id='+requestId,
+    'attempt_id='+attemptId,
+    'terminal_receipt_comment_id=6505800965',
+    'worker_state=FINISHED',
+    'worker_outcome='+receipt.outcome,
+    'model=gemini-3.8-flash-high;variant=high;cli_version=1.4.10',
+    'session_id='+sessionId,
+    'worker_diff_sha256='+diffSha,
+    'worker_diff_bytes=30841',
+    'worker_task_acceptance=UNKNOWN',
+    'external_effects=UNKNOWN',
+    'task_source_pr=644',
+    'task_source_head='+sourceSha,
+    'result_pr='+resultPrNumber,
+    'result_head='+resultHead,
+    'result_base_sha='+resultBaseSha,
+    'changed_paths='+editPaths.join(','),
+    'git_diff_check=PASS',
+    "focused_test=node --test --test-name-pattern='W2 panel acceptance parser' tests/operator-panel-api.test.mjs:1_pass;0_fail",
+    'exact_head_ci=SUCCESS_REQUIRED_TRUSTED_CHECKS',
+    'checks=check-native-only:SUCCESS(run_40904904767);csg-trusted-verifier-hosted:SUCCESS(run_40904904738);v2-native-windows:SUCCESS(run_40904904801)',
+    'legacy_check=csg-trusted-verifier:PENDING_NOT_COUNTED_AS_PASS',
+    'codex_source_acceptance=ACCEPTED_FOR_PR_HEAD_ONLY',
+    'merge=NOT_PERFORMED',
+    'runtime_deployment=NOT_PERFORMED',
+  ].join('\n');
+  const sourceComment={id:6506000001,user:{login:'t14210184'},body:sourceBody};
+  const resultPull={
+    number:resultPrNumber,state:'open',merged:false,merged_at:null,merge_commit_sha:null,
+    base:{ref:'main',sha:resultBaseSha,
+      repo:{id:1352411536,full_name:'PT-Original-Point/ptysd-autonomous-factory'}},
+    head:{sha:resultHead,
+      repo:{id:1352411536,full_name:'PT-Original-Point/ptysd-autonomous-factory'}},
+  };
+  const resultChecks={check_runs:[
+    {id:40904904767,name:'check-native-only',head_sha:resultHead,status:'completed',conclusion:'success'},
+    {id:40904904738,name:'csg-trusted-verifier-hosted',head_sha:resultHead,status:'completed',conclusion:'success'},
+  ]};
+  const issueComments=[
+    {id:6505800965,user:{login:'t14210184'},body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(receipt)},
+    sourceComment,
+  ];
+  const goalIdentity={id:6188322050,author:'t14210184',body_sha256:goalBodySha};
+  const evidence=panel.w2EvidenceData(goalComments,issueComments,head,goalIdentity,true,true,
+    {requestId,attemptId},resultPull,resultChecks);
+  assert.equal(evidence.native.receipt.state,'FINISHED');
+  assert.equal(evidence.native.receipt.session_id,sessionId);
+  assert.equal(evidence.native.receipt.task_acceptance,'UNKNOWN');
+  assert.equal(evidence.native.receipt.external_effects,'UNKNOWN');
+  assert.equal(evidence.native.codexAcceptance.codex_source_acceptance,'ACCEPTED');
+  assert.equal(evidence.native.codexAcceptance.sourceAcceptance.result_pr,resultPrNumber);
+  assert.equal(evidence.native.codexAcceptance.sourceAcceptance.result_head,resultHead);
+  assert.equal(evidence.native.codexAcceptance.sourceAcceptance.result_pr_state,'OPEN_HEAD_ONLY');
+  panel.renderW2Evidence(evidence);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/結果 PR #645 OPEN_HEAD_ONLY/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/Worker task_acceptance=UNKNOWN/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/external_effects=UNKNOWN/);
+
+  const rejected=body=>panel.w2EvidenceData(goalComments,[issueComments[0],
+    {...sourceComment,body}],head,goalIdentity,true,true,{requestId,attemptId},resultPull,resultChecks)
+    .native.codexAcceptance;
+  const badRecords=[
+    sourceBody.replace('request_id='+requestId,'request_id=W2_OTHER_REQUEST_20261030'),
+    sourceBody.replace('attempt_id='+attemptId,'attempt_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
+    sourceBody.replace('task_source_head='+sourceSha,'task_source_head='+'f'.repeat(40)),
+    sourceBody.replace('worker_diff_sha256='+diffSha,'worker_diff_sha256='+'f'.repeat(64)),
+    sourceBody.replace('result_pr=645','result_pr=PR #645'),
+    sourceBody.replace('result_head='+resultHead,'result_head='+'f'.repeat(40)),
+    sourceBody.replace('checks=check-native-only:SUCCESS','checks=check-native-only:FAILURE'),
+    sourceBody.replace('codex_source_acceptance=ACCEPTED_FOR_PR_HEAD_ONLY','codex_source_acceptance=ACCEPTED'),
+    sourceBody.replace('worker_task_acceptance=UNKNOWN','worker_task_acceptance=ACCEPTED'),
+    sourceBody.replace('terminal_receipt_comment_id=6505800965','terminal_receipt_comment_id=6505800966'),
+    sourceBody.replace('changed_paths='+editPaths.join(','),'changed_paths=outside/scope.mjs'),
+    sourceBody.replace('0_fail','1_fail'),
+  ];
+  for(const body of badRecords)
+    assert.equal(rejected(body),null,'wrong request, attempt, SHA, diff, PR, checks, acceptance, receipt, scope or tests are rejected');
+  assert.equal(panel.w2EvidenceData(goalComments,[issueComments[0],
+    {...sourceComment,user:{login:'untrusted-user'}}],head,goalIdentity,true,true,
+    {requestId,attemptId},resultPull,resultChecks).native.codexAcceptance,null,
+  'only a dispatcher-authored source acceptance is eligible');
+  assert.equal(panel.w2EvidenceData(goalComments,issueComments,head,goalIdentity,true,true,
+    {requestId,attemptId},{...resultPull,head:{...resultPull.head,sha:'f'.repeat(40)}},resultChecks)
+    .native.codexAcceptance,null,'the live result PR HEAD must match the accepted HEAD');
+  assert.equal(panel.w2EvidenceData(goalComments,issueComments,head,goalIdentity,true,true,
+    {requestId,attemptId},resultPull,{check_runs:resultChecks.check_runs.map(run=>
+      ({...run,head_sha:'f'.repeat(40)}))}).native.codexAcceptance,null,
+  'checks from a different HEAD cannot satisfy acceptance');
+
+  const humanGoal={id:6188322050,user:{login:'t14210184'},issue_url:apiRoot+'/issues/310',
+    body:'<!-- PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015 -->\nBounded Human construction authority.'};
+  const verifiedGoal=await panel.hashHumanGoalComment(humanGoal);
+  const cycleJob={...job,goal_body_sha256:verifiedGoal.body_sha256};
+  const cycleSourceComment={...sourceComment,
+    body:sourceBody.replace('goal_body_sha256='+goalBodySha,
+      'goal_body_sha256='+verifiedGoal.body_sha256)};
+  const goalUrl=apiRoot+'/issues/310/comments?per_page=100&sort=created&direction=desc';
+  const cycleGoalComments=[humanGoal,{id:6505121134,user:{login:'t14210184'},
+    body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(cycleJob)}];
+  const cycleIssueComments=[...observationComments(baseTime,{latestTask:false}),issueComments[0],cycleSourceComment];
+  const calls=[];
+  const resultChecksUrl=apiRoot+'/commits/'+resultHead+'/check-runs?per_page=100';
+  const client=panel.createApiClient(async url=>{
+    calls.push(url);
+    if(url===urls.issue)return response(200,cycleIssueComments,quotaHeaders(baseTime));
+    if(url===goalUrl)return response(200,cycleGoalComments,quotaHeaders(baseTime));
+    if(url===urls.main)return response(200,{sha:head},quotaHeaders(baseTime));
+    if(url===apiRoot+'/pulls/'+resultPrNumber)return response(200,resultPull,quotaHeaders(baseTime));
+    if(url===resultChecksUrl)return response(200,resultChecks,quotaHeaders(baseTime));
+    throw new Error('unexpected API URL: '+url);
+  },{now:()=>baseTime});
+  const store=panel.createResourceStore(client,()=>baseTime);
+  await panel.runSyncCycle(store,client,{...urls,goal:goalUrl});
+  assert.ok(calls.includes(apiRoot+'/pulls/'+resultPrNumber),
+    'the panel reads the result PR identified by the exact source acceptance');
+  assert.ok(calls.includes(resultChecksUrl),
+    'the panel reads trusted check-runs at an open result PR exact HEAD');
+  assert.equal(store.resources.w2ResultChecks.url,resultChecksUrl);
+});
+
 test('a direct Antigravity CLI session alone never appears as a schema-6 native W2 task', () => {
   const comment = { id:6438594849, user:{login:'t14210184'}, created_at:'2026-10-27T09:45:07Z',
     body:['record_type=ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT',
@@ -2267,4 +2427,229 @@ test('operator panel documentation binds live PR data to task evidence, not a fi
   assert.match(readme, /Issue #407 and #310.*every 5 minutes/);
   assert.match(readme, /pagination and separate per-worker source PR reads add requests/i);
   assert.match(readme, /W2.*native.*direct CLI.*separate/i);
+});
+
+test('W2 regression: new queued request alongside previous terminal result, request without receipt, and terminal acceptance preservation', () => {
+  const goalBodySha = '2f1829da0e1f5105a384be03904b2289c57c05e8a44215c4824fb6b8631d8f7b';
+  const goalIdentity = { id:6188322050, author:'t14210184', body_sha256:goalBodySha };
+  const oldJob = {
+    schema:6, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
+    request_id:'W2_OLD_REQUEST_20261028_A1B2C3D4', kind:'antigravity_edit',
+    source_sha:'a'.repeat(40), spec_path:'native-bridge/tasks/w2-r7-panel-evidence.md',
+    spec_sha256:'c'.repeat(64), model:'gemini-3.8-flash-high', variant:'high',
+    edit_paths:['operator-panel/index.html'], source_pr:579,
+    goal_comment_id:6188322050, goal_body_sha256:goalBodySha,
+  };
+  const oldReceipt = {
+    schema:1, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
+    request_id:'W2_OLD_REQUEST_20261028_A1B2C3D4', attempt_id:'11111111-1111-4111-8111-111111111111',
+    state:'FINISHED', outcome:'COMPLETED', kind:'antigravity_edit',
+    source_sha:'a'.repeat(40), source_pr:579, session_id:'22222222-2222-4222-8222-222222222222',
+    task_acceptance:'UNKNOWN', external_effects:'UNKNOWN',
+  };
+  const newJob = {
+    schema:6, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
+    request_id:'W2_NEW_REQUEST_20261029_B2C3D4E5', kind:'antigravity_edit',
+    source_sha:'b'.repeat(40), spec_path:'native-bridge/tasks/w2-r7-panel-evidence.md',
+    spec_sha256:'c'.repeat(64), model:'gemini-3.8-flash-high', variant:'high',
+    edit_paths:['operator-panel/index.html'], source_pr:580,
+    goal_comment_id:6188322050, goal_body_sha256:goalBodySha,
+  };
+
+  const goalComments = [
+    { id:6490000001, user:{login:'t14210184'}, body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(oldJob) },
+    { id:6490000010, user:{login:'t14210184'}, body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(newJob) },
+  ];
+  const issueComments = [
+    { id:6490000002, user:{login:'t14210184'}, body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(oldReceipt) },
+  ];
+
+  const evidence = panel.w2EvidenceData(goalComments, issueComments, 'b'.repeat(40), goalIdentity, true, true);
+  assert.equal(evidence.native.job.request_id, 'W2_NEW_REQUEST_20261029_B2C3D4E5');
+  assert.equal(evidence.native.receipt, null);
+  assert.equal(evidence.native.receiptResolution, 'NO_MATCHING_RECEIPT');
+  assert.ok(evidence.native.lastTerminal?.receipt);
+  assert.equal(evidence.native.lastTerminal.receipt.job.request_id, 'W2_OLD_REQUEST_20261028_A1B2C3D4');
+  assert.equal(evidence.native.lastTerminal.receipt.attempt_id, '11111111-1111-4111-8111-111111111111');
+  assert.equal(evidence.native.lastTerminal.receipt.task_acceptance, 'UNKNOWN');
+  assert.equal(evidence.native.lastTerminal.receipt.external_effects, 'UNKNOWN');
+
+  panel.renderW2Evidence(evidence);
+  assert.ok(domElements.get('w2-native-task').textContent.includes('W2_NEW_REQUEST_20261029_B2C3D4E5'));
+  assert.match(domElements.get('w2-native-attempt').textContent, /已觀測到正式請求；尚未觀測到 Worker 收據（request observed; Worker receipt not observed）/);
+  assert.match(domElements.get('w2-native-session').textContent, /最新請求尚未讀回工作階段（Session UNKNOWN）/);
+  assert.match(domElements.get('w2-native-acceptance').textContent, /最新請求尚未讀回 Worker 收據；Worker 終態與驗收 UNKNOWN/);
+  assert.match(domElements.get('w2-last-result').textContent, /最近終態收據：W2_OLD_REQUEST_20261028_A1B2C3D4 · 批次 11111111-1111-4111-8111-111111111111 · FINISHED（生命週期結束；非驗收） · COMPLETED · Worker task_acceptance=UNKNOWN · external_effects=UNKNOWN/);
+
+  const finishedLatest = panel.w2EvidenceData([goalComments[0]], issueComments, 'a'.repeat(40), goalIdentity, true, true);
+  assert.equal(finishedLatest.native.receipt.state, 'FINISHED');
+  assert.equal(finishedLatest.native.receipt.task_acceptance, 'UNKNOWN');
+  assert.equal(finishedLatest.native.receipt.external_effects, 'UNKNOWN');
+  panel.renderW2Evidence(finishedLatest);
+  assert.match(domElements.get('w2-native-attempt').textContent, /批次 11111111-1111-4111-8111-111111111111 · FINISHED（生命週期結束；非驗收）/);
+  assert.match(domElements.get('w2-native-acceptance').textContent, /Worker task_acceptance=UNKNOWN · external_effects=UNKNOWN/);
+  assert.match(domElements.get('w2-last-result').textContent, /最近終態收據：W2_OLD_REQUEST_20261028_A1B2C3D4/);
+});
+
+test('W2 regression: fresh explicit idle evidence vs absent idle evidence and empty queue claims', () => {
+  const now = baseTime;
+  const freshIdle = {
+    worker_id:'W2', status:'IDLE', activity_observed_at:new Date(now).toISOString(),
+    evidence_ref:'snap-w2-idle-1', evidence_kind:'NO_ACTIVE_WORK',
+  };
+  const verifiedIdle = panel.classifyWorker(freshIdle, 'FRESH', now);
+  assert.equal(verifiedIdle.status, 'IDLE');
+  assert.match(verifiedIdle.reason, /新鮮來源同時證實沒有待處理任務及活動程序/);
+
+  const freshIdleAlt = { ...freshIdle, evidence_kind:'NO_PENDING_TASKS_AND_NO_ACTIVE_PROCESS' };
+  assert.equal(panel.classifyWorker(freshIdleAlt, 'FRESH', now).status, 'IDLE');
+
+  const unsupportedKind = { ...freshIdle, evidence_kind:'IDLE_ASSUMED_NO_TASK_ROW' };
+  assert.equal(panel.classifyWorker(unsupportedKind, 'FRESH', now).status, 'UNKNOWN');
+
+  const missingRef = { ...freshIdle, evidence_ref:null };
+  assert.equal(panel.classifyWorker(missingRef, 'FRESH', now).status, 'UNKNOWN');
+
+  assert.equal(panel.classifyWorker(null, 'FRESH', now).status, 'UNKNOWN');
+  assert.equal(panel.classifyWorker(freshIdle, 'STALE', now).status, 'STALE');
+  assert.equal(panel.classifyWorker(freshIdle, 'UNKNOWN', now).status, 'UNKNOWN');
+
+  const emptyGoalEvidence = panel.w2EvidenceData([], [], head, null, true, true);
+  panel.renderW2Evidence(emptyGoalEvidence);
+  assert.equal(domElements.get('w2-native-task').textContent, '未觀測到正式 schema-6 W2 請求（不代表原生佇列為空或無 READY Goal 工作）');
+  assert.equal(domElements.get('w2-native-attempt').textContent, '尚無相符原生收據批次');
+  assert.equal(domElements.get('w2-last-result').textContent, '尚無已確認的終態收據');
+});
+
+test('W2 regression: model eligibility is separated from execution switch with WAITING as waiting state', () => {
+  const job = {
+    request_id:'W2_ELIGIBILITY_TEST_20261029', source_sha:'c'.repeat(40), source_pr:601,
+  };
+  const enabledRecord = {
+    worker_id:'W2', task_id:job.request_id, task_source_sha:job.source_sha, source_pr:job.source_pr,
+    model_execution_switch:'ENABLED', model_eligibility:'WAITING',
+  };
+  const disabledRecord = { ...enabledRecord, model_execution_switch:'DISABLED' };
+
+  assert.equal(panel.modelExecutionSwitchLabel('W2', enabledRecord), '模型執行開關：啟用；不代表本次已派工或模型資格可用');
+  assert.equal(panel.modelExecutionSwitchLabel('W2', disabledRecord), '模型執行開關：停用；目前不派發新的模型工作');
+
+  const enabledWaiting = panel.w2ModelEligibility(enabledRecord, 'FRESH', job, true);
+  assert.equal(enabledWaiting, 'WAITING');
+  assert.equal(panel.w2ModelEligibilityLabel(enabledWaiting), '模型執行資格：WAITING；等待狀態，非資格核准');
+
+  const disabledWaiting = panel.w2ModelEligibility(disabledRecord, 'FRESH', job, true);
+  assert.equal(disabledWaiting, 'WAITING');
+  assert.equal(panel.w2ModelEligibilityLabel(disabledWaiting), '模型執行資格：WAITING；等待狀態，非資格核准');
+
+  assert.equal(panel.w2ModelEligibilityLabel('READY'), '模型執行資格：READY；Win11 觀測明示資格就緒');
+  assert.equal(panel.w2ModelEligibilityLabel('ELIGIBLE'), '模型執行資格：ELIGIBLE；Win11 觀測明示符合資格');
+  assert.equal(panel.w2ModelEligibilityLabel('INELIGIBLE'), '模型執行資格：INELIGIBLE；目前不具備執行資格');
+
+  assert.equal(panel.w2ModelEligibility({ ...enabledRecord, model_eligibility:null }, 'FRESH', job, true), 'UNKNOWN');
+  assert.equal(panel.w2ModelEligibility({ ...enabledRecord, model_eligibility:'UNKNOWN' }, 'FRESH', job, true), 'UNKNOWN');
+  assert.equal(panel.w2ModelEligibility({ ...enabledRecord, model_eligibility:'AUTO_READY' }, 'FRESH', job, true), 'UNKNOWN');
+  assert.equal(panel.w2ModelEligibility(enabledRecord, 'STALE', job, true), 'UNKNOWN');
+  assert.equal(panel.w2ModelEligibility(enabledRecord, 'UNKNOWN', job, true), 'UNKNOWN');
+  assert.equal(panel.w2ModelEligibilityLabel('UNKNOWN'), '模型執行資格：UNKNOWN');
+
+  const switchOnly = { model_execution_switch:'ENABLED' };
+  assert.equal(panel.w2ModelEligibility(switchOnly, 'FRESH', job, true), 'UNKNOWN');
+});
+
+test('W2 regression: incomplete sources, identity mismatches, unbound multiple attempts, and cross-lane preservation', () => {
+  const goalBodySha = '2f1829da0e1f5105a384be03904b2289c57c05e8a44215c4824fb6b8631d8f7b';
+  const goalIdentity = { id:6188322050, author:'t14210184', body_sha256:goalBodySha };
+  const job = {
+    schema:6, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
+    request_id:'W2_IDENTITY_TEST_20261029', kind:'antigravity_edit', source_sha:'d'.repeat(40),
+    spec_path:'native-bridge/tasks/w2-r7-panel-evidence.md', spec_sha256:'c'.repeat(64),
+    model:'gemini-3.8-flash-high', variant:'high', edit_paths:['operator-panel/index.html'],
+    source_pr:602, goal_comment_id:6188322050, goal_body_sha256:goalBodySha,
+  };
+  const goalComments = [{ id:6490000020, user:{login:'t14210184'}, body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job) }];
+
+  const wrongGoalIdentity = panel.w2EvidenceData(goalComments, [], 'd'.repeat(40),
+    { ...goalIdentity, body_sha256:'f'.repeat(64) }, true, true);
+  assert.equal(wrongGoalIdentity.native.goalReferenceVerified, false);
+  assert.equal(wrongGoalIdentity.native.receiptResolution, 'GOAL_REFERENCE_UNVERIFIED');
+  assert.equal(wrongGoalIdentity.native.lastTerminal.status, 'GOAL_REFERENCE_UNVERIFIED');
+  panel.renderW2Evidence(wrongGoalIdentity);
+  assert.match(domElements.get('w2-native-task').textContent, /GOAL 未核對；任務身分 UNKNOWN/);
+  assert.match(domElements.get('w2-native-attempt').textContent, /attempt 狀態 UNKNOWN/);
+  assert.match(domElements.get('w2-native-session').textContent, /Session UNKNOWN/);
+  assert.match(domElements.get('w2-native-acceptance').textContent, /Worker 終態與 Codex source acceptance UNKNOWN/);
+  assert.match(domElements.get('w2-last-result').textContent, /UNKNOWN：Human GOAL 身分／雜湊未核對/);
+
+  const incompleteGoal = panel.w2EvidenceData(goalComments, [], 'd'.repeat(40), goalIdentity, false, true);
+  assert.equal(incompleteGoal.native.sourceComplete, false);
+  assert.equal(incompleteGoal.native.receiptResolution, 'GOAL_SOURCE_INCOMPLETE');
+  panel.renderW2Evidence(incompleteGoal);
+  assert.match(domElements.get('w2-native-task').textContent, /Issue #310 最新評論分頁未核對；schema-6 派工狀態未知/);
+  assert.match(domElements.get('w2-last-result').textContent, /UNKNOWN：來源資料未完整讀回/);
+
+  const incompleteIssue = panel.w2EvidenceData(goalComments, [], 'd'.repeat(40), goalIdentity, true, false);
+  assert.equal(incompleteIssue.native.issueSourceComplete, false);
+  assert.equal(incompleteIssue.native.receiptResolution, 'ISSUE_SOURCE_INCOMPLETE');
+  panel.renderW2Evidence(incompleteIssue);
+  assert.match(domElements.get('w2-native-attempt').textContent, /Issue #407 最新／相符收據分頁未核對；attempt 狀態未知/);
+  assert.match(domElements.get('w2-last-result').textContent, /UNKNOWN：來源資料未完整讀回/);
+
+  const wrongRequestReceipt = {
+    schema:1, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
+    request_id:'W2_OTHER_REQUEST_20261029', attempt_id:'33333333-3333-4333-8333-333333333333',
+    state:'FINISHED', kind:'antigravity_edit', source_sha:'d'.repeat(40), source_pr:602,
+  };
+  const wrongSourceReceipt = { ...wrongRequestReceipt, request_id:job.request_id, source_sha:'e'.repeat(40) };
+  const wrongPrReceipt = { ...wrongRequestReceipt, request_id:job.request_id, source_pr:999 };
+  const mismatchEvidence = panel.w2EvidenceData(goalComments, [
+    { id:6490000021, user:{login:'t14210184'}, body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(wrongRequestReceipt) },
+    { id:6490000022, user:{login:'t14210184'}, body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(wrongSourceReceipt) },
+    { id:6490000023, user:{login:'t14210184'}, body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(wrongPrReceipt) },
+  ], 'd'.repeat(40), goalIdentity, true, true);
+  assert.equal(mismatchEvidence.native.receipt, null);
+  assert.equal(mismatchEvidence.native.receiptResolution, 'NO_MATCHING_RECEIPT');
+
+  const wrongRecord = {
+    worker_id:'W2', task_id:'W2_OTHER_REQUEST', task_source_sha:job.source_sha, source_pr:job.source_pr,
+    model_eligibility:'READY',
+  };
+  assert.equal(panel.w2ModelEligibility(wrongRecord, 'FRESH', job, true), 'UNKNOWN');
+  const malformedSourcePr = {
+    worker_id:'W2', task_id:job.request_id, task_source_sha:job.source_sha,
+    source_pr:String(job.source_pr), model_eligibility:'READY',
+  };
+  assert.equal(panel.w2ModelEligibility(malformedSourcePr, 'FRESH', job, true), 'UNKNOWN');
+
+  const receiptAttempt1 = {
+    schema:1, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
+    request_id:job.request_id, attempt_id:'44444444-4444-4444-8444-444444444444',
+    state:'FINISHED', kind:'antigravity_edit', source_sha:job.source_sha, source_pr:job.source_pr,
+  };
+  const receiptAttempt2 = { ...receiptAttempt1, attempt_id:'55555555-5555-4555-8555-555555555555' };
+  const unboundEvidence = panel.w2EvidenceData(goalComments, [
+    { id:6490000031, user:{login:'t14210184'}, body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(receiptAttempt1) },
+    { id:6490000032, user:{login:'t14210184'}, body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(receiptAttempt2) },
+  ], 'd'.repeat(40), goalIdentity, true, true);
+  assert.equal(unboundEvidence.native.receiptResolution, 'MULTIPLE_ATTEMPTS_UNBOUND');
+  assert.equal(unboundEvidence.native.receipt, null);
+  panel.renderW2Evidence(unboundEvidence);
+  assert.match(domElements.get('w2-native-attempt').textContent, /同一 request 有多個 attempt；尚無精確 attempt 綁定，未自動挑選/);
+  assert.match(domElements.get('w2-native-session').textContent, /多個 attempt 未唯一綁定；Session UNKNOWN/);
+  assert.match(domElements.get('w2-native-acceptance').textContent, /多個 attempt 未唯一綁定；Worker 終態與 Codex source acceptance 保留 UNKNOWN/);
+  assert.match(domElements.get('w2-last-result').textContent, /UNKNOWN：同一 request 有多個 attempt 未安全綁定/);
+
+  const w1Record = { worker_id:'W1', configured:false, model_execution_switch:'DISABLED' };
+  const w1Card = panel.workerCardData('W1', w1Record, { status:'UNCONFIGURED', reason:'未配置' }, {});
+  assert.equal(w1Card.prefix, 'w1');
+  assert.equal(panel.modelExecutionSwitchLabel('W1', w1Record), '模型執行開關：停用；目前不派發新的模型工作');
+
+  const w3Record = { worker_id:'W3', status:'PENDING', task_id:'W3_TASK', task_source:'https://github.com' };
+  const w3Card = panel.workerCardData('W3', w3Record, { status:'PENDING', reason:'等候' }, {});
+  assert.equal(w3Card.prefix, 'w3');
+  assert.equal(panel.modelExecutionSwitchLabel('W3', w3Record), null);
+
+  assert.equal(unboundEvidence.directCli, null);
+  assert.equal(unboundEvidence.historical, null);
+
 });
