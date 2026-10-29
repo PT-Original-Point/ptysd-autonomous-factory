@@ -716,6 +716,7 @@ function emptyAntigravityRunEvidence(valid, reason = null, forbiddenToolEvidence
     file_change_tool_evidence: 'UNKNOWN', file_change_tool_completed_count: 0,
     file_change_tool_failed_count: 0, file_change_tool_incomplete_count: 0,
     file_change_target_evidence: emptyAntigravityFileChangeTargetEvidence(),
+    file_tool_failure_reasons: [],
     token_usage: null, event_count: 0, stdout_sha256: null, stdout_bytes: 0,
     workspace_cwd_evidence: { status: 'UNKNOWN', expected_path_sha256: null,
       observed_path_sha256: null } };
@@ -783,6 +784,102 @@ function isForbiddenAntigravityToolName(value) {
 const ANTIGRAVITY_FILE_CHANGE_TOOL_NAMES = Object.freeze([
   'replace_file_content', 'multi_replace_file_content', 'edit_file', 'write_file', 'write_to_file',
 ]);
+export const ANTIGRAVITY_FILE_TOOL_NAMES = Object.freeze([
+  'read_file',
+  ...ANTIGRAVITY_FILE_CHANGE_TOOL_NAMES,
+]);
+
+export const ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS = Object.freeze({
+  READ_TARGET_NOT_FOUND: 'READ_TARGET_NOT_FOUND',
+  EDIT_TARGET_TEXT_MISMATCH: 'EDIT_TARGET_TEXT_MISMATCH',
+  EDIT_TARGET_MISMATCH: 'EDIT_TARGET_TEXT_MISMATCH',
+  FILE_TOOL_ERROR_UNKNOWN: 'FILE_TOOL_ERROR_UNKNOWN',
+  UNKNOWN_FILE_TOOL_ERROR: 'FILE_TOOL_ERROR_UNKNOWN',
+});
+
+export function isAntigravityFileTool(toolName) {
+  if (typeof toolName !== 'string') return false;
+  return ANTIGRAVITY_FILE_TOOL_NAMES.includes(toolName.trim().toLowerCase());
+}
+
+export function classifyAntigravityFileToolReason(toolName, toolInfo = null, stepState = null, stepError = null) {
+  if (!isAntigravityFileTool(toolName)) return null;
+  const isFailed = stepState === 'ERROR' || Boolean(toolInfo?.error) || Boolean(stepError);
+  if (!isFailed) return null;
+
+  const norm = toolName.trim().toLowerCase();
+  const rawError = toolInfo?.error ?? stepError ?? null;
+  const errorStrings = [];
+  let code = '';
+
+  const collect = (val) => {
+    if (typeof val === 'string') {
+      errorStrings.push(val);
+    } else if (val && typeof val === 'object') {
+      if (typeof val.code === 'string') {
+        code = val.code.trim().toUpperCase();
+        errorStrings.push(val.code);
+      }
+      if (typeof val.message === 'string') errorStrings.push(val.message);
+      if (typeof val.error === 'string') errorStrings.push(val.error);
+      if (typeof val.details === 'string') errorStrings.push(val.details);
+      if (typeof val.type === 'string') errorStrings.push(val.type);
+      if (val.error && typeof val.error === 'object') collect(val.error);
+      if (val.cause && typeof val.cause === 'object') collect(val.cause);
+    }
+  };
+  collect(rawError);
+  if (typeof toolInfo?.message === 'string') errorStrings.push(toolInfo.message);
+
+  const combined = errorStrings.join(' ').toLowerCase();
+
+  // 1. Missing read target
+  if (norm === 'read_file' || norm === 'read') {
+    if (['ENOENT', 'FILE_NOT_FOUND', 'READ_TARGET_NOT_FOUND', 'NOT_FOUND', 'PATH_NOT_FOUND'].includes(code)) {
+      return ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.READ_TARGET_NOT_FOUND;
+    }
+    if (/\b(?:enoent|no such file|not found|does not exist|cannot find (?:the )?(?:file|path)|missing (?:file|target))\b/i.test(combined)) {
+      return ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.READ_TARGET_NOT_FOUND;
+    }
+  }
+
+  // 2. Edit target-text mismatch
+  if (ANTIGRAVITY_FILE_CHANGE_TOOL_NAMES.includes(norm)) {
+    if (['TARGET_MISMATCH', 'EDIT_TARGET_MISMATCH', 'EDIT_TARGET_TEXT_MISMATCH',
+      'TEXT_MISMATCH', 'TARGET_TEXT_MISMATCH', 'CONTENT_MISMATCH', 'TARGET_NOT_FOUND',
+      'SEARCH_STRING_NOT_FOUND', 'OLD_STRING_NOT_FOUND'].includes(code)) {
+      return ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.EDIT_TARGET_TEXT_MISMATCH;
+    }
+    if (/\bmismatch\b/i.test(combined) && /\b(?:target|text|content|string|block)\b/i.test(combined)) {
+      return ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.EDIT_TARGET_TEXT_MISMATCH;
+    }
+    if (/\btarget\b/i.test(combined) &&
+        /\b(?:not found|could not find|cannot find|unable to find|does not match|not matching|missing)\b/i.test(combined)) {
+      return ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.EDIT_TARGET_TEXT_MISMATCH;
+    }
+    if (/\b(?:string|text) to replace not found\b/i.test(combined)) {
+      return ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.EDIT_TARGET_TEXT_MISMATCH;
+    }
+    if (/\btarget must exactly match\b/i.test(combined)) {
+      return ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.EDIT_TARGET_TEXT_MISMATCH;
+    }
+  }
+
+  // 3. Unrecognized file-tool error fallback
+  return ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.FILE_TOOL_ERROR_UNKNOWN;
+}
+
+export function summarizeAntigravityFileToolFailureReasons(toolsMap) {
+  const reasons = [];
+  if (!toolsMap || typeof toolsMap.values !== 'function') return reasons;
+  for (const tool of toolsMap.values()) {
+    if (tool?.failed && tool.failureReason && !reasons.includes(tool.failureReason)) {
+      reasons.push(tool.failureReason);
+    }
+  }
+  return reasons;
+}
+
 const ANTIGRAVITY_FILE_CHANGE_TARGET_KEYS = new Set([
   'path', 'targetfile', 'filepath', 'file_path', 'absolute_path',
 ]);
@@ -956,8 +1053,24 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
             for (const [identity, root] of antigravityFileChangeTargetIdentities(step.tool_info,
               expectedCwd, registeredRoot))
               targetIdentities.set(identity, root);
+          const isFailed = step.state === 'ERROR' ||
+            (step.state === 'DONE' && Boolean(step.tool_info?.error)) ||
+            Boolean(step.error) || Boolean(previous?.failed);
+          const classifiedReason = classifyAntigravityFileToolReason(step.tool_name,
+            step.tool_info, step.state, step.error);
+          let failureReason = classifiedReason;
+          if (previous?.failureReason &&
+              previous.failureReason !== ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.FILE_TOOL_ERROR_UNKNOWN &&
+              classifiedReason === ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.FILE_TOOL_ERROR_UNKNOWN) {
+            failureReason = previous.failureReason;
+          } else if (!failureReason) {
+            failureReason = previous?.failureReason ??
+              (isFailed && isAntigravityFileTool(step.tool_name)
+                ? ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.FILE_TOOL_ERROR_UNKNOWN : null);
+          }
           tools.set(step.step_index, { name: step.tool_name, state: step.state,
-            failed: step.state === 'ERROR' || (step.state === 'DONE' && Boolean(step.tool_info?.error)),
+            failed: isFailed,
+            failureReason: isFailed ? failureReason : null,
             targetIdentities });
         }
       } else if (event.event === 'result') {
@@ -987,6 +1100,7 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
     const completedFileTools = fileTools.filter(tool => tool.state === 'DONE');
     const failedFileTools = fileTools.filter(tool => tool.failed);
     const incompleteFileTools = fileTools.filter(tool => tool.state === 'ACTIVE');
+    const fileToolFailureReasons = summarizeAntigravityFileToolFailureReasons(tools);
     const partialUsage = !partialUsageMalformed && init
       ? aggregateAntigravityUsage([...stepUsageByIndex.values()]) : null;
     const positivePartialUsage = positiveStepUsageObserved;
@@ -1027,6 +1141,7 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
       file_change_tool_failed_count: failedFileTools.length,
       file_change_tool_incomplete_count: incompleteFileTools.length,
       file_change_target_evidence: fileChangeTargetEvidence,
+      file_tool_failure_reasons: fileToolFailureReasons,
       token_usage: tokenUsage ?? null,
       event_count: eventCount,
       stdout_sha256: streamComplete ? stdoutHash : null,
@@ -1051,6 +1166,7 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
   const completedFileTools = fileTools.filter(tool => tool.state === 'DONE');
   const failedFileTools = fileTools.filter(tool => tool.failed);
   const incompleteFileTools = fileTools.filter(tool => tool.state === 'ACTIVE');
+  const fileToolFailureReasons = summarizeAntigravityFileToolFailureReasons(tools);
   const usage = result.usage;
   const modelInvoked = positiveStepUsageObserved || hasPositiveAntigravityUsage(usage);
   const hasToolCalls = tools.size > 0;
@@ -1076,5 +1192,6 @@ export async function readAntigravityV2RunEvidence(stdoutPath, expectedSha256 = 
     file_change_tool_failed_count: failedFileTools.length,
     file_change_tool_incomplete_count: incompleteFileTools.length,
     file_change_target_evidence: fileChangeTargetEvidence,
+    file_tool_failure_reasons: fileToolFailureReasons,
     token_usage: usage, event_count: eventCount, stdout_sha256: stdoutHash, stdout_bytes: bytes };
 }
