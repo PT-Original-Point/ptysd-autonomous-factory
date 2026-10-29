@@ -586,10 +586,15 @@ export function triggerPendingExecutorAttempt(descriptor, attemptId, {
     exit_code: 0, attempt_id: attemptId };
 }
 
-export function claimPendingManifest(manifestDir, rename = renameSync) {
+export function claimPendingManifest(manifestDir, rename = renameSync,
+  isVerifiedCompletedRunningAttempt = () => false) {
+  if (typeof isVerifiedCompletedRunningAttempt !== 'function')
+    fail('EXECUTOR_COMPLETED_ATTEMPT_CHECK_INVALID');
   const state = executorMailboxState(manifestDir);
-  if (state.active.some(name => name.endsWith('.running.json'))) fail('EXECUTOR_ATTEMPT_ALREADY_RUNNING');
+  const running = state.active.filter(name => /\.running\.json$/i.test(name));
   const pending = state.active.filter(name => name.endsWith('.pending.json'));
+  if (running.length > 0 && running.some(name =>
+    isVerifiedCompletedRunningAttempt(name) !== true)) fail('EXECUTOR_ATTEMPT_ALREADY_RUNNING');
   if (pending.length === 0) return null;
   if (pending.length !== 1) fail('EXECUTOR_MANIFEST_MULTIPLE_PENDING');
   const source = join(manifestDir, pending[0]);

@@ -7,7 +7,7 @@ import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, realp
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { guardConfig, isRecoverableModelPreflightWait, JOB_MARKER, parseJob,
-  receipt, runPlan, terminalStateForResult } from './worker.mjs';
+  parseReceipt, RECEIPT_MARKER, receipt, runPlan, terminalStateForResult } from './worker.mjs';
 import { safeErrorCode } from './safe-error-code.mjs';
 import { assertPhysicalDirectory, candidateBundlePath, candidateWorkspacePath,
   claimPendingManifest, executorResultPath, getCurrentWindowsSid } from './windows-executor.mjs';
@@ -341,6 +341,62 @@ function persistAndReadback(path, record, readPersisted, { readError, mismatchEr
   return persisted;
 }
 
+function hasVerifiedCompletedRunningAttempt({ filename, manifestDir, resultsDir, config, readPersisted }) {
+  const match = /^([a-f0-9-]{36})\.running\.json$/i.exec(filename);
+  if (!match) fail('EXECUTOR_RUNNING_MANIFEST_IDENTITY_INVALID');
+  const attemptId = match[1];
+  const manifestPath = join(manifestDir, filename);
+  let manifest;
+  try {
+    const info = lstatSync(manifestPath);
+    if (!info.isFile() || info.isSymbolicLink()) fail('EXECUTOR_RUNNING_MANIFEST_INVALID');
+    manifest = JSON.parse(readFileSync(manifestPath).toString('utf8'));
+  } catch (error) {
+    if (/^EXECUTOR_/.test(error?.code || '')) throw error;
+    fail('EXECUTOR_RUNNING_MANIFEST_INVALID');
+  }
+  const job = parseJob(JOB_MARKER + JSON.stringify(manifest?.job));
+  if (!job || manifest.schema !== 1 || manifest.kind !== 'PTYSD_NATIVE_EXECUTOR_MANIFEST_V1' ||
+      manifest.attempt_id !== attemptId || manifest.request_id !== job.request_id ||
+      manifest.source_sha !== job.source_sha || manifest.spec_sha256 !== job.spec_sha256 ||
+      typeof manifest.spec !== 'string' ||
+      digest(Buffer.from(manifest.spec, 'utf8')) !== job.spec_sha256 ||
+      job.project_id !== config.project_id || job.host.toUpperCase() !== config.host.toUpperCase() ||
+      manifest.source_bundle_sha256 !== undefined && !HASH.test(manifest.source_bundle_sha256 || ''))
+    fail('EXECUTOR_RUNNING_MANIFEST_IDENTITY_INVALID');
+  if (manifest.source_bundle_sha256 !== undefined) {
+    const bundlePath = candidateBundlePath(manifestDir, attemptId);
+    let bundleInfo;
+    try { bundleInfo = lstatSync(bundlePath); }
+    catch { fail('EXECUTOR_RUNNING_SOURCE_BUNDLE_UNAVAILABLE'); }
+    if (!bundleInfo.isFile() || bundleInfo.isSymbolicLink() ||
+        digest(readFileSync(bundlePath)) !== manifest.source_bundle_sha256)
+      fail('EXECUTOR_RUNNING_SOURCE_BUNDLE_HASH_MISMATCH');
+  }
+  const resultPath = executorResultPath(resultsDir, job.request_id, attemptId);
+  if (!existsSync(resultPath)) return false;
+  let resultInfo;
+  try { resultInfo = lstatSync(resultPath); }
+  catch { fail('EXECUTOR_RESULT_READBACK_FAILED'); }
+  if (!resultInfo.isFile() || resultInfo.isSymbolicLink())
+    fail('EXECUTOR_RESULT_READBACK_FAILED');
+  const saved = readPersisted(resultPath, { expectedBytes: resultInfo.size });
+  const terminal = parseReceipt(RECEIPT_MARKER + JSON.stringify(saved?.terminal));
+  if (!terminal || saved.request_id !== job.request_id || saved.attempt_id !== attemptId ||
+      terminal.project_id !== job.project_id || terminal.host.toUpperCase() !== job.host.toUpperCase() ||
+      terminal.request_id !== job.request_id || terminal.attempt_id !== attemptId ||
+      terminal.kind !== job.kind || terminal.source_sha !== job.source_sha ||
+      job.model !== undefined && terminal.model !== job.model ||
+      job.variant !== undefined && terminal.variant !== job.variant ||
+      job.source_pr !== undefined && terminal.source_pr !== job.source_pr ||
+      job.goal_comment_id !== undefined && terminal.goal_comment_id !== job.goal_comment_id ||
+      job.goal_body_sha256 !== undefined && terminal.goal_body_sha256 !== job.goal_body_sha256 ||
+      Array.isArray(job.edit_paths) &&
+        terminal.edit_paths_sha256 !== digest(Buffer.from(JSON.stringify(job.edit_paths), 'utf8')))
+    fail('EXECUTOR_RUNNING_RESULT_IDENTITY_MISMATCH');
+  return terminal.state === 'FINISHED';
+}
+
 export async function executePendingManifest({ config, manifestDir, currentSid = getCurrentWindowsSid,
   execute = runPlan, rename = renameSync, readPersisted = readPersistedResult } = {}) {
   if (process.platform !== 'win32') fail('EXECUTOR_WINDOWS_ONLY');
@@ -364,7 +420,9 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
   assertPhysicalDirectory(runtime.results_dir, 'EXECUTOR_RESULT_DIRECTORY_UNAVAILABLE');
   assertPhysicalDirectory(config.workspace, 'EXECUTOR_WORKSPACE_NOT_PHYSICAL_DIRECTORY');
 
-  const runningPath = claimPendingManifest(manifestDir, rename);
+  const runningPath = claimPendingManifest(manifestDir, rename, filename =>
+    hasVerifiedCompletedRunningAttempt({ filename, manifestDir, resultsDir: runtime.results_dir,
+      config, readPersisted }));
   if (!runningPath) return { outcome: 'NO_PENDING_EXECUTOR_MANIFEST', exit_code: 0 };
 
   const runningBytes = readFileSync(runningPath);
