@@ -2442,6 +2442,21 @@ async function updateCombinedHash(hash, path) {
 export async function verifyCapturedEvidence(resultDir, result) {
   const local = result?.local_evidence;
   const terminal = result?.terminal ?? result;
+  const waitingReceipt = terminal?.state === 'WAITING' &&
+    terminal.model_invoked === false && terminal.session_id === null &&
+    terminal.session_started === null && terminal.evidence_sha256 === null &&
+    terminal.evidence_bytes === 0 && terminal.diff_sha256 === null &&
+    terminal.diff_bytes === null && terminal.scope_valid === null &&
+    terminal.tool_execution_count === 0 &&
+    parseReceipt(RECEIPT_MARKER + JSON.stringify(terminal)) !== null;
+  const waitingLocalEvidence = !local || (!Array.isArray(local) && typeof local === 'object' &&
+    Object.keys(local).every(key => key === 'executor_workspace_guard') &&
+    (local.executor_workspace_guard === undefined ||
+      local.executor_workspace_guard?.readback === 'COMPLETE'));
+  // A preflight WAITING receipt has no stdout/stderr capture. The Executor may
+  // add its completed workspace guard to local_evidence, which must not turn
+  // that valid no-model record into a missing-capture failure.
+  if (waitingReceipt && waitingLocalEvidence) return true;
   if (!local && terminal?.evidence_sha256 == null && terminal?.evidence_bytes === 0) return true;
   const outputCaptureFailed = Boolean(local &&
     (local.storage_error || local.capture_error || local.spawn_error || local.process_error || local.stdin_error) &&

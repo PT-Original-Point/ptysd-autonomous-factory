@@ -4091,8 +4091,23 @@ test('publisher records executor WAITING, continues a ping, then re-dispatches t
       outcome: 'OPENCODE_V2_AUTH_NOT_READY', exit_code: 48,
       evidence_sha256: null, evidence_bytes: 0, model_invoked: false,
     });
-    writeFileSync(resultPath, JSON.stringify({ request_id: requestId, attempt_id: attemptId,
-      terminal: waiting, local_evidence: null }), { flag: 'wx' });
+    const waitingResult = { request_id: requestId, attempt_id: attemptId,
+      terminal: waiting, local_evidence: { executor_workspace_guard: {
+        registered_root_identity_sha256: 'a'.repeat(64),
+        registered_root_state_sha256: 'b'.repeat(64),
+        candidate_root_identity_sha256: 'c'.repeat(64),
+        candidate_root_state_sha256: 'd'.repeat(64),
+        registered_root_after_sha256: 'b'.repeat(64),
+        candidate_root_after_sha256: 'd'.repeat(64),
+        readback: 'COMPLETE', registered_root_changed_paths: 0,
+        candidate_root_changed_paths: 0,
+      } } };
+    assert.equal(await verifyCapturedEvidence(resultsDir, waitingResult), true,
+      'workspace guard metadata does not require stdout capture for a no-model WAITING receipt');
+    await assert.rejects(verifyCapturedEvidence(resultsDir, { ...waitingResult,
+      terminal: { ...waiting, session_id: 'forged_session' } }), /CAPTURED_EVIDENCE_PATH_INVALID/,
+    'a WAITING receipt claiming a Session cannot use the no-capture recovery path');
+    writeFileSync(resultPath, JSON.stringify(waitingResult), { flag: 'wx' });
     const adapters = {
       readExecutorWorkspace:()=>workspace,
       apiRead(uri) {
