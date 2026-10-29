@@ -231,11 +231,20 @@ function Get-WorkerRuntimeTaskDefinitionSha256 {
     try { [xml]$document = [string]$text }
     catch { throw 'WORKER_RUNTIME_TASK_XML_INVALID' }
     $triggerNodes = @($document.SelectNodes("//*[local-name()='Triggers']/*"))
+    $timeTriggerNodes = @($triggerNodes | Where-Object { $_.LocalName -ceq 'TimeTrigger' })
+    $logonTriggerNodes = @($triggerNodes | Where-Object { $_.LocalName -ceq 'LogonTrigger' })
     $settingsNode = $document.SelectSingleNode("//*[local-name()='Settings']")
-    if ($triggerNodes.Count -ne 1 -or $triggerNodes[0].LocalName -cne 'TimeTrigger' -or
+    if ($triggerNodes.Count -ne 2 -or $timeTriggerNodes.Count -ne 1 -or
+        $logonTriggerNodes.Count -ne 1 -or
         $null -eq $settingsNode) { throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' }
-    $intervalNode = $triggerNodes[0].SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='Interval']")
-    $durationNode = $triggerNodes[0].SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='Duration']")
+    $expectedLogonUser = $env:USERDOMAIN + '\' + $env:USERNAME
+    $logonUserNode = $logonTriggerNodes[0].SelectSingleNode("./*[local-name()='UserId']")
+    if ($null -eq $logonUserNode -or
+        [string]$logonUserNode.InnerText -ine $expectedLogonUser) {
+        throw 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH'
+    }
+    $intervalNode = $timeTriggerNodes[0].SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='Interval']")
+    $durationNode = $timeTriggerNodes[0].SelectSingleNode("./*[local-name()='Repetition']/*[local-name()='Duration']")
     $executionLimitNode = $settingsNode.SelectSingleNode("./*[local-name()='ExecutionTimeLimit']")
     $multipleInstancesNode = $settingsNode.SelectSingleNode("./*[local-name()='MultipleInstancesPolicy']")
     $disallowStartIfOnBatteriesNode = $settingsNode.SelectSingleNode("./*[local-name()='DisallowStartIfOnBatteries']")
@@ -957,21 +966,25 @@ if ($Mode -eq 'Install') {
     }
     $argsLine = '//B //NoLogo "' + $hiddenWorker + '"'
     $action = New-ScheduledTaskAction -Execute $wscript -Argument $argsLine -WorkingDirectory $homeDir
+    $username = $env:USERDOMAIN + '\' + $env:USERNAME
     $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
         -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
+    $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $username
     $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 15) `
         -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    $username = $env:USERDOMAIN + '\' + $env:USERNAME
     $principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -ErrorAction Stop | Out-Null
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigger, $logonTrigger) `
+        -Settings $settings -Principal $principal -ErrorAction Stop | Out-Null
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
     if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ne $wscript -or
         $task.Actions[0].Arguments -ne $argsLine -or $task.Actions[0].WorkingDirectory -ne $homeDir) {
         throw 'TASK_INSTALL_READBACK_MISMATCH'
     }
+    $taskDefinitionSha256 = Get-WorkerRuntimeTaskDefinitionSha256
     Write-Output 'NATIVE_BRIDGE_INSTALLED_SOURCE_ONLY_NOT_FIRST_POLL'
     Write-Output ('LOCAL_WORKER_SHA256=' + $workerHash)
-    Write-Output 'LOGON_TYPE=Interactive; RUNLEVEL=Limited; BOOT_BEFORE_LOGON=NOT_GUARANTEED'
+    Write-Output ('TASK_DEFINITION_SHA256=' + $taskDefinitionSha256)
+    Write-Output 'LOGON_TYPE=Interactive; RUNLEVEL=Limited; LOGON_TRIGGER=USER_SESSION_LOGIN; BOOT_BEFORE_LOGON=NOT_GUARANTEED'
     Write-Output 'NEXT: Run -Mode RunOnce for exact GitHub STARTED/FINISHED receipt readback'
     return
 }
