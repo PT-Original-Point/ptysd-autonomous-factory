@@ -1068,10 +1068,13 @@ test('executor result readback failure preserves the running attempt and prevent
     assert.equal(executeCalls, 1);
     assert.equal(existsSync(join(f.manifestDir, `${ATTEMPT_EDIT}.running.json`)), true);
     assert.equal(existsSync(executorResultPath(f.resultsDir, job.request_id, ATTEMPT_EDIT)), true);
-    await assert.rejects(executePendingManifest({ manifestDir: f.manifestDir,
+    const relaunched = await executePendingManifest({ manifestDir: f.manifestDir,
       currentSid: () => EXECUTOR_SID, config,
       execute: async () => { executeCalls++; throw new Error('must not replay'); },
-    }), /EXECUTOR_ATTEMPT_ALREADY_RUNNING/);
+    });
+    assert.equal(relaunched.outcome, 'NO_PENDING_EXECUTOR_MANIFEST');
+    assert.equal(existsSync(join(f.manifestDir, `${ATTEMPT_EDIT}.running.json`)), true);
+    assert.equal(existsSync(executorResultPath(f.resultsDir, job.request_id, ATTEMPT_EDIT)), true);
     assert.equal(executeCalls, 1);
   } finally { f.dispose(); }
 });
@@ -1915,10 +1918,262 @@ test('executor result readback failure preserves the running attempt and prevent
     assert.equal(executeCalls, 1);
     assert.equal(existsSync(join(f.manifestDir, `${ATTEMPT_EDIT}.running.json`)), true);
     assert.equal(existsSync(executorResultPath(f.resultsDir, job.request_id, ATTEMPT_EDIT)), true);
-    await assert.rejects(executePendingManifest({ manifestDir: f.manifestDir,
+    const relaunched = await executePendingManifest({ manifestDir: f.manifestDir,
       currentSid: () => EXECUTOR_SID, config,
       execute: async () => { executeCalls++; throw new Error('must not replay'); },
-    }), /EXECUTOR_ATTEMPT_ALREADY_RUNNING/);
+    });
+    assert.equal(relaunched.outcome, 'NO_PENDING_EXECUTOR_MANIFEST');
+    assert.equal(existsSync(join(f.manifestDir, `${ATTEMPT_EDIT}.running.json`)), true);
+    assert.equal(existsSync(executorResultPath(f.resultsDir, job.request_id, ATTEMPT_EDIT)), true);
     assert.equal(executeCalls, 1);
   } finally { f.dispose(); }
+});
+
+
+test('completed W2 antigravity_edit attempt is not executed again after executor task relaunch', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler executor lifecycle is Windows-only');
+  const f = fixture();
+  const attemptId = '00000000-0000-4000-8000-000000000099';
+  let source;
+  try {
+    source = sourceRepository(f.root, 'antigravity-restart-recovery');
+    const spec = 'Synthetic W2 one-shot restart recovery; no model invocation is permitted.';
+    const job = {
+      schema: 6,
+      project_id: PROJECT,
+      host: hostname().toUpperCase(),
+      request_id: 'PTYSD_ANTIGRAVITY_ONE_SHOT_RECOVERY_20261020',
+      kind: 'antigravity_edit',
+      source_sha: source.sourceSha,
+      spec_path: 'native-bridge/tasks/w2-review.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gemini-3.8-flash-high',
+      variant: 'high',
+      edit_paths: ['README.md'],
+      source_pr: 461,
+      goal_comment_id: 6188322050,
+      goal_body_sha256: 'c'.repeat(64),
+    };
+    const bundle = createExecutorSourceBundle({
+      workspace: source.workspace,
+      descriptor: f.descriptor,
+      job,
+      attemptId,
+      filesystemPath: localPathMap(f),
+    });
+    const pendingPath = join(f.manifestDir, `${attemptId}.pending.json`);
+    writeFileSync(pendingPath, JSON.stringify(
+      makeExecutorManifest(job, spec, attemptId, bundle.sha256)), { flag: 'wx' });
+
+    let executeCalls = 0;
+    let captured;
+    const config = {
+      project_id: PROJECT,
+      repo: REPO,
+      host: hostname().toUpperCase(),
+      executor_runtime: {
+        user_sid: EXECUTOR_SID,
+        publisher_sid: PUBLISHER_SID,
+        manifest_dir: f.manifestDir,
+        results_dir: f.resultsDir,
+      },
+      workspace: source.workspace,
+      state_dir: f.resultsDir,
+      enable_antigravity_model_runs: true,
+    };
+
+    const firstResult = await executePendingManifest({
+      manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID,
+      filesystemPath: localPathMap(f),
+      config,
+      execute: async (_receivedSpec, executionConfig, receivedJob, receivedAttemptId) => {
+        executeCalls++;
+        assert.equal(receivedJob.kind, 'antigravity_edit');
+        assert.equal(receivedJob.request_id, job.request_id);
+        assert.equal(receivedAttemptId, attemptId);
+        assert.equal(executionConfig.antigravity_project_root, source.workspace,
+          'registered project root is preserved separately from attempt checkout');
+        assert.equal(executionConfig.workspace, candidateWorkspacePath(f.resultsDir, attemptId),
+          'attempt checkout is outside the registered source project');
+        assert.equal(execFileSync('git', ['-C', executionConfig.workspace, 'rev-parse', 'HEAD'], {
+          encoding: 'utf8', windowsHide: true, shell: false,
+        }).trim(), source.sourceSha);
+
+        writeFileSync(join(executionConfig.workspace, 'README.md'), 'pinned source fixture with edit\n');
+        captured = await captureScopedEditDiff({
+          workspace: executionConfig.workspace,
+          state_dir: f.resultsDir,
+          job,
+          attempt_id: attemptId,
+        });
+
+        return {
+          outcome: 'ANTIGRAVITY_EDIT_COMPLETED',
+          exit_code: 0,
+          scope_valid: captured.scope_valid,
+          diff_sha256: captured.sha256,
+          diff_bytes: captured.bytes,
+          changed_files: captured.changed_files,
+          model_invoked: true,
+          external_effects: 'UNKNOWN',
+          task_acceptance: 'UNKNOWN',
+          local_evidence: {
+            edit_diff: {
+              file: captured.file,
+              sha256: captured.sha256,
+              bytes: captured.bytes,
+              changed_files: captured.changed_files,
+              allowed_paths: ['README.md'],
+              scope_valid: captured.scope_valid,
+            },
+          },
+        };
+      },
+    });
+
+    assert.equal(executeCalls, 1, 'first execution consumes attempt exactly once');
+    assert.equal(firstResult.terminal_state, 'FINISHED');
+    assert.equal(firstResult.outcome, 'EXECUTOR_RESULT_PERSISTED_NOT_SEMANTIC_ACCEPTANCE');
+    assert.equal(existsSync(pendingPath), false, 'pending manifest is consumed');
+    const runningPath = join(f.manifestDir, `${attemptId}.running.json`);
+    assert.equal(existsSync(runningPath), true, 'running marker persists on disk until reconciliation');
+
+    const resultPath = executorResultPath(f.resultsDir, job.request_id, attemptId);
+    assert.equal(firstResult.result_path, resultPath);
+    assert.ok(existsSync(resultPath), 'terminal result exists at configured results path');
+
+    const saved = JSON.parse(readFileSync(resultPath, 'utf8'));
+    assert.equal(saved.request_id, job.request_id);
+    assert.equal(saved.attempt_id, attemptId);
+    assert.equal(saved.terminal.state, 'FINISHED');
+    assert.equal(saved.terminal.outcome, 'ANTIGRAVITY_EDIT_COMPLETED');
+    assert.equal(saved.terminal.model, 'gemini-3.8-flash-high');
+    assert.equal(saved.terminal.variant, 'high');
+    assert.equal(saved.terminal.model_invoked, true);
+    assert.equal(saved.terminal.scope_valid, true);
+    assert.equal(saved.terminal.diff_sha256, captured.sha256);
+    assert.equal(saved.terminal.diff_bytes, captured.bytes);
+    assert.equal(saved.terminal.changed_files_count, 1);
+    assert.equal(saved.terminal.source_sha, source.sourceSha);
+    assert.equal(saved.terminal.source_pr, 461);
+    assert.equal(saved.terminal.goal_comment_id, 6188322050);
+    assert.equal(saved.terminal.goal_body_sha256, 'c'.repeat(64));
+    assert.equal(saved.terminal.external_effects, 'UNKNOWN');
+    assert.equal(saved.terminal.task_acceptance, 'UNKNOWN');
+    assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(saved.terminal)),
+      'persisted result is a valid receipt under schema-1');
+
+    const runningBytesBefore = readFileSync(runningPath);
+    const resultBytesBefore = readFileSync(resultPath);
+
+    // Simulate new Task Scheduler process relaunching the executor task
+    const secondResult = await executePendingManifest({
+      manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID,
+      filesystemPath: localPathMap(f),
+      config,
+      execute: async () => {
+        executeCalls++;
+        throw new Error('must not re-execute completed attempt');
+      },
+    });
+
+    assert.equal(secondResult.outcome, 'NO_PENDING_EXECUTOR_MANIFEST',
+      'relaunched process reports no pending manifest');
+    assert.equal(secondResult.exit_code, 0);
+    assert.equal(executeCalls, 1, 'stub is never called a second time');
+
+    const activeAttempts = readdirSync(f.manifestDir).filter(name =>
+      /^[a-f0-9-]{36}\.(?:pending|running)\.json$/i.test(name));
+    assert.deepEqual(activeAttempts, [`${attemptId}.running.json`],
+      'no new attempt is created in the mailbox');
+
+    assert.deepEqual(readFileSync(runningPath), runningBytesBefore,
+      'original .running.json bytes remain unchanged');
+    assert.deepEqual(readFileSync(resultPath), resultBytesBefore,
+      'original result file bytes remain unchanged');
+
+    rmSync(resultPath);
+    await assert.rejects(() => executePendingManifest({
+      manifestDir: f.manifestDir, currentSid: () => EXECUTOR_SID,
+      filesystemPath: localPathMap(f), config,
+      execute: async () => { executeCalls++; throw new Error('must not replay an unresolved attempt'); },
+    }), error => error.code === 'EXECUTOR_ATTEMPT_ALREADY_RUNNING');
+    writeFileSync(resultPath, resultBytesBefore, { flag: 'wx' });
+
+    const mismatchedResult = JSON.parse(resultBytesBefore.toString('utf8'));
+    mismatchedResult.attempt_id = '00000000-0000-4000-8000-000000000098';
+    writeFileSync(resultPath, JSON.stringify(mismatchedResult));
+    await assert.rejects(() => executePendingManifest({
+      manifestDir: f.manifestDir, currentSid: () => EXECUTOR_SID,
+      filesystemPath: localPathMap(f), config,
+      execute: async () => { executeCalls++; throw new Error('must not replay a mismatched result'); },
+    }), error => error.code === 'EXECUTOR_RUNNING_RESULT_IDENTITY_MISMATCH');
+    writeFileSync(resultPath, resultBytesBefore);
+    assert.equal(executeCalls, 1, 'missing or mismatched terminal results never replay the model');
+    assert.deepEqual(readFileSync(runningPath), runningBytesBefore,
+      'original running marker stays unchanged after fail-closed recovery');
+    assert.deepEqual(readFileSync(resultPath), resultBytesBefore,
+      'exact terminal result is restored unchanged after negative checks');
+
+    const nextAttemptId = '00000000-0000-4000-8000-000000000100';
+    const nextSpec = 'A distinct W2 request proceeds after the prior exact FINISHED result.';
+    const nextJob = { ...job, request_id: 'PTYSD_ANTIGRAVITY_ONE_SHOT_RECOVERY_NEXT_20261020',
+      spec_sha256: createHash('sha256').update(nextSpec).digest('hex') };
+    const nextBundle = createExecutorSourceBundle({ workspace: source.workspace,
+      descriptor: f.descriptor, job: nextJob, attemptId: nextAttemptId,
+      filesystemPath: localPathMap(f) });
+    writeFileSync(join(f.manifestDir, `${nextAttemptId}.pending.json`), JSON.stringify(
+      makeExecutorManifest(nextJob, nextSpec, nextAttemptId, nextBundle.sha256)), { flag: 'wx' });
+    let nextCalls = 0;
+    const nextResult = await executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID, filesystemPath: localPathMap(f), config,
+      execute: async (_receivedSpec, executionConfig, receivedJob, receivedAttemptId) => {
+        nextCalls++;
+        assert.equal(receivedJob.request_id, nextJob.request_id);
+        assert.equal(receivedAttemptId, nextAttemptId);
+        writeFileSync(join(executionConfig.workspace, 'README.md'), 'distinct W2 attempt diff\n');
+        const nextDiff = await captureScopedEditDiff({ workspace: executionConfig.workspace,
+          state_dir: f.resultsDir, job: nextJob, attempt_id: nextAttemptId });
+        return { outcome: 'ANTIGRAVITY_EDIT_COMPLETED', exit_code: 0,
+          scope_valid: nextDiff.scope_valid, diff_sha256: nextDiff.sha256,
+          diff_bytes: nextDiff.bytes, changed_files: nextDiff.changed_files,
+          model_invoked: true, external_effects: 'UNKNOWN', task_acceptance: 'UNKNOWN',
+          local_evidence: { edit_diff: { file: nextDiff.file, sha256: nextDiff.sha256,
+            bytes: nextDiff.bytes, changed_files: nextDiff.changed_files,
+            allowed_paths: ['README.md'], scope_valid: nextDiff.scope_valid } } };
+      },
+    });
+    assert.equal(nextResult.terminal_state, 'FINISHED');
+    assert.equal(nextCalls, 1, 'one distinct request is accepted behind an exact completed marker');
+    assert.deepEqual(readFileSync(runningPath), runningBytesBefore,
+      'advancing the mailbox preserves the prior attempt marker');
+    const nextRunningPath = join(f.manifestDir, `${nextAttemptId}.running.json`);
+    assert.equal(existsSync(nextRunningPath), true);
+    const finalRelaunch = await executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID, filesystemPath: localPathMap(f), config,
+      execute: async () => { nextCalls++; throw new Error('must not replay either completed attempt'); },
+    });
+    assert.equal(finalRelaunch.outcome, 'NO_PENDING_EXECUTOR_MANIFEST');
+    assert.equal(nextCalls, 1);
+
+    cleanupExecutorAttempt({ ...f.descriptor, manifest_dir: f.manifestDir, results_dir: f.resultsDir }, attemptId);
+    cleanupExecutorAttempt({ ...f.descriptor, manifest_dir: f.manifestDir, results_dir: f.resultsDir }, nextAttemptId);
+    assert.equal(existsSync(candidateWorkspacePath(f.resultsDir, attemptId)), false,
+      'cleanup removes attempt workspace');
+    assert.equal(existsSync(candidateBundlePath(f.manifestDir, attemptId)), false,
+      'cleanup removes candidate bundle');
+    assert.equal(existsSync(runningPath), false, 'cleanup removes running manifest');
+    assert.equal(existsSync(nextRunningPath), false, 'test cleanup removes next running manifest');
+    assert.equal(readFileSync(join(source.workspace, 'README.md'), 'utf8'), 'pinned source fixture\n',
+      'registered source checkout was not modified');
+  } finally {
+    if (source) {
+      try {
+        cleanupExecutorAttempt({ ...f.descriptor, manifest_dir: f.manifestDir, results_dir: f.resultsDir }, attemptId);
+      } catch {}
+    }
+    f.dispose();
+  }
 });
