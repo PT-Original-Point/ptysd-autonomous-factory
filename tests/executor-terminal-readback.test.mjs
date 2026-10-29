@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PROJECT, REPO } from '../native-bridge/worker.mjs';
+import { PROJECT, RECEIPT_MARKER, REPO, parseReceipt } from '../native-bridge/worker.mjs';
 import { executePendingManifest, readPersistedResult } from '../native-bridge/executor.mjs';
 import { executorResultPath, makeExecutorManifest } from '../native-bridge/windows-executor.mjs';
 
@@ -27,14 +27,14 @@ function modelJob(spec) {
     model: 'opencode/spark', variant: 'high' };
 }
 
-function fixture() {
+function fixture({ spec = 'Read-only synthetic fixture; this test never invokes a model.',
+  makeJob = modelJob } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'ptysd-executor-readback-'));
   const manifestDir = join(root, 'inbox');
   const resultsDir = join(root, 'results');
   const workspace = join(root, 'workspace');
   for (const dir of [manifestDir, resultsDir, workspace]) mkdirSync(dir);
-  const spec = 'Read-only synthetic fixture; this test never invokes a model.';
-  const job = modelJob(spec);
+  const job = makeJob(spec);
   writeFileSync(join(manifestDir, `${ATTEMPT}.pending.json`),
     JSON.stringify(makeExecutorManifest(job, spec, ATTEMPT)), { flag: 'wx' });
   const config = {
@@ -245,5 +245,68 @@ test('executor verifies the complete WAITING receipt including local evidence', 
     const preserved = JSON.parse(readFileSync(f.resultPath, 'utf8'));
     assert.equal(preserved.terminal.state, 'WAITING');
     assert.equal(preserved.local_evidence.reason, 'auth_wait');
+  } finally { f.dispose(); }
+});
+
+test('executor preserves schema-6 Antigravity WAITING identity and rejects tampered readback without changing result bytes', async t => {
+  if (skipUnlessWindows(t)) return;
+  const spec = 'Synthetic schema-6 Antigravity WAITING readback; no model invocation is permitted.';
+  const f = fixture({ spec, makeJob: content => ({ ...modelJob(content),
+    schema: 6, kind: 'antigravity_edit', request_id: 'PTYSD_W2_WAITING_READBACK_20261029',
+    source_sha: 'd'.repeat(40), spec_path: 'native-bridge/tasks/w2-schema6-waiting-result-readback.md',
+    model: 'gemini-3.8-flash-high', variant: 'high',
+    edit_paths: ['native-bridge/tasks/w2-schema6-waiting-result-readback.md'],
+    source_pr: 999999, goal_comment_id: 987654321, goal_body_sha256: 'c'.repeat(64) }) });
+  try {
+    f.config.enable_antigravity_model_runs = false;
+    let executeCalls = 0;
+    let originalPersistedBytes;
+    const run = executePendingManifest({
+      manifestDir: f.manifestDir, currentSid: () => EXECUTOR_SID, config: f.config,
+      execute: async () => {
+        executeCalls++;
+        return { outcome: 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED', exit_code: 48,
+          eligibility_state: 'WAITING', model_invoked: false };
+      },
+      readPersisted: (path, options) => {
+        originalPersistedBytes = Buffer.from(readFileSync(path));
+        const persisted = readPersistedResult(path, options);
+        persisted.terminal.goal_body_sha256 = 'e'.repeat(64);
+        return persisted;
+      },
+    });
+    await assert.rejects(run,
+      error => error.code === 'EXECUTOR_WAITING_RESULT_IDENTITY_MISMATCH');
+    assert.equal(executeCalls, 0, 'a disabled W2 lane must not call the execution callback');
+    assert.ok(originalPersistedBytes, 'the exact pre-tamper persisted bytes were captured');
+    const resultBytesAfterRejection = readFileSync(f.resultPath);
+    assert.deepEqual(resultBytesAfterRejection, originalPersistedBytes,
+      'tampered readback must not alter the original persisted result bytes');
+
+    const saved = JSON.parse(resultBytesAfterRejection.toString('utf8'));
+    const terminal = saved.terminal;
+    assert.equal(saved.request_id, f.job.request_id);
+    assert.equal(saved.attempt_id, ATTEMPT);
+    assert.equal(terminal.request_id, f.job.request_id);
+    assert.equal(terminal.attempt_id, ATTEMPT);
+    assert.equal(terminal.kind, 'antigravity_edit');
+    assert.equal(terminal.source_sha, f.job.source_sha);
+    assert.equal(terminal.model, f.job.model);
+    assert.equal(terminal.variant, f.job.variant);
+    assert.equal(terminal.source_pr, f.job.source_pr);
+    assert.equal(terminal.goal_comment_id, f.job.goal_comment_id);
+    assert.equal(terminal.goal_body_sha256, f.job.goal_body_sha256);
+    assert.equal(terminal.edit_paths_sha256,
+      createHash('sha256').update(JSON.stringify(f.job.edit_paths)).digest('hex'));
+    assert.equal(terminal.state, 'WAITING');
+    assert.equal(terminal.outcome, 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED');
+    assert.equal(terminal.exit_code, 48);
+    assert.equal(terminal.evidence_sha256, null);
+    assert.equal(terminal.evidence_bytes, 0);
+    assert.equal(terminal.eligibility_state, 'WAITING');
+    assert.equal(terminal.model_invoked, false);
+    assert.equal(terminal.task_acceptance, 'UNKNOWN');
+    assert.equal(terminal.external_effects, 'UNKNOWN');
+    assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify(terminal))?.state, 'WAITING');
   } finally { f.dispose(); }
 });
