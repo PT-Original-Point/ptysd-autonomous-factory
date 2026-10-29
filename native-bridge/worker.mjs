@@ -811,12 +811,17 @@ function observationWorkerRecords(comments, config, workerLogin, mainSha, candid
     ['W1', new Set(['opencode_edit'])],
     ['W2', new Set(['antigravity_edit'])],
   ]) {
+    const modelSetting = workerId === 'W1'
+      ? config.enable_v2_model_runs : config.enable_antigravity_model_runs;
+    const modelExecutionSwitch = typeof modelSetting === 'boolean'
+      ? (modelSetting ? 'ENABLED' : 'DISABLED') : 'UNKNOWN';
     const task = latestOperatorJob(comments, config, workerLogin, mainSha,
       candidateSourceShas, kinds);
     if (!task) {
       records.push({ worker_id: workerId, status: 'UNKNOWN',
         blocker_code: workerId === 'W1' ? 'NO_AUTHORIZED_W1_JOB' : 'NO_CURRENT_W2_TASK',
-        model_eligibility: 'UNKNOWN', next_owner: '等待精確、受信任的正式任務來源' });
+        model_eligibility: 'UNKNOWN', model_execution_switch: modelExecutionSwitch,
+        next_owner: '等待精確、受信任的正式任務來源' });
       continue;
     }
     const status = ['QUEUED_NOT_STARTED', 'STARTED_UNVERIFIED', 'WAITING_ELIGIBILITY']
@@ -841,6 +846,7 @@ function observationWorkerRecords(comments, config, workerLogin, mainSha, candid
       task_kind: task.kind, task_source: taskSource, task_source_sha: task.source_sha,
       task_comment_id: task.job_comment_id, ...(task.source_pr ? { source_pr: task.source_pr } : {}),
       ...(task.attempt_id ? { attempt_id: task.attempt_id } : {}), task_state: task.state,
+      model_execution_switch: modelExecutionSwitch,
       model_eligibility: task.state === 'WAITING_ELIGIBILITY' || queueWaitsForModelGate
         ? 'WAITING' : 'UNKNOWN',
       code_changes: hasCapturedDiff ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNPROVEN',

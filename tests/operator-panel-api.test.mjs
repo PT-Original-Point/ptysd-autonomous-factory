@@ -573,7 +573,8 @@ test('renderer separates closed W1 source history from live worker status and sh
     native_worker:{latest_task:{request_id:requestId,kind:'opencode_edit',source_pr:505,
       source_sha:w1Sha,state:'FINISHED_NOT_ACCEPTANCE'}},
     workers:[task,{worker_id:'W2',status:'BLOCKED',task_id:'W2_PANEL_TEST',
-      blocker_code:'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED'},
+      blocker_code:'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED',
+      model_execution_switch:'DISABLED'},
       {worker_id:'W3',status:'UNKNOWN'}],
     opencode_v2:{process_count:0,installed_version:'2.0.32'}};
   const observationComment={id:6144415195,user:{login:'wfvupu1212'},
@@ -645,6 +646,7 @@ test('renderer separates closed W1 source history from live worker status and sh
   assert.match(domElements.get('w1-dispatch-delivery').textContent,/DIFF_CAPTURED_UNVERIFIED/);
   assert.match(domElements.get('w1-dispatch-time').textContent,/最後已讀回派工／收據/);
   assert.match(domElements.get('w2-dispatch-state').textContent,/BLOCKED／派工留言 ID 未確認/);
+  assert.match(domElements.get('w2-model-switch').textContent,/模型執行開關：停用.*不派發新的模型工作/);
   assert.match(domElements.get('w2-dispatch-progress').textContent,/ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED/);
   assert.match(domElements.get('w3-dispatch-progress').textContent,/沒有 Zero Risk request_id/);
   assert.match(domElements.get('codex-executor').textContent,/UNKNOWN/);
@@ -822,6 +824,10 @@ test('dispatch cards separate W1 execution, reconciliation, result PR/CI, and ac
     assert.match(withoutTrustedResultHead.resultDetails,/回收核對未確認/);
   }
   assert.equal(w2.shortStatus,'受阻');
+  assert.equal(w2.hasBoundReceipt,true,
+    'a W2 terminal receipt is exposed only after the exact request/source/attempt binding matches');
+  assert.equal(w2.receiptState,'BLOCKED');
+  assert.equal(w2.receiptAttemptId,w2Attempt);
   assert.equal(w2.externalEffectClass,'PARTIAL_OR_AMBIGUOUS');
   assert.equal(w2.externalEffects,'UNKNOWN');
   assert.equal(w2.recoveredFileHashes.length,3);
@@ -1556,6 +1562,25 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
   assert.equal(evidence.native.receipt.task_acceptance,'UNKNOWN');
   assert.equal(evidence.native.codexAcceptance.codex_source_acceptance,'ACCEPTED');
   assert.equal(evidence.native.receipt.external_effects,'UNKNOWN');
+  const workerSummary=panel.workerMetricSummary(
+    {W1:{status:'UNKNOWN'},W2:{status:'UNKNOWN'},W3:{status:'UNKNOWN'}},
+    {W1:{hasBoundReceipt:true,codexSourceAcceptance:{status:'ACCEPTED'}},
+      W2:{hasBoundReceipt:true}},
+    {native:{receipt:{attempt_id:'00000000-0000-4000-8000-000000000001'},
+      codexAcceptance:{codex_source_acceptance:'ACCEPTED'}}},true,true);
+  assert.equal(workerSummary,'目前施工 0／3；W1/W2 精確收據 2／2；Codex 來源接受 2／2',
+    'current activity, bound Worker receipts, and Codex source acceptance are separate facts');
+  assert.match(panel.workerMetricSummary(
+    {W1:{status:'UNKNOWN'},W2:{status:'UNKNOWN'},W3:{status:'UNKNOWN'}},
+    {W1:{hasBoundReceipt:true},W2:{hasBoundReceipt:true}},
+    {native:{receipt:null,receiptResolution:'SNAPSHOT_REQUEST_MISMATCH'}},true,true),
+    /W1\/W2 精確收據 1／2/,
+    'the W2 total comes from its exact latest-job binding, not a stale per-worker snapshot');
+  assert.doesNotMatch(workerSummary,/近期施工證據/,
+    'a zero active count must not erase recent terminal Worker receipts');
+  assert.match(panel.workerMetricSummary({}, {}, {}, false, false),
+    /目前施工 UNKNOWN；W1\/W2 原生收據 UNKNOWN；Codex 來源接受 UNKNOWN/,
+    'stale OS or incomplete GitHub reads never become zero counts');
   const acceptedEvidence = panel.w2EvidenceData(goalComments,issueComments,head,goalIdentity);
   assert.equal(acceptedEvidence.native.codexAcceptance.codex_source_acceptance,'ACCEPTED');
   assert.equal(acceptedEvidence.native.receipt.state,'FINISHED',
@@ -1567,6 +1592,37 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
   assert.match(domElements.get('w2-native-acceptance').textContent,/測試 367\/412 · 失敗 0 · 略過 45/);
   assert.match(domElements.get('w2-native-acceptance').textContent,/Worker task_acceptance=UNKNOWN/);
   assert.match(domElements.get('w2-native-acceptance').textContent,/external_effects=UNKNOWN/);
+
+  const otherAttemptReceipt={...currentReceipt,
+    attempt_id:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    session_id:'00000000-0000-4000-8000-000000000001'};
+  const twoAttemptComments=[...issueComments,comment(6462176021,'t14210184',
+    'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(otherAttemptReceipt),'2026-10-28T06:18:00Z')];
+  const unboundAttempts=panel.w2EvidenceData(goalComments,twoAttemptComments,head,goalIdentity);
+  assert.equal(unboundAttempts.native.receiptResolution,'MULTIPLE_ATTEMPTS_UNBOUND',
+    'the W2 summary must not silently treat the latest comment as the uniquely recovered attempt');
+  assert.equal(unboundAttempts.native.receipt,null,
+    'multiple W2 attempts require an exact attempt binding before showing a Session or terminal');
+  assert.equal(unboundAttempts.native.codexAcceptance,null,
+    'a source acceptance tied to one attempt is not attached to an ambiguous attempt set');
+  panel.renderW2Evidence(unboundAttempts);
+  assert.match(domElements.get('w2-native-attempt').textContent,/多個 attempt.*未自動挑選/);
+  assert.match(domElements.get('w2-native-session').textContent,/Session UNKNOWN/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/source acceptance 保留 UNKNOWN/);
+  const boundAttempt=panel.w2EvidenceData(goalComments,twoAttemptComments,head,goalIdentity,
+    true,true,{requestId:currentRequest,attemptId:currentReceipt.attempt_id});
+  assert.equal(boundAttempt.native.receipt.attempt_id,currentReceipt.attempt_id,
+    'an exact request/attempt binding recovers only that W2 receipt');
+  assert.equal(boundAttempt.native.receipt.session_id,currentReceipt.session_id);
+  assert.equal(boundAttempt.native.codexAcceptance.codex_source_acceptance,'ACCEPTED');
+  const missingExpectedAttempt=panel.w2EvidenceData(goalComments,twoAttemptComments,head,goalIdentity,
+    true,true,{requestId:currentRequest,attemptId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'});
+  assert.equal(missingExpectedAttempt.native.receiptResolution,'EXPECTED_ATTEMPT_NOT_FOUND');
+  assert.equal(missingExpectedAttempt.native.receipt,null,
+    'a missing expected attempt must not fall back to another attempt');
+  assert.equal(missingExpectedAttempt.native.codexAcceptance,null);
+  panel.renderW2Evidence(missingExpectedAttempt);
+  assert.match(domElements.get('w2-native-attempt').textContent,/指定 attempt.*不改配其他 attempt/);
   assert.equal(evidence.directCli.provenance,'DIRECT_CLI_NOT_NATIVE_WORKER');
   assert.equal(evidence.directCli.session_id,'be190416-e85f-4f68-b33a-5d05f54d7072');
   assert.equal(evidence.directCli.pull_request,576);
