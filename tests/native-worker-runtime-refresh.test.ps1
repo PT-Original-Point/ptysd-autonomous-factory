@@ -37,6 +37,14 @@ function Assert-Throws([scriptblock]$Action, [string]$ExpectedMessage, [string]$
     }
 }
 
+$installerText = [IO.File]::ReadAllText($installerPath)
+$installModeIndex = $installerText.IndexOf('if ($Mode -eq ''Install'')', [StringComparison]::Ordinal)
+if ($installModeIndex -lt 0) { throw 'WORKER_INSTALL_MODE_BLOCK_MISSING' }
+$installModeBlock = $installerText.Substring($installModeIndex)
+if (-not [regex]::IsMatch($installModeBlock, '\$logonTrigger\s*=\s*New-ScheduledTaskTrigger\s+-AtLogOn\s+-User\s+\$username')) { throw 'WORKER_INSTALL_LOGON_TRIGGER_MISSING' }
+if (-not $installModeBlock.Contains('-Trigger @($trigger, $logonTrigger)')) { throw 'WORKER_INSTALL_LOGON_TRIGGER_REGISTRATION_MISSING' }
+if (-not $installModeBlock.Contains('$taskDefinitionSha256 = Get-WorkerRuntimeTaskDefinitionSha256')) { throw 'WORKER_INSTALL_TASK_DEFINITION_READBACK_MISSING' }
+
 $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $testRoot = Join-Path $tempBase ('pty-worker-runtime-refresh-' + [guid]::NewGuid().ToString('N'))
 if (-not $testRoot.StartsWith($tempBase, [StringComparison]::OrdinalIgnoreCase)) {
@@ -71,9 +79,11 @@ try {
     $wscript = 'C:\Windows\System32\wscript.exe'
     $hiddenWorker = Join-Path $testRoot 'HiddenWorker.vbs'
     $homeDir = $testRoot
+    $expectedLogonUser = $env:USERDOMAIN + '\' + $env:USERNAME
     $global:MockWorkerTaskXml = @'
-<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><Enabled>true</Enabled><ExecutionTimeLimit>PT15M</ExecutionTimeLimit><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable></Settings><Triggers><TimeTrigger><StartBoundary>2026-10-27T00:00:00</StartBoundary><Repetition><Interval>PT5M</Interval><Duration>P3650D</Duration></Repetition></TimeTrigger></Triggers></Task>
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><Enabled>true</Enabled><ExecutionTimeLimit>PT15M</ExecutionTimeLimit><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable></Settings><Triggers><TimeTrigger><StartBoundary>2026-10-27T00:00:00</StartBoundary><Repetition><Interval>PT5M</Interval><Duration>P3650D</Duration></Repetition></TimeTrigger><LogonTrigger><UserId>__EXPECTED_LOGON_USER__</UserId></LogonTrigger></Triggers></Task>
 '@
+    $global:MockWorkerTaskXml = $global:MockWorkerTaskXml.Replace('__EXPECTED_LOGON_USER__', $expectedLogonUser)
     function global:Export-ScheduledTask {
         [CmdletBinding()]
         param([string]$TaskName, [string]$TaskPath)
@@ -120,6 +130,15 @@ try {
     $readback = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $false -ExpectedState 'Disabled' `
         -ExpectedDefinitionSha256 $enabledHash
     Assert-Equal $readback.DefinitionSha256 $enabledHash 'exact task identity reads back with disabled state'
+    $validTaskXml = $global:MockWorkerTaskXml
+    $global:MockWorkerTaskXml = [regex]::Replace($validTaskXml, '<LogonTrigger>[\s\S]*?</LogonTrigger>', '')
+    Assert-Throws { Get-WorkerRuntimeTaskDefinitionSha256 } 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'a missing logon recovery trigger blocks refresh'
+    $global:MockWorkerTaskXml = $validTaskXml.Replace($expectedLogonUser, 'OTHER\unexpected-user')
+    Assert-Throws { Get-WorkerRuntimeTaskDefinitionSha256 } 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'a logon trigger for another account blocks refresh'
+    $global:MockWorkerTaskXml = $validTaskXml.Replace('</Triggers>',
+        '<BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>')
+    Assert-Throws { Get-WorkerRuntimeTaskDefinitionSha256 } 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'an extra unsupported trigger blocks refresh'
+    $global:MockWorkerTaskXml = $validTaskXml
     $global:MockWorkerTask.Principal.UserId = 'S-1-5-18'
     Assert-Throws { Get-WorkerRuntimeTaskReadback -ExpectedEnabled $false -ExpectedState 'Disabled' } `
         'WORKER_RUNTIME_TASK_PRINCIPAL_IDENTITY_MISMATCH' 'a task registered to a different Windows identity blocks refresh'
