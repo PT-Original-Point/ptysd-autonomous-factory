@@ -1,0 +1,31 @@
+{
+  "candidate_id": "R3-P0-DIRECTORY-ACTIVE-RUN-REF-COMPAT-CANDIDATE",
+  "status": "FROZEN_LOCAL_NONCANONICAL_CANDIDATE_PENDING_EXTERNAL_READER_CENSUS_AND_SCHEMA_GATE",
+  "active_run_ref_contract": "csg.active-run-ref.v1",
+  "directory_record_contract": "csg.project.v2",
+  "legacy_directory_v1_readable": true,
+  "current_directory_record_has_active_run_ref": false,
+  "current_directory_record_has_active_run_id": false,
+  "current_checkpoint_190_result": "FAIL_CLOSED_INVALID_CHECKPOINT_KEYS",
+  "current_checkpoint_190_undeclared_field": "authorization_mode",
+  "current_checkpoint_190_pointer_digest_matches_payload_digest": true,
+  "successful_fresh_session_test_scope": "LOCAL_SYNTHETIC_ONLY",
+  "tests": {
+    "passed": 12,
+    "failed": 0,
+    "suite": "node --test tests/active-run-ref.test.mjs"
+  },
+  "remote_or_canonical_writes": false,
+  "pr297_298_299_modified": false,
+  "canonical_control_modified": false,
+  "mission_or_production_modified": false,
+  "dispatch_authority_granted": false,
+  "operation025_redispatched": false,
+  "operation027_dispatched": false,
+  "cp192_jit_fence_created": false,
+  "external_reentry_conditions": [
+    "Exact current Directory adapter and Host reader/writer inventory with lawful readback.",
+    "An authorized canonical schema decision for the extra checkpoint authorization_mode field; preserve original bytes and do not infer PASS.",
+    "A permitted single-writer CAS migration plan and exact reader compatibility route before any Directory v2 publication."
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "classification": "READ_ONLY_SOURCE_INVENTORY_NONCANONICAL",
+  "repository": "PT-Original-Point/ptysd-vnext42-governance-sandbox",
+  "repository_id": 1352411536,
+  "directory_ref": {
+    "ref": "refs/heads/governance/project-directory",
+    "commit_sha": "f22a9eb9e75d6b2d89dc9b950109910af8d290bb",
+    "tree_sha": "0b063010d8dd3e9be3f594abfdbba61a3a35e54a",
+    "tree_entries": 323,
+    "truncated": false,
+    "observed_objects": [
+      "directory/descriptor.json",
+      "directory/projects/CHATGPT_GLOBAL_SKILL_GOVERNANCE.json",
+      "directory/projects/HANYAO_ADS_LINE_PROD.json",
+      "directory/aliases/index.json",
+      "directory/aliases/{normalized_name_sha256}.json",
+      "governance/v47/w47-04-directory-locator-rebase-receipt-v1.json",
+      "governance/v47/w47-05-directory-locator-advance-receipt-v1.json"
+    ],
+    "reader_or_writer_source_files": []
+  },
+  "control_ref": {
+    "ref": "refs/heads/v45/factory-control",
+    "commit_sha": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+    "tree_sha": "ed773277217d158eced95536965d05e1fe7d4ae9",
+    "code_files_scanned": 135,
+    "scan_patterns": [
+      "active_run_id",
+      "active_run_ref",
+      "csg.directory-root",
+      "project_path_template",
+      "current_control_locator",
+      "directory/projects",
+      "project_directory",
+      "project-directory",
+      "ProjectDirectory"
+    ],
+    "relevant_files": [
+      {
+        "path": "schemas/csg/project.schema.json",
+        "blob_sha": "4636949989d65b728ac39a8a26f96b9bc8d6ca31",
+        "finding": "csg.project.v1 exact schema; additionalProperties=false; field set matches current Directory project v1 record"
+      },
+      {
+        "path": "scripts/csg-schema.mjs",
+        "blob_sha": "c58ec22fc4f44dd5892da74aa39db247d62796b2",
+        "finding": "strict current CSG reader accepts csg.project.v1 only with exact keys"
+      },
+      {
+        "path": "scripts/csg-migration-shadow.mjs",
+        "blob_sha": "310e1546c95f747b9c712665d3d060e0d9761254",
+        "finding": "legacy shadow comparison reads control.active_run_id and directory.active_run_id; it is not a Directory adapter and has no active_run_ref route"
+      },
+      {
+        "path": "tests/csg/migration.test.mjs",
+        "blob_sha": "7a5fb8dd2b1e716ae21870b6fb9b4813e794a581",
+        "finding": "legacy active_run_id projection fixture only"
+      },
+      {
+        "path": "tests/v45-z3-provider-evidence.test.mjs",
+        "blob_sha": "e35bd48d11ef5e7f5e6b2c2b52c7d6ab400acf9f",
+        "finding": "legacy control active_run_id assertion only"
+      },
+      {
+        "path": ".github/workflows/factory-bounded.yml",
+        "blob_sha": "91051ba52a8ac32c9fb050a4a8089dbd34a04648",
+        "finding": "read-only bounded acceptance workflow; no Directory writes"
+      },
+      {
+        "path": ".github/workflows/v45-bounded-self-hosted.yml",
+        "blob_sha": "96eaa3e3a95c6d2a7821ee298659b43da8656db5",
+        "finding": "bounded CI workflow; no Directory writes"
+      }
+    ],
+    "active_run_ref_code_hits": 0,
+    "directory_service_source_path_present": false
+  },
+  "limits": [
+    "The accessible repository refs contain no Project Directory API/adapter reader or writer implementation.",
+    "This source inventory does not prove the absence of external or Host readers; a current authorized adapter census is still required before any v2 Directory write.",
+    "The exact current checkpoint 190 has an undeclared authorization_mode key while the pinned csg.checkpoint.v1 schema forbids additional properties. Its payload digest matches the pointer, but the resolver must still fail closed on schema drift."
+  ]
+}
