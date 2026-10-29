@@ -1715,6 +1715,136 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
+test('a disabled W2 lane does not starve an independently eligible schema-6 W1 OpenCode edit', async () => {
+  const root=mkdtempSync(join(homedir(),'.ptysd-w1-after-disabled-w2-test-'));
+  try {
+    const workspace=join(root,'workspace'),stateDir=join(root,'state');
+    mkdirSync(join(workspace,'src'),{recursive:true}); mkdirSync(stateDir);
+    const host=hostname().toUpperCase();
+    const w2Spec='Synthetic W2 request that must remain queued without model execution.';
+    const w1Spec='Edit only src/w1-after-disabled-w2.mjs for this synthetic task.';
+    const w2Job=withHumanGoal({schema:6,project_id:PROJECT,host,
+      request_id:'PTYSD_W2_DISABLED_BEFORE_W1_20261029',kind:'antigravity_edit',
+      source_sha:commit,spec_path:'native-bridge/tasks/w2-before-w1.md',spec_sha256:h(w2Spec),
+      model:ANTIGRAVITY_V2_MODEL,variant:'high',
+      edit_paths:['src/w2-before-w1.mjs'],source_pr:448});
+    const w1Job=withHumanGoal({schema:6,project_id:PROJECT,host,
+      request_id:'PTYSD_W1_AFTER_DISABLED_W2_20261029',kind:'opencode_edit',
+      source_sha:commit,spec_path:'native-bridge/tasks/w1-after-w2.md',spec_sha256:h(w1Spec),
+      model:'opencode/deepseek-v4.1-flash-free',variant:'free',
+      edit_paths:['src/w1-after-disabled-w2.mjs'],source_pr:437});
+    const w2Comment={...com(410,encoded(w2Job),'t14210184'),
+      issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+    const w1Comment={...com(411,encoded(w1Job),'t14210184'),
+      issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+    const comments=[w2Comment,w1Comment];
+    const w1Executor=executorDescriptorForLane('OpenCode',1001);
+    const w2Executor=executorDescriptorForLane('Antigravity',1003);
+    const config={repo:REPO,project_id:PROJECT,host,issue:407,workspace,state_dir:stateDir,
+      dispatchers:['t14210184'],executors:{opencode:w1Executor,antigravity:w2Executor},
+      enable_v2_model_runs:true,enable_antigravity_model_runs:false,
+      allowed_models:{'opencode/deepseek-v4.1-flash-free':['free'],[ANTIGRAVITY_V2_MODEL]:['high']}};
+    const posted=[],logs=[];
+    let bundles=0,dispatches=0,inlineModels=0,antigravityReadiness=0,w2Readiness=0,
+      pendingTriggers=0,nextReceiptId=420;
+    const pullFor=pr=>({number:pr,state:'open',
+      base:{ref:'main',repo:{id:1352411536,full_name:REPO}},
+      head:{sha:commit,repo:{id:1352411536,full_name:REPO}}});
+    const adapters={
+      goalCommentsRead:()=>[humanGoalComment(),...comments],
+      apiRead(uri){
+        if(uri==='user')return {login:'worker'};
+        if(uri===`repos/${REPO}/issues/407`)return {title:ISSUE_TITLE,state:'open'};
+        if(uri===`repos/${REPO}/git/ref/heads/main`)return {object:{sha:commit}};
+        if(uri===`repos/${REPO}/issues/comments/6188322050`)return humanGoalComment();
+        if(uri===`repos/${REPO}/pulls/448`)return pullFor(448);
+        if(uri===`repos/${REPO}/pulls/437`)return pullFor(437);
+        const commentMatch=uri.match(new RegExp(`^repos/${REPO.replaceAll('/','\\/')}/issues/comments/(\\d+)$`));
+        if(commentMatch)return comments.find(item=>item.id===Number(commentMatch[1]));
+        if(uri.startsWith(`repos/${REPO}/contents/`))
+          return {encoding:'base64',content:Buffer.from(
+            uri.includes('w2-before-w1.md')?w2Spec:w1Spec).toString('base64')};
+        throw new Error(`UNEXPECTED_W1_AFTER_DISABLED_W2_API_${uri}`);
+      },
+      commentsRead:()=>comments,
+      assertExecutorTaskReady(descriptor){
+        if(descriptor===w2Executor)w2Readiness++;
+        assert.equal(descriptor,w1Executor,
+          'only the independently eligible W1 descriptor reaches Task Scheduler readiness');
+        return {ready:true};
+      },
+      createExecutorSourceBundle({descriptor,job,attemptId}){
+        assert.equal(descriptor,w1Executor,'W1 source bundles must use the OpenCode descriptor');
+        assert.equal(job.request_id,w1Job.request_id);
+        assert.equal(job.source_sha,commit);
+        assert.equal(job.source_pr,437);
+        assert.deepEqual(job.edit_paths,['src/w1-after-disabled-w2.mjs']);
+        bundles++;
+        return {attempt_id:attemptId,source_sha:job.source_sha,sha256:'c'.repeat(64)};
+      },
+      dispatchToExecutor(descriptor,manifest){
+        assert.equal(descriptor,w1Executor,'W1 dispatch must not use the disabled W2 identity');
+        assert.equal(manifest.job.request_id,w1Job.request_id);
+        assert.equal(manifest.job.source_sha,commit);
+        assert.equal(manifest.job.source_pr,437);
+        assert.deepEqual(manifest.job.edit_paths,['src/w1-after-disabled-w2.mjs']);
+        assert.equal(manifest.source_bundle_sha256,'c'.repeat(64));
+        dispatches++;
+        return {outcome:'SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION'};
+      },
+      writeReceipt(receiptConfig,data){
+        assert.equal(receiptConfig.issue,407,'receipts stay on the existing #407 stream');
+        posted.push(data);
+        comments.push(com(nextReceiptId++,RECEIPT_MARKER+JSON.stringify(data),'worker'));
+      },
+      runPlan(){inlineModels++;throw new Error('W1_MODEL_MUST_RUN_ONLY_IN_EXECUTOR');},
+      runAntigravityV2Readiness(){
+        antigravityReadiness++;
+        throw new Error('ANTIGRAVITY_READINESS_MUST_NOT_RUN_WHILE_W2_DISABLED');
+      },
+      triggerPendingExecutorAttempt(){
+        pendingTriggers++;
+        return {outcome:'SYNTHETIC_PENDING_TRIGGER_NOT_CONFIRMED'};
+      },
+      observationDependencies:{collectWindowsObservation:()=>({status:'UNKNOWN'})},
+      log:value=>logs.push(value),
+    };
+
+    const result=await executeWorker(config,adapters);
+    assert.equal(result.state,'DISPATCHED',JSON.stringify({result,logs}));
+    assert.equal(result.request_id,w1Job.request_id);
+    assert.equal(bundles,1);
+    assert.equal(dispatches,1,'the W1 request is dispatched exactly once through the OpenCode Executor');
+    assert.equal(inlineModels,0,'the Worker never invokes an inline model');
+    assert.equal(antigravityReadiness,0,'a disabled W2 lane cannot trigger Antigravity readiness');
+    assert.equal(w2Readiness,0,'the W2 Task Scheduler identity is never probed');
+    assert.equal(pendingTriggers,0);
+    assert.ok(logs.includes('ANTIGRAVITY_LANE_WAITING_ELIGIBILITY_ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED'),
+      'the W2 gate was evaluated before continuing to W1');
+    assert.ok(!logs.some(value=>value.startsWith('OPENCODE_LANE_WAITING_ELIGIBILITY_')),
+      'the eligible W1 lane was not denied');
+    assert.equal(posted.filter(item=>item.request_id===w2Job.request_id).length,0,
+      'W2 remains unclaimed with no STARTED receipt');
+    assert.equal(posted.filter(item=>item.kind==='antigravity_edit').length,0);
+    assert.equal(comments.filter(item=>parseReceipt(item.body)?.request_id===w2Job.request_id).length,0,
+      'no W2 STARTED or terminal receipt exists after the W1 dispatch tick');
+    const w1Receipts=posted.filter(item=>item.request_id===w1Job.request_id);
+    assert.equal(w1Receipts.length,1);
+    assert.equal(w1Receipts[0].state,'STARTED');
+    assert.equal(w1Receipts[0].kind,'opencode_edit');
+    assert.equal(w1Receipts[0].source_sha,commit);
+    assert.equal(w1Receipts[0].source_pr,437);
+    assert.equal(w1Receipts[0].goal_comment_id,w1Job.goal_comment_id);
+    assert.equal(w1Receipts[0].goal_body_sha256,w1Job.goal_body_sha256);
+    assert.equal(w1Receipts[0].edit_paths_sha256,h(JSON.stringify(w1Job.edit_paths)));
+
+    const next=selectNext(comments,['t14210184'],'worker',host,commit,[],
+      new Map([[448,commit],[437,commit]]));
+    assert.equal(next?.job.request_id,w2Job.request_id,
+      'the disabled W2 request remains queued and eligible for later reevaluation');
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
 test('candidate PR head drift at final readback prevents STARTED and Executor dispatch', async () => {
   const root=mkdtempSync(join(homedir(),'.ptysd-edit-pr-drift-test-'));
   try {
