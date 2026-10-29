@@ -2025,6 +2025,203 @@ test('W2 panel evidence separates native schema-6 task, direct CLI, and the hist
     assert.match(html,new RegExp(`id=["']${id}["']`),`panel contains ${id}`);
 });
 
+test('W2 source acceptance binds the exact blocked attempt, diff, result PR, and trusted checks', async () => {
+  const requestId='W2_RUNTIME_REFRESH_NONMUTATION_20261029_8EE5D1135A9644F5A29D92A96F218293';
+  const sourceSha='450a2f51253a4bb868d68c8c573fe2f380237974';
+  const attemptId='3123a5e1-5d97-4dec-a008-a2d99c6e7e74';
+  const diffSha='429c668023ca14a016023e9265d256af6f7cbe85cef18bd3b9b4b219952cbc9b';
+  const goalBodySha='2f1829da0e1f5105a384be03904b2289c57c05e8a44215c4824fb6b8631d8f7b';
+  const job={
+    schema:6, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
+    request_id:requestId, kind:'antigravity_edit', source_sha:sourceSha,
+    spec_path:'native-bridge/tasks/w2-runtime-refresh-nonmutation-contract.md',
+    spec_sha256:'9ec18d8b4f8d7a84788d65233210bf51dd95a12a27da9ca361cec6609f20ae85',
+    model:'gemini-3.8-flash-high', variant:'high',
+    edit_paths:['tests/native-worker-opencode-cli-audit.test.mjs'],
+    source_pr:625, goal_comment_id:6188322050, goal_body_sha256:goalBodySha,
+  };
+  const receipt={
+    schema:1, project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE', host:'DESKTOP-1B6PD2P',
+    request_id:requestId, attempt_id:attemptId, state:'BLOCKED', kind:'antigravity_edit',
+    source_sha:sourceSha, source_pr:625,
+    outcome:'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED',
+    session_id:'24caad69-3bce-4692-94cb-60505bf37446',
+    diff_sha256:diffSha, diff_bytes:9362,
+    task_acceptance:'UNKNOWN', external_effects:'UNKNOWN',
+  };
+  const goalComments=[{id:6492466486,user:{login:'t14210184'},
+    body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job)}];
+  const sourceBody=[
+    'PTYSD_V53R4_W2_SOURCE_ACCEPTANCE_V1',
+    'record_type=CODEX_SOURCE_ACCEPTANCE_WITH_WORKER_BLOCKED_TERMINAL',
+    'repo=PT-Original-Point/ptysd-autonomous-factory',
+    'project_id=CHATGPT_GLOBAL_SKILL_GOVERNANCE',
+    'human_goal_comment_id=6188322050',
+    '',
+    'WORKER_EXECUTION',
+    'request_id='+requestId,
+    'worker_attempt_id='+attemptId,
+    'worker_terminal_comment_id=6493900836',
+    'worker_state=BLOCKED',
+    'worker_outcome=ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED',
+    'gemini_session_id=24caad69-3bce-4692-94cb-60505bf37446',
+    'model=gemini-3.8-flash-high',
+    'diff_sha256='+diffSha,
+    'diff_bytes=9362',
+    'external_effects=UNKNOWN',
+    '',
+    'CODEX_SOURCE_REVIEW',
+    'source_pr=625',
+    'source_head='+sourceSha,
+    'result_pr=629',
+    'result_head=453ab048718632b1cf94ba885858b3eb272b1a84',
+    'result_merge_commit=962181b54734ae3aff55a1948d21c4d734eeb7cc',
+    'main_readback=962181b54734ae3aff55a1948d21c4d734eeb7cc',
+    'changed_path=tests/native-worker-opencode-cli-audit.test.mjs',
+    'source_test=node --test tests/native-worker-opencode-cli-audit.test.mjs:3_pass;0_fail',
+    'git_diff_check=PASS',
+    'exact_head_checks=check-native-only:SUCCESS;csg-trusted-verifier-hosted:SUCCESS',
+    'legacy_check=csg-trusted-verifier:PENDING_ZERO_STEPS (old factory-bounded self-hosted workflow);bounded-driver-acceptance:SKIPPED',
+    'source_acceptance=CODEX_ACCEPTED_AFTER_TEST_AND_EXACT_HEAD_HOSTED_VERIFIER',
+    'worker_task_acceptance=UNKNOWN;external_effects=UNKNOWN',
+  ].join('\n');
+  const sourceComment={id:6494098118,user:{login:'t14210184'},body:sourceBody};
+  const resultPull={
+    number:629,state:'closed',merged:true,merged_at:'2026-10-29T10:21:22Z',
+    merge_commit_sha:'962181b54734ae3aff55a1948d21c4d734eeb7cc',
+    base:{ref:'main',repo:{id:1352411536,full_name:'PT-Original-Point/ptysd-autonomous-factory'}},
+    head:{sha:'453ab048718632b1cf94ba885858b3eb272b1a84',
+      repo:{id:1352411536,full_name:'PT-Original-Point/ptysd-autonomous-factory'}},
+  };
+  const resultChecks={check_runs:[
+    {id:901,name:'check-native-only',head_sha:'453ab048718632b1cf94ba885858b3eb272b1a84',
+      status:'completed',conclusion:'success'},
+    {id:902,name:'csg-trusted-verifier-hosted',head_sha:'453ab048718632b1cf94ba885858b3eb272b1a84',
+      status:'completed',conclusion:'success'},
+  ]};
+  const issueComments=[
+    {id:6493900836,user:{login:'t14210184'},
+      body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(receipt)},
+    sourceComment,
+  ];
+  const goalIdentity={id:6188322050,author:'t14210184',body_sha256:goalBodySha};
+  const evidence=panel.w2EvidenceData(goalComments,issueComments,
+    '962181b54734ae3aff55a1948d21c4d734eeb7cc',goalIdentity,true,true,
+    {requestId,attemptId},resultPull,resultChecks);
+  assert.equal(evidence.native.receiptCommentId,6493900836);
+  assert.equal(evidence.native.receipt.state,'BLOCKED');
+  assert.equal(evidence.native.receipt.session_id,receipt.session_id);
+  assert.equal(evidence.native.receipt.task_acceptance,'UNKNOWN');
+  assert.equal(evidence.native.receipt.external_effects,'UNKNOWN');
+  assert.equal(evidence.native.codexAcceptance.codex_source_acceptance,'ACCEPTED');
+  assert.equal(evidence.native.codexAcceptance.sourceAcceptance.diff_sha256,diffSha);
+  assert.equal(evidence.native.codexAcceptance.sourceAcceptance.result_pr,629);
+  assert.equal(evidence.native.codexAcceptance.sourceAcceptance.result_head,
+    '453ab048718632b1cf94ba885858b3eb272b1a84');
+  assert.equal(evidence.native.codexAcceptance.sourceAcceptance.merge_commit,
+    '962181b54734ae3aff55a1948d21c4d734eeb7cc');
+  panel.renderW2Evidence(evidence);
+  assert.match(domElements.get('w2-native-attempt').textContent,/BLOCKED/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/Worker task_acceptance=UNKNOWN/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/結果 PR #629 MERGED/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/check-native-only:SUCCESS/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/csg-trusted-verifier-hosted:SUCCESS/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/PENDING_ZERO_STEPS/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/3_pass;0_fail/);
+  assert.match(domElements.get('w2-native-acceptance').textContent,/external_effects=UNKNOWN/);
+
+  const rejected=body => panel.w2EvidenceData(goalComments,[
+    issueComments[0],{...sourceComment,body}], '962181b54734ae3aff55a1948d21c4d734eeb7cc',
+    goalIdentity,true,true,{requestId,attemptId},resultPull,resultChecks).native.codexAcceptance;
+  const badRecords=[
+    sourceBody.replace('request_id='+requestId,'request_id=W2_OTHER_REQUEST_20261029'),
+    sourceBody.replace('worker_attempt_id='+attemptId,
+      'worker_attempt_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
+    sourceBody.replace('source_head='+sourceSha,'source_head='+'f'.repeat(40)),
+    sourceBody.replace('diff_sha256='+diffSha,'diff_sha256='+'f'.repeat(64)),
+    sourceBody.replace('result_pr=629','result_pr=PR #629'),
+    sourceBody.replace('result_head=453ab048718632b1cf94ba885858b3eb272b1a84',
+      'result_head='+'f'.repeat(40)),
+    sourceBody.replace('csg-trusted-verifier-hosted:SUCCESS',
+      'csg-trusted-verifier-hosted:FAILURE'),
+    sourceBody.replace('source_acceptance=CODEX_ACCEPTED_AFTER_TEST_AND_EXACT_HEAD_HOSTED_VERIFIER',
+      'source_acceptance=ACCEPTED'),
+    sourceBody.replace('worker_task_acceptance=UNKNOWN;external_effects=UNKNOWN',
+      'worker_task_acceptance=ACCEPTED;external_effects=UNKNOWN'),
+    sourceBody.replace('worker_terminal_comment_id=6493900836',
+      'worker_terminal_comment_id=6493900837'),
+  ];
+  for (const body of badRecords)
+    assert.equal(rejected(body),null,'mismatched identity, diff, result PR, CI, or acceptance is rejected');
+  const wrongAuthor=panel.w2EvidenceData(goalComments,[
+    issueComments[0],{...sourceComment,user:{login:'untrusted-user'}}],
+    '962181b54734ae3aff55a1948d21c4d734eeb7cc',goalIdentity,true,true,
+    {requestId,attemptId});
+  assert.equal(wrongAuthor.native.codexAcceptance,null,
+    'a non-dispatcher cannot supply Codex source acceptance');
+  const wrongPrReadback=panel.w2EvidenceData(goalComments,issueComments,
+    '962181b54734ae3aff55a1948d21c4d734eeb7cc',goalIdentity,true,true,
+    {requestId,attemptId},{...resultPull,head:{...resultPull.head,sha:'f'.repeat(40)}},resultChecks);
+  assert.equal(wrongPrReadback.native.codexAcceptance,null,
+    'the result PR API head must match the accepted result head');
+  const wrongMergeReadback=panel.w2EvidenceData(goalComments,issueComments,
+    '962181b54734ae3aff55a1948d21c4d734eeb7cc',goalIdentity,true,true,
+    {requestId,attemptId},{...resultPull,merge_commit_sha:'f'.repeat(40)},resultChecks);
+  assert.equal(wrongMergeReadback.native.codexAcceptance,null,
+    'the result PR API merge commit must match its source acceptance readback');
+  const failedTrustedCheck=panel.w2EvidenceData(goalComments,issueComments,
+    '962181b54734ae3aff55a1948d21c4d734eeb7cc',goalIdentity,true,true,
+    {requestId,attemptId},resultPull,{check_runs:resultChecks.check_runs.map(run =>
+      run.name === 'csg-trusted-verifier-hosted' ? {...run,conclusion:'failure'} : run)});
+  assert.equal(failedTrustedCheck.native.codexAcceptance,null,
+    'a failed live trusted exact-head check prevents source acceptance');
+  const wrongCheckHead=panel.w2EvidenceData(goalComments,issueComments,
+    '962181b54734ae3aff55a1948d21c4d734eeb7cc',goalIdentity,true,true,
+    {requestId,attemptId},resultPull,{check_runs:resultChecks.check_runs.map(run =>
+      ({...run,head_sha:'f'.repeat(40)}))});
+  assert.equal(wrongCheckHead.native.codexAcceptance,null,
+    'checks from any other SHA are not reused');
+
+  const humanGoal={id:6188322050,user:{login:'t14210184'},issue_url:apiRoot+'/issues/310',
+    body:'<!-- PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015 -->\nBounded Human construction authority.'};
+  const verifiedGoal=await panel.hashHumanGoalComment(humanGoal);
+  const cycleJob={...job,goal_body_sha256:verifiedGoal.body_sha256};
+  const goalUrl=apiRoot+'/issues/310/comments?per_page=100&sort=created&direction=desc';
+  const cycleGoalComments=[
+    humanGoal,
+    {id:6492466486,user:{login:'t14210184'},
+      body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(cycleJob)},
+  ];
+  const cycleIssueComments=[
+    ...observationComments(baseTime,{latestTask:false}),
+    issueComments[0],sourceComment,
+  ];
+  const calls=[];
+  const resultChecksUrl=apiRoot+'/commits/453ab048718632b1cf94ba885858b3eb272b1a84/check-runs?per_page=100';
+  const client=panel.createApiClient(async url=>{
+    calls.push(url);
+    if (url===urls.issue) return response(200,cycleIssueComments,quotaHeaders(baseTime));
+    if (url===goalUrl) return response(200,cycleGoalComments,quotaHeaders(baseTime));
+    if (url===urls.main) return response(200,{sha:'962181b54734ae3aff55a1948d21c4d734eeb7cc'},quotaHeaders(baseTime));
+    if (url===apiRoot+'/pulls/629') return response(200,resultPull,quotaHeaders(baseTime));
+    if (url===resultChecksUrl) return response(200,resultChecks,quotaHeaders(baseTime));
+    throw new Error('unexpected API URL: '+url);
+  },{now:()=>baseTime});
+  const store=panel.createResourceStore(client,()=>baseTime);
+  await panel.runSyncCycle(store,client,{...urls,goal:goalUrl});
+  assert.ok(calls.includes(apiRoot+'/pulls/629'),
+    'the existing GitHub API client reads the exact result PR named by the bound acceptance');
+  assert.equal(store.resources.w2ResultPr.url,apiRoot+'/pulls/629');
+  assert.equal(store.resources.w2ResultPr.data.number,629);
+  assert.ok(calls.includes(resultChecksUrl),
+    'the panel independently reads check runs for the result PR exact HEAD');
+  assert.equal(store.resources.w2ResultChecks.url,resultChecksUrl);
+  const cycleEvidence=panel.w2EvidenceData(cycleGoalComments,cycleIssueComments,
+    '962181b54734ae3aff55a1948d21c4d734eeb7cc',verifiedGoal,true,true,
+    {requestId,attemptId},store.resources.w2ResultPr.data,store.resources.w2ResultChecks.data);
+  assert.equal(cycleEvidence.native.codexAcceptance.sourceAcceptance.result_pr,629);
+});
+
 test('a direct Antigravity CLI session alone never appears as a schema-6 native W2 task', () => {
   const comment = { id:6438594849, user:{login:'t14210184'}, created_at:'2026-10-27T09:45:07Z',
     body:['record_type=ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT',

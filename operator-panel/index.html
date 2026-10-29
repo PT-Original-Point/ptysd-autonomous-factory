@@ -416,6 +416,7 @@
   const JOB_MARKER = 'PTYSD_NATIVE_JOB_V1\n';
   const RECEIPT_MARKER = 'PTYSD_NATIVE_RECEIPT_V1\n';
   const ACCEPTANCE_MARKER = 'PTYSD_V53R4_W2_PANEL_ACCEPTANCE_V1\n';
+  const W2_SOURCE_ACCEPTANCE_MARKER = 'PTYSD_V53R4_W2_SOURCE_ACCEPTANCE_V1';
   const W1_SOURCE_ACCEPTANCE_MARKER = 'PTYSD_V53R4_R6_W1_SOURCE_ACCEPTANCE_AFTER_MERGE_V1';
   const W1_PATCH_IDENTITY_MARKER = 'PTYSD_V53R4_R6_W1_SOURCE_PATCH_BYTE_IDENTITY_RECONCILIATION_V1';
   const V2_NATIVE_WORKFLOW_PATH_FILTERS = [
@@ -452,8 +453,9 @@
   const PR_POLL_MS = 15 * 60 * 1000;
   const CHECKS_POLL_MS = 15 * 60 * 1000;
   const MAIN_POLL_MS = 60 * 60 * 1000;
-  // Manual sync revalidates four GitHub resources; keep repeated user refreshes
-  // within the same low-cost budget as ordinary polling.
+  // Manual sync revalidates its ordinary GitHub resources; exact W2 source
+  // acceptance may also refresh one result PR and its head-bound check runs.
+  // Keep repeated user refreshes within the same low-cost budget as polling.
   const MANUAL_SYNC_MIN_MS = 15 * 60 * 1000;
   const LOW_REMAINING_THRESHOLD = 10;
   const RATE_STATE_STORAGE_KEY = 'ptysd-operator-panel-rate-state-v1';
@@ -681,6 +683,146 @@
       ['SUCCESS','FAILURE','PENDING','UNKNOWN','SKIPPED'].includes(value.exact_head_ci) &&
       !!tests &&
       ['NONE','UNKNOWN','OBSERVED'].includes(value.external_effects);
+  }
+  function parseW2SourceAcceptanceFields(comment) {
+    const id=Number(comment?.id);
+    const body=comment?.body;
+    const marker=W2_SOURCE_ACCEPTANCE_MARKER + '\n';
+    if (!Number.isSafeInteger(id) || id < 1 || !DISPATCHERS.has(comment?.user?.login || '') ||
+        typeof body !== 'string' || !body.startsWith(marker) ||
+        body.split(W2_SOURCE_ACCEPTANCE_MARKER).length !== 2) return null;
+    const fields={};
+    for (const line of body.slice(marker.length).split(/\r?\n/)) {
+      let lastKey=null;
+      for (const segment of line.split(';')) {
+        const split=segment.indexOf('=');
+        if (split < 1) {
+          if (lastKey && segment.trim()) fields[lastKey] += ';' + segment.trim();
+          continue;
+        }
+        const key=segment.slice(0,split).trim();
+        const value=segment.slice(split+1).trim();
+        if (!/^[a-z][a-z0-9_]*$/.test(key) || !value ||
+            Object.hasOwn(fields,key) && fields[key] !== value) return null;
+        fields[key]=value;
+        lastKey=key;
+      }
+    }
+    return { id, fields };
+  }
+  function w2SourceAcceptanceResultPr(issueComments, job, receipt, receiptCommentId) {
+    if (!job || !receipt || !Number.isSafeInteger(receiptCommentId)) return null;
+    const candidates=[];
+    for (const comment of issueComments || []) {
+      const parsed=parseW2SourceAcceptanceFields(comment);
+      if (!parsed) continue;
+      const {id,fields}=parsed;
+      const resultPr=/^\d{1,9}$/.test(fields.result_pr || '') ? Number(fields.result_pr) : null;
+      const exactChecks=String(fields.exact_head_checks || '').split(';').map(item => item.trim());
+      const resultHead=fields.result_head || '';
+      const mergeCommit=fields.result_merge_commit || '';
+      const mainReadback=fields.main_readback || '';
+      if (fields.record_type === 'CODEX_SOURCE_ACCEPTANCE_WITH_WORKER_BLOCKED_TERMINAL' &&
+          fields.repo === REPO && fields.project_id === PROJECT &&
+          fields.human_goal_comment_id === String(job.goal_comment_id) &&
+          fields.request_id === job.request_id &&
+          fields.worker_attempt_id === receipt.attempt_id &&
+          fields.worker_terminal_comment_id === String(receiptCommentId) &&
+          fields.worker_state === receipt.state && fields.worker_outcome === receipt.outcome &&
+          fields.gemini_session_id === receipt.session_id &&
+          fields.model === job.model && fields.source_pr === String(job.source_pr) &&
+          String(fields.source_head || '').toLowerCase() === String(job.source_sha).toLowerCase() &&
+          String(fields.diff_sha256 || '').toLowerCase() === String(receipt.diff_sha256 || '').toLowerCase() &&
+          Number(fields.diff_bytes) === Number(receipt.diff_bytes) &&
+          fields.worker_task_acceptance === 'UNKNOWN' && fields.external_effects === 'UNKNOWN' &&
+          fields.source_acceptance === 'CODEX_ACCEPTED_AFTER_TEST_AND_EXACT_HEAD_HOSTED_VERIFIER' &&
+          exactChecks.includes('check-native-only:SUCCESS') &&
+          exactChecks.includes('csg-trusted-verifier-hosted:SUCCESS') &&
+          /^[a-f0-9]{40}$/i.test(resultHead) &&
+          /^[a-f0-9]{40}$/i.test(mergeCommit) && mergeCommit.toLowerCase() === mainReadback.toLowerCase() &&
+          Number.isSafeInteger(resultPr) && resultPr > 0)
+        candidates.push({id,resultPr});
+    }
+    candidates.sort((a,b)=>a.id-b.id);
+    return candidates.at(-1)?.resultPr || null;
+  }
+  function w2TrustedResultChecks(checkData, expectedHead) {
+    const head=safeSha(expectedHead)?.toLowerCase();
+    if (!head || !Array.isArray(checkData?.check_runs)) return null;
+    const required=['check-native-only','csg-trusted-verifier-hosted'];
+    const verified=[];
+    for (const name of required) {
+      const runs=checkData.check_runs.filter(run => run?.name === name &&
+        safeSha(run.head_sha)?.toLowerCase() === head)
+        .sort((a,b)=>(Number(a.id)||0)-(Number(b.id)||0));
+      const latest=runs.at(-1);
+      if (!latest || latest.status !== 'completed' || latest.conclusion !== 'success') return null;
+      verified.push(name + ':SUCCESS');
+    }
+    return verified.join('; ');
+  }
+  function parseW2SourceAcceptance(comment, job, receipt, receiptCommentId, resultPull = null,
+      resultChecks = null, goalReferenceVerified = false) {
+    const parsed=parseW2SourceAcceptanceFields(comment);
+    if (!parsed) return null;
+    const {id,fields}=parsed;
+    const isSha=value => /^[a-f0-9]{40}$/i.test(value || '');
+    const isHash=value => /^[a-f0-9]{64}$/i.test(value || '');
+    const positiveInteger=value => /^\d{1,9}$/.test(value || '') &&
+      Number.isSafeInteger(Number(value)) && Number(value) > 0;
+    const exactChecks=String(fields.exact_head_checks || '').split(';').map(item => item.trim());
+    const testMatch=String(fields.source_test || '').match(
+      /^node --test ([A-Za-z0-9._/-]+):(\d+)_pass;(\d+)_fail$/);
+    const resultPr=positiveInteger(fields.result_pr) ? Number(fields.result_pr) : null;
+    const resultHead=isSha(fields.result_head) ? fields.result_head.toLowerCase() : null;
+    const mergeCommit=isSha(fields.result_merge_commit) ? fields.result_merge_commit.toLowerCase() : null;
+    const mainReadback=isSha(fields.main_readback) ? fields.main_readback.toLowerCase() : null;
+    const pullHead=safeSha(resultPull?.head?.sha)?.toLowerCase() || null;
+    const pullMerge=safeSha(resultPull?.merge_commit_sha)?.toLowerCase() || null;
+    const pullMerged=resultPull?.merged === true || Boolean(resultPull?.merged_at || resultPull?.mergedAt);
+    const verifiedChecks=w2TrustedResultChecks(resultChecks,resultHead);
+    if (!goalReferenceVerified ||
+        fields.record_type !== 'CODEX_SOURCE_ACCEPTANCE_WITH_WORKER_BLOCKED_TERMINAL' ||
+        fields.repo !== REPO || fields.project_id !== PROJECT ||
+        fields.human_goal_comment_id !== String(job?.goal_comment_id || '') ||
+        fields.request_id !== job?.request_id ||
+        fields.worker_attempt_id !== receipt?.attempt_id ||
+        fields.worker_terminal_comment_id !== String(receiptCommentId || '') ||
+        fields.worker_state !== receipt?.state || fields.worker_outcome !== receipt?.outcome ||
+        fields.gemini_session_id !== receipt?.session_id ||
+        fields.model !== job?.model || fields.source_pr !== String(job?.source_pr || '') ||
+        String(fields.source_head || '').toLowerCase() !== String(job?.source_sha || '').toLowerCase() ||
+        !isHash(fields.diff_sha256) || String(fields.diff_sha256).toLowerCase() !==
+          String(receipt?.diff_sha256 || '').toLowerCase() ||
+        !positiveInteger(fields.diff_bytes) || Number(fields.diff_bytes) !== Number(receipt?.diff_bytes) ||
+        !Array.isArray(job?.edit_paths) || !job.edit_paths.includes(fields.changed_path) ||
+        fields.git_diff_check !== 'PASS' || !testMatch || testMatch[1] !== fields.changed_path ||
+        Number(testMatch[3]) !== 0 || !resultPr || !resultHead || !mergeCommit ||
+        !mainReadback || mergeCommit !== mainReadback ||
+        !candidatePullIdentityMatches(resultPull,{number:resultPr}) ||
+        String(resultPull?.state || '').toLowerCase() !== 'closed' || !pullMerged ||
+        pullHead !== resultHead || pullMerge !== mergeCommit ||
+        !verifiedChecks ||
+        !exactChecks.includes('check-native-only:SUCCESS') ||
+        !exactChecks.includes('csg-trusted-verifier-hosted:SUCCESS') ||
+        fields.source_acceptance !== 'CODEX_ACCEPTED_AFTER_TEST_AND_EXACT_HEAD_HOSTED_VERIFIER' ||
+        fields.worker_task_acceptance !== 'UNKNOWN' || fields.external_effects !== 'UNKNOWN') return null;
+    return {
+      schema:1, project_id:PROJECT,
+      record_type:'ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT',
+      request_id:job.request_id, attempt_id:receipt.attempt_id,
+      source_pr:job.source_pr, source_sha:job.source_sha,
+      codex_source_acceptance:'ACCEPTED', exact_head_ci:'SUCCESS',
+      external_effects:'UNKNOWN', sourceAcceptance:{
+        comment_id:id, worker_terminal_comment_id:Number(receiptCommentId),
+        diff_sha256:String(fields.diff_sha256).toLowerCase(),
+        result_pr:resultPr, result_head:resultHead, merge_commit:mergeCommit,
+        main_readback:mainReadback, exact_head_checks:exactChecks.join('; '),
+        result_checks:verifiedChecks,
+        legacy_check:fields.legacy_check || 'UNKNOWN', source_test:fields.source_test,
+        changed_path:fields.changed_path,
+      },
+    };
   }
   function validDirectCliDelivery(value, directCli = null) {
     if (!object(value) || value.schema !== 1 || value.project_id !== PROJECT ||
@@ -1339,6 +1481,8 @@
       pr:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       main:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, generation:0 },
       checks:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
+      w2ResultPr:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
+      w2ResultChecks:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       dispatches:Object.create(null), dispatchPulls:Object.create(null), dispatchChecks:Object.create(null),
     };
     const failures=new Map();
@@ -1410,6 +1554,21 @@
         clearResource(resource,url);
         clearResource(resources.checks);
       }
+      return url || null;
+    }
+    function bindW2ResultPull(prNumber) {
+      const url=Number.isSafeInteger(prNumber) && prNumber > 0
+        ? API + '/pulls/' + prNumber : '';
+      const resource=resources.w2ResultPr;
+      if (resource.url !== url) clearResource(resource,url);
+      return url || null;
+    }
+    function bindW2ResultChecks(head) {
+      const expectedSha=safeSha(head);
+      const url=expectedSha
+        ? API + '/commits/' + expectedSha + '/check-runs?per_page=100' : '';
+      const resource=resources.w2ResultChecks;
+      if (resource.url !== url) clearResource(resource,url);
       return url || null;
     }
     function bindGoalAuthority(commentId) {
@@ -1489,7 +1648,8 @@
     }
     return { resources, loadResource, bindPullRequest, bindGoalAuthority, bindGoalLatest,
       bindIssueLatest, bindChecksHead, checksSummaryForHead,
-      bindDispatchComment, bindDispatchPull, bindDispatchChecks, dispatchChecksSummaryForHead, now };
+      bindDispatchComment, bindDispatchPull, bindDispatchChecks, dispatchChecksSummaryForHead,
+      bindW2ResultPull, bindW2ResultChecks, now };
   }
   function adaptivePollInterval(key, apiClient) {
     const state=apiClient.getRateState?.() || {};
@@ -1721,6 +1881,37 @@
           adaptivePollInterval('checks',apiClient),force);
       }
     }
+    const goalResource=resourceStore.resources.goal;
+    const issueResource=resourceStore.resources.issue;
+    const goalComments=Array.isArray(goalResource?.latestComments)
+      ? goalResource.latestComments : Array.isArray(goalResource?.data) ? goalResource.data : [];
+    const issueComments=Array.isArray(issueResource?.latestComments)
+      ? issueResource.latestComments : Array.isArray(issueResource?.data) ? issueResource.data : [];
+    const w2Job=goalResource?.latestComplete
+      ? latestSchema6Job(goalComments,'antigravity_edit')?.job || null : null;
+    const w2Evidence=goalResource?.latestComplete && issueResource?.latestComplete
+      ? w2EvidenceData(goalComments,issueComments,safeSha(resourceStore.resources.main.data?.sha),
+        goalResource.identity || null,true,true)
+      : null;
+    const resultPr=w2Evidence?.native?.goalReferenceVerified && w2Evidence?.native?.receipt
+      ? w2SourceAcceptanceResultPr(issueComments,w2Job,w2Evidence.native.receipt,
+        w2Evidence.native.receiptCommentId)
+      : null;
+    const resultPrUrl=resourceStore.bindW2ResultPull(resultPr);
+    if (!recoveryProbeCompleted && !apiClient.isPaused?.() && resultPrUrl)
+      await resourceStore.loadResource('w2ResultPr',resultPrUrl,adaptivePollInterval('pr',apiClient),force);
+    const resultPrResource=resourceStore.resources.w2ResultPr;
+    const resultPull=resultPrResource.url === resultPrUrl &&
+      resourceFreshness(resultPrResource,resourceStore.now(),PR_POLL_MS) === 'FRESH' &&
+      !resultPrResource.error ? resultPrResource.data : null;
+    const resultPullMerged=resultPull?.merged === true || Boolean(resultPull?.merged_at || resultPull?.mergedAt);
+    const resultHead=resultPr && candidatePullIdentityMatches(resultPull,{number:resultPr}) &&
+      String(resultPull?.state || '').toLowerCase() === 'closed' && resultPullMerged
+      ? safeSha(resultPull.head?.sha) : null;
+    const resultChecksUrl=resourceStore.bindW2ResultChecks(resultHead);
+    if (!recoveryProbeCompleted && !apiClient.isPaused?.() && resultChecksUrl)
+      await resourceStore.loadResource('w2ResultChecks',resultChecksUrl,
+        adaptivePollInterval('checks',apiClient),force);
     return { head, prPin, pullIdentityMatches, pullLifecycle, recoveryProbeCompleted,
       rateState:apiClient.getRateState?.() || null };
   }
@@ -2606,7 +2797,8 @@
     };
   }
   function w2EvidenceData(goalComments, issueComments, mainSha, goalIdentity = null,
-      goalSourceComplete = true, issueSourceComplete = true, expectedAttemptBinding = null) {
+      goalSourceComplete = true, issueSourceComplete = true, expectedAttemptBinding = null,
+      resultPull = null, resultChecks = null) {
     const latest = goalSourceComplete ? latestSchema6Job(goalComments,'antigravity_edit') : null;
     const currentJob = latest?.job || null;
     const goalReferenceVerified = Boolean(currentJob && goalIdentity &&
@@ -2672,6 +2864,9 @@
       const candidateAcceptances = [];
       for (const c of (issueComments || [])) {
         if (!c?.body) continue;
+        const sourceAcceptance=parseW2SourceAcceptance(c,currentJob,matchedReceipt,
+          matchedReceiptCommentId,resultPull,resultChecks,goalReferenceVerified);
+        if (sourceAcceptance) candidateAcceptances.push({ id:Number(c.id), acc:sourceAcceptance });
         const acc = parseMarkedAfterHeading(c.body, ACCEPTANCE_MARKER);
         if (validW2Acceptance(acc) &&
             (DISPATCHERS.has(c.user?.login || '') || RECEIPT_AUTHORS.has(c.user?.login || '')) &&
@@ -2821,7 +3016,14 @@
       const workerAcc = receipt ? `Worker task_acceptance=${receipt.task_acceptance || 'UNKNOWN'} · external_effects=${receipt.external_effects || 'UNKNOWN'}` : 'Worker 收據未讀回';
       const tests = codex ? w2AcceptanceTestSummary(codex.tests) : null;
       const testSummary = tests ? ` · 測試 ${tests.passed}/${tests.total} · 失敗 ${tests.failed} · 略過 ${tests.skipped}` : '';
-      const codexAcc = codex ? `Codex source_acceptance=${codex.codex_source_acceptance} · CI=${codex.exact_head_ci}${testSummary} · external_effects=${codex.external_effects || 'UNKNOWN'}` : 'Codex 驗收紀錄未讀回';
+      const source = codex?.sourceAcceptance;
+      const sourceSummary = source
+        ? ` · Diff SHA-256=${source.diff_sha256} · 結果 PR #${source.result_pr} MERGED · ` +
+          `head ${source.result_head} · merge ${source.merge_commit} · main readback ${source.main_readback} · ` +
+          `收據 checks ${source.exact_head_checks} · GitHub 精確 HEAD checks ${source.result_checks} · legacy ${source.legacy_check} · ` +
+          `測試 ${source.source_test}`
+        : '';
+      const codexAcc = codex ? `Codex source_acceptance=${codex.codex_source_acceptance} · CI=${codex.exact_head_ci}${sourceSummary}${testSummary} · external_effects=${codex.external_effects || 'UNKNOWN'}` : 'Codex 驗收紀錄未讀回';
       text('w2-native-acceptance', `${workerAcc}；${codexAcc}`);
     } else if (native.receiptResolution === 'MULTIPLE_ATTEMPTS_UNBOUND') {
       text('w2-native-acceptance', '多個 attempt 未唯一綁定；Worker 終態與 Codex source acceptance 保留 UNKNOWN');
@@ -2933,6 +3135,8 @@
           sourceStatusLabel(resources.goalLatest?.data ? resources.goalLatest : resources.goal,
             now,resources.goalLatest?.data ? GOAL_LATEST_POLL_MS : GOAL_INDEX_POLL_MS))] : []),
       '任務來源 PR ' + sourceStatusLabel(resources.pr,now,PR_POLL_MS),
+      ...(resources.w2ResultPr?.url ? ['W2 結果 PR ' + sourceStatusLabel(resources.w2ResultPr,now,PR_POLL_MS)] : []),
+      ...(resources.w2ResultChecks?.url ? ['W2 結果 PR checks ' + sourceStatusLabel(resources.w2ResultChecks,now,CHECKS_POLL_MS)] : []),
       'checks ' + sourceStatusLabel(resources.checks,now,CHECKS_POLL_MS),
       'main ' + sourceStatusLabel(resources.main,now,MAIN_POLL_MS),
     ].join('；');
@@ -3064,11 +3268,23 @@
         records[id], snapshot, id === 'W1' ? githubTask : null,
         id === 'W1' ? dispatchData.W1.codexSourceAcceptance : null);
     for (const id of ['W1','W2','W3']) renderWorker(id, cardData[id],dispatchData[id]);
+    const w2ResultPrResource=resources.w2ResultPr;
+    const w2ResultPull=w2ResultPrResource?.url &&
+      resourceFreshness(w2ResultPrResource,now,PR_POLL_MS) === 'FRESH' &&
+      !w2ResultPrResource.error
+      ? w2ResultPrResource.data : null;
+    const w2ResultHead=safeSha(w2ResultPull?.head?.sha);
+    const w2ResultChecksResource=resources.w2ResultChecks;
+    const w2ResultChecks=w2ResultHead && w2ResultChecksResource?.url ===
+      API + '/commits/' + w2ResultHead + '/check-runs?per_page=100' &&
+      resourceFreshness(w2ResultChecksResource,now,CHECKS_POLL_MS) === 'FRESH' &&
+      !w2ResultChecksResource.error
+      ? w2ResultChecksResource.data : null;
     const w2Evidence = w2EvidenceData(goalComments, comments, safeSha(main?.sha),
       resources.goal?.identity || null,resources.goal?.latestComplete === true,
       resources.issue?.latestComplete === true,
       dispatchData.W2?.requestId ? {requestId:dispatchData.W2.requestId,
-        attemptId:dispatchData.W2.expectedAttemptId} : null);
+        attemptId:dispatchData.W2.expectedAttemptId} : null,w2ResultPull,w2ResultChecks);
     renderW2Evidence(w2Evidence);
     const workerSourcesComplete=issueReadFreshness === 'FRESH' &&
       resources.issue?.latestComplete === true && resources.goal?.latestComplete === true;
