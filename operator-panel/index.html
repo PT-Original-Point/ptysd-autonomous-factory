@@ -728,6 +728,7 @@
       const parsed=parseW2SourceAcceptanceFields(comment);
       if (!parsed) continue;
       const {id,fields}=parsed;
+      if (!Number.isSafeInteger(id) || id <= receiptCommentId) continue;
       const resultPr=/^\d{1,9}$/.test(fields.result_pr || '') ? Number(fields.result_pr) : null;
       const trustedChecksDeclared=w2SourceAcceptanceDeclaresTrustedChecks(fields);
       const resultHead=fields.result_head || '';
@@ -800,6 +801,8 @@
     const parsed=parseW2SourceAcceptanceFields(comment);
     if (!parsed) return null;
     const {id,fields}=parsed;
+    if (!job || !receipt || !Number.isSafeInteger(receiptCommentId) ||
+        !Number.isSafeInteger(id) || id <= receiptCommentId) return null;
     const isSha=value => /^[a-f0-9]{40}$/i.test(value || '');
     const isHash=value => /^[a-f0-9]{64}$/i.test(value || '');
     const positiveInteger=value => /^\d{1,9}$/.test(value || '') &&
@@ -1081,14 +1084,18 @@
       task_state:task.state, attempt_id:task.attempt_id,
       source_pr:task.source_pr } : null;
   }
+  function schema6GoalReferenceVerified(job, goalIdentity, sourceComplete) {
+    return Boolean(sourceComplete && job && goalIdentity &&
+      goalIdentity.id === job.goal_comment_id &&
+      DISPATCHERS.has(goalIdentity.author || '') &&
+      goalIdentity.body_sha256 === job.goal_body_sha256);
+  }
   function schema6TaskSource(comments, id, goalIdentity, sourceComplete) {
     if (!sourceComplete || !goalIdentity || !['W1','W2'].includes(id)) return null;
     const kind=id === 'W1' ? 'opencode_edit' : 'antigravity_edit';
     const latest=latestSchema6Job(comments,kind);
     const job=latest?.job;
-    if (!job || goalIdentity.id !== job.goal_comment_id ||
-        !DISPATCHERS.has(goalIdentity.author || '') ||
-        goalIdentity.body_sha256 !== job.goal_body_sha256) return null;
+    if (!schema6GoalReferenceVerified(job,goalIdentity,sourceComplete)) return null;
     return {task_id:job.request_id,request_id:job.request_id,task_kind:job.kind,kind:job.kind,
       task_source_sha:job.source_sha,source_sha:job.source_sha,source_pr:job.source_pr,
       task_comment_id:latest.id,job_comment_id:latest.id,task_state:'ISSUE_310_SCHEMA6',
@@ -2310,7 +2317,7 @@
       if (!Number.isSafeInteger(resultPrNo) || resultPrNo < 1) continue;
       const resultPrKey=String(resultPrNo);
       const mainAtAcceptance=safeSha(fields.current_main);
-      if (fields.repo !== REPO || fields.human_goal_comment_id !== '6188322050' ||
+      if (fields.repo !== REPO || fields.human_goal_comment_id !== String(job.goal_comment_id) ||
           fields.request_id !== job.request_id || fields.task_comment_id !== String(jobCommentId) ||
           fields.attempt_id !== receipt.attempt_id || fields.model !== receipt.model ||
           fields.session_id !== receipt.session_id ||
@@ -2473,7 +2480,8 @@
       hasBoundReceipt:false,
       summaryTask:'沒有有效正式任務',summaryProgress:'目前沒有可核對任務執行證據。',
       summaryBlocker:'未派工；目前工作狀態 UNKNOWN。',shortStatus:'未派工',hasTask:false,
-      receiptProvenance:'UNKNOWN：尚無同一任務已配對收據',codexSourceAcceptance:null,w3Stages,record};
+      receiptProvenance:'UNKNOWN：尚無同一任務已配對收據',codexSourceAcceptance:null,
+      goalReferenceVerified:null,w3Stages,record};
     if (!taskId) {
       return { ...base, label:'UNKNOWN／沒有可核對的正式派工', task:'沒有同來源 request_id；未證實曾派工。',
         progress:id === 'W3' ? '沒有 Zero Risk request_id／Human 轉送／工具回傳證據。'
@@ -2540,8 +2548,12 @@
       base.receiptAttemptId=base.hasBoundReceipt ? receipt.attempt_id : null;
       base.receiptState=base.hasBoundReceipt ? receipt.state : null;
       const reconciliation=reconciliationForTask(comments,id,job,latest,now);
+      base.goalReferenceVerified=id === 'W1'
+        ? schema6GoalReferenceVerified(job,goalIdentity,goalSourceComplete) : null;
       base.codexSourceAcceptance=id === 'W1'
-        ? w1SourceAcceptanceData(comments,job,latest,reconciliation,commentId) : null;
+        ? base.goalReferenceVerified
+          ? w1SourceAcceptanceData(comments,job,latest,reconciliation,commentId) : null
+        : null;
       base.receiptProvenance=receiptProvenance(latest);
       base.status=fallbackState;
       base.hasTask=true;
@@ -2698,7 +2710,9 @@
     text(prefix + 'delivery',data?.delivery);
     text(prefix + 'worker-terminal',data?.workerTerminal || 'UNKNOWN');
     text(prefix + 'codex-source-acceptance',data?.codexSourceAcceptance?.label ||
-      'UNKNOWN：沒有與目前 W1 request／attempt／來源 SHA 配對的 Codex source acceptance');
+      (id === 'W1' && data?.goalReferenceVerified === false
+        ? 'UNKNOWN：Human GOAL 完整讀回或身分未驗證；不顯示 Codex source acceptance'
+        : 'UNKNOWN：沒有與目前 W1 request／attempt／來源 SHA 配對的 Codex source acceptance'));
     text(prefix + 'reconciliation',id === 'W1'
       ? '差異核對 ' + (data?.diffReconciliation || 'UNKNOWN') +
         (data?.reconciliation ? '；對帳留言 #' + data.reconciliation.id +
@@ -2985,7 +2999,7 @@
             receipt.source_sha === currentJob.source_sha &&
             receipt.kind === currentJob.kind && (receipt.source_pr === undefined || receipt.source_pr === currentJob.source_pr) &&
             /^[a-f0-9-]{36}$/i.test(receipt.attempt_id || '') &&
-            Number.isSafeInteger(Number(c.id)) && Number(c.id) > 0 &&
+            Number.isSafeInteger(Number(c.id)) && Number(c.id) > latest.id &&
             ['STARTED','WAITING','FINISHED','BLOCKED'].includes(receipt.state)) {
           candidateReceipts.push({ id: Number(c.id), receipt });
         }
@@ -3033,6 +3047,7 @@
         if (sourceAcceptance) candidateAcceptances.push({ id:Number(c.id), acc:sourceAcceptance });
         const acc = parseMarkedAfterHeading(c.body, ACCEPTANCE_MARKER);
         if (validW2Acceptance(acc) &&
+            Number.isSafeInteger(Number(c.id)) && Number(c.id) > matchedReceiptCommentId &&
             (DISPATCHERS.has(c.user?.login || '') || RECEIPT_AUTHORS.has(c.user?.login || '')) &&
             acc.request_id === currentJob.request_id &&
             acc.attempt_id === matchedReceipt.attempt_id &&

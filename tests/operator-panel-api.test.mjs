@@ -937,12 +937,15 @@ test('W1 source acceptance is shown separately without upgrading the original Wo
     'live_acceptance=NOT_CLAIMED',
   ].join('\n'),'2026-10-29T02:37:44Z');
   const comments=[terminal,reconciliation,acceptance,patchIdentity];
+  const goalIdentity={id:job.goal_comment_id,author:'t14210184',body_sha256:job.goal_body_sha256};
   const data=panel.dispatchCardData('W1',snapshot,comments,
     {dispatches:{W1:{data:jobComment}}},{status:'UNKNOWN'},Date.parse('2026-10-29T03:00:00Z'),
-    {lifecycle:'MERGED',status:'MERGED',checks_allowed:false});
+    {lifecycle:'MERGED',status:'MERGED',checks_allowed:false},[jobComment],goalIdentity,true);
 
   assert.ok(data.codexSourceAcceptance,'the current W1 request and attempt have matching Codex source-acceptance and byte-identity readbacks');
   assert.equal(data.codexSourceAcceptance.status,'ACCEPTED');
+  assert.equal(data.goalReferenceVerified,true,
+    'the observed W1 task is source-accepted only after the exact Human GOAL ID, author, and body hash are verified');
   assert.equal(data.codexSourceAcceptance.resultPr,590);
   assert.equal(data.codexSourceAcceptance.resultHead,resultHead);
   assert.equal(data.codexSourceAcceptance.mergeCommit,resultMerge);
@@ -963,7 +966,6 @@ test('W1 source acceptance is shown separately without upgrading the original Wo
   assert.match(panel.w1SourceHarvestLabel(data),/external_effects=UNKNOWN/);
   assert.equal(panel.validJob(job),true,
     'the shared schema-6 validator accepts the official OpenCode/W1 contract');
-  const goalIdentity={id:job.goal_comment_id,author:'t14210184',body_sha256:job.goal_body_sha256};
   const githubTask=panel.schema6TaskSource([jobComment],'W1',goalIdentity,true);
   assert.equal(githubTask.task_comment_id,jobCommentId,
     'a complete, identity-matched Issue #310 readback can supply the formal W1 task when the OS snapshot omits it');
@@ -998,7 +1000,7 @@ test('W1 source acceptance is shown separately without upgrading the original Wo
     .replaceAll('result_pr=590','result_pr=612')}));
   const futurePrData=panel.dispatchCardData('W1',snapshot,futurePrComments,
     {dispatches:{W1:{data:jobComment}}},{status:'UNKNOWN'},Date.parse('2026-10-29T03:00:00Z'),
-    {lifecycle:'MERGED',status:'MERGED',checks_allowed:false});
+    {lifecycle:'MERGED',status:'MERGED',checks_allowed:false},[jobComment],goalIdentity,true);
   assert.equal(futurePrData.codexSourceAcceptance.status,'ACCEPTED',
     'the legacy readback format binds dynamically to another result PR number');
   assert.equal(futurePrData.codexSourceAcceptance.resultPr,612);
@@ -1019,7 +1021,7 @@ test('W1 source acceptance is shown separately without upgrading the original Wo
   for (const invalidComments of rejectedCases) {
     const rejected=panel.dispatchCardData('W1',snapshot,invalidComments,
       {dispatches:{W1:{data:jobComment}}},{status:'UNKNOWN'},Date.parse('2026-10-29T03:00:00Z'),
-      {lifecycle:'MERGED',status:'MERGED',checks_allowed:false});
+      {lifecycle:'MERGED',status:'MERGED',checks_allowed:false},[jobComment],goalIdentity,true);
     assert.equal(rejected.codexSourceAcceptance,null,
       'mismatched or incomplete source evidence is not shown as accepted');
     assert.equal(rejected.workerTerminal,'FINISHED_NOT_ACCEPTANCE');
@@ -1087,8 +1089,9 @@ test('W1 current additive reconciliation renders the exact merged result without
   const comments=[terminal,reconciliation];
   const resources={dispatches:{W1:{data:jobComment}}};
   const now=Date.parse('2026-10-30T00:00:00Z');
+  const goalIdentity={id:job.goal_comment_id,author:'t14210184',body_sha256:job.goal_body_sha256};
   const data=panel.dispatchCardData('W1',snapshot,comments,resources,{status:'UNKNOWN'},now,
-    {lifecycle:'MERGED',status:'MERGED'},[],null,false);
+    {lifecycle:'MERGED',status:'MERGED'},[jobComment],goalIdentity,true);
 
   assert.ok(data.codexSourceAcceptance,
     'the current exact #407 reconciliation is recognized as Codex source acceptance');
@@ -1123,7 +1126,7 @@ test('W1 current additive reconciliation renders the exact merged result without
   for (const body of rejectedBodies) {
     const rejected=panel.dispatchCardData('W1',snapshot,comments.map(comment =>
       comment.id === reconciliationId ? {...comment,body} : comment),resources,
-      {status:'UNKNOWN'},now,{lifecycle:'MERGED',status:'MERGED'},[],null,false);
+      {status:'UNKNOWN'},now,{lifecycle:'MERGED',status:'MERGED'},[jobComment],goalIdentity,true);
     assert.equal(rejected.codexSourceAcceptance,null,
       'a failed trusted check, failed test, mismatched request, upgraded Worker claim, or invalid main blob is rejected');
     assert.equal(rejected.workerTerminal,'FINISHED_NOT_ACCEPTANCE');
@@ -1134,7 +1137,7 @@ test('W1 current additive reconciliation renders the exact merged result without
   const mismatchedGoalResources={dispatches:{W1:{data:{...jobComment,
     body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(mismatchedGoalJob)}}}};
   const mismatchedGoal=panel.dispatchCardData('W1',snapshot,comments,mismatchedGoalResources,
-    {status:'UNKNOWN'},now,{lifecycle:'MERGED',status:'MERGED'},[],null,false);
+    {status:'UNKNOWN'},now,{lifecycle:'MERGED',status:'MERGED'},[jobComment],goalIdentity,true);
   assert.equal(mismatchedGoal.codexSourceAcceptance,null,
     'the reconciliation GOAL identity must match the dispatched task identity');
   assert.equal(mismatchedGoal.formalAcceptance,'UNKNOWN');
@@ -1228,9 +1231,15 @@ test('W1 additive source acceptance rejects independent identity, source, diff, 
       resources:{dispatches:{W1:{data:jobComment}}},body,checks};
   };
 
-  const cardFor=(fixture,comments=fixture.comments,resources=fixture.resources) =>
+  const goalIdentityFor=resources => {
+    const source=resources.dispatches.W1.data;
+    const job=JSON.parse(source.body.slice('PTYSD_NATIVE_JOB_V1\n'.length));
+    return {id:job.goal_comment_id,author:'t14210184',body_sha256:job.goal_body_sha256};
+  };
+  const cardFor=(fixture,comments=fixture.comments,resources=fixture.resources,
+    goalIdentity=goalIdentityFor(resources),goalSourceComplete=true) =>
     panel.dispatchCardData('W1',fixture.snapshot,comments,resources,{status:'UNKNOWN'},now,
-      {lifecycle:'MERGED',status:'MERGED'},[],null,false);
+      {lifecycle:'MERGED',status:'MERGED'},[],goalIdentity,goalSourceComplete);
   const replaceLine=(body,key,value) => body.split('\n').map(line =>
     line.startsWith(key + '=') ? key + '=' + value : line).join('\n');
   const removeLine=(body,key) => body.split('\n').filter(line =>
@@ -1259,6 +1268,22 @@ test('W1 additive source acceptance rejects independent identity, source, diff, 
   assert.equal(data.formalAcceptance,'UNKNOWN');
   assert.equal(data.externalEffects,'UNKNOWN');
   assert.equal(data.codexSourceAcceptance.liveAcceptance,'NOT_CLAIMED');
+  const validGoalIdentity=goalIdentityFor(fixture.resources);
+  for (const [label,identity,complete] of [
+    ['missing GOAL identity',null,true],
+    ['incomplete GOAL readback',validGoalIdentity,false],
+    ['mismatched GOAL id',{...validGoalIdentity,id:validGoalIdentity.id + 1},true],
+    ['untrusted GOAL author',{...validGoalIdentity,author:'untrusted-dispatcher'},true],
+    ['mismatched GOAL body hash',{...validGoalIdentity,body_sha256:'f'.repeat(64)},true],
+  ]) {
+    assert.equal(cardFor(fixture,fixture.comments,fixture.resources,identity,complete).codexSourceAcceptance,null,
+      `${label} must not authorize the observed W1 task's source acceptance`);
+  }
+  const unverifiedGoalCard=cardFor(fixture,fixture.comments,fixture.resources,null,true);
+  assert.equal(unverifiedGoalCard.goalReferenceVerified,false);
+  panel.renderDispatchCard('W1',unverifiedGoalCard);
+  assert.match(domElements.get('w1-dispatch-codex-source-acceptance').textContent,
+    /Human GOAL.*未驗證.*不顯示/);
   panel.renderDispatchCard('W1',data);
   assert.match(domElements.get('w1-dispatch-codex-source-acceptance').textContent,
     new RegExp(`PR #${resultPr} SOURCE_ACCEPTED`));
@@ -1350,6 +1375,83 @@ test('W1 additive source acceptance rejects independent identity, source, diff, 
     assert.equal(rejected.externalEffects,'UNKNOWN',
       `${label} must preserve external_effects=UNKNOWN`);
   }
+
+  const alternateGoalId=6188320999;
+  const dynamicGoalFixture=buildFixture(resultPr + 31,'native-bridge/v2-readiness.mjs',
+    'v2-native-windows=SUCCESS');
+  const dynamicJob=JSON.parse(dynamicGoalFixture.jobComment.body.slice('PTYSD_NATIVE_JOB_V1\n'.length));
+  dynamicJob.goal_comment_id=alternateGoalId;
+  const dynamicJobComment={...dynamicGoalFixture.jobComment,
+    body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(dynamicJob)};
+  const [dynamicTerminal,dynamicReconciliation]=dynamicGoalFixture.comments;
+  const reconciliationBody=replaceLine(
+    replaceLine(dynamicReconciliation.body,'human_goal_comment_id',String(alternateGoalId)),
+    'source_acceptance','NOT_ACCEPTED_BY_THE_RECONCILIATION_RECORD');
+  const dynamicResultPr=resultPr + 31;
+  const sourcePrMerge='8'.repeat(40);
+  const sourceAcceptance={id:reconciliationId + 1,user:{login:'t14210184'},body:[
+    'PTYSD_V53R4_R6_W1_SOURCE_ACCEPTANCE_AFTER_MERGE_V1',
+    'record_type=ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_ORIGINAL_WORKER_OR_LIVE_ACCEPTANCE',
+    `repo=${repository}`,
+    `human_goal_comment_id=${alternateGoalId}`,
+    `request_id=${requestId}`,
+    `task_comment_id=${jobCommentId}`,
+    `attempt_id=${attemptId}`,
+    `model=${model}`,
+    `session_id=${sessionId}`,
+    `worker_diff_sha256=${workerDiff}`,
+    `source_spec_pr=${sourcePr}; head=${sourceSha}; merge_commit=${sourcePrMerge}`,
+    `result_pr=${dynamicResultPr}; head=${resultHead}; merge_commit=${resultMerge}`,
+    `current_main=${resultMerge}`,
+    'current_main_contains_both_merges=TRUE',
+    `current_main_blobs_match_pr${dynamicResultPr}_merge=TRUE`,
+    `source_acceptance=PASS_FOR_PR${dynamicResultPr}_REVIEWED_SOURCE_AND_MERGED_INTEGRATION`,
+    'focused_test=5_passed;0_failed;0_skipped',
+    'git_diff_check=PASS',
+    'semantic_review=PASS_DYNAMIC_GOAL_ID',
+    'live_acceptance=NOT_CLAIMED',
+    'worker_model_external_effects=UNKNOWN_AS_ORIGINAL_TERMINAL_RECORDED',
+  ].join('\n')};
+  const patchIdentity={id:reconciliationId + 2,user:{login:'t14210184'},body:[
+    'PTYSD_V53R4_R6_W1_SOURCE_PATCH_BYTE_IDENTITY_RECONCILIATION_V1',
+    'record_type=ADDITIVE_CODEX_SOURCE_RECONCILIATION_NOT_ORIGINAL_WORKER_TERMINAL_OR_LIVE_ACCEPTANCE',
+    `request_id=${requestId}`,
+    `task_comment_id=${jobCommentId}`,
+    `attempt_id=${attemptId}`,
+    `worker_diff_sha256=${workerDiff}`,
+    `worker_diff_bytes=${diffBytes}`,
+    `worker_diff_byte_identity=CONFIRMED_AGAINST_PR${dynamicResultPr}_GIT_DIFF`,
+    `pr${dynamicResultPr}_git_diff_sha256=${workerDiff}`,
+    `pr${dynamicResultPr}_git_diff_bytes=${diffBytes}`,
+    'byte_identical=true',
+    `source_pr=${sourcePr}; source_head=${sourceSha}; merge_commit=${sourcePrMerge}`,
+    `result_pr=${dynamicResultPr}; result_head=${resultHead}`,
+    `merge_commit=${resultMerge}`,
+    'current_main_contains_merge=true',
+    'current_blobs_match_merge=true',
+    'check-native-only=SUCCESS',
+    'csg-trusted-verifier-hosted=SUCCESS',
+    'v2-native-windows=SUCCESS',
+    'csg-trusted-verifier=CANCELLED_NOT_COUNTED_AS_PASS',
+    'bounded-driver-acceptance=SKIPPED',
+    'original_worker_terminal=FINISHED_NOT_ACCEPTANCE;unchanged',
+    'original_worker_task_acceptance=UNKNOWN;external_effects=UNKNOWN',
+    'live_acceptance=NOT_CLAIMED',
+    `source_acceptance=SUPPORTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR${dynamicResultPr}_SOURCE`,
+  ].join('\n')};
+  const dynamicComments=[dynamicTerminal,{...dynamicReconciliation,body:reconciliationBody},
+    sourceAcceptance,patchIdentity];
+  const dynamicResources={dispatches:{W1:{data:dynamicJobComment}}};
+  const dynamicCard=cardFor(dynamicGoalFixture,dynamicComments,dynamicResources);
+  assert.equal(dynamicCard.codexSourceAcceptance?.resultPr,dynamicResultPr,
+    'the readback acceptance follows the Human GOAL identity pinned by the schema-6 job');
+  assert.equal(dynamicCard.codexSourceAcceptance?.acceptanceCommentId,sourceAcceptance.id);
+  const wrongGoalComment={...sourceAcceptance,body:replaceLine(sourceAcceptance.body,
+    'human_goal_comment_id',String(alternateGoalId + 1))};
+  const wrongDynamicGoalCard=cardFor(dynamicGoalFixture,
+    [...dynamicComments.slice(0,-2),wrongGoalComment,patchIdentity],dynamicResources);
+  assert.equal(wrongDynamicGoalCard.codexSourceAcceptance,null,
+    'a valid-looking readback for a different Human GOAL is rejected');
 });
 
 test('dispatch layout uses two readable desktop columns, collapsible technical detail, and a compact W3 empty state', () => {
@@ -2322,6 +2424,24 @@ test('W2 additive FINISHED acceptance supports the canonical fields and reads an
   assert.match(domElements.get('w2-native-acceptance').textContent,/Worker task_acceptance=UNKNOWN/);
   assert.match(domElements.get('w2-native-acceptance').textContent,/external_effects=UNKNOWN/);
 
+  const receiptBeforeTask=panel.w2EvidenceData(goalComments,issueComments.map(comment =>
+    comment.id===6505800965 ? {...comment,id:6505000000} : comment),head,goalIdentity,true,true,
+    {requestId,attemptId},resultPull,resultChecks);
+  assert.equal(receiptBeforeTask.native.receipt,null,
+    'a matching receipt posted before the formal request cannot become its Worker result');
+  assert.equal(receiptBeforeTask.native.lastTerminal?.receipt,null,
+    'a pre-request receipt is not a terminal result for the later request');
+  assert.equal(receiptBeforeTask.native.codexAcceptance,null,
+    'a pre-request receipt cannot support source acceptance');
+
+  const acceptanceBeforeReceipt=panel.w2EvidenceData(goalComments,issueComments.map(comment =>
+    comment.id===sourceComment.id ? {...comment,id:6505700000} : comment),head,goalIdentity,true,true,
+    {requestId,attemptId},resultPull,resultChecks);
+  assert.equal(acceptanceBeforeReceipt.native.receipt.state,'FINISHED',
+    'the correctly ordered Worker terminal remains visible');
+  assert.equal(acceptanceBeforeReceipt.native.codexAcceptance,null,
+    'a source-acceptance comment posted before the terminal receipt cannot be applied to it');
+
   const mergedAfterHead=panel.w2EvidenceData(goalComments,issueComments,'e'.repeat(40),goalIdentity,true,true,
     {requestId,attemptId},{...resultPull,state:'closed',merged:true,merged_at:'2026-10-30T03:30:00Z',
       merge_commit_sha:'d'.repeat(40)},resultChecks);
@@ -2398,6 +2518,23 @@ test('W2 additive FINISHED acceptance supports the canonical fields and reads an
   assert.ok(calls.includes(resultChecksUrl),
     'the panel reads trusted check-runs at an open result PR exact HEAD');
   assert.equal(store.resources.w2ResultChecks.url,resultChecksUrl);
+
+  const outOfOrderCalls=[];
+  const outOfOrderIssueComments=[...observationComments(baseTime,{latestTask:false}),
+    issueComments[0],{...cycleSourceComment,id:6505700000}];
+  const outOfOrderClient=panel.createApiClient(async url=>{
+    outOfOrderCalls.push(url);
+    if(url===urls.issue)return response(200,outOfOrderIssueComments,quotaHeaders(baseTime));
+    if(url===goalUrl)return response(200,cycleGoalComments,quotaHeaders(baseTime));
+    if(url===urls.main)return response(200,{sha:head},quotaHeaders(baseTime));
+    if(url===apiRoot+'/pulls/'+resultPrNumber)return response(200,resultPull,quotaHeaders(baseTime));
+    if(url===resultChecksUrl)return response(200,resultChecks,quotaHeaders(baseTime));
+    throw new Error('unexpected out-of-order API URL: '+url);
+  },{now:()=>baseTime});
+  const outOfOrderStore=panel.createResourceStore(outOfOrderClient,()=>baseTime);
+  await panel.runSyncCycle(outOfOrderStore,outOfOrderClient,{...urls,goal:goalUrl});
+  assert.equal(outOfOrderCalls.includes(apiRoot+'/pulls/'+resultPrNumber),false,
+    'a source-acceptance record before its terminal receipt cannot trigger result-PR lookup');
 });
 
 test('a direct Antigravity CLI session alone never appears as a schema-6 native W2 task', () => {
