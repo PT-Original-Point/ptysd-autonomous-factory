@@ -1,0 +1,139 @@
+{
+  "schema": "vnext5.r3.source-identity-pins.v1",
+  "recorded_at_utc": "2026-09-25T02:38:49Z",
+  "evidence_source": "read-only GitHub connector reads",
+  "repository": {
+    "full_name": "PT-Original-Point/ptysd-vnext42-governance-sandbox",
+    "repository_id": 1352411536,
+    "refs": {
+      "main": "1dcec5ea8124e4d1b69b53652c657df8b65eb3ef",
+      "v45/factory-control": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+      "v49/accepted-source": "7189c7ca43d52887d0ede16cd2cc70a35bb7e238",
+      "governance/project-directory": "f22a9eb9e75d6b2d89dc9b950109910af8d290bb"
+    }
+  },
+  "pr297": {
+    "url": "https://github.com/PT-Original-Point/ptysd-vnext42-governance-sandbox/pull/297",
+    "state": "OPEN_DRAFT_UNMERGED",
+    "base_ref": "v45/factory-control",
+    "base_commit": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+    "head_ref": "r3-op025-recovery-readback-027-20260924",
+    "head_commit": "137518035f9c3c7f89176b20b12b9db548d3f79c",
+    "head_tree": "04c1ce3210b7175be50b9775d968c1f254036f08",
+    "direct_parents": [
+      "209e0ad9040a08965a49109e18f783cfd9c7c7f4"
+    ],
+    "changed_paths": [
+      "governance/csg/checkpoints/000191.json",
+      "governance/csg/current.json",
+      "governance/csg/v49/gov-hardening-p5-op025-recovery-readback-027-plan-191-v1.json",
+      "governance/csg/v49/scripts/gov-hardening-p5-op025-receipt-readback-027.ps1",
+      "governance/csg/worklog/WORKLOG.md",
+      "governance/csg/worklog/current.json"
+    ],
+    "check_readback": {
+      "run_id": 35975597754,
+      "exact_head": "137518035f9c3c7f89176b20b12b9db548d3f79c",
+      "csg_trusted_verifier": "SUCCESS",
+      "csg_trusted_verifier_check_id": 107555213735,
+      "bounded_driver_acceptance": "SKIPPED",
+      "interpretation": "Structural verifier only; no independent provider semantic gate established."
+    },
+    "semantic_reviews": [
+      {
+        "review_id": "PRR_kwDOUJwpkM8AAAABPAWnFw",
+        "exact_head": "137518035f9c3c7f89176b20b12b9db548d3f79c",
+        "verdict_text": "PASS",
+        "state": "COMMENTED",
+        "author_login": "t14210184",
+        "author_account_id": 259907265,
+        "same_account_as_pr_author": true,
+        "independent_provider_review": false
+      },
+      {
+        "review_id": "PRR_kwDOUJwpkM8AAAABO_QgSQ",
+        "exact_head": "8803a87076b7ebb88531ff3600d723ed8e2fd4d8",
+        "verdict_text": "CHANGES_REQUIRED",
+        "state": "COMMENTED",
+        "author_login": "t14210184",
+        "applicable_to_current_head": false
+      }
+    ]
+  },
+  "immutable_source_files": [
+    {
+      "role": "base_checkpoint_190",
+      "revision": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+      "path": "governance/csg/checkpoints/000190.json",
+      "git_blob_oid": "8991abd3e19757698b393ccd4b09fcad5f230651",
+      "raw_sha256": "2591b20875405c4711397dff8b31d9d13ab77f10452c43d239ea567d40cdff8a",
+      "checkpoint_seq": 190,
+      "payload_digest": "sha256:7925c06ea87b9cd98cdd8b45fb8fe0766a99abd6cb520a76890749afce02dd2e"
+    },
+    {
+      "role": "candidate_checkpoint_191",
+      "revision": "137518035f9c3c7f89176b20b12b9db548d3f79c",
+      "path": "governance/csg/checkpoints/000191.json",
+      "git_blob_oid": "0180e5eb9c65342675f4e4dd743c5a1a04430da1",
+      "checkpoint_seq": 191,
+      "payload_digest": "sha256:167225ba4431852061992540c7a8ee06d501b10e30f3da87b6927cef575fc9f6"
+    },
+    {
+      "role": "candidate_current_pointer_191",
+      "revision": "137518035f9c3c7f89176b20b12b9db548d3f79c",
+      "path": "governance/csg/current.json",
+      "git_blob_oid": "a3f1fa8c631491de4d1e86e480990cc5e5e90f01",
+      "binds_previous_control_oid": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+      "checkpoint_digest": "sha256:167225ba4431852061992540c7a8ee06d501b10e30f3da87b6927cef575fc9f6"
+    },
+    {
+      "role": "candidate_recovery_plan_191",
+      "revision": "137518035f9c3c7f89176b20b12b9db548d3f79c",
+      "path": "governance/csg/v49/gov-hardening-p5-op025-recovery-readback-027-plan-191-v1.json",
+      "git_blob_oid": "e2332386f23d6708cd9cbebf5ed22b204c1b482e",
+      "declared_script_sha256": "sha256:92573521a5a4c7165884613397153b0116af0d0e6e982978a8434a9a057ef1d9"
+    },
+    {
+      "role": "operation_027_script",
+      "revision": "137518035f9c3c7f89176b20b12b9db548d3f79c",
+      "path": "governance/csg/v49/scripts/gov-hardening-p5-op025-receipt-readback-027.ps1",
+      "git_blob_oid": "6c20c1e9567271cddeb2effd3ed0e23502253442",
+      "script_sha256": "sha256:92573521a5a4c7165884613397153b0116af0d0e6e982978a8434a9a057ef1d9"
+    },
+    {
+      "role": "mission_anchor",
+      "revision": "c57dd50c9c27b217fbd6dd2e4b38c7f7a3ddcd18",
+      "path": "governance/v49/current-mission.json",
+      "git_blob_oid": "4dda1f19d80d6e634297b1d7097993762a4bd90e",
+      "declared_digest": "sha256:58f21a0818bd60b61929925b38ea8507d5b80c09d816a7b6f5a75d2a410d542b",
+      "declared_revision": "20260919T010100+0800",
+      "canonicalization": "HUMAN_TEXT_V1"
+    },
+    {
+      "role": "policy_anchor",
+      "revision": "c57dd50c9c27b217fbd6dd2e4b38c7f7a3ddcd18",
+      "path": "governance/v49/current-execution-policy.json",
+      "git_blob_oid": "f63b840a7e1d9e28654c531853047078dfe5fd32",
+      "declared_digest": "sha256:0dc535adfcf8c0bf1c12b1ff5e5191f5b74f267143403a41d77d626889eba861",
+      "declared_revision": "20260919T010100+0800-EP71",
+      "canonicalization": "HUMAN_TEXT_V1"
+    }
+  ],
+  "publication_plan": {
+    "base_ref": "main",
+    "base_commit": "1dcec5ea8124e4d1b69b53652c657df8b65eb3ef",
+    "base_tree": "b12e07578ea83ee1d69799345ca5cdefbaae6a1a",
+    "branch_name": "codex/r3-op027-jit-preparation-20260925",
+    "draft_pr": true,
+    "scope": "Additive documentation/evidence candidate only; no canonical or executable files."
+  },
+  "prior_pr300_publication": {
+    "pr_number": 300,
+    "previous_head": "516754b778470b37b6819244e661fbfb8a5ea17d",
+    "previous_tree": "8a48da950c2c2332790a171a1307460d78a49904",
+    "base": "1dcec5ea8124e4d1b69b53652c657df8b65eb3ef",
+    "previous_structural_run": 36086690520,
+    "previous_csg_trusted_verifier": "SUCCESS",
+    "classification": "superseded exact-head publication; no canonical state change"
+  }
+}
