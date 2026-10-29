@@ -16,6 +16,7 @@ import {
   assertExecutorTaskReady, buildExecutorTaskXml, claimPendingManifest,
   candidateBundlePath, candidateWorkspacePath, cleanupExecutorAttempt,
   createExecutorSourceBundle, dispatchToExecutor, executorResultPath, makeExecutorManifest,
+  readExecutorWorkspace,
   getCurrentWindowsSid, triggerPendingExecutorAttempt,
   executorTaskArguments, validateExecutorRoutingMap, validateExecutorTaskXml,
   validateWindowsTaskAction,
@@ -484,6 +485,82 @@ test('attempt source bundle pins one exact commit and is attached to the Task Sc
     assert.equal(editPending.job.kind,'opencode_edit');
     assert.deepEqual(editPending.job.edit_paths,['README.md']);
     assert.equal(editPending.source_bundle_sha256,editBundle.sha256);
+  } finally { f.dispose(); }
+});
+
+test('candidate source bundling fetches only the exact trusted PR ref when the pinned SHA is absent', () => {
+  const f = fixture();
+  try {
+    const upstream = sourceRepository(f.root, 'upstream');
+    const bare = join(f.root, 'upstream.git');
+    execFileSync('git', ['clone', '--bare', '--quiet', upstream.workspace, bare], {
+      windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    execFileSync('git', ['-C', bare, 'update-ref', 'refs/pull/619/head', upstream.sourceSha], {
+      windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const executorWorkspace = join(f.root, 'executor-workspace');
+    mkdirSync(executorWorkspace);
+    execFileSync('git', ['-C', executorWorkspace, 'init', '--quiet'], {
+      windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    execFileSync('git', ['-C', executorWorkspace, 'remote', 'add', 'origin',
+      'https://github.com/PT-Original-Point/ptysd-autonomous-factory.git'], {
+      windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const job = { ...modelJob('Bundle only the exact candidate source.'),
+      kind: 'opencode_edit', source_sha: upstream.sourceSha, source_pr: 619 };
+    const interceptedExec = (file, args, options) => {
+      const rewritten = [...args];
+      const fetchIndex = rewritten.indexOf('fetch');
+      if (fetchIndex >= 0) {
+        assert.equal(rewritten[fetchIndex + 3], 'origin');
+        assert.match(rewritten[fetchIndex + 4],
+          /^refs\/pull\/619\/head:refs\/pty-native\/fetched-candidates\/[a-f0-9-]{36}$/);
+        rewritten[fetchIndex + 3] = bare;
+      }
+      return execFileSync(file, rewritten, options);
+    };
+    const bundle = createExecutorSourceBundle({ workspace: executorWorkspace,
+      descriptor: f.descriptor, job, attemptId: ATTEMPT,
+      filesystemPath: localPathMap(f), execFile: interceptedExec });
+    assert.equal(bundle.source_sha, upstream.sourceSha);
+    assert.match(bundle.sha256, /^[a-f0-9]{64}$/);
+    const refs = execFileSync('git', ['-C', executorWorkspace, 'for-each-ref',
+      '--format=%(refname)', 'refs/pty-native/'], { encoding: 'utf8', windowsHide: true, shell: false });
+    assert.equal(refs.trim(), '', 'both the fetched PR ref and bundle ref are removed after packing');
+    assert.equal(existsSync(bundle.bundle_path), true);
+
+    const mismatchJob = { ...job, source_sha: 'e'.repeat(40) };
+    assert.throws(() => createExecutorSourceBundle({ workspace: executorWorkspace,
+      descriptor: f.descriptor, job: mismatchJob,
+      attemptId: '00000000-0000-4000-8000-000000000003',
+      filesystemPath: localPathMap(f), execFile: interceptedExec }),
+    /EXECUTOR_SOURCE_PULL_REF_SHA_MISMATCH/);
+  } finally { f.dispose(); }
+});
+
+test('executor source workspace is bound to its lane config identity and physical sibling', () => {
+  const f = fixture();
+  try {
+    const laneRoot = join(f.root, 'opencode');
+    const workspace = join(laneRoot, 'workspace');
+    const manifests = join(laneRoot, 'manifests');
+    const results = join(laneRoot, 'results');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(manifests); mkdirSync(results);
+    const descriptor = { ...f.descriptor, config_path: join(laneRoot, 'executor-config.json'),
+      manifest_dir: manifests, results_dir: results };
+    const identity = { repo: REPO, project_id: PROJECT, host: hostname().toUpperCase(), workspace };
+    writeFileSync(descriptor.config_path, JSON.stringify(identity));
+    assert.equal(readExecutorWorkspace(descriptor, { projectId: PROJECT, host: identity.host }),
+      workspace);
+    writeFileSync(descriptor.config_path, JSON.stringify({ ...identity, project_id: 'OTHER_PROJECT' }));
+    assert.throws(() => readExecutorWorkspace(descriptor, { projectId: PROJECT, host: identity.host }),
+      /EXECUTOR_CONFIG_IDENTITY_MISMATCH/);
+    writeFileSync(descriptor.config_path, JSON.stringify({ ...identity, workspace: f.root }));
+    assert.throws(() => readExecutorWorkspace(descriptor, { projectId: PROJECT, host: identity.host }),
+      /EXECUTOR_WORKSPACE_PATH_MISMATCH/);
   } finally { f.dispose(); }
 });
 
@@ -1310,6 +1387,7 @@ test('Worker integration publishes one STARTED receipt, dispatches the executor,
     };
     const adapters = {
       apiRead, commentsRead: () => comments, goalCommentsRead: () => [],
+      readExecutorWorkspace:()=>workspace,
       writeReceipt: (_config, value, login) => {
         const body = RECEIPT_MARKER + JSON.stringify(value);
         comments.push({ id: nextId++, body, user: { login } });

@@ -1275,6 +1275,55 @@ test('candidate observation distinguishes unknown PR readback from stale and cur
   }
 });
 
+test('operator observation reports a queued W1 preflight refusal without inventing an attempt or acceptance', async () => {
+  const host=hostname().toUpperCase(),publisher='publisher',now=new Date();
+  const job=withHumanGoal({schema:6,project_id:PROJECT,host,
+    request_id:'PTYSD_W1_SOURCE_BUNDLE_PREFLIGHT_20261029',kind:'opencode_edit',
+    source_sha:commit,spec_path:'native-bridge/tasks/w1-panel-additive-acceptance-negative-cases.md',
+    spec_sha256:hash,model:'opencode/deepseek-v4.1-flash-free',variant:'free',
+    edit_paths:['tests/operator-panel-api.test.mjs'],source_pr:619});
+  const taskComment={...com(702,encoded(job),'t14210184'),
+    issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+  const priorTime=now.getTime()-60_000;
+  const prior=seededOperatorObservation(OPERATOR_COMMENT_ID,17,'c'.repeat(40),priorTime);
+  const observationComment={id:OPERATOR_COMMENT_ID,user:{login:publisher},
+    body:encodeOperatorObservation(prior),updated_at:new Date(priorTime).toISOString()};
+  const comments=[observationComment,taskComment];
+  const workspace=mkdtempSync(join(homedir(),'.ptysd-w1-preflight-observation-'));
+  try {
+    const config={repo:REPO,project_id:PROJECT,host,issue:407,workspace,state_dir:workspace,
+      dispatchers:['t14210184'],enable_v2_model_runs:true,enable_antigravity_model_runs:false};
+    const dependencies={now:()=>now,
+      collectWindowsObservation:()=>({status:'FRESH',observed_at:now.toISOString(),
+        tasks_total:1,legacy_monitor_registered:false,listener_2667:false,opencode_process_count:0,
+        runner_service_count:0,runner_service_running:false,native_task:{registered:true,enabled:true,
+          state:'READY',last_run:null,last_result:'0x00000000',action_kind:'WINDOWLESS_LAUNCHER',
+          identity_class:'INTERACTIVE_LIMITED',multiple_instances:'IGNORENEW',trigger_interval_minutes:5}}),
+      readRunnerRegistration:()=>({total_count:0}),
+      readComment:id=>structuredClone(comments.find(comment=>comment.id===id)),
+      patchComment:(id,body)=>{
+        const comment=comments.find(value=>value.id===id);
+        comment.body=body;
+        comment.updated_at=new Date(now.getTime()+1000).toISOString();
+      },
+      readComments:()=>structuredClone(comments)};
+    const blockers=new Map([[job.request_id,'EXECUTOR_SOURCE_COMMIT_UNAVAILABLE']]);
+    const result=await publishOperatorObservation(config,publisher,comments,commit,dependencies,
+      new Map([[619,commit]]),comments.length,blockers);
+    assert.equal(result.status,'UPDATED',JSON.stringify(result));
+    const w1=result.observation.workers.find(record=>record.worker_id==='W1');
+    assert.equal(w1.status,'PENDING');
+    assert.equal(w1.task_state,'QUEUED_NOT_STARTED');
+    assert.equal(w1.request_id,undefined);
+    assert.equal(w1.task_id,job.request_id);
+    assert.equal(w1.attempt_id,undefined);
+    assert.equal(w1.model_eligibility,'WAITING');
+    assert.equal(w1.blocker_code,'EXECUTOR_SOURCE_COMMIT_UNAVAILABLE');
+    assert.equal(w1.delivery_status,undefined);
+    assert.equal(result.observation.native_worker.next_owner,'CODEX_REPAIR_NATIVE_PREFLIGHT');
+  } finally {rmSync(workspace,{recursive:true,force:true});}
+});
+
 test('operator observation publishes the single seeded comment with role-separated identity and conservative W1/W2/W3 records', async () => {
   const host = 'DESKTOP-1B6PD2P';
   const actor = 't14210184';
@@ -1450,6 +1499,7 @@ test('schema-6 OpenCode edit honors phase-specific OS identity and leaves indepe
     const writes=[],logs=[]; let bundles=0,dispatches=0,modelCalls=0,readinessCalls=0,nextId=20;
     const adapters={
       goalCommentsRead:()=>[humanGoalComment(),...taskComments],
+      readExecutorWorkspace:()=>workspace,
       apiRead(uri){
         if(uri==='user')return {login:'worker'};
         if(uri===`repos/${REPO}/issues/407`)return {title:ISSUE_TITLE,state:'open'};
@@ -1546,6 +1596,7 @@ test('Issue #310 structured candidate task dispatches through the existing Execu
     let bundleCalls=0,dispatchCalls=0,modelCalls=0,candidatePrReads=0,posted=[];
     const result=await executeWorker(config,{
       goalCommentsRead:()=>[humanGoalComment(),goalTaskComment,untrustedGoalTask,wrongIssueTask],
+      readExecutorWorkspace:()=>workspace,
       apiRead(uri){
         if(uri==='user')return {login:'worker'};
         if(uri===`repos/${REPO}/issues/407`)return {title:ISSUE_TITLE,state:'open'};
@@ -1663,6 +1714,7 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
     const posted=[],logs=[];
     const adapters={
       goalCommentsRead:()=>[humanGoalComment(),...comments],
+      readExecutorWorkspace:()=>workspace,
       apiRead(uri){
         if(uri==='user')return {login:'worker'};
         if(uri===`repos/${REPO}/issues/407`)return {title:ISSUE_TITLE,state:'open'};
@@ -1789,8 +1841,9 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
 test('a disabled W2 lane does not starve an independently eligible schema-6 W1 OpenCode edit', async () => {
   const root=mkdtempSync(join(homedir(),'.ptysd-w1-after-disabled-w2-test-'));
   try {
-    const workspace=join(root,'workspace'),stateDir=join(root,'state');
+    const workspace=join(root,'workspace'),opencodeWorkspace=join(root,'opencode-workspace'),stateDir=join(root,'state');
     mkdirSync(join(workspace,'src'),{recursive:true}); mkdirSync(stateDir);
+    mkdirSync(join(opencodeWorkspace,'src'),{recursive:true});
     const host=hostname().toUpperCase();
     const w2Spec='Synthetic W2 request that must remain queued without model execution.';
     const w1Spec='Edit only src/w1-after-disabled-w2.mjs for this synthetic task.';
@@ -1823,6 +1876,10 @@ test('a disabled W2 lane does not starve an independently eligible schema-6 W1 O
       head:{sha:commit,repo:{id:1352411536,full_name:REPO}}});
     const adapters={
       goalCommentsRead:()=>[humanGoalComment(),...comments],
+      readExecutorWorkspace:(descriptor)=>{
+        assert.equal(descriptor,w1Executor,'the W1 lane resolves its own registered workspace');
+        return opencodeWorkspace;
+      },
       apiRead(uri){
         if(uri==='user')return {login:'worker'};
         if(uri===`repos/${REPO}/issues/407`)return {title:ISSUE_TITLE,state:'open'};
@@ -1844,7 +1901,9 @@ test('a disabled W2 lane does not starve an independently eligible schema-6 W1 O
           'only the independently eligible W1 descriptor reaches Task Scheduler readiness');
         return {ready:true};
       },
-      createExecutorSourceBundle({descriptor,job,attemptId}){
+      createExecutorSourceBundle({workspace:sourceWorkspace,descriptor,job,attemptId}){
+        assert.equal(sourceWorkspace,opencodeWorkspace,
+          'source bundle creation must not touch the global W2 workspace');
         assert.equal(descriptor,w1Executor,'W1 source bundles must use the OpenCode descriptor');
         assert.equal(job.request_id,w1Job.request_id);
         assert.equal(job.source_sha,commit);
@@ -1941,6 +2000,7 @@ test('candidate PR head drift at final readback prevents STARTED and Executor di
     const logs=[];
     const result=await executeWorker(config,{
       goalCommentsRead:()=>[humanGoalComment()],
+      readExecutorWorkspace:()=>workspace,
       apiRead(uri){
         if(uri==='user')return {login:'worker'};
         if(uri===`repos/${REPO}/issues/407`)return {title:ISSUE_TITLE,state:'open'};
@@ -2000,6 +2060,7 @@ test('edited Human GOAL bytes at final readback prevent a candidate dispatch', a
       head:{sha:commit,repo:{id:1352411536,full_name:REPO}}};
     const result=await executeWorker(config,{
       goalCommentsRead:()=>[humanGoalComment()],
+      readExecutorWorkspace:()=>workspace,
       apiRead(uri){
         if(uri==='user')return {login:'worker'};
         if(uri===`repos/${REPO}/issues/407`)return {title:ISSUE_TITLE,state:'open'};
@@ -2065,6 +2126,7 @@ test('a newer trusted Human GOAL supersedes a queued candidate before dispatch',
         latestGoalReads++;
         return latestGoalReads===1?[oldGoal]:[oldGoal,newerGoal];
       },
+      readExecutorWorkspace:()=>workspace,
       apiRead(uri){
         if(uri==='user')return {login:'worker'};
         if(uri===`repos/${REPO}/issues/407`)return {title:ISSUE_TITLE,state:'open'};
@@ -3923,6 +3985,7 @@ test('publisher records executor WAITING, continues a ping, then re-dispatches t
     writeFileSync(resultPath, JSON.stringify({ request_id: requestId, attempt_id: attemptId,
       terminal: waiting, local_evidence: null }), { flag: 'wx' });
     const adapters = {
+      readExecutorWorkspace:()=>workspace,
       apiRead(uri) {
         if (uri === 'user') return { login: 'worker' };
         if (uri === `repos/${REPO}/issues/101`) return { title: ISSUE_TITLE, state: 'open' };
@@ -4700,6 +4763,7 @@ test('legacy read-only OpenCode plans stay historical-only while pings continue'
     let modelCalls = 0;
     let executorDispatches = 0;
     const adapters = {
+      readExecutorWorkspace:()=>workspace,
       apiRead(uri) {
         if (uri === 'user') return { login: 'worker' };
         if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
@@ -4784,6 +4848,7 @@ test('OpenCode edit eligibility waits without receipts, keeps ping moving, then 
       head: { sha: commit, repo: { id: 1352411536, full_name: REPO } } };
     const adapters = {
       goalCommentsRead: () => [humanGoalComment()],
+      readExecutorWorkspace:()=>workspace,
       apiRead(uri) {
         if (uri === 'user') return { login: 'worker' };
         if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
@@ -4872,6 +4937,7 @@ test('an ineligible OpenCode edit does not starve a later independent edit reque
     const writes = [], logs = [];
     let dispatches = 0, nextId = 9900;
     const result = await executeWorker(config, {
+      readExecutorWorkspace:()=>workspace,
       apiRead(uri) {
         if (uri === 'user') return { login: 'worker' };
         if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
