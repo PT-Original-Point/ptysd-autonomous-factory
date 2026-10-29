@@ -3826,6 +3826,65 @@ test('only allowlisted sender and host are eligible, completed/started jobs neve
   state.push(com(3,RECEIPT_MARKER+JSON.stringify(start),'worker'));
   assert.equal(selectNext(state,['t14210184'],'worker','DESKTOP-1B6PD2P'),null);
 });
+test('trusted dispatcher receipts block cross-identity replay without becoming worker acceptance', async () => {
+  const job = withHumanGoal({ schema: 6, project_id: PROJECT, host: 'DESKTOP-1B6PD2P',
+    request_id: 'PTYSD_CROSS_IDENTITY_RECEIPT_DEDUPE_20261029', kind: 'antigravity_edit',
+    source_sha: commit, spec_path: 'native-bridge/tasks/w2-quota-canary.md',
+    spec_sha256: hash, model: ANTIGRAVITY_V2_MODEL, variant: 'high',
+    edit_paths: ['src/w2-quota-canary.mjs'], source_pr: 461 });
+  const attemptId = '11111111-1111-4111-8111-111111111111';
+  const started = receipt(job.request_id, attemptId, 'STARTED', job);
+  const blocked = receipt(job.request_id, attemptId, 'BLOCKED', job);
+  const comments = [com(10, encoded(job), 't14210184'),
+    com(11, RECEIPT_MARKER + JSON.stringify(started), 't14210184'),
+    com(12, RECEIPT_MARKER + JSON.stringify(blocked), 't14210184')];
+  assert.equal(parseReceipt(comments[2].body)?.state, 'BLOCKED');
+
+  const sourceReads = [];
+  const sources = await readPinnedCandidateSources(comments, ['t14210184'], 'wfvupu1212',
+    job.host, path => { sourceReads.push(path); return {}; }, undefined, [], () => []);
+  assert.equal(sources.size, 0,
+    'a trusted dispatcher receipt suppresses replay when the local Worker login changed');
+  assert.deepEqual(sourceReads, [], 'a terminal cross-identity receipt prevents candidate reads');
+  assert.equal(selectNext(comments, ['t14210184'], 'wfvupu1212', job.host,
+    commit, [], new Map([[job.source_pr, job.source_sha]])), null,
+  'the exact historical request cannot be selected again');
+
+  const now = Date.now();
+  const observationComments = [{ id: OPERATOR_COMMENT_ID,
+    user: { login: 'wfvupu1212' },
+    body: encodeOperatorObservation(seededOperatorObservation(OPERATOR_COMMENT_ID, 2,
+      'c'.repeat(40), now - 60_000)),
+    updated_at: new Date(now - 50_000).toISOString() }, ...comments];
+  const config = { repo: REPO, project_id: PROJECT, host: job.host, issue: 407,
+    dispatchers: ['t14210184'], state_dir: 'unused', enable_antigravity_model_runs: true };
+  const observed = await publishOperatorObservation(config, 'wfvupu1212', observationComments,
+    commit, {
+      now: () => new Date(now),
+      collectWindowsObservation: () => ({ status: 'FRESH',
+        native_task: { registered: true, enabled: true, state: 'READY' } }),
+      collectRuntimeDeployment: () => ({ status: 'UNKNOWN', observed_at: new Date(now).toISOString(),
+        bundle_sha256: hash, component_sha256: Object.fromEntries([
+          'worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs', 'codex-continuation.mjs',
+          'antigravity-quota.mjs', 'operator-observation.mjs', 'captured-process.mjs',
+          'safe-error-code.mjs', 'executor.mjs', 'windows-executor.mjs',
+        ].map(name => [name, null])), reason_code: 'RUNTIME_FILES_UNAVAILABLE' }),
+      readRunnerRegistration: () => ({ total_count: 0 }),
+      readComment: id => structuredClone(observationComments.find(item => item.id === id)),
+      patchComment: (id, body) => {
+        const target = observationComments.find(item => item.id === id);
+        target.body = body;
+        target.updated_at = new Date(now + 1_000).toISOString();
+      },
+      readComments: () => structuredClone(observationComments),
+    }, new Map([[job.source_pr, job.source_sha]]));
+  const workerRecord = observed.observation.workers.find(item => item.worker_id === 'W2');
+  assert.equal(workerRecord.task_state, 'QUEUED_NOT_STARTED',
+    'dispatcher-authored receipts do not become Worker activity');
+  assert.equal(workerRecord.attempt_id, undefined);
+  assert.equal(workerRecord.delivery_status, undefined,
+    'dispatcher-authored receipts cannot produce Worker delivery acceptance');
+});
 test('a recoverable WAITING receipt makes the same OpenCode task eligible for reevaluation', () => {
   const job = { ...mkjob({ request_id: 'PTYSD_OPENCODE_WAITING_REEVALUATE_20261018',
     kind: 'opencode_edit' }), schema: 4, spec_path: 'native-bridge/tasks/waiting.md',
