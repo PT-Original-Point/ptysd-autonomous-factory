@@ -2774,6 +2774,9 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
       project_scope_evidence:'PROJECT_WORKSPACE_MATCHED',
       effective_config_evidence:'EFFECTIVE_CONFIG_VERIFIED_NO_MODEL',
       credit_fallback_setting:'CREDIT_FALLBACK_DISABLED',
+      inference_executed:false,credential_values_collected:false,
+      model_catalog:{status:'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT',pinned_model_cataloged:true,
+        catalog_count:1,catalog_sha256:h(ANTIGRAVITY_V2_MODEL)},
       gemini_aggregate_quota:{status:'GEMINI_AGGREGATE_QUOTA_READ',source:'GEMINI_MODELS_AGGREGATE',
         weekly_remaining_percent:95,five_hour_remaining_percent:0}};
     const emptyQuota=await executeOpenCodeTask('Synthetic; no inference.',config,job,randomUUID(),
@@ -2787,6 +2790,9 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
       project_scope_evidence:'PROJECT_WORKSPACE_MATCHED',
       effective_config_evidence:'EFFECTIVE_CONFIG_VERIFIED_NO_MODEL',
       tool_policy_evidence:'W2_NONFILE_ACTIONS_DENIED',
+      inference_executed:false,credential_values_collected:false,
+      model_catalog:{status:'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT',pinned_model_cataloged:true,
+        catalog_count:1,catalog_sha256:h(ANTIGRAVITY_V2_MODEL)},
       gemini_aggregate_quota:{status:'GEMINI_AGGREGATE_QUOTA_READ',
         source:'GEMINI_MODELS_AGGREGATE',weekly_remaining_percent:95,five_hour_remaining_percent:99},
       credit_fallback_setting:'CREDIT_FALLBACK_DISABLED',issues:[]};
