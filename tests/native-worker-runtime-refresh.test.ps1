@@ -17,7 +17,12 @@ function Get-InstallerFunction([string]$Name) {
 foreach ($name in @('Get-WorkerRuntimeBytesSha256','Get-WorkerRuntimeFileSha256',
     'Resolve-WorkerRuntimeIdentitySid',
     'Write-WorkerRuntimeAtomicReplacement','Get-WorkerRuntimeTaskDefinitionSha256',
-    'Get-TaskOptional','Get-WorkerRuntimeTaskReadback','Invoke-WorkerRuntimeCommandText',
+    'Get-WorkerRuntimeTaskDefinitionWithoutLogonTriggerSha256','Get-WorkerRuntimeTaskTriggerState',
+    'Assert-WorkerRuntimeTaskTimeTriggerMatchesXml',
+    'Assert-WorkerRuntimeTaskLogonTriggerMatchesXml',
+    'Write-WorkerRuntimeNewFile','Get-TaskOptional','Get-WorkerRuntimeTaskReadback',
+    'Add-WorkerRuntimeTaskLogonTrigger','Invoke-WorkerRuntimeTaskLogonTriggerRefresh',
+    'Invoke-WorkerRuntimeCommandText',
     'Assert-WorkerRuntimeTrustedRuns','Assert-WorkerRuntimeAcceptedPrAncestry',
     'Get-WorkerRuntimeGitPath')) {
     Invoke-Expression (Get-InstallerFunction $name)
@@ -44,6 +49,22 @@ $installModeBlock = $installerText.Substring($installModeIndex)
 if (-not [regex]::IsMatch($installModeBlock, '\$logonTrigger\s*=\s*New-ScheduledTaskTrigger\s+-AtLogOn\s+-User\s+\$username')) { throw 'WORKER_INSTALL_LOGON_TRIGGER_MISSING' }
 if (-not $installModeBlock.Contains('-Trigger @($trigger, $logonTrigger)')) { throw 'WORKER_INSTALL_LOGON_TRIGGER_REGISTRATION_MISSING' }
 if (-not $installModeBlock.Contains('$taskDefinitionSha256 = Get-WorkerRuntimeTaskDefinitionSha256')) { throw 'WORKER_INSTALL_TASK_DEFINITION_READBACK_MISSING' }
+$triggerRefreshModeIndex = $installerText.IndexOf("if (`$Mode -eq 'RefreshTaskLogonTrigger')", [StringComparison]::Ordinal)
+if ($triggerRefreshModeIndex -lt 0 -or -not $installerText.Substring($triggerRefreshModeIndex).Contains('Invoke-WorkerRuntimeTaskLogonTriggerRefresh')) {
+    throw 'WORKER_TASK_TRIGGER_REFRESH_MODE_MISSING'
+}
+$triggerRefreshFunction = Get-InstallerFunction 'Invoke-WorkerRuntimeTaskLogonTriggerRefresh'
+foreach ($requiredToken in @('Assert-WorkerRuntimeSource','Get-WorkerRuntimeTaskReadback',
+    'Write-WorkerRuntimeNewFile','Add-WorkerRuntimeTaskLogonTrigger',
+    'WithoutLogonTriggerSha256','WORKER_RUNTIME_TASK_TRIGGER_UPGRADE_OUTCOME_UNKNOWN')) {
+    if (-not $triggerRefreshFunction.Contains($requiredToken)) {
+        throw ('WORKER_TASK_TRIGGER_REFRESH_CONTRACT_MISSING:' + $requiredToken)
+    }
+}
+if ($triggerRefreshFunction.Contains('Register-ScheduledTask') -or
+    $triggerRefreshFunction.Contains('Unregister-ScheduledTask')) {
+    throw 'WORKER_TASK_TRIGGER_REFRESH_MUST_UPDATE_EXISTING_TASK_ONLY'
+}
 
 $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $testRoot = Join-Path $tempBase ('pty-worker-runtime-refresh-' + [guid]::NewGuid().ToString('N'))
@@ -81,7 +102,7 @@ try {
     $homeDir = $testRoot
     $expectedLogonUser = $env:USERDOMAIN + '\' + $env:USERNAME
     $global:MockWorkerTaskXml = @'
-<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><Enabled>true</Enabled><ExecutionTimeLimit>PT15M</ExecutionTimeLimit><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable></Settings><Triggers><TimeTrigger><StartBoundary>2026-10-27T00:00:00</StartBoundary><Repetition><Interval>PT5M</Interval><Duration>P3650D</Duration></Repetition></TimeTrigger><LogonTrigger><UserId>__EXPECTED_LOGON_USER__</UserId></LogonTrigger></Triggers></Task>
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><Enabled>true</Enabled><ExecutionTimeLimit>PT15M</ExecutionTimeLimit><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable></Settings><Triggers><TimeTrigger><StartBoundary>2026-10-27T00:00:00</StartBoundary><Repetition><Interval>PT5M</Interval><Duration>P3650D</Duration><StopAtDurationEnd>true</StopAtDurationEnd></Repetition></TimeTrigger><LogonTrigger><UserId>__EXPECTED_LOGON_USER__</UserId></LogonTrigger></Triggers></Task>
 '@
     $global:MockWorkerTaskXml = $global:MockWorkerTaskXml.Replace('__EXPECTED_LOGON_USER__', $expectedLogonUser)
     function global:Export-ScheduledTask {
@@ -94,6 +115,28 @@ try {
         param([string]$TaskName, [string]$TaskPath)
         return @($global:MockWorkerTask)
     }
+    function global:New-ScheduledTaskTrigger {
+        [CmdletBinding()]
+        param([switch]$AtLogOn, [string]$User)
+        return [pscustomobject]@{ CimClass=[pscustomobject]@{ CimClassName='MSFT_TaskLogonTrigger' };
+            Enabled=$true; UserId=$User }
+    }
+    function global:Set-ScheduledTask {
+        [CmdletBinding()]
+        param([string]$TaskName, [string]$TaskPath, [object[]]$Trigger)
+        $global:MockSetScheduledTaskCalls += ,([pscustomobject]@{
+            TaskName=$TaskName; TaskPath=$TaskPath; Trigger=@($Trigger)
+        })
+        if (-not $global:MockSchedulerApply) {
+            if ($global:MockSchedulerThrowAfterApply) { throw 'MOCK_SET_SCHEDULED_TASK_FAILED_BEFORE_APPLY' }
+            return
+        }
+        $userXml = [Security.SecurityElement]::Escape([string]$Trigger[1].UserId)
+        $global:MockWorkerTaskXml = $global:MockWorkerTaskXml.Replace('</Triggers>',
+            ('<LogonTrigger><UserId>' + $userXml + '</UserId></LogonTrigger></Triggers>'))
+        $global:MockWorkerTask.Triggers = @($Trigger)
+        if ($global:MockSchedulerThrowAfterApply) { throw 'MOCK_SET_SCHEDULED_TASK_FAILED_AFTER_APPLY' }
+    }
 
     $global:MockWorkerTask = [pscustomobject]@{
         TaskName=$taskName; TaskPath='\'; State='Disabled'
@@ -103,7 +146,21 @@ try {
             ExecutionTimeLimit='PT15M'; StartWhenAvailable=$true;
             DisallowStartIfOnBatteries=$false; StopIfGoingOnBatteries=$false }
         Actions=@([pscustomobject]@{ Execute=$wscript; Arguments='//B //NoLogo "' + $hiddenWorker + '"'; WorkingDirectory=$homeDir })
+        Triggers=@()
     }
+    $timeTrigger = [pscustomobject]@{
+        CimClass=[pscustomobject]@{ CimClassName='MSFT_TaskTimeTrigger' }
+        Enabled=$true; StartBoundary='2026-10-27T00:00:00'
+        Repetition=[pscustomobject]@{ Interval='PT5M'; Duration='P3650D'; StopAtDurationEnd=$true }
+    }
+    $logonTriggerMock = [pscustomobject]@{
+        CimClass=[pscustomobject]@{ CimClassName='MSFT_TaskLogonTrigger' }
+        Enabled=$true; UserId=$expectedLogonUser
+    }
+    $global:MockWorkerTask.Triggers = @($timeTrigger,$logonTriggerMock)
+    $global:MockSetScheduledTaskCalls = @()
+    $global:MockSchedulerApply = $false
+    $global:MockSchedulerThrowAfterApply = $false
 
     $enabledHash = Get-WorkerRuntimeTaskDefinitionSha256
     $global:MockWorkerTaskXml = $global:MockWorkerTaskXml.Replace('<Enabled>true</Enabled>', '<Enabled>false</Enabled>')
@@ -130,15 +187,83 @@ try {
     $readback = Get-WorkerRuntimeTaskReadback -ExpectedEnabled $false -ExpectedState 'Disabled' `
         -ExpectedDefinitionSha256 $enabledHash
     Assert-Equal $readback.DefinitionSha256 $enabledHash 'exact task identity reads back with disabled state'
+    $global:MockWorkerTask.Triggers[1].Enabled = $false
+    Assert-Throws { Get-WorkerRuntimeTaskReadback -ExpectedEnabled $false -ExpectedState 'Disabled' } `
+        'WORKER_RUNTIME_TASK_TRIGGER_OBJECT_MISMATCH' 'a disabled logon CIM trigger cannot be reported as enabled recovery'
+    $global:MockWorkerTask.Triggers[1].Enabled = $true
     $validTaskXml = $global:MockWorkerTaskXml
     $global:MockWorkerTaskXml = [regex]::Replace($validTaskXml, '<LogonTrigger>[\s\S]*?</LogonTrigger>', '')
     Assert-Throws { Get-WorkerRuntimeTaskDefinitionSha256 } 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'a missing logon recovery trigger blocks refresh'
+    $legacyTaskXml = $global:MockWorkerTaskXml
+    $legacyState = Get-WorkerRuntimeTaskTriggerState $legacyTaskXml
+    Assert-Equal $legacyState.TriggerKind 'LEGACY_TIME_ONLY' 'the dedicated upgrade preflight recognizes the exact legacy shape'
+    Assert-Equal $legacyState.DefinitionSha256 (Get-WorkerRuntimeTaskDefinitionSha256 -AllowLegacyTimeOnly -TaskXml $legacyTaskXml) `
+        'legacy upgrade preflight returns the exact pinned task definition hash'
+    $currentState = Get-WorkerRuntimeTaskTriggerState $validTaskXml
+    Assert-Equal $currentState.TriggerKind 'CURRENT_TIME_AND_LOGON' 'a current task definition is classified without modification'
+    Assert-Equal $legacyState.WithoutLogonTriggerSha256 $currentState.WithoutLogonTriggerSha256 `
+        'adding only the logon trigger preserves the complete remaining task XML'
+    $changedScheduleXml = $validTaskXml.Replace('PT5M','PT10M')
+    $changedScheduleProjection = Get-WorkerRuntimeTaskDefinitionWithoutLogonTriggerSha256 $changedScheduleXml
+    if ($legacyState.WithoutLogonTriggerSha256 -ceq $changedScheduleProjection) {
+        throw 'WORKER_TASK_TRIGGER_PROJECTION_MISSED_TIME_SCHEDULE_CHANGE'
+    }
+    Assert-Throws { Get-WorkerRuntimeTaskDefinitionSha256 -TaskXml $legacyTaskXml } `
+        'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'normal refresh still rejects the legacy trigger shape'
     $global:MockWorkerTaskXml = $validTaskXml.Replace($expectedLogonUser, 'OTHER\unexpected-user')
     Assert-Throws { Get-WorkerRuntimeTaskDefinitionSha256 } 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'a logon trigger for another account blocks refresh'
+    Assert-Throws { Get-WorkerRuntimeTaskDefinitionSha256 -AllowLegacyTimeOnly } `
+        'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'legacy allowance never accepts a wrong-account logon trigger'
     $global:MockWorkerTaskXml = $validTaskXml.Replace('</Triggers>',
         '<BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>')
     Assert-Throws { Get-WorkerRuntimeTaskDefinitionSha256 } 'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'an extra unsupported trigger blocks refresh'
     $global:MockWorkerTaskXml = $validTaskXml
+    $global:MockWorkerTask.Triggers = @($timeTrigger)
+    Add-WorkerRuntimeTaskLogonTrigger $global:MockWorkerTask $legacyTaskXml
+    Assert-Equal $global:MockSetScheduledTaskCalls.Count 1 'the migration updates the existing task exactly once'
+    $triggerWrite = $global:MockSetScheduledTaskCalls[0]
+    Assert-Equal $triggerWrite.TaskName $taskName 'the migration targets the existing canonical task name'
+    Assert-Equal $triggerWrite.TaskPath '\' 'the migration targets the existing root task path'
+    Assert-Equal $triggerWrite.Trigger.Count 2 'the update submits exactly the original time trigger and one logon trigger'
+    if (-not [object]::ReferenceEquals($triggerWrite.Trigger[0], $timeTrigger)) {
+        throw 'WORKER_TASK_TRIGGER_REFRESH_DID_NOT_PRESERVE_ORIGINAL_TIME_TRIGGER_OBJECT'
+    }
+    Assert-Equal $triggerWrite.Trigger[1].CimClass.CimClassName 'MSFT_TaskLogonTrigger' 'the added trigger is a logon trigger'
+    Assert-Equal $triggerWrite.Trigger[1].UserId $expectedLogonUser 'the added trigger is scoped to the current user'
+    $callCountBeforeRejectedTrigger = $global:MockSetScheduledTaskCalls.Count
+    $global:MockWorkerTask.Triggers = @($timeTrigger,$triggerWrite.Trigger[1])
+    Assert-Throws { Add-WorkerRuntimeTaskLogonTrigger $global:MockWorkerTask $legacyTaskXml } `
+        'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'a second trigger-add attempt is rejected rather than duplicated'
+    Assert-Equal $global:MockSetScheduledTaskCalls.Count $callCountBeforeRejectedTrigger `
+        'unsupported or duplicate trigger state causes no scheduler write'
+    $global:MockWorkerTask.TaskName = 'OTHER-TASK'
+    Assert-Throws { Add-WorkerRuntimeTaskLogonTrigger $global:MockWorkerTask $legacyTaskXml } `
+        'WORKER_RUNTIME_TASK_IDENTITY_MISMATCH' 'the trigger write cannot target a different task identity'
+    $global:MockWorkerTask.TaskName = $taskName
+    $global:MockWorkerTask.Triggers = @([pscustomobject]@{
+        CimClass=[pscustomobject]@{ CimClassName='MSFT_TaskBootTrigger' }
+    })
+    Assert-Throws { Add-WorkerRuntimeTaskLogonTrigger $global:MockWorkerTask $legacyTaskXml } `
+        'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'the migration refuses a non-time legacy trigger'
+    Assert-Equal $global:MockSetScheduledTaskCalls.Count $callCountBeforeRejectedTrigger `
+        'wrong identity and unsupported trigger paths make no scheduler write'
+    $staleTimeTrigger = [pscustomobject]@{
+        CimClass=[pscustomobject]@{ CimClassName='MSFT_TaskTimeTrigger' }
+        Enabled=$true; StartBoundary='2026-10-26T00:00:00'
+        Repetition=[pscustomobject]@{ Interval='PT5M'; Duration='P3650D'; StopAtDurationEnd=$true }
+    }
+    $global:MockWorkerTask.Triggers = @($staleTimeTrigger)
+    Assert-Throws { Add-WorkerRuntimeTaskLogonTrigger $global:MockWorkerTask $legacyTaskXml } `
+        'WORKER_RUNTIME_TASK_TRIGGER_OBJECT_MISMATCH' 'a stale task object cannot overwrite the XML-pinned time schedule'
+    Assert-Equal $global:MockSetScheduledTaskCalls.Count $callCountBeforeRejectedTrigger `
+        'a stale trigger-object mismatch causes no scheduler write'
+    $global:MockWorkerTask.Triggers = @($timeTrigger)
+    $disabledLogonXml = $validTaskXml.Replace('<LogonTrigger>', '<LogonTrigger><Enabled>false</Enabled>')
+    Assert-Throws { Get-WorkerRuntimeTaskDefinitionSha256 -TaskXml $disabledLogonXml } `
+        'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'a disabled logon trigger is not accepted as recovery-ready'
+    $disabledTimeXml = $validTaskXml.Replace('<TimeTrigger>', '<TimeTrigger><Enabled>false</Enabled>')
+    Assert-Throws { Get-WorkerRuntimeTaskDefinitionSha256 -TaskXml $disabledTimeXml } `
+        'WORKER_RUNTIME_TASK_SCHEDULE_IDENTITY_MISMATCH' 'a disabled dispatch time trigger is not accepted'
     $global:MockWorkerTask.Principal.UserId = 'S-1-5-18'
     Assert-Throws { Get-WorkerRuntimeTaskReadback -ExpectedEnabled $false -ExpectedState 'Disabled' } `
         'WORKER_RUNTIME_TASK_PRINCIPAL_IDENTITY_MISMATCH' 'a task registered to a different Windows identity blocks refresh'
@@ -146,6 +271,110 @@ try {
     $global:MockWorkerTask.Actions[0].Arguments = 'unexpected action'
     Assert-Throws { Get-WorkerRuntimeTaskReadback -ExpectedEnabled $false -ExpectedState 'Disabled' } `
         'WORKER_RUNTIME_TASK_IDENTITY_MISMATCH' 'refresh refuses a changed scheduled action'
+    $global:MockWorkerTask.Actions[0].Arguments = '//B //NoLogo "' + $hiddenWorker + '"'
+
+    # Exercise the dedicated native mode against mocked Task Scheduler and a
+    # temp-only backup root. No live task, GitHub source, or OS service is used.
+    function Test-GhAuthenticated([string]$GhExe) { return $true }
+    function Require-Command([string]$Name) {
+        if ($Name -eq 'node.exe') { return $global:MockNodeExecutable }
+        return $Name
+    }
+    function Assert-WorkerRuntimePathChain([string]$Path) { return }
+    function Assert-WorkerRuntimeNoActiveProcess([string]$NodePath) { return }
+    function Assert-WorkerRuntimeSource([string]$GitExe, [string]$GhExe) { return $testRoot }
+    $nodeCommand = Get-Command node.exe -ErrorAction Stop
+    $global:MockNodeExecutable = $nodeCommand.Source
+    $expectedHost = $env:COMPUTERNAME.ToUpperInvariant()
+    $configPath = Join-Path $testRoot 'config.json'
+    $null = [IO.File]::WriteAllText($configPath, '{}', ([Text.UTF8Encoding]::new($false)))
+    $null = [IO.File]::WriteAllText($hiddenWorker,
+        ('commandLine = """' + $global:MockNodeExecutable + '"""'), ([Text.UTF8Encoding]::new($false)))
+    $hiddenWorkerSha256 = Get-WorkerRuntimeFileSha256 $hiddenWorker
+    $legacyEnabledXml = $legacyTaskXml.Replace('<Enabled>false</Enabled>', '<Enabled>true</Enabled>')
+    $global:MockWorkerTaskXml = $legacyEnabledXml
+    $global:MockWorkerTask.State = 'Ready'
+    $global:MockWorkerTask.Settings.Enabled = $true
+    $global:MockWorkerTask.Triggers = @($timeTrigger)
+
+    $global:MockSchedulerApply = $true
+    $preconditionWriteCount = $global:MockSetScheduledTaskCalls.Count
+    $global:MockWorkerTask.State = 'Disabled'
+    $global:MockWorkerTask.Settings.Enabled = $false
+    Assert-Throws { Invoke-WorkerRuntimeTaskLogonTriggerRefresh } `
+        'WORKER_RUNTIME_TASK_STATE_READBACK_MISMATCH' 'a disabled task is not silently re-enabled by trigger migration'
+    $global:MockWorkerTask.State = 'Running'
+    $global:MockWorkerTask.Settings.Enabled = $true
+    Assert-Throws { Invoke-WorkerRuntimeTaskLogonTriggerRefresh } `
+        'WORKER_RUNTIME_TASK_STATE_READBACK_MISMATCH' 'a running task is not mutated by trigger migration'
+    $global:MockWorkerTask.State = 'Ready'
+    $global:MockWorkerTask.Principal.UserId = 'S-1-5-18'
+    Assert-Throws { Invoke-WorkerRuntimeTaskLogonTriggerRefresh } `
+        'WORKER_RUNTIME_TASK_PRINCIPAL_IDENTITY_MISMATCH' 'a different task principal blocks trigger migration'
+    Assert-Equal $global:MockSetScheduledTaskCalls.Count $preconditionWriteCount `
+        'disabled, running, and wrong-principal tasks produce no scheduler writes'
+    $global:MockWorkerTask.Principal.UserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $global:MockWorkerTask.State = 'Ready'
+    $global:MockWorkerTask.Settings.Enabled = $true
+
+    $global:MockSchedulerThrowAfterApply = $false
+    $setCountBeforeMode = $global:MockSetScheduledTaskCalls.Count
+    $modeOutput = (Invoke-WorkerRuntimeTaskLogonTriggerRefresh | Out-String)
+    Assert-Equal $global:MockSetScheduledTaskCalls.Count ($setCountBeforeMode + 1) `
+        'the native migration performs one Task Scheduler write for the legacy task'
+    if (-not $modeOutput.Contains('WORKER_TASK_LOGON_TRIGGER=ADDED_FOR_CURRENT_USER')) {
+        throw 'WORKER_TASK_TRIGGER_REFRESH_SUCCESS_READBACK_MISSING'
+    }
+    $backupPathLine = @($modeOutput -split "`r?`n" | Where-Object { $_.StartsWith('WORKER_TASK_BACKUP=') })[0]
+    $backupPath = $backupPathLine.Substring('WORKER_TASK_BACKUP='.Length)
+    Assert-Equal ([IO.File]::ReadAllText($backupPath)) $legacyEnabledXml `
+        'the migration preserves the exact pre-change task XML in its backup'
+    $backupHashLine = @($modeOutput -split "`r?`n" | Where-Object { $_.StartsWith('WORKER_TASK_BACKUP_SHA256=') })[0]
+    Assert-Equal (Get-WorkerRuntimeFileSha256 $backupPath) $backupHashLine.Substring('WORKER_TASK_BACKUP_SHA256='.Length) `
+        'the migration reads back the backup hash from the written file'
+    Assert-Equal (Get-WorkerRuntimeTaskTriggerState $global:MockWorkerTaskXml).TriggerKind `
+        'CURRENT_TIME_AND_LOGON' 'the migration reads back the current task trigger shape'
+    $backupCountAfterUpgrade = @(Get-ChildItem -LiteralPath (Join-Path $homeDir 'backups') -Filter '*.xml' -File).Count
+
+    $setCountBeforeIdempotency = $global:MockSetScheduledTaskCalls.Count
+    $idempotentOutput = (Invoke-WorkerRuntimeTaskLogonTriggerRefresh | Out-String)
+    Assert-Equal $global:MockSetScheduledTaskCalls.Count $setCountBeforeIdempotency `
+        'an already-upgraded task does not receive another scheduler write'
+    if (-not $idempotentOutput.Contains('WORKER_TASK_LOGON_TRIGGER=ALREADY_PRESENT_NO_CHANGE')) {
+        throw 'WORKER_TASK_TRIGGER_REFRESH_IDEMPOTENT_READBACK_MISSING'
+    }
+    Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $homeDir 'backups') -Filter '*.xml' -File).Count `
+        $backupCountAfterUpgrade 'an idempotent read does not create another backup'
+
+    $global:MockWorkerTaskXml = $legacyEnabledXml
+    $global:MockWorkerTask.Triggers = @($timeTrigger)
+    $global:MockSchedulerApply = $false
+    $global:MockSchedulerThrowAfterApply = $true
+    $setCountBeforeNoApply = $global:MockSetScheduledTaskCalls.Count
+    Assert-Throws { Invoke-WorkerRuntimeTaskLogonTriggerRefresh } `
+        'WORKER_RUNTIME_TASK_TRIGGER_UPGRADE_NOT_APPLIED' 'a scheduler error with unchanged exact prestate is reported as not applied'
+    Assert-Equal $global:MockSetScheduledTaskCalls.Count ($setCountBeforeNoApply + 1) `
+        'an unchanged failure outcome is not automatically replayed'
+    Assert-Equal (Get-WorkerRuntimeTaskTriggerState $global:MockWorkerTaskXml).TriggerKind `
+        'LEGACY_TIME_ONLY' 'a no-effect failure preserves the legacy task definition'
+
+    $global:MockSchedulerApply = $true
+    $setCountBeforeAmbiguousError = $global:MockSetScheduledTaskCalls.Count
+    $reconciledOutput = (Invoke-WorkerRuntimeTaskLogonTriggerRefresh | Out-String)
+    Assert-Equal $global:MockSetScheduledTaskCalls.Count ($setCountBeforeAmbiguousError + 1) `
+        'a scheduler error after apply is reconciled without issuing a second write'
+    if (-not $reconciledOutput.Contains('WORKER_TASK_TRIGGER_WRITE=ERROR_RECONCILED_FROM_EXACT_READBACK')) {
+        throw 'WORKER_TASK_TRIGGER_REFRESH_AMBIGUOUS_WRITE_READBACK_MISSING'
+    }
+    Assert-Equal (Get-WorkerRuntimeTaskTriggerState $global:MockWorkerTaskXml).TriggerKind `
+        'CURRENT_TIME_AND_LOGON' 'the ambiguous write is accepted only after exact current-state readback'
+    $global:MockSchedulerApply = $false
+    $global:MockSchedulerThrowAfterApply = $false
+    $global:MockWorkerTaskXml = $validTaskXml
+    $global:MockWorkerTask.State = 'Disabled'
+    $global:MockWorkerTask.Settings.Enabled = $false
+    $global:MockWorkerTask.Triggers = @($timeTrigger)
+    Remove-Variable MockNodeExecutable -Scope Global -ErrorAction SilentlyContinue
 
     $head = 'a' * 40
     $repo = 'PT-Original-Point/ptysd-autonomous-factory'
@@ -255,6 +484,13 @@ try {
 } finally {
     Remove-Item Function:\global:Export-ScheduledTask -ErrorAction SilentlyContinue
     Remove-Item Function:\global:Get-ScheduledTask -ErrorAction SilentlyContinue
+    Remove-Item Function:\global:New-ScheduledTaskTrigger -ErrorAction SilentlyContinue
+    Remove-Item Function:\global:Set-ScheduledTask -ErrorAction SilentlyContinue
+    Remove-Item Function:\Test-GhAuthenticated -ErrorAction SilentlyContinue
+    Remove-Item Function:\Require-Command -ErrorAction SilentlyContinue
+    Remove-Item Function:\Assert-WorkerRuntimePathChain -ErrorAction SilentlyContinue
+    Remove-Item Function:\Assert-WorkerRuntimeNoActiveProcess -ErrorAction SilentlyContinue
+    Remove-Item Function:\Assert-WorkerRuntimeSource -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $testRoot) {
         $resolvedTestRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $testRoot).Path)
         if (-not $resolvedTestRoot.StartsWith($tempBase, [StringComparison]::OrdinalIgnoreCase)) {
@@ -271,4 +507,7 @@ try {
     }
     Remove-Variable MockWorkerTaskXml -Scope Global -ErrorAction SilentlyContinue
     Remove-Variable MockWorkerTask -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable MockSetScheduledTaskCalls -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable MockSchedulerApply -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable MockSchedulerThrowAfterApply -Scope Global -ErrorAction SilentlyContinue
 }
