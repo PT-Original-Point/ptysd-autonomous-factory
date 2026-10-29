@@ -205,16 +205,32 @@ try {
     $acceptedTree = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'rev-parse',($acceptedHead + '^{tree}'))
     $rebasedMain = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'commit-tree',$acceptedTree,
         '-p',$baseSha,'-m','rebased PR with exact tree')
-    Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $acceptedHead $acceptedHead
-    Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $rebasedMain $rebasedMain
-    Assert-Throws { Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $acceptedHead $rebasedMain } 'WORKER_RUNTIME_ACCEPTED_PR_NOT_IN_MAIN' 'a PR merge commit not reachable from main cannot authorize refresh'
+    Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $acceptedHead $acceptedHead @('worker.mjs')
+    Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $rebasedMain $rebasedMain @('worker.mjs')
+    Assert-Throws {
+        Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $acceptedHead $rebasedMain @('worker.mjs')
+    } 'WORKER_RUNTIME_ACCEPTED_PR_NOT_IN_MAIN' 'a PR merge commit not reachable from main cannot authorize refresh'
+    Assert-Throws {
+        Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $rebasedMain $rebasedMain
+    } 'WORKER_RUNTIME_ACCEPTED_PR_RUNTIME_BUNDLE_SCOPE_REQUIRED' 'rewritten merge validation requires explicit runtime scope'
     [IO.File]::WriteAllText((Join-Path $ancestryRoot 'source.txt'),'different merge tree',
         ([Text.UTF8Encoding]::new($false)))
     $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'add','source.txt')
     $differentTree = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'write-tree')
     $differentMerge = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'commit-tree',$differentTree,
         '-p',$baseSha,'-m','different merge result')
-    Assert-Throws { Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $differentMerge $differentMerge } 'WORKER_RUNTIME_ACCEPTED_PR_MERGE_TREE_MISMATCH' 'a rewritten PR head requires exact merge-tree equality'
+    Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead $differentMerge $differentMerge @('worker.mjs')
+    [IO.File]::WriteAllText((Join-Path $nativeBridgeFixture 'worker.mjs'),'runtime source changed in merge',
+        ([Text.UTF8Encoding]::new($false)))
+    $null = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'add','native-bridge/worker.mjs')
+    $differentRuntimeTree = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'write-tree')
+    $differentRuntimeMerge = Invoke-TestGit -GitArguments @('-C',$ancestryRoot,'commit-tree',$differentRuntimeTree,
+        '-p',$baseSha,'-m','runtime module differs in merge')
+    Assert-Throws {
+        Assert-WorkerRuntimeAcceptedPrAncestry $gitExe $ancestryRoot $acceptedHead `
+            $differentRuntimeMerge $differentRuntimeMerge @('worker.mjs')
+    } 'WORKER_RUNTIME_ACCEPTED_PR_RUNTIME_BUNDLE_MISMATCH:native-bridge/worker.mjs' `
+        'a rewritten PR merge that changes a runtime module must be rejected'
 
     Write-Output 'NATIVE_WORKER_RUNTIME_REFRESH_HELPERS_PASS'
 } finally {
