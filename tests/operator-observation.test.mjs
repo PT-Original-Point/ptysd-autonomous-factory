@@ -342,7 +342,7 @@ test('Windows collector reads only named PTYSD tasks and publishes only allowlis
       last_run: new Date(now - 5 * 60 * 1000).toISOString(),
       last_result: '0x00000000', action_kind: 'WINDOWLESS_LAUNCHER',
       identity_class: 'INTERACTIVE_LIMITED', multiple_instances: 'IgnoreNew',
-      trigger_interval_minutes: 5,
+      trigger_interval_minutes: 5, start_when_available: true,
     },
   };
   const live = collectWindowsObservation({
@@ -362,6 +362,7 @@ test('Windows collector reads only named PTYSD tasks and publishes only allowlis
   assert.equal(live.native_task.identity_class, 'INTERACTIVE_LIMITED');
   assert.equal(live.native_task.multiple_instances, 'IGNORENEW');
   assert.equal(live.native_task.action_kind, 'WINDOWLESS_LAUNCHER');
+  assert.equal(live.native_task.start_when_available, true);
   assert.equal(live.opencode_process_count, 0);
   assert.equal(live.runner_service_running, 1);
   assert.deepEqual(live.executor_tasks, {
@@ -380,6 +381,7 @@ test('Windows collector reads only named PTYSD tasks and publishes only allowlis
   assert.match(collectorSource, /PTYSD-OpenCode-Executor/);
   assert.match(collectorSource, /PTYSD-Antigravity-Executor/);
   assert.match(collectorSource, /PTYSD-Codex-Executor/);
+  assert.match(collectorSource, /StartWhenAvailable/);
   assert.doesNotMatch(collectorSource, /\$all\s*=\s*@\(Get-ScheduledTask/);
   assert.match(collectorSource, /wscript\.exe[\s\S]+HiddenWorker\\\.vbs/);
   assert.match(collectorSource, /Name='opencode2\.exe' OR Name='opencode-cli\.exe' OR Name='opencode\.exe'/,
@@ -387,11 +389,25 @@ test('Windows collector reads only named PTYSD tasks and publishes only allowlis
 
   const legacy = collectWindowsObservation({
     platformName: 'win32',
-    execute: () => JSON.stringify({ ...raw, tasks_total: 225,
-      active_sessions: 'NOT_SAFELY_QUERIED' }),
+    execute: () => {
+      const oldRaw = { ...raw, native_task: { ...raw.native_task } };
+      delete oldRaw.native_task.start_when_available;
+      return JSON.stringify({ ...oldRaw, tasks_total: 225,
+        active_sessions: 'NOT_SAFELY_QUERIED' });
+    },
   });
   assert.equal(legacy.status, 'FRESH', 'historical extra fields remain safely ignorable');
+  assert.equal(legacy.native_task.start_when_available, null,
+    'old collector output degrades recovery capability to unknown');
   assert.equal(Object.hasOwn(legacy, 'tasks_total'), false);
+
+  const malformed = collectWindowsObservation({
+    platformName: 'win32',
+    execute: () => JSON.stringify({ ...raw,
+      native_task: { ...raw.native_task, start_when_available: 'true' } }),
+  });
+  assert.equal(malformed.status, 'UNKNOWN');
+  assert.equal(malformed.error, 'WINDOWS_READBACK_FAILED');
 });
 
 test('failed Windows collection exposes a bounded error code, not command output', () => {

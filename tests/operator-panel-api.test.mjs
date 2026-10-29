@@ -564,7 +564,8 @@ test('renderer separates closed W1 source history from live worker status and sh
     runtime_deployment:{status:'MANIFEST_MATCHED',observed_at:observedAt,source_main_sha:mainSha,
       deployment_pr:592,deployment_pr_head:'c'.repeat(40),bundle_sha256:'d'.repeat(64)},
     windows:{status:'FRESH',observed_at:observedAt,native_task:{registered:true,enabled:true,
-      state:'READY',identity_class:'INTERACTIVE_LIMITED',multiple_instances:'IgnoreNew'},
+      state:'READY',identity_class:'INTERACTIVE_LIMITED',multiple_instances:'IgnoreNew',
+      start_when_available:true},
       executor_tasks:{
         opencode:{registered:true,enabled:true,state:'READY',last_run:observedAt,last_result:'0X00000000'},
         antigravity:{registered:true,enabled:false,state:'DISABLED',last_run:observedAt,last_result:'0X00000000'},
@@ -631,6 +632,17 @@ test('renderer separates closed W1 source history from live worker status and sh
   assert.match(domElements.get('native-executor-tasks').textContent,/Codex 主控：RUNNING（啟用）/);
   assert.doesNotMatch(domElements.get('native-executor-tasks').textContent,/W3 Codex/);
   assert.match(domElements.get('native-executor-tasks').textContent,/不代表模型工作/);
+  assert.match(domElements.get('native-identity').textContent,/互動登入後補跑已啟用；首次登入前不保證/);
+  snapshot.windows.native_task.start_when_available=false;
+  observationComment.body='PTYSD_OPERATOR_OBSERVATION_V1\n'+JSON.stringify(snapshot);
+  panel.render(null,resources,null,now,{status:'READY',coordination:'SHARED_LOCKED',remaining:40,
+    lastError:null,lastSuccessAt:now,resetAt:null,pauseUntil:null,indefinite:false});
+  assert.match(domElements.get('native-identity').textContent,/互動登入後補跑未啟用/);
+  delete snapshot.windows.native_task.start_when_available;
+  observationComment.body='PTYSD_OPERATOR_OBSERVATION_V1\n'+JSON.stringify(snapshot);
+  panel.render(null,resources,null,now,{status:'READY',coordination:'SHARED_LOCKED',remaining:40,
+    lastError:null,lastSuccessAt:now,resetAt:null,pauseUntil:null,indefinite:false});
+  assert.match(domElements.get('native-identity').textContent,/互動登入後補跑設定未知/);
   assert.match(domElements.get('pr-state').textContent,/歷史來源/);
   assert.match(domElements.get('pr-state').textContent,/PR #505/);
   assert.doesNotMatch(domElements.get('pr-state').textContent,/CANDIDATE_PR_IDENTITY_UNKNOWN/);

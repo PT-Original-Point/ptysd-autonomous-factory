@@ -358,6 +358,10 @@ if ($task) {
   if ($repeat.Count -eq 1 -and [string]$repeat[0].Repetition.Interval -match '^PT(\d+)M$') {
     $interval = [int]$Matches[1]
   }
+  $startWhenAvailable = $null
+  if ($task.Settings.StartWhenAvailable -is [bool]) {
+    $startWhenAvailable = [bool]$task.Settings.StartWhenAvailable
+  }
   $lastRun = $null
   if ($info.LastRunTime -and $info.LastRunTime.Year -gt 2000) { $lastRun = $info.LastRunTime.ToString('o') }
   $native = [pscustomobject]@{
@@ -370,9 +374,10 @@ if ($task) {
     identity_class = $identityClass
     multiple_instances = [string]$task.Settings.MultipleInstances
     trigger_interval_minutes = $interval
+    start_when_available = $startWhenAvailable
   }
 } else {
-  $native = [pscustomobject]@{ registered = ($nativeTaskMatches.Count -gt 1); enabled = $null; state = 'UNKNOWN'; last_run = $null; last_result = $null; action_kind = 'UNKNOWN'; identity_class = 'UNKNOWN'; multiple_instances = 'UNKNOWN'; trigger_interval_minutes = $null }
+  $native = [pscustomobject]@{ registered = ($nativeTaskMatches.Count -gt 1); enabled = $null; state = 'UNKNOWN'; last_run = $null; last_result = $null; action_kind = 'UNKNOWN'; identity_class = 'UNKNOWN'; multiple_instances = 'UNKNOWN'; trigger_interval_minutes = $null; start_when_available = $null }
 }
 [pscustomobject]@{
   observed_at = [DateTime]::UtcNow.ToString('o')
@@ -410,6 +415,8 @@ export function collectWindowsObservation({
           (Number.isSafeInteger(raw.runner_service_running) && raw.runner_service_running >= 0)) ||
         !object(raw.native_task)) throw new Error('WINDOWS_READBACK_INVALID');
     const t = raw.native_task;
+    if (Object.hasOwn(t, 'start_when_available') && t.start_when_available !== null &&
+        typeof t.start_when_available !== 'boolean') throw new Error('WINDOWS_READBACK_INVALID');
     const task = {
       registered: t.registered === true ? true : t.registered === false ? false : null,
       enabled: t.enabled === true ? true : t.enabled === false ? false : null,
@@ -427,6 +434,8 @@ export function collectWindowsObservation({
       trigger_interval_minutes: Number.isSafeInteger(t.trigger_interval_minutes) &&
         t.trigger_interval_minutes > 0 && t.trigger_interval_minutes <= 1440
         ? t.trigger_interval_minutes : null,
+      start_when_available: typeof t.start_when_available === 'boolean'
+        ? t.start_when_available : null,
     };
     let executorTasks;
     if (Object.hasOwn(raw, 'executor_tasks')) {
