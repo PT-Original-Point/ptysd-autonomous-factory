@@ -224,13 +224,14 @@
     </article>
     <article class="panel worker-card">
       <div class="worker-head">
-        <div><div class="worker-title-line"><div><span class="worker-id">W2</span><h2 class="worker-name">Antigravity</h2></div><span id="w2-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">只接受已核准的原生執行證據</span><span id="w2-model-switch" class="worker-harness">模型執行開關：UNKNOWN</span><div class="worker-latest"><span id="w2-header-progress">最新任務進度未確認</span><time id="w2-last-event">最後任務事件：未確認</time></div></div>
+        <div><div class="worker-title-line"><div><span class="worker-id">W2</span><h2 class="worker-name">Antigravity</h2></div><span id="w2-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">只接受已核准的原生執行證據</span><span id="w2-model-switch" class="worker-harness">模型執行開關：UNKNOWN</span><span id="w2-model-eligibility" class="worker-harness">模型執行資格：UNKNOWN</span><div class="worker-latest"><span id="w2-header-progress">最新任務進度未確認</span><time id="w2-last-event">最後任務事件：未確認</time></div></div>
         <div class="worker-live"><span class="worker-live-label">即時施工</span><span id="w2-badge" class="badge neutral">狀態未確認</span></div>
       </div>
       <div class="field"><strong>原生派工（Issue #310 schema-6）</strong><span id="w2-native-task">未確認</span></div>
       <div class="field"><strong>原生收據批次（Issue #407）</strong><span id="w2-native-attempt">未確認</span></div>
       <div class="field"><strong>原生工作階段（Session）</strong><span id="w2-native-session">未確認</span></div>
       <div class="field"><strong>原生驗收與效果</strong><span id="w2-native-acceptance">未確認</span></div>
+      <div class="field"><strong>最近終態結果（Last Terminal Result）</strong><span id="w2-last-result">未確認</span></div>
       <div class="field"><strong>單次直接 CLI 紀錄（非原生 Worker）</strong><span id="w2-direct-cli">未確認</span></div>
       <div class="field"><strong>直接 CLI 交付脈絡</strong><span id="w2-direct-delivery">未確認</span></div>
       <div class="field"><strong>直接 CLI 程式差異</strong><span id="w2-direct-diff">未確認</span></div>
@@ -710,6 +711,16 @@
     }
     return { id, fields };
   }
+  function w2SourceAcceptanceDeclaresTrustedChecks(fields) {
+    const declarations=['exact_head_checks','checks']
+      .flatMap(key=>String(fields?.[key] || '').split(';'))
+      .map(item=>item.trim()).filter(Boolean);
+    return ['check-native-only','csg-trusted-verifier-hosted'].every(name=>{
+      const entries=declarations.filter(item=>item.startsWith(name + ':'));
+      return entries.length > 0 && entries.every(item=>
+        new RegExp('^' + name + ':SUCCESS(?:\\(run_\\d+\\))?$').test(item));
+    });
+  }
   function w2SourceAcceptanceResultPr(issueComments, job, receipt, receiptCommentId) {
     if (!job || !receipt || !Number.isSafeInteger(receiptCommentId)) return null;
     const candidates=[];
@@ -718,11 +729,11 @@
       if (!parsed) continue;
       const {id,fields}=parsed;
       const resultPr=/^\d{1,9}$/.test(fields.result_pr || '') ? Number(fields.result_pr) : null;
-      const exactChecks=String(fields.exact_head_checks || '').split(';').map(item => item.trim());
+      const trustedChecksDeclared=w2SourceAcceptanceDeclaresTrustedChecks(fields);
       const resultHead=fields.result_head || '';
       const mergeCommit=fields.result_merge_commit || '';
       const mainReadback=fields.main_readback || '';
-      if (fields.record_type === 'CODEX_SOURCE_ACCEPTANCE_WITH_WORKER_BLOCKED_TERMINAL' &&
+      const blockedTerminal=fields.record_type === 'CODEX_SOURCE_ACCEPTANCE_WITH_WORKER_BLOCKED_TERMINAL' &&
           fields.repo === REPO && fields.project_id === PROJECT &&
           fields.human_goal_comment_id === String(job.goal_comment_id) &&
           fields.request_id === job.request_id &&
@@ -736,11 +747,32 @@
           Number(fields.diff_bytes) === Number(receipt.diff_bytes) &&
           fields.worker_task_acceptance === 'UNKNOWN' && fields.external_effects === 'UNKNOWN' &&
           fields.source_acceptance === 'CODEX_ACCEPTED_AFTER_TEST_AND_EXACT_HEAD_HOSTED_VERIFIER' &&
-          exactChecks.includes('check-native-only:SUCCESS') &&
-          exactChecks.includes('csg-trusted-verifier-hosted:SUCCESS') &&
+          trustedChecksDeclared &&
           /^[a-f0-9]{40}$/i.test(resultHead) &&
           /^[a-f0-9]{40}$/i.test(mergeCommit) && mergeCommit.toLowerCase() === mainReadback.toLowerCase() &&
-          Number.isSafeInteger(resultPr) && resultPr > 0)
+          Number.isSafeInteger(resultPr) && resultPr > 0;
+      const headOnlyTerminal=fields.record_type === 'ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_MERGE_OR_RUNTIME_ACCEPTANCE' &&
+          fields.repo === REPO && fields.project_id === PROJECT &&
+          fields.human_goal_comment_id === String(job.goal_comment_id) &&
+          fields.goal_body_sha256 === job.goal_body_sha256 &&
+          fields.request_id === job.request_id &&
+          fields.attempt_id === receipt.attempt_id &&
+          fields.terminal_receipt_comment_id === String(receiptCommentId) &&
+          receipt.state === 'FINISHED' && fields.worker_state === receipt.state &&
+          fields.worker_outcome === receipt.outcome && fields.session_id === receipt.session_id &&
+          fields.model === job.model && fields.task_source_pr === String(job.source_pr) &&
+          String(fields.task_source_head || '').toLowerCase() === String(job.source_sha).toLowerCase() &&
+          String(fields.worker_diff_sha256 || '').toLowerCase() === String(receipt.diff_sha256 || '').toLowerCase() &&
+          Number(fields.worker_diff_bytes) === Number(receipt.diff_bytes) &&
+          fields.worker_task_acceptance === 'UNKNOWN' && fields.external_effects === 'UNKNOWN' &&
+          fields.codex_source_acceptance === 'ACCEPTED_FOR_PR_HEAD_ONLY' &&
+          fields.exact_head_ci === 'SUCCESS_REQUIRED_TRUSTED_CHECKS' &&
+          trustedChecksDeclared &&
+          fields.merge === 'NOT_PERFORMED' && fields.runtime_deployment === 'NOT_PERFORMED' &&
+          /^[a-f0-9]{40}$/i.test(resultHead) &&
+          /^[a-f0-9]{40}$/i.test(fields.result_base_sha || '') &&
+          Number.isSafeInteger(resultPr) && resultPr > 0;
+      if (blockedTerminal || headOnlyTerminal)
         candidates.push({id,resultPr});
     }
     candidates.sort((a,b)=>a.id-b.id);
@@ -753,7 +785,9 @@
     const verified=[];
     for (const name of required) {
       const runs=checkData.check_runs.filter(run => run?.name === name &&
-        safeSha(run.head_sha)?.toLowerCase() === head)
+        safeSha(run.head_sha)?.toLowerCase() === head &&
+        Number(run?.app?.id) === 15368 && run?.app?.slug === 'github-actions' &&
+        run?.app?.name === 'GitHub Actions')
         .sort((a,b)=>(Number(a.id)||0)-(Number(b.id)||0));
       const latest=runs.at(-1);
       if (!latest || latest.status !== 'completed' || latest.conclusion !== 'success') return null;
@@ -770,43 +804,76 @@
     const isHash=value => /^[a-f0-9]{64}$/i.test(value || '');
     const positiveInteger=value => /^\d{1,9}$/.test(value || '') &&
       Number.isSafeInteger(Number(value)) && Number(value) > 0;
-    const exactChecks=String(fields.exact_head_checks || '').split(';').map(item => item.trim());
-    const testMatch=String(fields.source_test || '').match(
-      /^node --test ([A-Za-z0-9._/-]+):(\d+)_pass;(\d+)_fail$/);
+    const blockedTerminal=fields.record_type === 'CODEX_SOURCE_ACCEPTANCE_WITH_WORKER_BLOCKED_TERMINAL';
+    const headOnlyTerminal=fields.record_type === 'ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_MERGE_OR_RUNTIME_ACCEPTANCE';
+    if (!blockedTerminal && !headOnlyTerminal) return null;
+    const exactChecks=String(fields.exact_head_checks || fields.checks || '')
+      .split(';').map(item => item.trim()).filter(Boolean);
+    const sourceTest=fields.source_test || fields.focused_test || '';
+    const testMatch=String(sourceTest).match(
+      /^node --test (?:--test-name-pattern=(?:"[^"]*"|'[^']*')\s+)?([A-Za-z0-9._/-]+):(\d+)_pass;(\d+)_fail$/);
     const resultPr=positiveInteger(fields.result_pr) ? Number(fields.result_pr) : null;
     const resultHead=isSha(fields.result_head) ? fields.result_head.toLowerCase() : null;
-    const mergeCommit=isSha(fields.result_merge_commit) ? fields.result_merge_commit.toLowerCase() : null;
-    const mainReadback=isSha(fields.main_readback) ? fields.main_readback.toLowerCase() : null;
+    const mergeCommit=blockedTerminal && isSha(fields.result_merge_commit) ? fields.result_merge_commit.toLowerCase() : null;
+    const mainReadback=blockedTerminal && isSha(fields.main_readback) ? fields.main_readback.toLowerCase() : null;
+    const resultBaseSha=headOnlyTerminal && isSha(fields.result_base_sha) ? fields.result_base_sha.toLowerCase() : null;
     const pullHead=safeSha(resultPull?.head?.sha)?.toLowerCase() || null;
     const pullMerge=safeSha(resultPull?.merge_commit_sha)?.toLowerCase() || null;
     const pullMerged=resultPull?.merged === true || Boolean(resultPull?.merged_at || resultPull?.mergedAt);
     const verifiedChecks=w2TrustedResultChecks(resultChecks,resultHead);
+    const sourcePr=headOnlyTerminal ? fields.task_source_pr : fields.source_pr;
+    const sourceHead=headOnlyTerminal ? fields.task_source_head : fields.source_head;
+    const attemptId=headOnlyTerminal ? fields.attempt_id : fields.worker_attempt_id;
+    const terminalId=headOnlyTerminal ? fields.terminal_receipt_comment_id : fields.worker_terminal_comment_id;
+    const diffSha=headOnlyTerminal ? fields.worker_diff_sha256 : fields.diff_sha256;
+    const diffBytes=headOnlyTerminal ? fields.worker_diff_bytes : fields.diff_bytes;
+    const acceptance=headOnlyTerminal ? fields.codex_source_acceptance : fields.source_acceptance;
+    const changedPaths=headOnlyTerminal
+      ? String(fields.changed_paths || '').split(/[;,]\s*/).map(item=>item.trim()).filter(Boolean)
+      : [fields.changed_path].filter(Boolean);
+    const changedPathsInScope=changedPaths.length > 0 && Array.isArray(job?.edit_paths) &&
+      changedPaths.every(path=>job.edit_paths.includes(path));
+    const exactHeadChecksPresent=w2SourceAcceptanceDeclaresTrustedChecks(fields);
+    const mergedSourceMatches=blockedTerminal &&
+      String(resultPull?.state || '').toLowerCase() === 'closed' && pullMerged &&
+      pullHead === resultHead && pullMerge === mergeCommit && mergeCommit === mainReadback;
+    const resultPullState=String(resultPull?.state || '').toLowerCase();
+    const headOnlySourceMatches=headOnlyTerminal && resultBaseSha &&
+      String(resultPull?.base?.ref || '').toLowerCase() === 'main' &&
+      ((resultPullState === 'open' && !pullMerged) || (resultPullState === 'closed' && pullMerged)) &&
+      pullHead === resultHead;
     if (!goalReferenceVerified ||
-        fields.record_type !== 'CODEX_SOURCE_ACCEPTANCE_WITH_WORKER_BLOCKED_TERMINAL' ||
         fields.repo !== REPO || fields.project_id !== PROJECT ||
         fields.human_goal_comment_id !== String(job?.goal_comment_id || '') ||
+        (headOnlyTerminal && fields.goal_body_sha256 !== job?.goal_body_sha256) ||
         fields.request_id !== job?.request_id ||
-        fields.worker_attempt_id !== receipt?.attempt_id ||
-        fields.worker_terminal_comment_id !== String(receiptCommentId || '') ||
+        attemptId !== receipt?.attempt_id ||
+        terminalId !== String(receiptCommentId || '') ||
         fields.worker_state !== receipt?.state || fields.worker_outcome !== receipt?.outcome ||
-        fields.gemini_session_id !== receipt?.session_id ||
-        fields.model !== job?.model || fields.source_pr !== String(job?.source_pr || '') ||
-        String(fields.source_head || '').toLowerCase() !== String(job?.source_sha || '').toLowerCase() ||
-        !isHash(fields.diff_sha256) || String(fields.diff_sha256).toLowerCase() !==
+        (headOnlyTerminal ? fields.session_id : fields.gemini_session_id) !== receipt?.session_id ||
+        fields.model !== job?.model || sourcePr !== String(job?.source_pr || '') ||
+        String(sourceHead || '').toLowerCase() !== String(job?.source_sha || '').toLowerCase() ||
+        !isHash(diffSha) || String(diffSha).toLowerCase() !==
           String(receipt?.diff_sha256 || '').toLowerCase() ||
-        !positiveInteger(fields.diff_bytes) || Number(fields.diff_bytes) !== Number(receipt?.diff_bytes) ||
-        !Array.isArray(job?.edit_paths) || !job.edit_paths.includes(fields.changed_path) ||
-        fields.git_diff_check !== 'PASS' || !testMatch || testMatch[1] !== fields.changed_path ||
-        Number(testMatch[3]) !== 0 || !resultPr || !resultHead || !mergeCommit ||
-        !mainReadback || mergeCommit !== mainReadback ||
+        !positiveInteger(String(diffBytes)) || Number(diffBytes) !== Number(receipt?.diff_bytes) ||
+        !changedPathsInScope ||
+        (headOnlyTerminal && !fields.changed_paths) ||
+        fields.git_diff_check !== 'PASS' || !testMatch || !changedPaths.includes(testMatch[1]) ||
+        Number(testMatch[2]) < 1 || Number(testMatch[3]) !== 0 || !resultPr || !resultHead ||
+        (blockedTerminal && !mergeCommit) ||
+        (blockedTerminal && (!mergeCommit || !mainReadback || mergeCommit !== mainReadback)) ||
+        (headOnlyTerminal && (!resultBaseSha || fields.exact_head_ci !== 'SUCCESS_REQUIRED_TRUSTED_CHECKS' ||
+          fields.codex_source_acceptance !== 'ACCEPTED_FOR_PR_HEAD_ONLY' ||
+          fields.merge !== 'NOT_PERFORMED' || fields.runtime_deployment !== 'NOT_PERFORMED' ||
+          receipt?.state !== 'FINISHED' || fields.worker_task_acceptance !== 'UNKNOWN' ||
+          fields.external_effects !== 'UNKNOWN')) ||
         !candidatePullIdentityMatches(resultPull,{number:resultPr}) ||
-        String(resultPull?.state || '').toLowerCase() !== 'closed' || !pullMerged ||
-        pullHead !== resultHead || pullMerge !== mergeCommit ||
+        !(blockedTerminal ? mergedSourceMatches : headOnlySourceMatches) ||
         !verifiedChecks ||
-        !exactChecks.includes('check-native-only:SUCCESS') ||
-        !exactChecks.includes('csg-trusted-verifier-hosted:SUCCESS') ||
-        fields.source_acceptance !== 'CODEX_ACCEPTED_AFTER_TEST_AND_EXACT_HEAD_HOSTED_VERIFIER' ||
-        fields.worker_task_acceptance !== 'UNKNOWN' || fields.external_effects !== 'UNKNOWN') return null;
+        !exactHeadChecksPresent ||
+        (blockedTerminal && (acceptance !== 'CODEX_ACCEPTED_AFTER_TEST_AND_EXACT_HEAD_HOSTED_VERIFIER' ||
+          fields.worker_task_acceptance !== 'UNKNOWN' || fields.external_effects !== 'UNKNOWN')) ||
+        (headOnlyTerminal && acceptance !== 'ACCEPTED_FOR_PR_HEAD_ONLY')) return null;
     return {
       schema:1, project_id:PROJECT,
       record_type:'ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT',
@@ -815,12 +882,17 @@
       codex_source_acceptance:'ACCEPTED', exact_head_ci:'SUCCESS',
       external_effects:'UNKNOWN', sourceAcceptance:{
         comment_id:id, worker_terminal_comment_id:Number(receiptCommentId),
-        diff_sha256:String(fields.diff_sha256).toLowerCase(),
-        result_pr:resultPr, result_head:resultHead, merge_commit:mergeCommit,
-        main_readback:mainReadback, exact_head_checks:exactChecks.join('; '),
+        diff_sha256:String(diffSha).toLowerCase(),
+        result_pr:resultPr, result_head:resultHead,
+        result_pr_state:blockedTerminal ? 'MERGED' : (pullMerged ? 'MERGED_AFTER_HEAD_ACCEPTANCE' : 'OPEN_HEAD_ONLY'),
+        merge_commit:blockedTerminal ? mergeCommit : (pullMerged ? pullMerge : null),
+        main_readback:blockedTerminal ? mainReadback : null,
+        result_base_sha:resultBaseSha,
+        exact_head_checks:exactChecks.join('; '),
         result_checks:verifiedChecks,
-        legacy_check:fields.legacy_check || 'UNKNOWN', source_test:fields.source_test,
-        changed_path:fields.changed_path,
+        legacy_check:fields.legacy_check || fields.non_trusted_candidate_check || 'UNKNOWN', source_test:sourceTest,
+        changed_path:headOnlyTerminal ? changedPaths.join('; ') : fields.changed_path,
+        runtime_deployment:headOnlyTerminal ? fields.runtime_deployment : 'NOT_RECORDED',
       },
     };
   }
@@ -1905,8 +1977,11 @@
       resourceFreshness(resultPrResource,resourceStore.now(),PR_POLL_MS) === 'FRESH' &&
       !resultPrResource.error ? resultPrResource.data : null;
     const resultPullMerged=resultPull?.merged === true || Boolean(resultPull?.merged_at || resultPull?.mergedAt);
+    const resultPullState=String(resultPull?.state || '').toLowerCase();
     const resultHead=resultPr && candidatePullIdentityMatches(resultPull,{number:resultPr}) &&
-      String(resultPull?.state || '').toLowerCase() === 'closed' && resultPullMerged
+      String(resultPull?.base?.ref || '').toLowerCase() === 'main' &&
+      ((resultPullState === 'open' && !resultPullMerged) ||
+        (resultPullState === 'closed' && resultPullMerged))
       ? safeSha(resultPull.head?.sha) : null;
     const resultChecksUrl=resourceStore.bindW2ResultChecks(resultHead);
     if (!recoveryProbeCompleted && !apiClient.isPaused?.() && resultChecksUrl)
@@ -1922,6 +1997,30 @@
         day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }) : '未確認';
   }
   function safeSha(value) { return /^[a-f0-9]{40}$/i.test(value || '') ? value : null; }
+  function w2ModelEligibility(record, osFreshness, currentJob = null, goalReferenceVerified = false) {
+    if (osFreshness !== 'FRESH' || !object(record)) return 'UNKNOWN';
+    if (currentJob) {
+      if (!goalReferenceVerified) return 'UNKNOWN';
+      if (record.task_id && record.task_id !== currentJob.request_id) return 'UNKNOWN';
+      if (record.request_id && record.request_id !== currentJob.request_id) return 'UNKNOWN';
+      if (record.task_source_sha && String(record.task_source_sha).toLowerCase() !== String(currentJob.source_sha).toLowerCase()) return 'UNKNOWN';
+      if (record.source_sha && String(record.source_sha).toLowerCase() !== String(currentJob.source_sha).toLowerCase()) return 'UNKNOWN';
+      if (record.source_pr !== undefined && record.source_pr !== null &&
+          (!Number.isSafeInteger(record.source_pr) || record.source_pr !== currentJob.source_pr)) return 'UNKNOWN';
+    } else if (record.task_id || record.request_id) {
+      return 'UNKNOWN';
+    }
+    const val = typeof record.model_eligibility === 'string' ? record.model_eligibility.trim().toUpperCase() : '';
+    if (['WAITING', 'READY', 'ELIGIBLE', 'INELIGIBLE'].includes(val)) return val;
+    return 'UNKNOWN';
+  }
+  function w2ModelEligibilityLabel(eligibility) {
+    if (eligibility === 'WAITING') return '模型執行資格：WAITING；等待狀態，非資格核准';
+    if (eligibility === 'READY') return '模型執行資格：READY；Win11 觀測明示資格就緒';
+    if (eligibility === 'ELIGIBLE') return '模型執行資格：ELIGIBLE；Win11 觀測明示符合資格';
+    if (eligibility === 'INELIGIBLE') return '模型執行資格：INELIGIBLE；目前不具備執行資格';
+    return '模型執行資格：UNKNOWN';
+  }
   function modelExecutionSwitchLabel(id, record) {
     if (id === 'W3') return null;
     if (record?.model_execution_switch === 'ENABLED')
@@ -2796,9 +2895,74 @@
       deliveryReadback: null,
     };
   }
+  function findLastTerminalReceipt(goalComments, issueComments, goalIdentity,
+      goalSourceComplete = true, issueSourceComplete = true, currentJob = null,
+      goalReferenceVerified = true) {
+    if (!goalSourceComplete || !issueSourceComplete || !Array.isArray(goalComments) || !Array.isArray(issueComments))
+      return { status:'SOURCE_INCOMPLETE', receipt:null };
+    if (currentJob && !goalReferenceVerified)
+      return { status:'GOAL_REFERENCE_UNVERIFIED', receipt:null };
+    const validJobs = [];
+    for (const c of goalComments) {
+      if (!c?.body || !DISPATCHERS.has(c.user?.login || '')) continue;
+      const job = parseMarked(c.body, JOB_MARKER);
+      if (job?.schema === 6 && job.kind === 'antigravity_edit' && validSchema6DispatchJob(job)) {
+        const goalVerified = Boolean(goalIdentity &&
+          goalIdentity.id === job.goal_comment_id &&
+          goalIdentity.author && DISPATCHERS.has(goalIdentity.author) &&
+          goalIdentity.body_sha256 === job.goal_body_sha256);
+        if (goalVerified) validJobs.push({ id:Number(c.id), job });
+      }
+    }
+    if (!validJobs.length) return { status:'NO_JOBS', receipt:null };
+
+    let hasUnboundAttempts = false;
+    const terminalReceipts = [];
+    for (const jobEntry of validJobs) {
+      const job = jobEntry.job;
+      const matchingReceipts = [];
+      for (const c of issueComments) {
+        if (!c?.body) continue;
+        const receipt = parseMarked(c.body, RECEIPT_MARKER);
+        if (receipt && receipt.schema === 1 && receipt.project_id === PROJECT &&
+            receipt.host === 'DESKTOP-1B6PD2P' &&
+            RECEIPT_AUTHORS.has(c.user?.login || '') &&
+            receipt.request_id === job.request_id &&
+            receipt.source_sha === job.source_sha &&
+            receipt.kind === job.kind &&
+            (receipt.source_pr === undefined || receipt.source_pr === job.source_pr) &&
+            /^[a-f0-9-]{36}$/i.test(receipt.attempt_id || '') &&
+            Number.isSafeInteger(Number(c.id)) && Number(c.id) > jobEntry.id) {
+          matchingReceipts.push({ id:Number(c.id), receipt });
+        }
+      }
+      const attemptIds = [...new Set(matchingReceipts.map(r => r.receipt.attempt_id))];
+      if (attemptIds.length > 1) {
+        hasUnboundAttempts = true;
+        continue;
+      }
+      for (const r of matchingReceipts) {
+        if (['FINISHED','BLOCKED'].includes(r.receipt.state)) {
+          terminalReceipts.push({
+            id: r.id,
+            receipt: r.receipt,
+            job,
+            jobCommentId: jobEntry.id,
+            attempt_id: r.receipt.attempt_id,
+            task_acceptance: r.receipt.task_acceptance || 'UNKNOWN',
+            external_effects: r.receipt.external_effects || 'UNKNOWN',
+          });
+        }
+      }
+    }
+    if (!terminalReceipts.length)
+      return { status: hasUnboundAttempts ? 'MULTIPLE_ATTEMPTS_UNBOUND' : 'NO_TERMINAL_RECEIPT', receipt:null };
+    terminalReceipts.sort((a,b) => a.id - b.id);
+    return { status:'MATCHED', receipt:terminalReceipts.at(-1) };
+  }
   function w2EvidenceData(goalComments, issueComments, mainSha, goalIdentity = null,
       goalSourceComplete = true, issueSourceComplete = true, expectedAttemptBinding = null,
-      resultPull = null, resultChecks = null) {
+      resultPull = null, resultChecks = null, workerRecord = null, osFreshness = 'UNKNOWN') {
     const latest = goalSourceComplete ? latestSchema6Job(goalComments,'antigravity_edit') : null;
     const currentJob = latest?.job || null;
     const goalReferenceVerified = Boolean(currentJob && goalIdentity &&
@@ -2808,7 +2972,7 @@
 
     let matchedReceipt = null;
     let matchedReceiptCommentId = null;
-    let receiptResolution = currentJob ? 'NO_MATCHING_RECEIPT' : 'NO_JOB';
+    let receiptResolution = !goalSourceComplete ? 'GOAL_SOURCE_INCOMPLETE' : !issueSourceComplete ? 'ISSUE_SOURCE_INCOMPLETE' : !currentJob ? 'NO_JOB' : !goalReferenceVerified ? 'GOAL_REFERENCE_UNVERIFIED' : 'NO_MATCHING_RECEIPT';
     if (currentJob) {
       const candidateReceipts = [];
       for (const c of (issueComments || [])) {
@@ -2819,7 +2983,7 @@
             RECEIPT_AUTHORS.has(c.user?.login || '') &&
             receipt.request_id === currentJob.request_id &&
             receipt.source_sha === currentJob.source_sha &&
-            receipt.kind === currentJob.kind &&
+            receipt.kind === currentJob.kind && (receipt.source_pr === undefined || receipt.source_pr === currentJob.source_pr) &&
             /^[a-f0-9-]{36}$/i.test(receipt.attempt_id || '') &&
             Number.isSafeInteger(Number(c.id)) && Number(c.id) > 0 &&
             ['STARTED','WAITING','FINISHED','BLOCKED'].includes(receipt.state)) {
@@ -2944,9 +3108,12 @@
         receiptCommentId: matchedReceiptCommentId,
         receiptResolution,
         codexAcceptance: matchedAcceptance,
+        lastTerminal: findLastTerminalReceipt(goalComments, issueComments, goalIdentity,
+          goalSourceComplete, issueSourceComplete, currentJob, goalReferenceVerified),
       },
       directCli,
       historical,
+      modelEligibility: w2ModelEligibility(workerRecord, osFreshness, currentJob, goalReferenceVerified),
     };
   }
   function workerMetricSummary(records, dispatchData, w2Evidence, osFresh, sourcesComplete) {
@@ -2973,15 +3140,19 @@
     if (!native.sourceComplete) {
       text('w2-native-task', 'Issue #310 最新評論分頁未核對；schema-6 派工狀態未知');
     } else if (!job) {
-      text('w2-native-task', '尚無正式 schema-6 派工');
+      text('w2-native-task', '未觀測到正式 schema-6 W2 請求（不代表原生佇列為空或無 READY Goal 工作）');
     }
     if (job) text('w2-native-task', job.request_id + '（Issue #310 comment #' +
       evidence.native.jobCommentId + ' · PR #' + job.source_pr + ' @' + job.source_sha +
-      ' · GOAL ' + (evidence.native.goalReferenceVerified ? '已核對' : '未核對') + '）');
+      ' · GOAL ' + (evidence.native.goalReferenceVerified ? '已核對' : '未核對；任務身分 UNKNOWN') + '）');
 
     if (receipt?.attempt_id) {
       const lifecycle = receipt.state === 'FINISHED' ? 'FINISHED（生命週期結束；非驗收）' : receipt.state;
       text('w2-native-attempt', `批次 ${receipt.attempt_id} · ${lifecycle}${receipt.outcome ? ' · ' + receipt.outcome : ''}`);
+    } else if (job && native.receiptResolution === 'NO_MATCHING_RECEIPT') {
+      text('w2-native-attempt', '已觀測到正式請求；尚未觀測到 Worker 收據（request observed; Worker receipt not observed）');
+    } else if (native.receiptResolution === 'GOAL_REFERENCE_UNVERIFIED') {
+      text('w2-native-attempt', 'Human GOAL 身分／雜湊未核對；attempt 狀態 UNKNOWN');
     } else if (native.receiptResolution === 'MULTIPLE_ATTEMPTS_UNBOUND') {
       text('w2-native-attempt', '同一 request 有多個 attempt；尚無精確 attempt 綁定，未自動挑選');
     } else if (native.receiptResolution === 'EXPECTED_ATTEMPT_NOT_FOUND') {
@@ -2998,6 +3169,10 @@
 
     if (receipt?.session_id) {
       text('w2-native-session', String(receipt.session_id));
+    } else if (job && native.receiptResolution === 'NO_MATCHING_RECEIPT') {
+      text('w2-native-session', '最新請求尚未讀回工作階段（Session UNKNOWN）');
+    } else if (native.receiptResolution === 'GOAL_REFERENCE_UNVERIFIED') {
+      text('w2-native-session', 'Human GOAL 身分／雜湊未核對；Session UNKNOWN');
     } else if (native.receiptResolution === 'MULTIPLE_ATTEMPTS_UNBOUND') {
       text('w2-native-session', '多個 attempt 未唯一綁定；Session UNKNOWN');
     } else if (native.receiptResolution === 'EXPECTED_ATTEMPT_NOT_FOUND') {
@@ -3018,13 +3193,17 @@
       const testSummary = tests ? ` · 測試 ${tests.passed}/${tests.total} · 失敗 ${tests.failed} · 略過 ${tests.skipped}` : '';
       const source = codex?.sourceAcceptance;
       const sourceSummary = source
-        ? ` · Diff SHA-256=${source.diff_sha256} · 結果 PR #${source.result_pr} MERGED · ` +
-          `head ${source.result_head} · merge ${source.merge_commit} · main readback ${source.main_readback} · ` +
+        ? ` · Diff SHA-256=${source.diff_sha256} · 結果 PR #${source.result_pr} ${source.result_pr_state} · ` +
+          `head ${source.result_head} · ${source.merge_commit ? 'merge ' + source.merge_commit + ' · main readback ' + (source.main_readback || 'UNKNOWN') : 'merge ' + (source.runtime_deployment === 'NOT_PERFORMED' ? 'NOT_PERFORMED' : 'UNKNOWN') + ' · runtime ' + (source.runtime_deployment || 'UNKNOWN')} · ` +
           `收據 checks ${source.exact_head_checks} · GitHub 精確 HEAD checks ${source.result_checks} · legacy ${source.legacy_check} · ` +
           `測試 ${source.source_test}`
         : '';
       const codexAcc = codex ? `Codex source_acceptance=${codex.codex_source_acceptance} · CI=${codex.exact_head_ci}${sourceSummary}${testSummary} · external_effects=${codex.external_effects || 'UNKNOWN'}` : 'Codex 驗收紀錄未讀回';
       text('w2-native-acceptance', `${workerAcc}；${codexAcc}`);
+    } else if (job && native.receiptResolution === 'NO_MATCHING_RECEIPT') {
+      text('w2-native-acceptance', '最新請求尚未讀回 Worker 收據；Worker 終態與驗收 UNKNOWN');
+    } else if (native.receiptResolution === 'GOAL_REFERENCE_UNVERIFIED') {
+      text('w2-native-acceptance', 'Human GOAL 身分／雜湊未核對；Worker 終態與 Codex source acceptance UNKNOWN');
     } else if (native.receiptResolution === 'MULTIPLE_ATTEMPTS_UNBOUND') {
       text('w2-native-acceptance', '多個 attempt 未唯一綁定；Worker 終態與 Codex source acceptance 保留 UNKNOWN');
     } else if (native.receiptResolution === 'EXPECTED_ATTEMPT_NOT_FOUND') {
@@ -3066,6 +3245,24 @@
     } else {
       text('w2-direct-tests', '未確認');
     }
+
+    const lastTerm = native.lastTerminal;
+    const term = lastTerm?.receipt;
+    if (!native.sourceComplete || !native.issueSourceComplete) {
+      text('w2-last-result', 'UNKNOWN：來源資料未完整讀回');
+    } else if (lastTerm?.status === 'GOAL_REFERENCE_UNVERIFIED') {
+      text('w2-last-result', 'UNKNOWN：Human GOAL 身分／雜湊未核對');
+    } else if (lastTerm?.status === 'MULTIPLE_ATTEMPTS_UNBOUND') {
+      text('w2-last-result', 'UNKNOWN：同一 request 有多個 attempt 未安全綁定');
+    } else if (term) {
+      const termLifecycle = term.receipt.state === 'FINISHED' ? 'FINISHED（生命週期結束；非驗收）' : term.receipt.state;
+      const outcome = term.receipt.outcome ? ' · ' + term.receipt.outcome : '';
+      text('w2-last-result', `最近終態收據：${term.job.request_id} · 批次 ${term.receipt.attempt_id} · ${termLifecycle}${outcome} · Worker task_acceptance=${term.task_acceptance || 'UNKNOWN'} · external_effects=${term.external_effects || 'UNKNOWN'}`);
+    } else {
+      text('w2-last-result', '尚無已確認的終態收據');
+    }
+
+    text('w2-model-eligibility', w2ModelEligibilityLabel(evidence?.modelEligibility || 'UNKNOWN'));
 
     if (historical) {
       text('w2-historical', `歷史嘗試 ${historical.attempt_id} · ${historical.state} · ${historical.classification} · external_effects=${historical.external_effects}`);
@@ -3284,7 +3481,7 @@
       resources.goal?.identity || null,resources.goal?.latestComplete === true,
       resources.issue?.latestComplete === true,
       dispatchData.W2?.requestId ? {requestId:dispatchData.W2.requestId,
-        attemptId:dispatchData.W2.expectedAttemptId} : null,w2ResultPull,w2ResultChecks);
+        attemptId:dispatchData.W2.expectedAttemptId} : null,w2ResultPull,w2ResultChecks,workerRecord(snapshot,'W2'),osFreshness);
     renderW2Evidence(w2Evidence);
     const workerSourcesComplete=issueReadFreshness === 'FRESH' &&
       resources.issue?.latestComplete === true && resources.goal?.latestComplete === true;
@@ -3562,6 +3759,7 @@
     freshnessOfSnapshot, createApiClient, createResourceStore, renderRateStatus,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
     w2EvidenceData, renderW2Evidence, workerMetricSummary, modelExecutionSwitchLabel,
+    w2ModelEligibility, w2ModelEligibilityLabel, findLastTerminalReceipt,
     hashHumanGoalComment, validDirectCliDelivery,
     constants:{ ISSUE_POLL_MS, PR_POLL_MS, CHECKS_POLL_MS, MAIN_POLL_MS,
       MANUAL_SYNC_MIN_MS, LOW_REMAINING_THRESHOLD, MAX_LIVE_AGE_MS },
