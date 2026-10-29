@@ -2977,8 +2977,31 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
         const addDirIndex=args.indexOf('--add-dir');
         assert.notEqual(addDirIndex,-1,'execution must explicitly add the attempt checkout to the selected project');
         assert.equal(args[addDirIndex+1],workspace);
-        assert.ok(JSON.parse(options.stdinText).message.content.includes(resolve(workspace,'src/worker.mjs')),
+        const promptContent = JSON.parse(options.stdinText).message.content;
+        assert.ok(promptContent.includes(resolve(workspace,'src/worker.mjs')),
           'the file tool must receive the exact absolute path inside the attempt checkout');
+        assert.ok(promptContent.includes('Use only the exact absolute paths supplied for the current attempt workspace. Never resolve or edit a path from the registered parent project.'),
+          'prompt must enforce attempt-workspace absolute paths and forbid parent project resolution');
+        assert.ok(promptContent.includes('Read files from byte offset zero in bounded chunks no larger than 16 KiB'),
+          'prompt must require bounded reads no larger than 16 KiB starting from offset zero');
+        assert.ok(promptContent.includes('never use a line number or an offset beyond the returned content/file length'),
+          'prompt must forbid line numbers and invalid offsets');
+        assert.ok(promptContent.includes('Immediately before each `edit_file`, reread the exact current target text from the same path and attempt workspace'),
+          'prompt must require fresh target text readback immediately before each edit_file');
+        assert.ok(promptContent.includes('Build the replacement from that fresh text, not from an earlier read or remembered source'),
+          'prompt must require replacement to be built from fresh text');
+        assert.ok(promptContent.includes('If an exact target no longer matches, reread the affected section once and adjust to the current exact text'),
+          'prompt must require one reread on target mismatch');
+        assert.ok(promptContent.includes('stop without broad replacement and report the blocker'),
+          'prompt must require stopping without broad replacement if target is ambiguous or absent');
+        assert.ok(promptContent.includes('After each edit, reread the changed span and verify the intended result before proceeding'),
+          'prompt must require post-edit readback verification');
+        assert.ok(promptContent.includes('Do not run shell commands, access the network, inspect credentials, or edit any other path'),
+          'prompt must retain existing non-file-tool restrictions');
+        assert.ok(promptContent.includes('Do not request broader permissions'),
+          'prompt must forbid requesting broader permissions');
+        assert.ok(promptContent.includes('If a required permission or file is unavailable, report the blocker without requesting broader access'),
+          'prompt must report blockers without broader access');
         assert.equal(args.includes('--print'),false,
           'stream-json mode reads the prompt from stdin and must not pass the print alias');
         assert.equal(args.includes('--prompt'),false);

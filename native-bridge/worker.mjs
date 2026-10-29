@@ -1568,8 +1568,19 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
 
   const scopedAbsolutePaths = job.edit_paths.map(path => resolve(config.workspace, path));
   const prompt = `${spec}\n\nThe only writable files are these exact absolute paths inside this attempt workspace: ` +
-    `${scopedAbsolutePaths.join(', ')}. Use these absolute paths; do not resolve the paths from the registered parent project. ` +
+    `${scopedAbsolutePaths.join(', ')}. Use only the exact absolute paths supplied for the current attempt workspace. ` +
+    'Never resolve or edit a path from the registered parent project. ' +
+    'Read files from byte offset zero in bounded chunks no larger than 16 KiB. ' +
+    'If more content is needed, use the known byte length and a valid next byte offset; never use a line number or an offset beyond the returned content/file length. ' +
+    'Immediately before each `edit_file`, reread the exact current target text from the same path and attempt workspace. ' +
+    'Build the replacement from that fresh text, not from an earlier read or remembered source. ' +
+    'If an exact target no longer matches, reread the affected section once and adjust to the current exact text. ' +
+    'If the target is still ambiguous or absent, stop without broad replacement and report the blocker. ' +
+    'After each edit, reread the changed span and verify the intended result before proceeding. ' +
+
     'Do not run shell commands, access the network, inspect credentials, or edit any other path. ' +
+    'Do not request broader permissions. ' +
+
     'If a required permission or file is unavailable, report the blocker without requesting broader access.';
   // Stream-json mode exclusively consumes user prompts from stdin; passing the
   // --print alias here can consume the next option as a positional prompt.
