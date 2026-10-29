@@ -72,6 +72,67 @@ test('Windows V2 APPDATA candidates are not version-probed unless Authenticode p
   } finally {rmSync(tmp,{recursive:true,force:true});}
 });
 
+test('Windows V2 skips an unsigned newer APPDATA CLI, falls back to an older signed CLI, and does not launch a model', async () => {
+  const tmp=mkdtempSync(join(tmpdir(),'oc2-appdata-signed-fallback-'));
+  try {
+    const home=join(tmp,'user'), appData=join(tmp,'roaming');
+    const workspace=join(tmp,'workspace'), stateDir=join(tmp,'state');
+    const cliRoot=join(appData,'ai.opencode.desktop','cli');
+    const newer=join(cliRoot,'2.1.3-x64','opencode-cli.exe');
+    const older=join(cliRoot,'2.1.2-x64','opencode-cli.exe');
+    mkdirSync(home);
+    mkdirSync(workspace);
+    mkdirSync(stateDir);
+    mkdirSync(join(cliRoot,'2.1.3-x64'),{recursive:true});
+    mkdirSync(join(cliRoot,'2.1.2-x64'),{recursive:true});
+    writeFileSync(newer,'synthetic untrusted executable');
+    writeFileSync(older,'synthetic signed executable');
+
+    const env={PATH:'',USERPROFILE:home,APPDATA:appData};
+    const signatureCalls=[],versionCalls=[];
+    let authCalls=0,modelLaunches=0;
+    const model='opencode/deepseek-v4.1-flash-free';
+    const job={schema:6,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'W1-REGRESSION',
+      request_id:'PTYSD_W1_SIGNED_CLI_FALLBACK_20261029',kind:'opencode_edit',source_pr:900001,
+      source_sha:'a'.repeat(40),goal_comment_id:900002,goal_body_sha256:'b'.repeat(64),
+      spec_path:'native-bridge/tasks/w1-opencode-signed-cli-fallback.md',
+      spec_sha256:'c'.repeat(64),model,variant:null,edit_paths:['src/worker.mjs']};
+    const config={workspace,state_dir:stateDir,enable_v2_model_runs:true,
+      allowed_models:{[model]:[null]},unauthenticated_free_models:[model]};
+    const result=await runPlan('Synthetic W1 fallback regression; no provider or model process may run.',
+      config,job,'55555555-5555-4555-8555-555555555555',{
+        qualifyOpenCodeV2:()=>qualifyOpenCodeV2(env,true,(path,args)=>{
+          versionCalls.push([path,args]);
+          return 'opencode v2.1.2';
+        },path=>{
+          signatureCalls.push(path);
+          return path===older;
+        }),
+        readV2ProviderAuth:(bin,provider,directory)=>{
+          authCalls++;
+          assert.equal(bin,older,'the older trusted CLI is selected for metadata checks');
+          assert.equal(provider,'opencode');
+          assert.equal(directory,workspace);
+          return {status:'AUTH_PROVIDER_METADATA_UNKNOWN'};
+        },
+        async runCapturedProcess(){
+          modelLaunches++;
+          throw new Error('MODEL_PROCESS_MUST_NOT_BE_REACHED');
+        },
+      });
+
+    assert.deepEqual(signatureCalls,[newer,older],
+      'newest APPDATA candidate is rejected before falling back to the older signed CLI');
+    assert.deepEqual(versionCalls,[[older,['--version']]],
+      'the untrusted newer candidate must never receive a --version call');
+    assert.equal(authCalls,1);
+    assert.equal(result.outcome,'OPENCODE_V2_AUTH_METADATA_UNKNOWN');
+    assert.equal(result.eligibility_state,'WAITING');
+    assert.equal(result.model_invoked,false);
+    assert.equal(modelLaunches,0,'unknown auth metadata must stop before any model launch');
+  } finally {rmSync(tmp,{recursive:true,force:true});}
+});
+
 test('real provider-auth parser reports an absent saved-provider record without auth login', () => {
   const calls=[];
   for (const raw of ['[]','{}']) {
