@@ -1030,6 +1030,155 @@ test('a terminal W1 edit releases its path lease so the next distinct W1 request
   'selecting the newer request does not invent an attempt receipt');
 });
 
+test('a later W1 poll starts and dispatches the next distinct edit after the prior terminal receipt', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-w1-next-after-terminal-poll-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const stateDir = join(root, 'state');
+    mkdirSync(workspace);
+    mkdirSync(join(workspace, 'native-bridge'), { recursive: true });
+    writeFileSync(join(workspace, 'native-bridge', 'worker.mjs'), 'export const fixture = true;\n');
+    mkdirSync(stateDir);
+    const host = hostname().toUpperCase();
+    const spec = 'Synthetic W1 continuation task; dispatch only, never invoke a model.';
+    const request = requestId => withHumanGoal({
+      project_id: PROJECT,
+      host,
+      request_id: requestId,
+      kind: 'opencode_edit',
+      source_sha: commit,
+      spec_path: 'native-bridge/tasks/w1-next-request-after-terminal.md',
+      spec_sha256: h(spec),
+      model: 'opencode/deepseek-v4.1-flash-free',
+      variant: 'free',
+      edit_paths: ['native-bridge/worker.mjs'],
+      source_pr: 437,
+    });
+    const priorJob = request('PTYSD_W1_TERMINAL_BEFORE_NEXT_POLL_20261030');
+    const nextJob = request('PTYSD_W1_NEXT_POLL_DISPATCH_ONCE_20261030');
+    const sourceComment = (id, job) => ({
+      ...com(id, encoded(job)),
+      issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
+    });
+    const goalJobs = [sourceComment(901, priorJob), sourceComment(902, nextJob)];
+    const priorAttemptId = '99999999-9999-4999-8999-999999999998';
+    const priorTerminal = receipt(priorJob.request_id, priorAttemptId, 'FINISHED', priorJob, {
+      outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED',
+      exit_code: 0,
+      model_invoked: true,
+      session_id: '77777777-7777-4777-8777-777777777778',
+      external_effects: 'UNKNOWN',
+      source_diff_evidence: 'CAPTURED',
+      task_acceptance: 'UNKNOWN',
+      coding_state: 'DIFF_CAPTURED_UNVERIFIED',
+      scope_valid: true,
+      diff_sha256: 'd'.repeat(64),
+      diff_bytes: 96,
+      changed_files: ['native-bridge/worker.mjs'],
+    });
+    assert.equal(priorTerminal.external_effects, 'UNKNOWN');
+    assert.equal(priorTerminal.task_acceptance, 'UNKNOWN');
+    const receiptComments = [com(903, RECEIPT_MARKER + JSON.stringify(priorTerminal), 'worker')];
+    const executor = executorDescriptorForLane('OpenCode', 1001);
+    const config = {
+      repo: REPO,
+      project_id: PROJECT,
+      host,
+      issue: 407,
+      workspace,
+      state_dir: stateDir,
+      dispatchers: ['t14210184'],
+      executors: { opencode: executor },
+      enable_v2_model_runs: true,
+      allowed_models: { 'opencode/deepseek-v4.1-flash-free': ['free'] },
+    };
+    const posted = [];
+    const logs = [];
+    let nextCommentId = 904;
+    let bundles = 0;
+    let dispatches = 0;
+    const adapters = {
+      goalCommentsRead: () => [humanGoalComment(), ...goalJobs],
+      readExecutorWorkspace: descriptor => {
+        assert.equal(descriptor, executor);
+        return workspace;
+      },
+      apiRead(uri) {
+        if (uri === 'user') return { login: 'worker' };
+        if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
+        if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: commit } };
+        if (uri === `repos/${REPO}/issues/comments/6188322050`) return humanGoalComment();
+        if (uri === `repos/${REPO}/pulls/437`) return {
+          number: 437,
+          state: 'open',
+          base: { ref: 'main', repo: { id: 1352411536, full_name: REPO } },
+          head: { sha: commit, repo: { id: 1352411536, full_name: REPO } },
+        };
+        const commentMatch = uri.match(new RegExp(
+          `^repos/${REPO.replaceAll('/', '\\/')}\/issues\/comments\\/(\\d+)$`));
+        if (commentMatch) return goalJobs.find(item => item.id === Number(commentMatch[1]));
+        if (uri.startsWith(`repos/${REPO}/contents/`))
+          return { encoding: 'base64', content: Buffer.from(spec).toString('base64') };
+        throw new Error(`UNEXPECTED_W1_NEXT_AFTER_TERMINAL_API_${uri}`);
+      },
+      commentsRead: () => receiptComments,
+      assertExecutorTaskReady: descriptor => {
+        assert.equal(descriptor, executor);
+        return { ready: true };
+      },
+      createExecutorSourceBundle: ({ descriptor, job, attemptId }) => {
+        assert.equal(descriptor, executor);
+        assert.equal(job.request_id, nextJob.request_id);
+        assert.equal(job.source_sha, commit);
+        assert.equal(job.source_pr, 437);
+        assert.deepEqual(job.edit_paths, ['native-bridge/worker.mjs']);
+        bundles++;
+        return { attempt_id: attemptId, source_sha: job.source_sha, sha256: 'c'.repeat(64) };
+      },
+      dispatchToExecutor: (descriptor, manifest) => {
+        assert.equal(descriptor, executor);
+        assert.equal(manifest.job.request_id, nextJob.request_id);
+        assert.equal(manifest.source_bundle_sha256, 'c'.repeat(64));
+        dispatches++;
+        return { outcome: 'SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION' };
+      },
+      writeReceipt(receiptConfig, data, login) {
+        assert.equal(receiptConfig.issue, 407);
+        posted.push(data);
+        receiptComments.push(com(nextCommentId++, RECEIPT_MARKER + JSON.stringify(data), login));
+      },
+      runPlan: () => { throw new Error('DISPATCH_MUST_NOT_INVOKE_A_MODEL_INLINE'); },
+      observationDependencies: { collectWindowsObservation: () => ({ status: 'UNKNOWN' }) },
+      log: value => logs.push(value),
+    };
+
+    const result = await runWorkerImplementation(config, adapters);
+    assert.equal(result.state, 'DISPATCHED', JSON.stringify({ result, logs }));
+    assert.equal(result.request_id, nextJob.request_id);
+    assert.equal(bundles, 1);
+    assert.equal(dispatches, 1);
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].request_id, nextJob.request_id);
+    assert.equal(posted[0].attempt_id, result.attempt_id);
+    assert.equal(posted[0].state, 'STARTED');
+    assert.equal(posted[0].model_invoked, null,
+      'executor dispatch is not evidence that the model has started');
+    assert.equal(posted[0].task_acceptance, 'UNKNOWN');
+    assert.equal(posted[0].external_effects, 'UNKNOWN');
+    assert.equal(posted[0].source_diff_evidence, 'NOT_INSPECTED');
+    assert.equal(posted[0].source_sha, commit);
+    assert.equal(posted[0].source_pr, 437);
+    assert.equal(posted.some(item => item.request_id === priorJob.request_id), false,
+      'the prior terminal attempt is not replayed on the next poll');
+    assert.equal(receiptComments.filter(item => parseReceipt(item.body)?.request_id === nextJob.request_id).length, 1,
+      'the next W1 request has exactly one durable STARTED receipt');
+    assert.ok(!logs.some(value => value.startsWith('OPENCODE_LANE_WAITING_ELIGIBILITY_')),
+      logs.join('\n'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('fresh OS publication does not carry stale W1 activity or incident state into the new snapshot', async () => {
   const staleAt = Date.now() - 24 * 60 * 60 * 1000;
   const prior = seededOperatorObservation(OPERATOR_COMMENT_ID, 17, commit, staleAt);
