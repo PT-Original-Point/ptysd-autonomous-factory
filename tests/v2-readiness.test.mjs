@@ -1548,6 +1548,143 @@ test('Antigravity readiness requests JSON usage and parses the official envelope
   assert.deepEqual(calls[3], ['--print', '/usage', '--output-format', 'json']);
 });
 
+test('Antigravity JSON usage readiness rejects mismatched command name or nested command error', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'pty-agy-mismatched-usage-'));
+  const workspace = mkdtempSync(join(tmpdir(), 'pty-agy-mismatched-workspace-'));
+  const settingsDir = join(profile, '.gemini', 'antigravity-cli');
+  const required = ['command(*)', 'unsandboxed(*)', 'read_url(*)', 'execute_url(*)', 'mcp(*)'];
+  mkdirSync(settingsDir, { recursive: true });
+  writeFileSync(join(settingsDir, 'settings.json'), JSON.stringify({
+    useG1Credits: false,
+    permissions: { deny: required },
+  }));
+  const help = '--project --add-dir --print --output-format stream-json --model --effort --sandbox --mode accept-edits';
+  const syntheticMarker = 'synthetic-marker-not-leaked@example.invalid';
+  const syntheticAccountId = 'synthetic-account-id-98765';
+  const cases = [
+    {
+      description: 'outer SUCCESS with command.name credits',
+      payload: JSON.stringify({
+        status: 'SUCCESS',
+        account: { id: syntheticAccountId, email: syntheticMarker },
+        email: syntheticMarker,
+        command: {
+          name: 'credits',
+          status: 'SUCCESS',
+          data: {
+            groups: [{
+              name: 'Gemini Models',
+              buckets: [
+                { name: 'Weekly Limit Remaining', remaining_fraction: 0.8941181898117065,
+                  reset_time: '2026-10-23T22:50:38Z' },
+                { name: 'Five Hour Limit Remaining', remaining_fraction: 0.9974105358123779,
+                  reset_time: '2026-10-23T18:43:08Z' },
+              ],
+            }],
+          },
+        },
+      }),
+    },
+    {
+      description: 'usage command with non-null command.error',
+      payload: JSON.stringify({
+        status: 'SUCCESS',
+        account: { id: syntheticAccountId, email: syntheticMarker },
+        email: syntheticMarker,
+        command: {
+          name: 'usage',
+          status: 'SUCCESS',
+          error: { code: 'COMMAND_ERROR', message: `nested failure: ${syntheticMarker}` },
+          data: {
+            groups: [{
+              name: 'Gemini Models',
+              buckets: [
+                { name: 'Weekly Limit Remaining', remaining_fraction: 0.8941181898117065,
+                  reset_time: '2026-10-23T22:50:38Z' },
+                { name: 'Five Hour Limit Remaining', remaining_fraction: 0.9974105358123779,
+                  reset_time: '2026-10-23T18:43:08Z' },
+              ],
+            }],
+          },
+        },
+      }),
+    },
+    {
+      description: 'usage command with non-success nested command status',
+      payload: JSON.stringify({
+        status: 'SUCCESS',
+        account: { id: syntheticAccountId, email: syntheticMarker },
+        email: syntheticMarker,
+        command: {
+          name: 'usage',
+          status: 'ERROR',
+          error: { code: 'COMMAND_FAILED', message: `nested failure: ${syntheticMarker}` },
+          data: {
+            groups: [{
+              name: 'Gemini Models',
+              buckets: [
+                { name: 'Weekly Limit Remaining', remaining_fraction: 0.8941181898117065,
+                  reset_time: '2026-10-23T22:50:38Z' },
+                { name: 'Five Hour Limit Remaining', remaining_fraction: 0.9974105358123779,
+                  reset_time: '2026-10-23T18:43:08Z' },
+              ],
+            }],
+          },
+        },
+      }),
+    },
+  ];
+
+  try {
+    writeAntigravityProject(profile, testProjectId, workspace);
+    for (const testCase of cases) {
+      const calls = [];
+      const runner = (_bin, args) => {
+        calls.push([...args]);
+        const rest = args[0] === `--project=${testProjectId}` ? args.slice(1) : args;
+        if (rest[0] === '--version') return '1.4.6';
+        if (rest[0] === '--help') return help;
+        if (rest[0] === 'models') return 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n';
+        if (rest[0] === '--print' && rest[1] === '/usage') return testCase.payload;
+        throw new Error(`Unexpected metadata command: ${args.join(' ')}`);
+      };
+
+      const readiness = runAntigravityV2Readiness(process.execPath, workspace, runner,
+        { USERPROFILE: profile, PATH: 'clean' }, () => true, testProjectId);
+
+      // Quota read & auth evidence not established
+      assert.notEqual(readiness.gemini_aggregate_quota?.status, 'GEMINI_AGGREGATE_QUOTA_READ');
+      assert.notEqual(readiness.authentication_evidence, 'AUTHENTICATED_QUOTA_READ');
+
+      // Authentication left unchecked/unknown, reports safe usage-output failure classification
+      assert.equal(readiness.authentication_checked, false);
+      assert.equal(readiness.authentication_evidence, 'UNVERIFIED');
+      assert.ok(readiness.issues.includes('ANTIGRAVITY_USAGE_OUTPUT_UNRECOGNIZED'));
+
+      // Execution-readiness gate fails with aggregate-quota-unknown reason
+      assert.equal(readiness.gemini_aggregate_quota?.status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+      assert.equal(readiness.gemini_aggregate_quota?.weekly_remaining_percent, null);
+      assert.equal(readiness.gemini_aggregate_quota?.five_hour_remaining_percent, null);
+      assert.equal(antigravityV2ReadinessExecutionFailure(readiness), 'ANTIGRAVITY_CLI_AUTH_NOT_VERIFIED');
+      assert.equal(antigravityV2ReadinessExecutionFailure({
+        ...readiness,
+        authentication_checked: true,
+        authentication_evidence: 'AUTHENTICATED_QUOTA_READ',
+        issues: [],
+      }), 'ANTIGRAVITY_AGGREGATE_QUOTA_UNKNOWN');
+
+      // No inference executed, no synthetic marker exposed
+      assert.equal(readiness.inference_executed, false);
+      assert.equal(JSON.stringify(readiness).includes(syntheticMarker), false);
+      assert.equal(JSON.stringify(readiness).includes(syntheticAccountId), false);
+      assert.deepEqual(calls[3], [`--project=${testProjectId}`, '--print', '/usage', '--output-format', 'json']);
+    }
+  } finally {
+    rmSync(profile, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test('Antigravity run evidence captures missing read target regression reason', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'pty-agy-read-fail-'));
   const session = '31e0c0de-0000-4000-8000-000000000041';
