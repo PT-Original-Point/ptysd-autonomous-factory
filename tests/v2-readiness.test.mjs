@@ -10,7 +10,9 @@ import { summarizeV2AuthJson, summarizeV2AuthProviderJson, summarizeV2Models, re
   runAntigravityV2Readiness, summarizeAntigravityUsage, summarizeAntigravityToolPolicy,
   readAntigravityProjectBinding, resolveAntigravityProjectId,
   antigravityV2ReadinessExecutionFailure, readAntigravityV2RunEvidence,
-  runAntigravityMetadata }
+  runAntigravityMetadata, ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS,
+  classifyAntigravityFileToolReason, ANTIGRAVITY_FILE_TOOL_NAMES,
+  isAntigravityFileTool, summarizeAntigravityFileToolFailureReasons }
   from '../native-bridge/v2-readiness.mjs';
 
 test('auth JSON excludes provider identities, keys and account details', () => {
@@ -1544,4 +1546,371 @@ test('Antigravity readiness requests JSON usage and parses the official envelope
   assert.equal(readiness.authentication_evidence, 'AUTHENTICATED_QUOTA_READ');
   assert.equal(readiness.inference_executed, false);
   assert.deepEqual(calls[3], ['--print', '/usage', '--output-format', 'json']);
+});
+
+test('Antigravity run evidence captures missing read target regression reason', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-read-fail-'));
+  const session = '31e0c0de-0000-4000-8000-000000000041';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  try {
+    const events = [
+      { event: 'init', conversation_id: session,
+        init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'ERROR', step_type: 'tool', tool_name: 'read_file',
+        tool_info: { error: { code: 'ENOENT', message: 'C:\\Users\\worker\\candidate\\missing.txt: No such file or directory' } } } },
+      { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+        usage: { input_tokens: 10, output_tokens: 5, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 15 } } },
+    ];
+    const { stdoutPath, bytes } = writeAntigravityStdout(directory, events);
+    const result = await readAntigravityV2RunEvidence(stdoutPath,
+      createHash('sha256').update(bytes).digest('hex'), cwd);
+    assert.equal(result.valid, true);
+    assert.deepEqual(result.file_tool_failure_reasons, [ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.READ_TARGET_NOT_FOUND]);
+    assert.equal(result.tool_execution_failed_count, 1);
+    assert.equal(result.file_change_tool_failed_count, 0);
+    assert.equal(result.task_acceptance, 'UNKNOWN');
+    assert.equal(result.external_effects, 'UNKNOWN');
+    assert.equal(result.source_diff_evidence, 'NOT_INSPECTED');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity run evidence captures edit target-text mismatch regression reason', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-edit-mismatch-'));
+  const session = '31e0c0de-0000-4000-8000-000000000042';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  try {
+    const events = [
+      { event: 'init', conversation_id: session,
+        init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'ERROR', step_type: 'tool', tool_name: 'edit_file',
+        tool_info: {
+          parameters: { targetfile: 'C:\\Users\\worker\\candidate\\source.js' },
+          error: { code: 'TARGET_MISMATCH', message: 'target content not found in the file' }
+        } } },
+      { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+        usage: { input_tokens: 10, output_tokens: 5, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 15 } } },
+    ];
+    const { stdoutPath, bytes } = writeAntigravityStdout(directory, events);
+    const result = await readAntigravityV2RunEvidence(stdoutPath,
+      createHash('sha256').update(bytes).digest('hex'), cwd);
+    assert.equal(result.valid, true);
+    assert.deepEqual(result.file_tool_failure_reasons, [ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.EDIT_TARGET_TEXT_MISMATCH]);
+    assert.equal(result.tool_execution_failed_count, 1);
+    assert.equal(result.file_change_tool_failed_count, 1);
+    assert.equal(result.task_acceptance, 'UNKNOWN');
+    assert.equal(result.external_effects, 'UNKNOWN');
+    assert.equal(result.source_diff_evidence, 'NOT_INSPECTED');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity run evidence captures unrecognized file-tool error fallback', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-file-unknown-'));
+  const session = '31e0c0de-0000-4000-8000-000000000043';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  try {
+    const events = [
+      { event: 'init', conversation_id: session,
+        init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'ERROR', step_type: 'tool', tool_name: 'write_file',
+        tool_info: {
+          parameters: { filepath: 'C:\\Users\\worker\\candidate\\out.txt' },
+          error: { code: 'EACCES', message: 'EACCES: permission denied, open' }
+        } } },
+      { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+        usage: { input_tokens: 10, output_tokens: 5, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 15 } } },
+    ];
+    const { stdoutPath, bytes } = writeAntigravityStdout(directory, events);
+    const result = await readAntigravityV2RunEvidence(stdoutPath,
+      createHash('sha256').update(bytes).digest('hex'), cwd);
+    assert.equal(result.valid, true);
+    assert.deepEqual(result.file_tool_failure_reasons, [ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.FILE_TOOL_ERROR_UNKNOWN]);
+    assert.equal(result.tool_execution_failed_count, 1);
+    assert.equal(result.file_change_tool_failed_count, 1);
+    assert.equal(result.task_acceptance, 'UNKNOWN');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity run evidence reproduces W2 attempt trace with missing read and edit mismatch', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-w2-trace-'));
+  const session = '31e0c0de-0000-4000-8000-000000000044';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  try {
+    const events = [
+      { event: 'init', conversation_id: session,
+        init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'ERROR', step_type: 'tool', tool_name: 'read_file',
+        tool_info: { error: { message: 'File not found: missing-header.h' } } } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 1,
+        state: 'ERROR', step_type: 'tool', tool_name: 'edit_file',
+        tool_info: {
+          parameters: { targetfile: 'C:\\Users\\worker\\candidate\\main.c' },
+          error: { message: 'Target must exactly match existing file text' }
+        } } },
+      { event: 'result', result: { conversation_id: session, status: 'ERROR', response: 'Failed to apply edits',
+        usage: { input_tokens: 100, output_tokens: 20, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 120 } } },
+    ];
+    const { stdoutPath, bytes } = writeAntigravityStdout(directory, events);
+    const result = await readAntigravityV2RunEvidence(stdoutPath,
+      createHash('sha256').update(bytes).digest('hex'), cwd);
+    assert.equal(result.valid, true);
+    assert.equal(result.cli_status, 'ERROR');
+    assert.equal(result.run_disposition, 'CLI_ERROR_EFFECTS_UNKNOWN');
+    assert.deepEqual(result.file_tool_failure_reasons, [
+      ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.READ_TARGET_NOT_FOUND,
+      ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.EDIT_TARGET_TEXT_MISMATCH,
+    ]);
+    assert.equal(result.tool_execution_failed_count, 2);
+    assert.equal(result.file_change_tool_failed_count, 1);
+    assert.equal(result.task_acceptance, 'UNKNOWN');
+    assert.equal(result.external_effects, 'UNKNOWN');
+    assert.equal(result.source_diff_evidence, 'NOT_INSPECTED');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity run evidence deduplicates failure reasons in encounter order', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-dedup-'));
+  const session = '31e0c0de-0000-4000-8000-000000000045';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  try {
+    const events = [
+      { event: 'init', conversation_id: session,
+        init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'ERROR', step_type: 'tool', tool_name: 'read_file',
+        tool_info: { error: { code: 'ENOENT' } } } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 1,
+        state: 'ERROR', step_type: 'tool', tool_name: 'edit_file',
+        tool_info: { error: { code: 'TARGET_MISMATCH' } } } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 2,
+        state: 'ERROR', step_type: 'tool', tool_name: 'read_file',
+        tool_info: { error: { message: 'File does not exist' } } } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 3,
+        state: 'ERROR', step_type: 'tool', tool_name: 'write_file',
+        tool_info: { error: { code: 'EIO' } } } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 4,
+        state: 'ERROR', step_type: 'tool', tool_name: 'edit_file',
+        tool_info: { error: { message: 'Target text mismatch' } } } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 5,
+        state: 'ERROR', step_type: 'tool', tool_name: 'replace_file_content',
+        tool_info: { error: { code: 'UNKNOWN_INTERNAL_ERROR' } } } },
+      { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+        usage: { input_tokens: 10, output_tokens: 5, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 15 } } },
+    ];
+    const { stdoutPath, bytes } = writeAntigravityStdout(directory, events);
+    const result = await readAntigravityV2RunEvidence(stdoutPath,
+      createHash('sha256').update(bytes).digest('hex'), cwd);
+    assert.equal(result.valid, true);
+    assert.deepEqual(result.file_tool_failure_reasons, [
+      ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.READ_TARGET_NOT_FOUND,
+      ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.EDIT_TARGET_TEXT_MISMATCH,
+      ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.FILE_TOOL_ERROR_UNKNOWN,
+    ]);
+    assert.equal(result.tool_execution_failed_count, 6);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity run evidence strictly excludes raw provider errors, paths, and contents', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-privacy-'));
+  const session = '31e0c0de-0000-4000-8000-000000000046';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  const sensitivePath = 'C:\\Users\\alice\\.ssh\\id_rsa';
+  const sensitiveSecret = 'ghp_secret_credential_token_9876543210';
+  const sensitiveProviderMsg = 'Internal Google Gemini Provider failure code 500 RPC timeout';
+  const sensitiveContent = 'PRIVATE_KEY_BODY_DO_NOT_EXPOSE';
+  try {
+    const events = [
+      { event: 'init', conversation_id: session,
+        init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'ERROR', step_type: 'tool', tool_name: 'read_file',
+        tool_info: {
+          parameters: { path: sensitivePath },
+          error: { code: 'ENOENT', message: `Cannot find file ${sensitivePath}: ${sensitiveSecret}` }
+        } } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 1,
+        state: 'ERROR', step_type: 'tool', tool_name: 'edit_file',
+        tool_info: {
+          parameters: { targetfile: 'C:\\Users\\worker\\candidate\\code.js', target: sensitiveContent },
+          error: { code: 'EDIT_DENIED', message: sensitiveProviderMsg }
+        } } },
+      { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: 'response text',
+        usage: { input_tokens: 10, output_tokens: 5, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 15 } } },
+    ];
+    const { stdoutPath, bytes } = writeAntigravityStdout(directory, events);
+    const result = await readAntigravityV2RunEvidence(stdoutPath,
+      createHash('sha256').update(bytes).digest('hex'), cwd);
+    assert.equal(result.valid, true);
+
+    const serialized = JSON.stringify(result);
+    assert.equal(serialized.includes(sensitivePath), false, 'sensitive path must not be in run evidence');
+    assert.equal(serialized.includes(sensitiveSecret), false, 'secret token must not be in run evidence');
+    assert.equal(serialized.includes(sensitiveProviderMsg), false, 'raw provider error must not be in run evidence');
+    assert.equal(serialized.includes(sensitiveContent), false, 'file content must not be in run evidence');
+    assert.equal(serialized.includes('response text'), false, 'raw response text must not be in run evidence');
+
+    assert.deepEqual(result.file_tool_failure_reasons, [
+      ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.READ_TARGET_NOT_FOUND,
+      ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.FILE_TOOL_ERROR_UNKNOWN,
+    ]);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity non-file tool failure and successful tools produce empty failure reasons', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-nonfile-'));
+  const session = '31e0c0de-0000-4000-8000-000000000047';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  try {
+    const eventsNonFile = [
+      { event: 'init', conversation_id: session,
+        init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'ERROR', step_type: 'tool', tool_name: 'run_command',
+        tool_info: { error: { code: 'COMMAND_FAILED', message: 'Process exited with status 1' } } } },
+      { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+        usage: { input_tokens: 10, output_tokens: 5, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 15 } } },
+    ];
+    const { stdoutPath: nonFilePath } = writeAntigravityStdout(directory, eventsNonFile);
+    const nonFileResult = await readAntigravityV2RunEvidence(nonFilePath, null, cwd);
+    assert.equal(nonFileResult.valid, true);
+    assert.equal(nonFileResult.tool_execution_failed_count, 1);
+    assert.equal(nonFileResult.file_change_tool_failed_count, 0);
+    assert.deepEqual(nonFileResult.file_tool_failure_reasons, []);
+
+    const eventsClean = [
+      { event: 'init', conversation_id: session,
+        init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'DONE', step_type: 'tool', tool_name: 'read_file' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 1,
+        state: 'DONE', step_type: 'tool', tool_name: 'write_file',
+        tool_info: { parameters: { path: 'C:\\Users\\worker\\candidate\\file.txt' } } } },
+      { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+        usage: { input_tokens: 10, output_tokens: 5, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 15 } } },
+    ];
+    const { stdoutPath: cleanPath } = writeAntigravityStdout(directory, eventsClean);
+    const cleanResult = await readAntigravityV2RunEvidence(cleanPath, null, cwd);
+    assert.equal(cleanResult.valid, true);
+    assert.equal(cleanResult.tool_execution_failed_count, 0);
+    assert.equal(cleanResult.file_change_tool_completed_count, 1);
+    assert.deepEqual(cleanResult.file_tool_failure_reasons, []);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity file tool failure reasons agree across valid and invalid parser paths', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pty-agy-paths-'));
+  const session = '31e0c0de-0000-4000-8000-000000000048';
+  const cwd = 'C:\\Users\\worker\\candidate';
+  try {
+    const events = [
+      { event: 'init', conversation_id: session,
+        init: { model: 'gemini-3.8-flash-high', cwd, tools: [], permission_mode: 'accept-edits' } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 0,
+        state: 'ERROR', step_type: 'tool', tool_name: 'read_file',
+        tool_info: { error: { code: 'ENOENT' } } } },
+      { event: 'step_update', step_update: { conversation_id: session, step_index: 1,
+        state: 'ERROR', step_type: 'tool', tool_name: 'edit_file',
+        tool_info: { error: { code: 'TARGET_MISMATCH' } } } },
+      { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: '',
+        usage: { input_tokens: 10, output_tokens: 5, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 15 } } },
+    ];
+    const { stdoutPath, bytes } = writeAntigravityStdout(directory, events);
+    const validSha = createHash('sha256').update(bytes).digest('hex');
+
+    const validResult = await readAntigravityV2RunEvidence(stdoutPath, validSha, cwd);
+    assert.equal(validResult.valid, true);
+
+    const mismatchResult = await readAntigravityV2RunEvidence(stdoutPath, '0'.repeat(64), cwd);
+    assert.equal(mismatchResult.valid, false);
+    assert.equal(mismatchResult.reason, 'ANTIGRAVITY_CAPTURE_HASH_MISMATCH');
+
+    const { stdoutPath: truncPath } = writeAntigravityStdout(directory, events.slice(0, 3));
+    const truncResult = await readAntigravityV2RunEvidence(truncPath, null, cwd);
+    assert.equal(truncResult.valid, false);
+    assert.equal(truncResult.reason, 'ANTIGRAVITY_JSONL_INCOMPLETE');
+
+    const expected = [
+      ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.READ_TARGET_NOT_FOUND,
+      ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS.EDIT_TARGET_TEXT_MISMATCH,
+    ];
+    assert.deepEqual(validResult.file_tool_failure_reasons, expected);
+    assert.deepEqual(mismatchResult.file_tool_failure_reasons, expected);
+    assert.deepEqual(truncResult.file_tool_failure_reasons, expected);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Antigravity classifyAntigravityFileToolReason unit classifications and unknown fallbacks', () => {
+  assert.equal(classifyAntigravityFileToolReason('read_file', { error: { code: 'ENOENT' } }, 'ERROR'),
+    'READ_TARGET_NOT_FOUND');
+  assert.equal(classifyAntigravityFileToolReason('read_file', { error: { code: 'FILE_NOT_FOUND' } }, 'ERROR'),
+    'READ_TARGET_NOT_FOUND');
+  assert.equal(classifyAntigravityFileToolReason('read_file', { error: { message: 'no such file or directory' } }, 'ERROR'),
+    'READ_TARGET_NOT_FOUND');
+  assert.equal(classifyAntigravityFileToolReason('read_file', { error: { message: 'File not found: foo.txt' } }, 'ERROR'),
+    'READ_TARGET_NOT_FOUND');
+  assert.equal(classifyAntigravityFileToolReason('read_file', { error: { message: 'file does not exist' } }, 'ERROR'),
+    'READ_TARGET_NOT_FOUND');
+  assert.equal(classifyAntigravityFileToolReason('read_file', { error: { message: 'cannot find the path specified' } }, 'ERROR'),
+    'READ_TARGET_NOT_FOUND');
+  assert.equal(classifyAntigravityFileToolReason('read_file', null, 'ERROR', { message: 'missing file' }),
+    'READ_TARGET_NOT_FOUND');
+
+  assert.equal(classifyAntigravityFileToolReason('edit_file', { error: { code: 'TARGET_MISMATCH' } }, 'ERROR'),
+    'EDIT_TARGET_TEXT_MISMATCH');
+  assert.equal(classifyAntigravityFileToolReason('edit_file', { error: { code: 'EDIT_TARGET_TEXT_MISMATCH' } }, 'ERROR'),
+    'EDIT_TARGET_TEXT_MISMATCH');
+  assert.equal(classifyAntigravityFileToolReason('edit_file', { error: { message: 'target content not found in the file' } }, 'ERROR'),
+    'EDIT_TARGET_TEXT_MISMATCH');
+  assert.equal(classifyAntigravityFileToolReason('edit_file', { error: { message: 'Target must exactly match existing file text' } }, 'ERROR'),
+    'EDIT_TARGET_TEXT_MISMATCH');
+  assert.equal(classifyAntigravityFileToolReason('edit_file', { error: { message: 'target text mismatch' } }, 'ERROR'),
+    'EDIT_TARGET_TEXT_MISMATCH');
+  assert.equal(classifyAntigravityFileToolReason('replace_file_content', { error: { message: 'could not find target text' } }, 'ERROR'),
+    'EDIT_TARGET_TEXT_MISMATCH');
+  assert.equal(classifyAntigravityFileToolReason('replace_file_content', { error: { message: 'string to replace not found' } }, 'ERROR'),
+    'EDIT_TARGET_TEXT_MISMATCH');
+  assert.equal(classifyAntigravityFileToolReason('edit_file', { error: { code: 'SEARCH_STRING_NOT_FOUND' } }, 'ERROR'),
+    'EDIT_TARGET_TEXT_MISMATCH');
+
+  assert.equal(classifyAntigravityFileToolReason('read_file', { error: { code: 'EACCES', message: 'permission denied' } }, 'ERROR'),
+    'FILE_TOOL_ERROR_UNKNOWN');
+  assert.equal(classifyAntigravityFileToolReason('read_file', { error: { message: 'arbitrary provider internal error' } }, 'ERROR'),
+    'FILE_TOOL_ERROR_UNKNOWN');
+  assert.equal(classifyAntigravityFileToolReason('write_file', { error: { code: 'ENOSPC', message: 'no space left on device' } }, 'ERROR'),
+    'FILE_TOOL_ERROR_UNKNOWN');
+  assert.equal(classifyAntigravityFileToolReason('edit_file', { error: { code: 'EIO', message: 'input/output error' } }, 'ERROR'),
+    'FILE_TOOL_ERROR_UNKNOWN');
+  assert.equal(classifyAntigravityFileToolReason('edit_file', null, 'ERROR'),
+    'FILE_TOOL_ERROR_UNKNOWN');
+
+  assert.equal(classifyAntigravityFileToolReason('run_command', { error: { code: 'ENOENT' } }, 'ERROR'), null);
+  assert.equal(classifyAntigravityFileToolReason('run_command', { error: { code: 'TARGET_MISMATCH' } }, 'ERROR'), null);
+  assert.equal(classifyAntigravityFileToolReason('browser_navigate', { error: { message: 'not found' } }, 'ERROR'), null);
+  assert.equal(classifyAntigravityFileToolReason('unknown_tool', { error: { code: 'ENOENT' } }, 'ERROR'), null);
+
+  assert.equal(classifyAntigravityFileToolReason('read_file', null, 'DONE'), null);
+  assert.equal(classifyAntigravityFileToolReason('edit_file', null, 'DONE'), null);
+  assert.equal(classifyAntigravityFileToolReason('write_file', null, 'DONE'), null);
+});
+
+test('Antigravity summarizeAntigravityFileToolFailureReasons aggregates and deduplicates', () => {
+  const tools = new Map([
+    [0, { failed: true, failureReason: 'READ_TARGET_NOT_FOUND' }],
+    [1, { failed: true, failureReason: 'EDIT_TARGET_TEXT_MISMATCH' }],
+    [2, { failed: true, failureReason: 'READ_TARGET_NOT_FOUND' }],
+    [3, { failed: false, failureReason: null }],
+    [4, { failed: true, failureReason: 'FILE_TOOL_ERROR_UNKNOWN' }],
+    [5, { failed: true, failureReason: 'EDIT_TARGET_TEXT_MISMATCH' }],
+    [6, { failed: true, failureReason: null }],
+  ]);
+  assert.deepEqual(summarizeAntigravityFileToolFailureReasons(tools), [
+    'READ_TARGET_NOT_FOUND',
+    'EDIT_TARGET_TEXT_MISMATCH',
+    'FILE_TOOL_ERROR_UNKNOWN',
+  ]);
+  assert.deepEqual(summarizeAntigravityFileToolFailureReasons(new Map()), []);
+  assert.deepEqual(summarizeAntigravityFileToolFailureReasons(null), []);
 });
