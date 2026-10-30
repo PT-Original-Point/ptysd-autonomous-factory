@@ -825,8 +825,6 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     }
   }
   const writeOwners = [...jobs.values()];
-  const sourceJobKeys = new Set(writeOwners.filter(owner => !owner.duplicate)
-    .map(owner => `${owner.job.kind}\0${owner.job.request_id}`));
   const ownerKeys = new Set(writeOwners.map(owner => {
     const paths = jobWritePaths(owner.job);
     return paths ? `${owner.job.kind}\0${owner.job.request_id}\0${JSON.stringify([...paths].sort())}` : null;
@@ -840,9 +838,9 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
       const job = codexJobFromReceipt(receiptValue);
       if (!job) {
         // A pre-scope Codex receipt cannot identify which files its attempt
-        // may have touched. If its source job is gone, fence other writers
-        // until that receipt proves the attempt had no model or tool effects.
-        if (sourceJobKeys.has(requestKey)) continue;
+        // may have touched. A current source job with the same request ID does
+        // not recover that historical scope; fence other writers until the old
+        // receipt proves the attempt had no model or tool effects.
         const unknownScopeKey = `${requestKey}\0UNKNOWN_SCOPE`;
         if (ownerKeys.has(unknownScopeKey)) continue;
         ownerKeys.add(unknownScopeKey);
@@ -884,7 +882,8 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     } else if (liveMainSha !== null && v.job.source_sha !== liveMainSha) continue;
     const candidateWritePaths = jobWritePaths(v.job);
     if (candidateWritePaths && writeOwners.some(owner => {
-      if (owner.job.request_id === v.job.request_id && owner.job.kind === v.job.kind) return false;
+      if (!owner.unknownWriteScope && owner.job.request_id === v.job.request_id &&
+          owner.job.kind === v.job.kind) return false;
       if (owner.unknownWriteScope)
         return unresolvedWriteAttempt(owner.job, receipts.get(owner.job.request_id) || [], { workerLogin });
       const ownerWritePaths = jobWritePaths(owner.job);
@@ -2486,7 +2485,7 @@ function assertCodexResultScopeMatchesRequest(started, result, spool) {
 export function codexTerminalReceipt(started, result) {
   if (!HASH.test(started?.task_fingerprint || '')) throw new Error('CODEX_START_FINGERPRINT_REQUIRED');
   validateCodexExecutorResult(result, started);
-  const job = { ...started, schema: 3, model: started.model,
+  const job = { ...started, schema: started.job_schema === 4 ? 4 : 3, model: started.model,
     reasoning_effort: started.reasoning_effort };
   // FINISHED describes this attempt's terminal lifecycle only. Even the
   // unverified zero-exit outcome is never evidence of coding or acceptance.

@@ -942,6 +942,88 @@ test('unresolved Codex write_paths reserve overlapping W1 and W2 edit scopes, bu
   'a session-started terminal without a captured diff remains fenced even when model invocation is false');
 });
 
+test('legacy Codex unknown scope remains a global fence when a same-ID source job is present', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = commit;
+  const replacement = { ...codexPlan(['docs/new-review.md']), source_sha: sourceSha };
+  const requestId = replacement.request_id;
+  const legacy = { schema: 3, project_id: PROJECT, host, request_id: requestId,
+    kind: 'codex_plan', source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/codex-review.md', spec_sha256: hash,
+    model: 'gpt-6.1-sol', reasoning_effort: 'medium' };
+  const overlapping = withHumanGoal(mkjob({
+    request_id: 'PTYSD_READY_W1_POSSIBLE_LEGACY_SCOPE_OVERLAP', kind: 'opencode_edit',
+    source_sha: sourceSha, spec_path: 'native-bridge/tasks/conflict-test.md', spec_sha256: hash,
+    model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+    edit_paths: ['src/worker.mjs'], source_pr: 461,
+  }));
+  const legacyStarted = receipt(requestId, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    'STARTED', legacy, { model_invoked: true, session_started: true,
+      session_id: 'legacy_unknown_scope_session' });
+  const issueUrl = `https://api.github.com/repos/${REPO}/issues/310`;
+  const comments = [
+    { ...com(841, encoded(replacement)), issue_url: issueUrl },
+    { ...com(842, encoded(overlapping)), issue_url: issueUrl },
+    com(843, RECEIPT_MARKER + JSON.stringify(legacyStarted), 'worker'),
+  ];
+  assert.ok(parseJob(encoded(replacement)), 'the replacement is a valid current Codex source job');
+  assert.equal(Object.hasOwn(legacyStarted, 'write_paths'), false,
+    'the old Codex attempt has no recoverable write scope');
+  const heads = new Map([[461, sourceSha]]);
+  assert.equal(selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+    'a same-ID replacement source cannot release an unknown legacy Codex scope for another writer');
+  const noEffectTerminal = receipt(requestId, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    'BLOCKED', legacy, { model_invoked: false, session_started: false,
+      tool_execution_evidence: 'OBSERVED', tool_execution_count: 0,
+      file_change_tool_evidence: 'UNKNOWN' });
+  const reconciledComments = [comments[0], comments[1],
+    com(844, RECEIPT_MARKER + JSON.stringify(noEffectTerminal), 'worker')];
+  assert.equal(selectNext(reconciledComments, ['t14210184'], 'worker', host,
+    sourceSha, [], heads)?.id, 842,
+  'a same-ID source remains dispatchable after a worker-authored, observed zero-effect terminal');
+});
+
+test('schema-4 Codex terminal-only receipt releases its verified exact write scope', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = commit;
+  const codex = codexPlan(['src']);
+  const attemptId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const fingerprint = codexTaskFingerprint(codex);
+  const started = receipt(codex.request_id, attemptId, 'STARTED', codex, {
+    fingerprint, model_invoked: true, session_started: true, session_id: 'session_schema4',
+  });
+  const terminal = codexTerminalReceipt(started, {
+    schema: 1, kind: 'codex_plan', request_id: codex.request_id, attempt_id: attemptId,
+    source_sha: sourceSha, exit_code: 0, fingerprint, session_id: 'session_schema4',
+    diff_sha256: hash, stdout_sha256: hash, stderr_sha256: hash,
+    outcome: 'CODEX_CLI_EXIT_0_UNVERIFIED', model_invoked: true,
+    changed_paths: ['src/worker.mjs'], out_of_scope_paths: [], pr_url: null, tests: 'NOT_RUN',
+  });
+  const candidate = withHumanGoal(mkjob({
+    request_id: 'PTYSD_READY_W1_AFTER_TERMINAL_ONLY_CODEX', kind: 'opencode_edit',
+    source_sha: sourceSha, spec_path: 'native-bridge/tasks/conflict-test.md', spec_sha256: hash,
+    model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+    edit_paths: ['src/worker.mjs'], source_pr: 461,
+  }));
+  const issueUrl = `https://api.github.com/repos/${REPO}/issues/310`;
+  const comments = [
+    { ...com(851, encoded(candidate)), issue_url: issueUrl },
+    com(852, RECEIPT_MARKER + JSON.stringify(started), 'worker'),
+    com(853, RECEIPT_MARKER + JSON.stringify(terminal), 'worker'),
+  ];
+  assert.equal(terminal.job_schema, 4,
+    'the terminal keeps the authenticated schema-4 scope and Goal fingerprint');
+  assert.equal(selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[461, sourceSha]]))?.id, 851,
+  'a complete exact-source terminal releases only its authenticated path lease when source is gone');
+  const badFingerprintTerminal = { ...terminal, task_fingerprint: 'c'.repeat(64) };
+  const invalidComments = [comments[0], comments[1],
+    com(854, RECEIPT_MARKER + JSON.stringify(badFingerprintTerminal), 'worker')];
+  assert.equal(selectNext(invalidComments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[461, sourceSha]])), null,
+  'a terminal with a mismatched fingerprint cannot release the preceding STARTED lease');
+});
+
 test('an unresolved W1 edit scope also excludes an overlapping Codex plan', () => {
   const host = 'DESKTOP-1B6PD2P';
   const sourceSha = commit;
