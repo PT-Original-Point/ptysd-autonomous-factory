@@ -22,7 +22,9 @@ test('V2 model argument builders use isolated fresh runs without resuming a prio
   for (const args of [readonly, edit]) {
     assert.equal(args[0], 'run');
     assert.equal(args.includes('--session'), false, 'worker runs must not attach to a migrated session');
+    assert.equal(args.includes('-s'), false, 'worker runs must not attach to a session via its short flag');
     assert.equal(args.includes('--continue'), false, 'worker runs must not continue an earlier session');
+    assert.equal(args.includes('-c'), false, 'worker runs must not continue a session via its short flag');
   }
   assert.equal(readonly[readonly.indexOf('--model')+1],model);
   assert.equal(edit[edit.indexOf('--model')+1],model);
