@@ -129,8 +129,12 @@ test('Worker installation preserves the five-minute and logon recovery triggers 
   const schedule = installBlock.slice(scheduleStart, registerStart);
 
   assert.match(schedule,
-    /\$trigger\s*=\s*New-ScheduledTaskTrigger\s+-Once[\s\S]*?-RepetitionInterval\s+\(New-TimeSpan\s+-Minutes\s+5\)[\s\S]*?-RepetitionDuration\s+\(New-TimeSpan\s+-Days\s+3650\)/i,
+    /\$trigger\s*=\s*New-ScheduledTaskTrigger\s+-Once[\s\S]*?-RepetitionInterval\s+\(New-TimeSpan\s+-Minutes\s+5\)/i,
     'the Worker receives its five-minute recurring trigger');
+  assert.doesNotMatch(schedule, /-RepetitionDuration\b/i,
+    'the five-minute trigger has no finite repetition end');
+  assert.doesNotMatch(installBlock, /P3650D|New-TimeSpan\s+-Days\s+3650/i,
+    'the Worker schedule cannot expire after a fixed duration');
   assert.match(schedule,
     /\$logonTrigger\s*=\s*New-ScheduledTaskTrigger\s+-AtLogOn\s+-User\s+\$username/i,
     'recovery is triggered at logon for the already selected Windows user');
