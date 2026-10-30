@@ -15,7 +15,8 @@ import { ANTIGRAVITY_V2_MODEL, ANTIGRAVITY_RUN_DISPOSITIONS, buildNativeChildEnv
   antigravityV2ReadinessExecutionFailure,
   emptyAntigravityFileChangeTargetEvidence, readAntigravityV2RunEvidence, readV2ProviderAuth,
   resolveAntigravityProjectId, runV2Readiness, runAntigravityV2Readiness } from './v2-readiness.mjs';
-import { parseCodexJob, codexExecutionGate, claimCodexAttempt, codexScopedActionStatus,
+import { parseCodexJob, validCodexWritePaths, codexTaskFingerprint, codexExecutionGate,
+  claimCodexAttempt, codexScopedActionStatus,
   releaseCodexAttempt, makeCodexExecutorRequest, publishCodexExecutorRequest,
   executorResultPath as codexExecutorResultPath,
   validateCodexExecutorRequest, validateCodexExecutorResult,
@@ -97,10 +98,14 @@ function validEditPaths(paths) {
   for (const file of paths) {
     if (typeof file !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(file)) return false;
     const parts = file.split('/');
-    if (parts.some(part => !part || part === '.' || part === '..' ||
+    if (parts.some(part => {
+      const win32Component = part.replace(/[. ]+$/g, '');
+      return !part || part === '.' || part === '..' || !win32Component ||
+        win32Component === '.' || win32Component === '..' ||
         /^\.(?:git|github|opencode)$/i.test(part) || /^\.env(?:\.|$)/i.test(part) ||
         /^opencode\.jsonc?$/i.test(part) ||
-        /(?:secret|credential|token|password|auth\.json)/i.test(part)) ||
+        /(?:secret|credential|token|password|auth\.json)/i.test(part);
+    }) ||
         ['governance', 'runs'].includes(parts[0].toLowerCase())) return false;
     const key = process.platform === 'win32' ? file.toLowerCase() : file;
     if (seen.has(key)) return false;
@@ -210,6 +215,9 @@ export function parseReceipt(body) {
       !body.startsWith(RECEIPT_MARKER)) return null;
   try {
     const o = JSON.parse(body.slice(RECEIPT_MARKER.length));
+    const codexScopeJob = codexJobFromReceipt(o);
+    const hasCodexTaskScope = ['job_schema', 'spec_path', 'spec_sha256', 'write_paths']
+      .some(key => Object.hasOwn(o || {}, key));
     if (o?.schema !== 1 || o.project_id !== PROJECT ||
         typeof o.host !== 'string' || !/^[A-Z0-9-]{3,64}$/.test(o.host) ||
         !SHA.test(o.source_sha) || typeof o.kind !== 'string' ||
@@ -261,10 +269,31 @@ export function parseReceipt(body) {
           o.kind !== 'codex_plan' || !Number.isSafeInteger(o.goal_comment_id) ||
           typeof o.goal_marker !== 'string' || !V53_HUMAN_DIRECTIVE_MARKER.test(o.goal_marker)) ||
         o.goal_marker !== undefined && o.goal_author === undefined ||
+         o.task_fingerprint !== undefined && (o.kind !== 'codex_plan' ||
+           o.task_fingerprint !== null && !HASH.test(o.task_fingerprint)) ||
+         hasCodexTaskScope && !codexScopeJob ||
         !RECEIPT_STATES.has(o.state) || typeof o.attempt_id !== 'string' ||
         !/^[a-f0-9-]{36}$/.test(o.attempt_id)) return null;
     return o;
   } catch { return null; }
+}
+function codexJobFromReceipt(receiptValue) {
+  if (!receiptValue || receiptValue.kind !== 'codex_plan' ||
+      ![3, 4].includes(receiptValue.job_schema) ||
+      !validCodexWritePaths(receiptValue.write_paths)) return null;
+  const job = {
+    schema: receiptValue.job_schema, project_id: receiptValue.project_id,
+    host: receiptValue.host, request_id: receiptValue.request_id, kind: receiptValue.kind,
+    source_sha: receiptValue.source_sha, spec_path: receiptValue.spec_path,
+    spec_sha256: receiptValue.spec_sha256, model: receiptValue.model,
+    reasoning_effort: receiptValue.reasoning_effort, write_paths: receiptValue.write_paths,
+    ...(receiptValue.job_schema === 4 ? {
+      goal_comment_id: receiptValue.goal_comment_id,
+      goal_body_sha256: receiptValue.goal_body_sha256,
+      goal_author: receiptValue.goal_author, goal_marker: receiptValue.goal_marker,
+    } : {}),
+  };
+  return parseCodexJob(JOB_MARKER + JSON.stringify(job));
 }
 function validAntigravityFileChangeTargetEvidence(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -373,11 +402,13 @@ function hasCompletedScopedEditDiff(receipt, job) {
   // task acceptance remains a separate review.
   return receipt?.state === 'FINISHED' && hasRequestBoundScopedEditDiff(receipt, job);
 }
-function unresolvedEditAttempt(job, entries, { allowIsolatedW2ScopedDiff = false } = {}) {
+function unresolvedEditAttempt(job, entries, { allowIsolatedW2ScopedDiff = false, workerLogin } = {}) {
   if (!validEditPaths(job?.edit_paths)) return true;
-  const matching = entries.filter(entry => entry.receipt.host.toUpperCase() === job.host.toUpperCase() &&
-    entry.receipt.kind === job.kind && entry.receipt.source_sha === job.source_sha);
-  if (matching.some(entry => !Number.isSafeInteger(entry.id) || entry.id < 1)) return true;
+  const requestLane = entries.filter(entry => entry.receipt.host.toUpperCase() === job.host.toUpperCase() &&
+    entry.receipt.kind === job.kind);
+  if (requestLane.some(entry => !Number.isSafeInteger(entry.id) || entry.id < 1 ||
+      entry.receipt.source_sha !== job.source_sha)) return true;
+  const matching = requestLane;
   const attempts = new Map();
   for (const entry of matching) {
     const attemptId = entry.receipt.attempt_id;
@@ -386,8 +417,10 @@ function unresolvedEditAttempt(job, entries, { allowIsolatedW2ScopedDiff = false
   }
   for (const attemptEntries of attempts.values()) {
     attemptEntries.sort((a, b) => a.id - b.id);
-    const last = attemptEntries.at(-1)?.receipt;
+    const lastEntry = attemptEntries.at(-1);
+    const last = lastEntry?.receipt;
     if (last?.state === 'STARTED' || (terminalStates.has(last?.state) &&
+        lastEntry.login !== workerLogin) || (terminalStates.has(last?.state) &&
         last.external_effects !== 'NONE' && last.model_invoked !== false &&
         !hasCompletedScopedEditDiff(last, job) &&
         !(allowIsolatedW2ScopedDiff && hasIsolatedW2ScopedEditDiff(last, job)))) return true;
@@ -400,12 +433,43 @@ function jobWritePaths(job) {
     return job.write_paths;
   return null;
 }
-function unresolvedCodexAttempt(job, entries) {
-  if (!Array.isArray(job?.write_paths) || job.write_paths.length === 0) return true;
+function hasObservedNoCodexToolEffects(receipt) {
+  return receipt?.model_invoked === false && receipt.session_started === false &&
+    receipt.session_id == null && receipt.diff_sha256 == null &&
+    receipt.provider_usage_evidence === 'UNKNOWN' && receipt.model_activity_evidence === 'UNKNOWN' &&
+    receipt.token_usage == null && receipt.tool_execution_evidence === 'OBSERVED' &&
+    receipt.tool_execution_count === 0 && receipt.file_change_tool_evidence === 'UNKNOWN' &&
+    receipt.file_change_tool_completed_count === 0 && receipt.file_change_tool_failed_count === 0 &&
+    receipt.file_change_tool_incomplete_count === 0;
+}
+function unresolvedCodexAttempt(job, entries, workerLogin) {
   const sameRequestLane = entries.filter(entry => entry.receipt.host.toUpperCase() === job.host.toUpperCase() &&
     entry.receipt.kind === job.kind);
   if (sameRequestLane.some(entry => !Number.isSafeInteger(entry.id) || entry.id < 1 ||
       entry.receipt.source_sha !== job.source_sha)) return true;
+  const hasWriteScope = validCodexWritePaths(job?.write_paths);
+  if (!hasWriteScope) {
+    const attempts = new Map();
+    for (const entry of sameRequestLane) {
+      if (!attempts.has(entry.receipt.attempt_id)) attempts.set(entry.receipt.attempt_id, []);
+      attempts.get(entry.receipt.attempt_id).push(entry);
+    }
+    for (const attemptEntries of attempts.values()) {
+      attemptEntries.sort((a, b) => a.id - b.id);
+      const lastEntry = attemptEntries.at(-1);
+      const last = lastEntry?.receipt;
+      if (!terminalStates.has(last?.state) || lastEntry.login !== workerLogin ||
+          !hasObservedNoCodexToolEffects(last)) return true;
+    }
+    return false;
+  }
+  const jobPaths = JSON.stringify([...job.write_paths].sort());
+  const expectedFingerprint = job.spec_path && job.spec_sha256
+    ? codexTaskFingerprint(job) : null;
+  if (sameRequestLane.some(entry => Array.isArray(entry.receipt.write_paths) &&
+      JSON.stringify([...entry.receipt.write_paths].sort()) !== jobPaths ||
+      expectedFingerprint && entry.receipt.task_fingerprint != null &&
+        entry.receipt.task_fingerprint !== expectedFingerprint)) return true;
   const matching = sameRequestLane;
   const attempts = new Map();
   for (const entry of matching) {
@@ -415,35 +479,49 @@ function unresolvedCodexAttempt(job, entries) {
   }
   for (const attemptEntries of attempts.values()) {
     attemptEntries.sort((a, b) => a.id - b.id);
-    const last = attemptEntries.at(-1)?.receipt;
+    const lastEntry = attemptEntries.at(-1);
+    const last = lastEntry?.receipt;
     if (last?.state === 'STARTED') return true;
-    if (!terminalStates.has(last?.state)) continue;
-    const noModelOrToolEffect = last.model_invoked === false && last.session_id == null &&
-      last.diff_sha256 == null && last.tool_execution_count === 0 &&
-      last.file_change_tool_completed_count === 0 && last.file_change_tool_failed_count === 0 &&
-      last.file_change_tool_incomplete_count === 0;
-    if (noModelOrToolEffect) continue;
+    if (!terminalStates.has(last?.state)) return true;
+    if (lastEntry.login !== workerLogin) return true;
+    if (hasObservedNoCodexToolEffects(last)) continue;
     // A successful Codex terminal receipt is emitted only after the exact
     // source-bundle result, session, and write_paths have been validated. This
     // releases the writer lease; it does not mean the task was accepted.
-    const completedScopedDiff = last.state === 'FINISHED' && last.model_invoked === true &&
+    const completedScopedDiff = last.state === 'FINISHED' && last.outcome === 'CODEX_CLI_EXIT_0_UNVERIFIED' &&
+      last.exit_code === 0 && last.model_invoked === true &&
       last.session_started === true && /^[A-Za-z0-9_-]{8,100}$/.test(last.session_id || '') &&
-      HASH.test(last.task_fingerprint || '') && HASH.test(last.diff_sha256 || '');
+      expectedFingerprint !== null && last.task_fingerprint === expectedFingerprint &&
+      JSON.stringify([...(last.write_paths || [])].sort()) === jobPaths &&
+      HASH.test(last.diff_sha256 || '');
     if (!completedScopedDiff) return true;
   }
   return false;
 }
 function unresolvedWriteAttempt(job, entries, options = {}) {
-  if (job?.kind === 'codex_plan') return unresolvedCodexAttempt(job, entries);
+  if (job?.kind === 'codex_plan') return unresolvedCodexAttempt(job, entries, options.workerLogin);
   return isEditExecutionKind(job?.kind)
     ? unresolvedEditAttempt(job, entries, options)
     : false;
 }
-function writePathsOverlap(left, right) {
-  const normalize = value => (process.platform === 'win32' ? value.toLowerCase() : value)
-    .replaceAll('\\', '/').replace(/\/+$/, '');
+export function writePathsOverlap(left, right, platform = process.platform) {
+  const normalize = value => {
+    const rawParts = value.replaceAll('\\', '/').replace(/\/+$/, '').split('/');
+    if (platform !== 'win32') return rawParts.join('/');
+    const parts = [];
+    for (const rawPart of rawParts) {
+      const withoutTrailingSpaces = rawPart.replace(/ +$/g, '');
+      const part = withoutTrailingSpaces.replace(/\.+$/g, '').toLowerCase();
+      // Invalid or traversal-like Win32 components have unknown physical
+      // resolution; conservatively treat them as overlapping every path.
+      if (!part || part === '.' || part === '..') return null;
+      parts.push(part);
+    }
+    return parts.join('/');
+  };
   return left.some(a => right.some(b => {
     const x = normalize(a), y = normalize(b);
+    if (x === null || y === null) return true;
     return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
   }));
 }
@@ -741,7 +819,43 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     const r = parseReceipt(c.body);
     if (r && receiptMayBlockReplay(login, workerLogin, dispatchers)) {
       if (!receipts.has(r.request_id)) receipts.set(r.request_id, []);
-      receipts.get(r.request_id).push({ id: c.id, receipt: r });
+      receipts.get(r.request_id).push({ id: c.id, login, receipt: r });
+    }
+  }
+  const writeOwners = [...jobs.values()];
+  const sourceJobKeys = new Set(writeOwners.filter(owner => !owner.duplicate)
+    .map(owner => `${owner.job.kind}\0${owner.job.request_id}`));
+  const ownerKeys = new Set(writeOwners.map(owner => {
+    const paths = jobWritePaths(owner.job);
+    return paths ? `${owner.job.kind}\0${owner.job.request_id}\0${JSON.stringify([...paths].sort())}` : null;
+  }).filter(Boolean));
+  for (const entries of receipts.values()) {
+    for (const entry of entries) {
+      const receiptValue = entry.receipt;
+      if (receiptValue.kind !== 'codex_plan' || receiptValue.host.toUpperCase() !== host.toUpperCase())
+        continue;
+      const requestKey = `${receiptValue.kind}\0${receiptValue.request_id}`;
+      const job = codexJobFromReceipt(receiptValue);
+      if (!job) {
+        // A pre-scope Codex receipt cannot identify which files its attempt
+        // may have touched. If its source job is gone, fence other writers
+        // until that receipt proves the attempt had no model or tool effects.
+        if (sourceJobKeys.has(requestKey)) continue;
+        const unknownScopeKey = `${requestKey}\0UNKNOWN_SCOPE`;
+        if (ownerKeys.has(unknownScopeKey)) continue;
+        ownerKeys.add(unknownScopeKey);
+        writeOwners.push({
+          job: { host: receiptValue.host, request_id: receiptValue.request_id,
+            kind: receiptValue.kind, source_sha: receiptValue.source_sha, write_paths: null },
+          id: entry.id, content: null, duplicate: false, receiptScope: false,
+          unknownWriteScope: true,
+        });
+        continue;
+      }
+      const key = `${job.kind}\0${job.request_id}\0${JSON.stringify([...job.write_paths].sort())}`;
+      if (ownerKeys.has(key)) continue;
+      ownerKeys.add(key);
+      writeOwners.push({ job, id: entry.id, content: null, duplicate: false, receiptScope: true });
     }
   }
   for (const [, v] of jobs) {
@@ -761,11 +875,15 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
       if (candidateSourceShas.get(v.job.source_pr)?.toLowerCase() !== v.job.source_sha.toLowerCase()) continue;
     } else if (liveMainSha !== null && v.job.source_sha !== liveMainSha) continue;
     const candidateWritePaths = jobWritePaths(v.job);
-    if (candidateWritePaths && [...jobs.values()].some(owner => {
+    if (candidateWritePaths && writeOwners.some(owner => {
+      if (owner.job.request_id === v.job.request_id && owner.job.kind === v.job.kind) return false;
+      if (owner.unknownWriteScope)
+        return unresolvedWriteAttempt(owner.job, receipts.get(owner.job.request_id) || [], { workerLogin });
       const ownerWritePaths = jobWritePaths(owner.job);
-      return owner.job.request_id !== v.job.request_id && ownerWritePaths &&
+      return ownerWritePaths &&
        writePathsOverlap(candidateWritePaths, ownerWritePaths) &&
        unresolvedWriteAttempt(owner.job, receipts.get(owner.job.request_id) || [], {
+         workerLogin,
         allowIsolatedW2ScopedDiff: v.job.kind === 'antigravity_edit' &&
           owner.job.kind === 'antigravity_edit',
        });
@@ -2217,7 +2335,11 @@ export function receipt(requestId, attemptId, state, job, result = null) {
     evidence_sha256: result?.evidence_sha256 ?? null,
     evidence_bytes: result?.evidence_bytes ?? null,
     ...(state === 'WAITING' ? { eligibility_state: 'WAITING', model_invoked: false } : {}),
-    ...(job.kind === 'codex_plan' ? { model: job.model, reasoning_effort: job.reasoning_effort,
+    ...(job.kind === 'codex_plan' ? { ...([3, 4].includes(job.schema) &&
+      typeof job.spec_path === 'string' && HASH.test(job.spec_sha256 || '') &&
+      validCodexWritePaths(job.write_paths) ? { job_schema: job.schema, spec_path: job.spec_path,
+        spec_sha256: job.spec_sha256, write_paths: [...job.write_paths] } : {}),
+      model: job.model, reasoning_effort: job.reasoning_effort,
       ...(job.goal_comment_id !== undefined ? { goal_comment_id: job.goal_comment_id,
         goal_body_sha256: job.goal_body_sha256, goal_author: job.goal_author,
         goal_marker: job.goal_marker } : {}),
