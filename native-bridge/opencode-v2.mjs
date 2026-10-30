@@ -531,6 +531,7 @@ export async function readOpenCodeV2RunEvidence(stdoutPath, expectedSha256 = nul
   let usageObserved = false;
   let usagePositive = false;
   let modelTextObserved = false;
+  let unboundSessionActivity = false;
   let providerErrorReason = null;
   let eventCount = 0;
   let lineNumber = 0;
@@ -580,6 +581,7 @@ export async function readOpenCodeV2RunEvidence(stdoutPath, expectedSha256 = nul
         ? eventTokens(event) : { present: false, valid: true };
       if (!usage.valid) { malformed = true; break; }
       if (usage.present) {
+        if (session === undefined) unboundSessionActivity = true;
         usageObserved = true;
         for (const key of Object.keys(totals)) {
           const value = usage.usage[key];
@@ -595,12 +597,15 @@ export async function readOpenCodeV2RunEvidence(stdoutPath, expectedSha256 = nul
       }
 
       if (event.type === 'text' && event.part?.type === 'text' &&
-          typeof event.part.text === 'string' && event.part.text.length > 0)
+          typeof event.part.text === 'string' && event.part.text.length > 0) {
+        if (session === undefined) unboundSessionActivity = true;
         modelTextObserved = true;
+      }
 
       if (event.type === 'tool_use' || event.part?.type === 'tool') {
         const status = toolStatus(event);
         if (status) {
+          if (session === undefined) unboundSessionActivity = true;
           const id = event.part?.callID ?? event.part?.call_id ?? event.part?.id ?? event.callID ?? event.id;
           const key = typeof id === 'string' && id.length > 0
             ? `call:${id}` : `line:${lineNumber}`;
@@ -619,6 +624,8 @@ export async function readOpenCodeV2RunEvidence(stdoutPath, expectedSha256 = nul
     return emptyRunEvidence(false, 'OPEN_CODE_CAPTURE_HASH_MISMATCH');
   if (eventCount === 0) return emptyRunEvidence(false, 'OPEN_CODE_JSONL_EMPTY');
   if (sessions.size > 1) return emptyRunEvidence(false, 'OPEN_CODE_JSONL_MULTIPLE_SESSIONS');
+  if (sessions.size === 1 && unboundSessionActivity)
+    return emptyRunEvidence(false, 'OPEN_CODE_JSONL_UNBOUND_SESSION_ACTIVITY');
 
   const changedTools = [...tools.values()].filter(tool =>
     ['edit', 'write', 'patch', 'apply_patch', 'multiedit'].includes(tool.name));

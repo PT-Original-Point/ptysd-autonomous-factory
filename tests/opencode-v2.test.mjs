@@ -80,6 +80,31 @@ test('OpenCode session alone is not model activity, usage, or tool execution', a
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
 
+test('OpenCode does not bind sessionless activity to the only identified session', async () => {
+  const dir=mkdtempSync(join(tmpdir(),'oc2-jsonl-unbound-session-activity-'));
+  const output=join(dir,'stdout.jsonl');
+  const sessionID='ses_abcdefgh12345678';
+  const cases=[
+    {name:'sessionless text',event:{type:'text',part:{type:'text',text:'unbound activity'}}},
+    {name:'sessionless tool',event:{type:'tool_use',part:{type:'tool',tool:'edit',
+      callID:'unbound-call',state:{status:'completed'}}}},
+  ];
+  try {
+    for (const scenario of cases) {
+      writeFileSync(output,[
+        {type:'step_start',sessionID},
+        scenario.event,
+      ].map(event=>JSON.stringify(event)).join('\n')+'\n');
+      const evidence=await readOpenCodeV2RunEvidence(output);
+      assert.equal(evidence.valid,false,scenario.name);
+      assert.equal(evidence.reason,'OPEN_CODE_JSONL_UNBOUND_SESSION_ACTIVITY',scenario.name);
+      assert.equal(evidence.session_id,null,scenario.name);
+      assert.equal(evidence.model_activity_evidence,'UNKNOWN',scenario.name);
+      assert.equal(evidence.tool_execution_evidence,'UNKNOWN',scenario.name);
+    }
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
 test('OpenCode free-tier rejection is retained as a sanitized reason without claiming model activity', async () => {
   const dir=mkdtempSync(join(tmpdir(),'oc2-jsonl-free-tier-error-'));
   const output=join(dir,'stdout.jsonl');
