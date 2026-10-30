@@ -44,11 +44,21 @@ function safeRepoPath(value) {
   if (typeof value !== 'string' || value.length < 1 ||
       value.includes('\\') || value.startsWith('/') || value.includes(':')) return false;
   const parts = value.split('/');
-  if (parts.some(part => !part || part === '.' || part === '..')) return false;
-  if (FORBIDDEN_PATHS.has(parts[0].toLowerCase())) return false;
-  if (parts[0].toLowerCase() === '.github' &&
+  if (parts.some(part => {
+    const win32Component = part.replace(/[. ]+$/g, '');
+    return !part || part === '.' || part === '..' || !win32Component ||
+      win32Component === '.' || win32Component === '..' || win32Component !== part;
+  })) return false;
+  const canonicalParts = parts.map(part => part.replace(/[. ]+$/g, ''));
+  if (FORBIDDEN_PATHS.has(canonicalParts[0].toLowerCase())) return false;
+  if (canonicalParts[0].toLowerCase() === '.github' &&
       ['workflows', 'actions'].includes(parts[1]?.toLowerCase())) return false;
   return true;
+}
+
+export function validCodexWritePaths(paths) {
+  return Array.isArray(paths) && paths.length >= 1 && paths.every(safeRepoPath) &&
+    new Set(paths).size === paths.length;
 }
 
 export function parseCodexJob(body) {
@@ -67,8 +77,7 @@ export function parseCodexJob(body) {
       !/^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(job.spec_path) ||
       typeof job.spec_sha256 !== 'string' || !HASH.test(job.spec_sha256)) return null;
   if (typeof job.model !== 'string' || !MODEL.test(job.model) || !validReasoningEffort(job.reasoning_effort)) return null;
-  if (!Array.isArray(job.write_paths) || job.write_paths.length < 1 ||
-      !job.write_paths.every(safeRepoPath) || new Set(job.write_paths).size !== job.write_paths.length) return null;
+  if (!validCodexWritePaths(job.write_paths)) return null;
   if (job.schema === 4) {
     const legacyRequestId = `PTYSD_HUMAN_GOAL_${job.goal_comment_id}`;
     const bodyBoundRequestId = `PTYSD_HUMAN_GOAL_${job.goal_comment_id}_${
