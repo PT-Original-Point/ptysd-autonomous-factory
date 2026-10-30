@@ -86,6 +86,7 @@ test('OpenCode does not bind sessionless activity to the only identified session
   const sessionID='ses_abcdefgh12345678';
   const cases=[
     {name:'sessionless text',event:{type:'text',part:{type:'text',text:'unbound activity'}}},
+    {name:'sessionless usage',event:{type:'step_finish',tokens:{input:17,output:4}}},
     {name:'sessionless tool',event:{type:'tool_use',part:{type:'tool',tool:'edit',
       callID:'unbound-call',state:{status:'completed'}}}},
   ];
