@@ -2812,11 +2812,13 @@ export async function runWorker(configInput, adapters = {}) {
   if (selected.unresolvedRequestId)
     log(`CODEX_LOCAL_CLAIM_UNRECONCILED_${selected.unresolvedRequestId}_NO_REPLAY`);
   let waitingEligibility = null;
+  let selectedSpec = null;
   let preparedSourceBundle = null;
   let preparedExecutor = null;
   let preparedWorkspace = null;
   const preflightBlockers = new Map();
   while (next) {
+    selectedSpec = null;
     preparedSourceBundle = null;
     preparedExecutor = null;
     preparedWorkspace = null;
@@ -2883,6 +2885,14 @@ export async function runWorker(configInput, adapters = {}) {
         try { buildV2ScopedEditConfig(preparedWorkspace, next.job.edit_paths); }
         catch (error) {
           reason = `EDIT_SCOPE_${safeErrorCode(error, 'INVALID')}`;
+        }
+      }
+      if (!reason && isModelExecutionKind(next.job.kind)) {
+        try { selectedSpec = readSpec(next.job, apiRead); }
+        catch (error) {
+          const specCode = ['SPEC_UNREADABLE', 'SPEC_HASH_MISMATCH'].includes(error?.message)
+            ? error.message : safeErrorCode(error);
+          reason = 'PREFLIGHT_' + specCode;
         }
       }
       if (!reason && isEditExecutionKind(next.job.kind) &&
@@ -2984,10 +2994,9 @@ export async function runWorker(configInput, adapters = {}) {
     discardPreparedSourceBundle();
     throw new Error('DISPATCH_COMMENT_CHANGED');
   }
-  let spec = null;
-  if (isModelExecutionKind(job.kind) || job.kind === 'codex_plan')
-    spec = job.kind === 'codex_plan' && job.schema === 4
-      ? humanGoalTask?.spec ?? readSpec(job, apiRead) : readSpec(job, apiRead);
+  let spec = selectedSpec;
+  if (job.kind === 'codex_plan')
+    spec = job.schema === 4 ? humanGoalTask?.spec ?? readSpec(job, apiRead) : readSpec(job, apiRead);
   if (job.source_pr !== undefined) {
     if (job.schema !== 6) {
       discardPreparedSourceBundle();

@@ -5287,6 +5287,96 @@ test('OpenCode edit eligibility waits without receipts, keeps ping moving, then 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+for (const failureCase of [
+  { label: 'unreadable', article: 'an', reason: 'SPEC_UNREADABLE',
+    badResponse: { encoding: 'utf-8', content: 'not base64' } },
+  { label: 'hash-mismatched', article: 'a', reason: 'SPEC_HASH_MISMATCH',
+    badResponse: { encoding: 'base64',
+      content: Buffer.from('# Different bytes than the pinned task spec.\n').toString('base64') } },
+]) {
+  test(failureCase.article + ' ' + failureCase.label + ' OpenCode spec does not starve a later independent request', async () => {
+    const root = mkdtempSync(join(homedir(), '.ptysd-opencode-spec-failover-'));
+    try {
+      const workspace = join(root, 'workspace');
+      const stateDir = join(root, 'state');
+      mkdirSync(join(workspace, 'src'), { recursive: true });
+      mkdirSync(stateDir);
+      writeFileSync(join(workspace, 'src', 'bad.mjs'), 'export const bad = 1;\n');
+      writeFileSync(join(workspace, 'src', 'ready.mjs'), 'export const ready = 1;\n');
+      const host = hostname().toUpperCase();
+      const intendedBadSpec = '# Pinned but unavailable spec bytes.\n';
+      const readySpec = '# Synthetic valid spec; model execution is forbidden.\n';
+      const badJob = { schema: 4, project_id: PROJECT, host,
+        request_id: 'PTYSD_OPENCODE_BAD_SPEC_' + failureCase.label.toUpperCase() + '_20261030',
+        kind: 'opencode_edit', source_sha: commit,
+        spec_path: 'native-bridge/tasks/bad-' + failureCase.label + '.md',
+        spec_sha256: h(intendedBadSpec), model: 'opencode/spark', variant: 'high',
+        edit_paths: ['src/bad.mjs'] };
+      const readyJob = { ...badJob, request_id: 'PTYSD_OPENCODE_READY_AFTER_BAD_SPEC_20261030',
+        spec_path: 'native-bridge/tasks/ready-after-bad-spec.md',
+        spec_sha256: h(readySpec), edit_paths: ['src/ready.mjs'] };
+      const comments = [com(9911, encoded(badJob)), com(9912, encoded(readyJob))];
+      const executor = { task_name: '\\PTYSD\\OpenCodeExecutor',
+        user_sid: 'S-1-5-21-100-200-300-1001', publisher_sid: 'S-1-5-21-100-200-300-1002',
+        wscript_path: 'C:\\Windows\\System32\\wscript.exe',
+        launcher_path: 'C:\\PTYSD\\HiddenCodexExecutor.vbs',
+        node_bin: 'C:\\Node\\node.exe', script_path: 'C:\\PTYSD\\executor.mjs',
+        config_path: 'C:\\PTYSD\\executor.json', manifest_dir: join(root, 'manifests'),
+        results_dir: join(root, 'results'), working_directory: root,
+        source_bundle_per_attempt: true };
+      const config = { repo: REPO, project_id: PROJECT, host, issue: 407, workspace,
+        state_dir: stateDir, dispatchers: ['t14210184'], enable_v2_model_runs: true,
+        allowed_models: { 'opencode/spark': ['high'] }, executor };
+      const writes = [], logs = [], bundleRequests = [];
+      let nextId = 9913, dispatches = 0;
+      const result = await executeWorker(config, {
+        readExecutorWorkspace: () => workspace,
+        goalCommentsRead: () => [],
+        apiRead(uri) {
+          if (uri === 'user') return { login: 'worker' };
+          if (uri === 'repos/' + REPO + '/issues/407') return { title: ISSUE_TITLE, state: 'open' };
+          if (uri === 'repos/' + REPO + '/git/ref/heads/main') return { object: { sha: commit } };
+          if (uri.startsWith('repos/' + REPO + '/contents/')) {
+            if (uri.includes('/bad-' + failureCase.label + '.md?ref=')) return failureCase.badResponse;
+            if (uri.includes('/ready-after-bad-spec.md?ref=')) return {
+              encoding: 'base64', content: Buffer.from(readySpec).toString('base64') };
+          }
+          const match = uri.match(/\/issues\/comments\/(\d+)$/);
+          if (match) return comments.find(item => item.id === Number(match[1]));
+          throw new Error('UNEXPECTED_TEST_API:' + uri);
+        },
+        commentsRead: () => comments,
+        assertExecutorTaskReady: () => ({ ready: true, source_bundle_per_attempt: true }),
+        createExecutorSourceBundle: ({ job, attemptId }) => {
+          bundleRequests.push(job.request_id);
+          return { attempt_id: attemptId, source_sha: job.source_sha, sha256: 'f'.repeat(64) };
+        },
+        writeReceipt(_config, data, login) {
+          writes.push(data);
+          comments.push(com(nextId++, RECEIPT_MARKER + JSON.stringify(data), login));
+        },
+        dispatchToExecutor: (_descriptor, manifest) => {
+          dispatches++;
+          assert.equal(manifest.request_id, readyJob.request_id);
+          return { outcome: 'SYNTHETIC_EXECUTOR_REQUESTED_NOT_MODEL_EXECUTION' };
+        },
+        runPlan: () => { throw new Error('TEST_MUST_NOT_INVOKE_A_MODEL'); },
+        observationDependencies: { collectWindowsObservation: () => ({ status: 'UNKNOWN' }) },
+        log: value => logs.push(value),
+      });
+      assert.equal(result.state, 'DISPATCHED');
+      assert.equal(result.request_id, readyJob.request_id,
+        'a pinned spec failure must not starve a later independent edit');
+      assert.equal(dispatches, 1);
+      assert.deepEqual(bundleRequests, [readyJob.request_id],
+        'an invalid pinned spec is rejected before building its executor source bundle');
+      assert.deepEqual(writes.map(item => [item.request_id, item.state]),
+        [[readyJob.request_id, 'STARTED']],
+        'the invalid spec publishes no STARTED or terminal receipt');
+      assert.ok(logs.includes('OPENCODE_LANE_WAITING_ELIGIBILITY_PREFLIGHT_' + failureCase.reason));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
 test('an ineligible OpenCode edit does not starve a later independent edit request', async () => {
   const root = mkdtempSync(join(homedir(), '.ptysd-opencode-independent-edit-'));
   try {
