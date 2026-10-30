@@ -394,7 +394,52 @@ function unresolvedEditAttempt(job, entries, { allowIsolatedW2ScopedDiff = false
   }
   return false;
 }
-function editPathsOverlap(left, right) {
+function jobWritePaths(job) {
+  if (isEditExecutionKind(job?.kind)) return validEditPaths(job.edit_paths) ? job.edit_paths : null;
+  if (job?.kind === 'codex_plan' && Array.isArray(job.write_paths) && job.write_paths.length > 0)
+    return job.write_paths;
+  return null;
+}
+function unresolvedCodexAttempt(job, entries) {
+  if (!Array.isArray(job?.write_paths) || job.write_paths.length === 0) return true;
+  const sameRequestLane = entries.filter(entry => entry.receipt.host.toUpperCase() === job.host.toUpperCase() &&
+    entry.receipt.kind === job.kind);
+  if (sameRequestLane.some(entry => !Number.isSafeInteger(entry.id) || entry.id < 1 ||
+      entry.receipt.source_sha !== job.source_sha)) return true;
+  const matching = sameRequestLane;
+  const attempts = new Map();
+  for (const entry of matching) {
+    const attemptId = entry.receipt.attempt_id;
+    if (!attempts.has(attemptId)) attempts.set(attemptId, []);
+    attempts.get(attemptId).push(entry);
+  }
+  for (const attemptEntries of attempts.values()) {
+    attemptEntries.sort((a, b) => a.id - b.id);
+    const last = attemptEntries.at(-1)?.receipt;
+    if (last?.state === 'STARTED') return true;
+    if (!terminalStates.has(last?.state)) continue;
+    const noModelOrToolEffect = last.model_invoked === false && last.session_id == null &&
+      last.diff_sha256 == null && last.tool_execution_count === 0 &&
+      last.file_change_tool_completed_count === 0 && last.file_change_tool_failed_count === 0 &&
+      last.file_change_tool_incomplete_count === 0;
+    if (noModelOrToolEffect) continue;
+    // A successful Codex terminal receipt is emitted only after the exact
+    // source-bundle result, session, and write_paths have been validated. This
+    // releases the writer lease; it does not mean the task was accepted.
+    const completedScopedDiff = last.state === 'FINISHED' && last.model_invoked === true &&
+      last.session_started === true && /^[A-Za-z0-9_-]{8,100}$/.test(last.session_id || '') &&
+      HASH.test(last.task_fingerprint || '') && HASH.test(last.diff_sha256 || '');
+    if (!completedScopedDiff) return true;
+  }
+  return false;
+}
+function unresolvedWriteAttempt(job, entries, options = {}) {
+  if (job?.kind === 'codex_plan') return unresolvedCodexAttempt(job, entries);
+  return isEditExecutionKind(job?.kind)
+    ? unresolvedEditAttempt(job, entries, options)
+    : false;
+}
+function writePathsOverlap(left, right) {
   const normalize = value => (process.platform === 'win32' ? value.toLowerCase() : value)
     .replaceAll('\\', '/').replace(/\/+$/, '');
   return left.some(a => right.some(b => {
@@ -715,13 +760,16 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     if (v.job.source_pr !== undefined) {
       if (candidateSourceShas.get(v.job.source_pr)?.toLowerCase() !== v.job.source_sha.toLowerCase()) continue;
     } else if (liveMainSha !== null && v.job.source_sha !== liveMainSha) continue;
-    if (isEditExecutionKind(v.job.kind) && [...jobs.values()].some(owner =>
-      owner.job.request_id !== v.job.request_id && isEditExecutionKind(owner.job.kind) &&
-      editPathsOverlap(v.job.edit_paths, owner.job.edit_paths) &&
-      unresolvedEditAttempt(owner.job, receipts.get(owner.job.request_id) || [], {
+    const candidateWritePaths = jobWritePaths(v.job);
+    if (candidateWritePaths && [...jobs.values()].some(owner => {
+      const ownerWritePaths = jobWritePaths(owner.job);
+      return owner.job.request_id !== v.job.request_id && ownerWritePaths &&
+       writePathsOverlap(candidateWritePaths, ownerWritePaths) &&
+       unresolvedWriteAttempt(owner.job, receipts.get(owner.job.request_id) || [], {
         allowIsolatedW2ScopedDiff: v.job.kind === 'antigravity_edit' &&
           owner.job.kind === 'antigravity_edit',
-      }))) continue;
+       });
+    })) continue;
     return { job: v.job, id: v.id, originalBody: v.content };
   }
   return null;
@@ -1557,7 +1605,7 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
       projectRootBefore = await captureAntigravityProjectRootSnapshot(config, job, attemptId,
         'project-root-before', dependencies.readGitProcessTree);
       if (projectRootBefore.changes.some(change =>
-        editPathsOverlap([change.path], job.edit_paths)))
+        writePathsOverlap([change.path], job.edit_paths)))
         throw new Error('EDIT_PROJECT_ROOT_DIRTY_SCOPE_CONFLICT');
     } catch (error) {
       return { outcome: `ANTIGRAVITY_EDIT_PROJECT_ROOT_${safeErrorCode(error, 'UNKNOWN')}`,
