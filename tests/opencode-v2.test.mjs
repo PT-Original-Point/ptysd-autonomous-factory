@@ -10,7 +10,7 @@ import { discoverV2Executables, qualifyOpenCodeV2, parseOpenCodeV2Version, valid
   readOpenCodeV2RunEvidence } from '../native-bridge/opencode-v2.mjs';
 import { runPlan, terminalStateForResult } from '../native-bridge/worker.mjs';
 
-test('V2 model argument builders preserve the exact model ID and use isolated standalone mode', () => {
+test('V2 model argument builders use isolated fresh runs without resuming a prior session', () => {
   const model='opencode/deepseek-v4.1-flash-free';
   const workspace=join(tmpdir(),'pty-v2-free-model-workspace');
   const job={model,variant:null,request_id:'PTYSD_FREE_MODEL_ARGS_20261018',edit_paths:['src/worker.mjs']};
@@ -19,6 +19,11 @@ test('V2 model argument builders preserve the exact model ID and use isolated st
   const edit=buildV2ScopedEditArgs(job,workspace,'Edit only the assigned source.');
   assert.ok(readonly.includes('--standalone'), 'read-only runs must not attach to a desktop background service');
   assert.ok(edit.includes('--standalone'), 'edit runs must not attach to a desktop background service');
+  for (const args of [readonly, edit]) {
+    assert.equal(args[0], 'run');
+    assert.equal(args.includes('--session'), false, 'worker runs must not attach to a migrated session');
+    assert.equal(args.includes('--continue'), false, 'worker runs must not continue an earlier session');
+  }
   assert.equal(readonly[readonly.indexOf('--model')+1],model);
   assert.equal(edit[edit.indexOf('--model')+1],model);
 });
