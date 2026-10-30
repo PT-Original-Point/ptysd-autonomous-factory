@@ -12,10 +12,12 @@ import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
   runPlan as executeOpenCodeTask, verifyCapturedEvidence, antigravityExecutionAuthorization,
   captureScopedEditDiff,
   codexTerminalReceipt, selectNextWithCodexClaim, readPinnedCandidateSources, executorForJobKind,
+  writePathsOverlap,
   publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight } from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, OPERATOR_COMMENT_ID, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
-import { makeCodexExecutorRequest, codexScopedActionStatus }
+import { makeCodexExecutorRequest, codexScopedActionStatus, codexTaskFingerprint,
+  validCodexWritePaths }
   from '../native-bridge/codex-continuation.mjs';
 import { ANTIGRAVITY_V2_MODEL, buildAntigravityChildEnvironment, buildNativeChildEnvironment,
   readAntigravityV2RunEvidence }
@@ -34,6 +36,13 @@ const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1
 const encoded = o => JOB_MARKER + JSON.stringify(o);
 const com = (id, body, login = 't14210184') => ({ id, body, user: { login } });
 const h = x => createHash('sha256').update(x).digest('hex');
+const codexPlan = write_paths => ({ schema: 4, project_id: PROJECT, host: 'DESKTOP-1B6PD2P',
+  request_id: `PTYSD_HUMAN_GOAL_6188322050_${h(humanGoalBody).slice(0, 42).toUpperCase()}`,
+  kind: 'codex_plan', source_sha: commit,
+  spec_path: 'native-bridge/tasks/human-goal-source-only.md', spec_sha256: hash,
+  model: 'gpt-6.1-sol', reasoning_effort: 'medium', write_paths,
+  goal_comment_id: 6188322050, goal_body_sha256: h(humanGoalBody), goal_author: 't14210184',
+  goal_marker: 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015' });
 
 test('Antigravity stream evidence binds the exact candidate cwd and reports mismatch or missing cwd without leaking paths', async () => {
   const root=mkdtempSync(join(homedir(),'.ptysd-agy-cwd-evidence-'));
@@ -788,6 +797,253 @@ test('active edit scopes exclude a second writer on overlapping paths but leave 
     'the shared file remains owned by the active W2 attempt while another path can proceed');
 });
 
+test('unresolved Codex write_paths reserve overlapping W1 and W2 edit scopes, but not independent paths', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = commit;
+  const codex = codexPlan(['src']);
+  const makeEdit = (requestId, kind, editPaths) => withHumanGoal(mkjob({
+    request_id: requestId, kind, source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/conflict-test.md', spec_sha256: hash,
+    model: kind === 'antigravity_edit' ? ANTIGRAVITY_V2_MODEL :
+      'opencode/deepseek-v4.1-flash-free',
+    variant: kind === 'antigravity_edit' ? 'high' : 'free',
+    edit_paths: editPaths, source_pr: 461,
+  }));
+  const w1 = makeEdit('PTYSD_READY_W1_CODEX_OVERLAP', 'opencode_edit', ['src/worker.mjs']);
+  const w2 = makeEdit('PTYSD_READY_W2_CODEX_OVERLAP', 'antigravity_edit', ['src/readiness.mjs']);
+  const independent = makeEdit('PTYSD_READY_W1_CODEX_INDEPENDENT', 'opencode_edit',
+    ['docs/independent.md']);
+  assert.ok(parseJob(encoded(codex)), 'the test uses a valid schema-4 Codex job');
+  const attemptId = '66666666-6666-4666-8666-666666666666';
+  const started = receipt(codex.request_id, attemptId, 'STARTED', codex, {
+    model_invoked: true, external_effects: 'UNKNOWN',
+  });
+  const jobComment = (id, job) => ({ ...com(id, encoded(job)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` });
+  const comments = [jobComment(801, codex), jobComment(802, w1), jobComment(803, w2),
+    jobComment(804, independent), com(805, RECEIPT_MARKER + JSON.stringify(started), 'worker')];
+  const heads = new Map([[461, sourceSha]]);
+  const next = selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [], heads);
+  assert.equal(next?.id, 804,
+    'a Codex STARTED attempt protects its authorized write scope without starving independent work');
+  assert.equal(selectNext(comments.filter(comment => comment.id !== 804),
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'both W1 and W2 candidates overlapping the Codex write scope must wait');
+
+  const sameRequestW1 = makeEdit(codex.request_id, 'opencode_edit', ['src/worker.mjs']);
+  const sameRequestCrossKindComments = [jobComment(817, sameRequestW1),
+    com(818, RECEIPT_MARKER + JSON.stringify(started), 'worker')];
+  assert.equal(selectNext(sameRequestCrossKindComments, ['t14210184'], 'worker', host,
+    sourceSha, [], heads), null,
+  'a same-ID receipt from another job kind still owns its overlapping write scope');
+
+  const receiptOnlyComments = comments.filter(comment => comment.id !== 801);
+  assert.equal(selectNext(receiptOnlyComments, ['t14210184'], 'worker', host, sourceSha, [], heads)?.id,
+    804, 'a Codex STARTED receipt retains its write scope after the synthetic job source disappears');
+  assert.equal(selectNext(receiptOnlyComments.filter(comment => comment.id !== 804),
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'receipt-only Codex scope still blocks both overlapping Worker lanes');
+
+  const wrongSourceReceipt = receipt(codex.request_id, attemptId, 'STARTED',
+    { ...codex, source_sha: 'b'.repeat(40) }, { model_invoked: true });
+  const wrongSourceComments = [...comments.slice(0, 4),
+    com(809, RECEIPT_MARKER + JSON.stringify(wrongSourceReceipt), 'worker')];
+  assert.equal(selectNext(wrongSourceComments.filter(comment => comment.id !== 804),
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'a request-bound Codex receipt with mismatched source identity cannot release or bypass the write lease');
+
+  const uncertainTerminal = receipt(codex.request_id, attemptId, 'FINISHED', codex, {
+    model_invoked: true, external_effects: 'UNKNOWN', session_id: 'session_codex_overlap',
+  });
+  const terminalComments = [...comments.slice(0, 4),
+    com(806, RECEIPT_MARKER + JSON.stringify(uncertainTerminal), 'worker')];
+  assert.equal(selectNext(terminalComments.filter(comment => comment.id !== 804),
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'a terminal Codex receipt with unknown effects retains only its overlapping path reservation');
+
+  const completedDiff = receipt(codex.request_id, attemptId, 'FINISHED', codex, {
+    model_invoked: true, session_started: true, session_id: 'session_codex_overlap',
+    fingerprint: codexTaskFingerprint(codex), diff_sha256: hash,
+    outcome: 'CODEX_CLI_EXIT_0_UNVERIFIED', exit_code: 0,
+    tool_execution_evidence: 'OBSERVED', tool_execution_count: 2,
+    file_change_tool_evidence: 'COMPLETED', file_change_tool_completed_count: 1,
+  });
+  const completedComments = [...comments.slice(0, 4),
+    com(808, RECEIPT_MARKER + JSON.stringify(completedDiff), 'worker')];
+  assert.equal(selectNext(completedComments.filter(comment => comment.id !== 804),
+    ['t14210184'], 'worker', host, sourceSha, [], heads)?.id, 802,
+  'a complete request-bound Codex diff releases the path lease without claiming task acceptance');
+
+  const dispatcherTerminalComments = [...comments.slice(0, 4),
+    com(815, RECEIPT_MARKER + JSON.stringify(completedDiff), 't14210184')];
+  assert.equal(selectNext(dispatcherTerminalComments.filter(comment => comment.id !== 804),
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'a dispatcher-authored terminal receipt is only a replay blocker and cannot release the Worker path lease');
+
+  const wrongFingerprint = receipt(codex.request_id, attemptId, 'FINISHED', codex, {
+    model_invoked: true, session_started: true, session_id: 'session_codex_overlap',
+    fingerprint: hash, diff_sha256: hash, outcome: 'CODEX_CLI_EXIT_0_UNVERIFIED', exit_code: 0,
+  });
+  const wrongFingerprintComments = [...comments.slice(0, 4),
+    com(810, RECEIPT_MARKER + JSON.stringify(wrongFingerprint), 'worker')];
+  assert.equal(selectNext(wrongFingerprintComments.filter(comment => comment.id !== 804),
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'a diff whose task fingerprint does not bind the exact write_paths cannot release the lease');
+
+  const unobservedNoEffect = receipt(codex.request_id, attemptId, 'BLOCKED', codex, {
+    model_invoked: false,
+  });
+  const unobservedComments = [...comments.slice(0, 4),
+    com(816, RECEIPT_MARKER + JSON.stringify(unobservedNoEffect), 'worker')];
+  assert.equal(selectNext(unobservedComments.filter(comment => comment.id !== 804),
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'missing tool evidence cannot be converted into a no-effect terminal');
+
+  const noEffectTerminal = receipt(codex.request_id, attemptId, 'BLOCKED', codex, {
+    model_invoked: false, session_started: false,
+    tool_execution_evidence: 'OBSERVED',
+    tool_execution_count: 0, file_change_tool_evidence: 'UNKNOWN',
+  });
+  const noEffectComments = [...comments.slice(0, 4),
+    com(807, RECEIPT_MARKER + JSON.stringify(noEffectTerminal), 'worker')];
+  assert.equal(selectNext(noEffectComments, ['t14210184'], 'worker', host, sourceSha, [], heads)?.id,
+    802, 'a verified no-effect Codex terminal releases the path reservation');
+
+  for (const malformedEvidence of [
+    { session_started: null },
+    { provider_usage_evidence: 'UNVERIFIED' },
+    { model_activity_evidence: 'OBSERVED' },
+  ]) {
+    const malformedTerminal = { ...noEffectTerminal, ...malformedEvidence };
+    const malformedComments = [...comments.slice(0, 4),
+      com(817, RECEIPT_MARKER + JSON.stringify(malformedTerminal), 'worker')];
+    assert.equal(selectNext(malformedComments.filter(comment => comment.id !== 804),
+      ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+    'malformed no-effect evidence cannot release an overlapping writer lease');
+  }
+
+  for (const omittedField of ['session_id', 'diff_sha256', 'token_usage']) {
+    const missingExplicitNull = { ...noEffectTerminal };
+    delete missingExplicitNull[omittedField];
+    const missingFieldComments = [...comments.slice(0, 4),
+      com(818, RECEIPT_MARKER + JSON.stringify(missingExplicitNull), 'worker')];
+    assert.equal(selectNext(missingFieldComments, ['t14210184'], 'worker', host,
+      sourceSha, [], heads)?.id, 804,
+    `omitted ${omittedField} cannot be treated as an explicit null or release the overlapping lease`);
+  }
+
+  const startedWithoutModel = receipt(codex.request_id, attemptId, 'BLOCKED', codex, {
+    model_invoked: false, session_started: true,
+  });
+  const startedWithoutModelComments = [...comments.slice(0, 4),
+    com(814, RECEIPT_MARKER + JSON.stringify(startedWithoutModel), 'worker')];
+  assert.equal(selectNext(startedWithoutModelComments.filter(comment => comment.id !== 804),
+    ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+  'a session-started terminal without a captured diff remains fenced even when model invocation is false');
+});
+
+test('an unresolved W1 edit scope also excludes an overlapping Codex plan', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = commit;
+  const w1 = withHumanGoal(mkjob({
+    request_id: 'PTYSD_ACTIVE_W1_CODEX_OVERLAP', kind: 'opencode_edit', source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/conflict-test.md', spec_sha256: hash,
+    model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+    edit_paths: ['src/worker.mjs'], source_pr: 461,
+  }));
+  const codex = codexPlan(['src']);
+  const attemptId = '77777777-7777-4777-8777-777777777777';
+  const started = receipt(w1.request_id, attemptId, 'STARTED', w1, {
+    model_invoked: true, external_effects: 'UNKNOWN',
+  });
+  const comments = [
+    { ...com(811, encoded(w1)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(812, encoded(codex)),
+    com(813, RECEIPT_MARKER + JSON.stringify(started), 'worker'),
+  ];
+  assert.equal(selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[461, sourceSha]])), null,
+  'path reservation is symmetric when Codex is the candidate and W1 owns the active scope');
+
+  const mismatchedSource = receipt(w1.request_id, attemptId, 'STARTED',
+    { ...w1, source_sha: 'b'.repeat(40) }, { model_invoked: true });
+  const mismatchedComments = [comments[0], comments[1],
+    com(814, RECEIPT_MARKER + JSON.stringify(mismatchedSource), 'worker')];
+  assert.equal(selectNext(mismatchedComments, ['t14210184'], 'worker', host, sourceSha,
+    ['opencode_edit'],
+    new Map([[461, sourceSha]])), null,
+  'a same-request W1 receipt from a different source SHA remains fenced');
+});
+
+test('a schema-6 receipt with a reused request id and different source SHA blocks that candidate', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = commit;
+  const requestId = 'PTYSD_REUSED_W1_SOURCE_IDENTITY';
+  const candidate = withHumanGoal(mkjob({
+    schema: 6, request_id: requestId, kind: 'opencode_edit', source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/conflict-test.md', spec_sha256: hash,
+    model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+    edit_paths: ['src/worker.mjs'], source_pr: 461,
+  }));
+  const oldAttempt = receipt(requestId, '99999999-9999-4999-8999-999999999999',
+    'STARTED', { ...candidate, source_sha: 'b'.repeat(40) }, { model_invoked: true });
+  const comments = [
+    { ...com(831, encoded(candidate)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(832, RECEIPT_MARKER + JSON.stringify(oldAttempt), 'worker'),
+  ];
+  assert.equal(selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[461, sourceSha]])), null,
+  'same request identity cannot discard a mismatched-source STARTED receipt and replay the candidate');
+});
+
+test('legacy Codex receipts without a recoverable source scope fence writers until no effects are proven', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = commit;
+  const legacy = { schema: 3, project_id: PROJECT, host,
+    request_id: 'PTYSD_CODEX_LEGACY_SCOPE_20261030', kind: 'codex_plan',
+    source_sha: sourceSha, spec_path: 'native-bridge/tasks/codex-review.md',
+    spec_sha256: hash, model: 'gpt-6.1-sol', reasoning_effort: 'medium' };
+  const candidate = withHumanGoal(mkjob({
+    request_id: 'PTYSD_READY_W1_LEGACY_SCOPE_GUARD', kind: 'opencode_edit',
+    source_sha: sourceSha, spec_path: 'native-bridge/tasks/conflict-test.md', spec_sha256: hash,
+    model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+    edit_paths: ['docs/unrelated.md'], source_pr: 461,
+  }));
+  const attemptId = '88888888-8888-4888-8888-888888888888';
+  const legacyStarted = receipt(legacy.request_id, attemptId, 'STARTED', legacy, {
+    model_invoked: true, session_started: true, session_id: 'legacy_session_1234',
+  });
+  assert.equal(Object.hasOwn(legacyStarted, 'write_paths'), false,
+    'the fixture represents a valid pre-scope Codex receipt');
+  const jobComment = { ...com(821, encoded(candidate)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+  const startedComments = [jobComment,
+    com(822, RECEIPT_MARKER + JSON.stringify(legacyStarted), 'worker')];
+  const heads = new Map([[461, sourceSha]]);
+  assert.equal(selectNext(startedComments, ['t14210184'], 'worker', host, sourceSha, [], heads), null,
+    'an unresolved old Codex attempt with unknown paths fences possible writers');
+
+  const noEffectTerminal = receipt(legacy.request_id, attemptId, 'BLOCKED', legacy, {
+    model_invoked: false, session_started: false, tool_execution_evidence: 'OBSERVED',
+    tool_execution_count: 0, file_change_tool_evidence: 'UNKNOWN',
+  });
+  const terminalComments = [jobComment,
+    com(822, RECEIPT_MARKER + JSON.stringify(noEffectTerminal), 'worker')];
+  assert.equal(selectNext(terminalComments, ['t14210184'], 'worker', host, sourceSha, [], heads)?.id,
+    821, 'the old global fence releases only after worker-authored zero-effect evidence');
+});
+
+test('Windows write-path overlap normalizes trailing dot and space aliases', () => {
+  assert.equal(writePathsOverlap(['src/file.'], ['src/file'], 'win32'), true);
+  assert.equal(writePathsOverlap(['src/folder.'], ['src/folder/file.mjs'], 'win32'), true);
+  assert.equal(writePathsOverlap(['src/.. /file.mjs'], ['src/file.mjs'], 'win32'), true);
+  assert.equal(writePathsOverlap(['src/file.'], ['src/file'], 'linux'), false);
+  assert.equal(validCodexWritePaths(['src/.. /file.mjs']), false);
+  assert.equal(validCodexWritePaths(['src/.../file.mjs']), false);
+  assert.equal(writePathsOverlap(['src/file ./child.mjs'], ['src/file/child.mjs'], 'win32'), true);
+  assert.equal(writePathsOverlap(['src/file. /child.mjs'], ['src/file/child.mjs'], 'win32'), true);
+});
+
 test('a terminal W2 candidate-root-only diff releases only the W2 same-path writer lease', () => {
   const host = 'DESKTOP-1B6PD2P';
   const sourceSha = commit;
@@ -1267,6 +1523,14 @@ test('strict exact job contract rejects injection, cross-project, unknown keys a
     edit_paths:['src/worker.mjs','tests/worker.test.mjs'] };
   assert.deepEqual(parseJob(encoded(editJob)), editJob,
     'the trusted task schema carries the exact writable file set');
+  assert.equal(parseJob(encoded({ ...editJob, edit_paths:['governance./policy.json'] })), null,
+    'a Win32 trailing-dot alias cannot bypass the protected governance directory');
+  assert.equal(parseJob(encoded({ ...editJob, edit_paths:['runs ./worker.json'] })), null,
+    'a Win32 trailing-space alias cannot bypass the protected runs directory');
+  assert.equal(validCodexWritePaths(['governance./policy.json']), false,
+    'Codex scope rejects a trailing-dot alias of the protected governance directory');
+  assert.equal(validCodexWritePaths(['runs ./worker.json']), false,
+    'Codex scope rejects a trailing-space alias of the protected runs directory');
   assert.ok(checkModelAuthorization(editJob,{allowed_models:{'opencode/spark':['high']}}));
   const antigravityJob=withHumanGoal({...editJob,schema:6,kind:'antigravity_edit',
     model:ANTIGRAVITY_V2_MODEL,variant:'high',source_pr:448});
@@ -2538,7 +2802,10 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
     assert.equal(sent.job.goal_comment_id,6219236273,'a later status-report marker by the trusted author is not an executable directive');
 
     const terminal=receipt(sent.job.request_id,'00000000-0000-0000-0000-000000000777',
-      'BLOCKED',sent.job,{exit_code:45,outcome:'CODEX_EXECUTOR_PREFLIGHT_BLOCKED'});
+      'BLOCKED',sent.job,{exit_code:45,outcome:'CODEX_EXECUTOR_PREFLIGHT_BLOCKED',
+        model_invoked:false,session_started:false,
+        tool_execution_evidence:'OBSERVED',tool_execution_count:0,
+        file_change_tool_evidence:'UNKNOWN'});
     receiptComments.push(com(99,RECEIPT_MARKER+JSON.stringify(terminal),'worker'));
     const replay=await executeWorker(config,adapters);
     assert.equal(replay.state,'NO_DELTA');
@@ -2567,7 +2834,9 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
     const legacyRequestId=`PTYSD_HUMAN_GOAL_${directive.id}`;
     const legacyJob={...sent.job,request_id:legacyRequestId};
     const legacyTerminal=receipt(legacyRequestId,'00000000-0000-0000-0000-000000000778',
-      'BLOCKED',legacyJob,{exit_code:45,outcome:'CODEX_EXECUTOR_PREFLIGHT_BLOCKED'});
+      'BLOCKED',legacyJob,{exit_code:45,outcome:'CODEX_EXECUTOR_PREFLIGHT_BLOCKED',
+        model_invoked:false,session_started:false,tool_execution_evidence:'OBSERVED',
+        tool_execution_count:0,file_change_tool_evidence:'UNKNOWN'});
     const legacyAdapterSet={...editedAdapters,goalCommentsRead:()=>[humanGoalComment(),changedBodyDirective],
       commentsRead:()=>[com(100,RECEIPT_MARKER+JSON.stringify(legacyTerminal),'worker')]};
     const legacy=await executeWorker({...config,state_dir:legacyState},legacyAdapterSet);
@@ -4733,7 +5002,8 @@ test('Worker routes an authorized Codex job through the isolated executor adapte
       pid: 98765, phase: 'MODEL_RUNNING' }));
     comments.push(com(9004, RECEIPT_MARKER + JSON.stringify({ ...started,
       state: 'BLOCKED', outcome: 'CODEX_SPAWN_FAILED' }), 'worker'));
-    const pendingJob = { ...codexJob, request_id: 'PTYSD_CODEX_ACTIVE_LOCK_GUARD_20261015' };
+    const pendingJob = { ...codexJob, request_id: 'PTYSD_CODEX_ACTIVE_LOCK_GUARD_20261015',
+      write_paths: ['native-bridge/another-sample.mjs'] };
     const pendingComment = com(9003, encoded(pendingJob));
     comments.push(pendingComment);
     const lockLogs = [];
@@ -5458,6 +5728,8 @@ test('Codex terminal receipt keeps exit-zero execution explicitly unverified', (
   const terminal = codexTerminalReceipt(started, result);
   assert.equal(terminal.state, 'FINISHED');
   assert.equal(terminal.outcome, 'CODEX_CLI_EXIT_0_UNVERIFIED');
+  assert.equal(Object.hasOwn(terminal, 'write_paths'), false,
+    'an incomplete legacy Codex job must not fabricate receipt scope metadata');
   assert.equal(Object.hasOwn(terminal, 'accepted'), false);
   const incomplete = codexTerminalReceipt(started, { ...result, outcome: 'EVIDENCE_STORAGE_FAILED' });
   assert.equal(incomplete.state, 'BLOCKED');
