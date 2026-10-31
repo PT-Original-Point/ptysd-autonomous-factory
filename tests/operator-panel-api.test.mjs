@@ -2412,6 +2412,14 @@ test('W2 additive FINISHED acceptance supports the canonical fields and reads an
   const goalIdentity={id:6188322050,author:'t14210184',body_sha256:goalBodySha};
   const evidence=panel.w2EvidenceData(goalComments,issueComments,head,goalIdentity,true,true,
     {requestId,attemptId},resultPull,resultChecks);
+  const dispatchCard=panel.dispatchCardData('W2',{workers:[]},issueComments,
+    {dispatches:{W2:{data:goalComments[1]}}},{status:'UNKNOWN'},Date.parse('2026-10-30T04:00:00Z'),
+    null,goalComments,goalIdentity,true);
+  assert.equal(dispatchCard.requestId,requestId,
+    'the W2 panel summary is tied to the current formal schema-6 request');
+  assert.equal(dispatchCard.summaryTask,'Antigravity 原生編輯任務；來源 PR #644');
+  assert.doesNotMatch(dispatchCard.summaryTask,/配額快照/,
+    'an Antigravity edit task must not be mislabeled as quota monitoring');
   assert.equal(evidence.native.receipt.state,'FINISHED');
   assert.equal(evidence.native.receipt.session_id,sessionId);
   assert.equal(evidence.native.receipt.task_acceptance,'UNKNOWN');

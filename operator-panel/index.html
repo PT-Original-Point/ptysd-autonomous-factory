@@ -2627,7 +2627,7 @@
           : '結果 PR／回收核對未確認。';
       base.summaryTask=id === 'W1' ? 'OpenCode 編輯任務；來源 PR #' + job.source_pr +
           (lifecycle?.lifecycle === 'CLOSED_UNMERGED' ? '（已關閉未合併，歷史來源）' : '')
-        : id === 'W2' ? 'Antigravity 配額快照任務；來源 PR #' + job.source_pr :
+        : id === 'W2' ? 'Antigravity 原生編輯任務；來源 PR #' + job.source_pr :
           'Zero Risk 正式任務；來源 PR #' + job.source_pr;
       base.summaryProgress=id === 'W1'
         ? 'Worker ' + base.workerTerminal + '；Codex 差異核對 ' +
