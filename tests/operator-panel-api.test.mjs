@@ -718,6 +718,7 @@ test('renderer shows poll_disposition as a separate native L0 decision and defau
   assert.doesNotMatch(domElements.get('native-l0').textContent, /PASS|已接受|驗收通過/);
   assert.match(domElements.get('native-l0-wait-code').textContent, /MODEL_RUNS_NOT_ENABLED/);
   assert.match(domElements.get('native-l0-wait-code').textContent, /不代表 Worker 接受、派工或模型活動/);
+  assert.doesNotMatch(domElements.get('native-l0-wait-code').textContent, /schema-4/);
 
   delete snapshot.native_worker.poll_wait_code;
   writeBody();
@@ -753,6 +754,13 @@ test('renderer shows poll_disposition as a separate native L0 decision and defau
   assert.match(domElements.get('native-l0').textContent, /WAITING_GATE_NO_MODEL_DISPATCH/);
   assert.match(domElements.get('native-l0-wait-code').textContent, /UNKNOWN/,
     'historical waiting observations without the additive reason stay readable but do not guess');
+
+  snapshot.native_worker.poll_wait_code = 'HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED';
+  writeBody();
+  panel.render(null, resources, null, now, rateState);
+  assert.match(domElements.get('native-l0-wait-code').textContent, /僅表示 schema-4/);
+  assert.match(domElements.get('native-l0-wait-code').textContent, /schema-6 W1\/W2/);
+  assert.match(domElements.get('native-l0').textContent, /其他車道.*分別核對/);
 });
 
 test('panel and native publisher share the same closed poll wait-code vocabulary', () => {
