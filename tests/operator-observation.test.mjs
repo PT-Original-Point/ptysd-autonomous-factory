@@ -9,7 +9,9 @@ import './native-worker-install-bundle.test.mjs';
 import {
   OPERATOR_MARKER, encodeOperatorObservation, parseOperatorObservation,
   OPERATOR_COMMENT_ID, findOperatorComment, updateExistingOperatorComment, observationFreshness,
-  collectWindowsObservation, collectRuntimeDeployment, POLL_DISPOSITIONS,
+  collectWindowsObservation, collectRuntimeDeployment, POLL_DISPOSITIONS, POLL_WAIT_CODES,
+  normalizePollWaitReason, derivePollWaitCode, validPollWaitCodeForDisposition,
+  normalizePollWaitCodeForDisposition,
 } from '../native-bridge/operator-observation.mjs';
 import {
   JOB_MARKER, RECEIPT_MARKER, PROJECT, REPO,
@@ -55,7 +57,7 @@ test('operator snapshot requires exact project identity, time bounds, and de-ide
     /INVALID_OPERATOR_OBSERVATION/);
 });
 
-test('operator snapshot accepts only the exact poll disposition enum and keeps historical observations readable', () => {
+test('operator snapshot validates additive poll wait codes and keeps historical observations readable', () => {
   // Historical observations predate this additive field; both shapes stay valid.
   assert.equal(parseOperatorObservation(encodeOperatorObservation(observation())).issue, 407);
   const legacyNativeWorker = observation({
@@ -70,6 +72,28 @@ test('operator snapshot accepts only the exact poll disposition enum and keeps h
     })));
     assert.equal(parsed?.native_worker?.poll_disposition, value);
   }
+  const waitingWithCode = observation({ native_worker: {
+    poll_disposition: 'WAITING_GATE_NO_MODEL_DISPATCH', poll_wait_code: 'MODEL_RUNS_NOT_ENABLED',
+  } });
+  assert.equal(parseOperatorObservation(OPERATOR_MARKER + JSON.stringify(waitingWithCode))
+    ?.native_worker?.poll_wait_code, 'MODEL_RUNS_NOT_ENABLED');
+  assert.equal(parseOperatorObservation(OPERATOR_MARKER + JSON.stringify(observation({
+    native_worker: { poll_disposition: 'WAITING_GATE_NO_MODEL_DISPATCH' },
+  })))?.native_worker?.poll_disposition, 'WAITING_GATE_NO_MODEL_DISPATCH',
+  'older observations that have a disposition but no diagnostic code remain readable');
+  const readyWithOtherLaneWait = observation({ native_worker: {
+    poll_disposition: 'READY_JOB_SELECTED_NOT_DISPATCHED', poll_wait_code: 'MODEL_RUNS_NOT_ENABLED',
+  } });
+  assert.equal(parseOperatorObservation(OPERATOR_MARKER + JSON.stringify(readyWithOtherLaneWait))
+    ?.native_worker?.poll_wait_code, 'MODEL_RUNS_NOT_ENABLED');
+  for (const native_worker of [
+    { poll_disposition: 'WAITING_GATE_NO_MODEL_DISPATCH', poll_wait_code: 'NOT_APPLICABLE' },
+    { poll_disposition: 'NO_READY_JOB_NO_MODEL_DISPATCH', poll_wait_code: 'MODEL_RUNS_NOT_ENABLED' },
+    { poll_disposition: 'UNKNOWN', poll_wait_code: 'MODEL_RUNS_NOT_ENABLED' },
+    { poll_wait_code: 'MODEL_RUNS_NOT_ENABLED' },
+    { poll_disposition: 'WAITING_GATE_NO_MODEL_DISPATCH', poll_wait_code: 'raw provider error' },
+  ]) assert.equal(parseOperatorObservation(OPERATOR_MARKER + JSON.stringify(
+    observation({ native_worker }))), null, 'malformed or disposition-incompatible wait codes fail closed');
   for (const malformed of [null, 7, true, {}, [], '', 'READY_JOB_DISPATCHED',
     'no_ready_job_no_model_dispatch', 'UNKNOWN ']) {
     const body = OPERATOR_MARKER + JSON.stringify(observation({
@@ -81,6 +105,34 @@ test('operator snapshot accepts only the exact poll disposition enum and keeps h
       native_worker: { poll_disposition: malformed },
     })), /INVALID_OPERATOR_OBSERVATION/);
   }
+});
+
+test('poll wait diagnostics use a finite safe vocabulary and fail closed on unknown or conflicting reasons', () => {
+  assert.deepEqual(POLL_WAIT_CODES.includes('MODEL_RUNS_NOT_ENABLED'), true);
+  assert.equal(normalizePollWaitReason('ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED'),
+    'MODEL_RUNS_NOT_ENABLED');
+  assert.equal(normalizePollWaitReason('OPENCODE_MODEL_NOT_EXPLICITLY_ALLOWED'),
+    'MODEL_NOT_EXPLICITLY_ALLOWED');
+  assert.equal(normalizePollWaitReason('C:\\private\\workspace\\secret.txt'), 'UNKNOWN');
+  assert.equal(normalizePollWaitReason('provider says Bearer abcdefghijklmnopqrstuvwxyz'), 'UNKNOWN');
+  assert.equal(derivePollWaitCode({ waiting: true,
+    waitingEligibility: 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED' }), 'MODEL_RUNS_NOT_ENABLED');
+  assert.equal(derivePollWaitCode({ waiting: false,
+    preflightBlockers: new Map([['W2_REQUEST', 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED']]) }),
+  'MODEL_RUNS_NOT_ENABLED', 'a W2 preflight wait remains visible when another READY job is selected');
+  assert.equal(derivePollWaitCode({ waiting: true,
+    waitingEligibility: 'ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED',
+    preflightBlockers: new Map([['W1_REQUEST', 'MODEL_NOT_EXPLICITLY_ALLOWED']]) }), 'UNKNOWN');
+  assert.equal(derivePollWaitCode({ waiting: true, waitingEligibility: 'UNRECOGNIZED_PROVIDER_TEXT' }),
+    'UNKNOWN');
+  assert.equal(derivePollWaitCode(null), 'UNKNOWN');
+  assert.equal(derivePollWaitCode({ waiting: true }), 'UNKNOWN');
+  assert.equal(derivePollWaitCode({ waiting: false }), 'NOT_APPLICABLE');
+  assert.equal(validPollWaitCodeForDisposition('WAITING_GATE_NO_MODEL_DISPATCH', 'NOT_APPLICABLE'), false);
+  assert.equal(validPollWaitCodeForDisposition('UNKNOWN', 'MODEL_RUNS_NOT_ENABLED'), false);
+  assert.equal(normalizePollWaitCodeForDisposition('NO_READY_JOB_NO_MODEL_DISPATCH', undefined),
+    'NOT_APPLICABLE');
+  assert.equal(normalizePollWaitCodeForDisposition('WAITING_GATE_NO_MODEL_DISPATCH', undefined), 'UNKNOWN');
 });
 
 test('operator snapshot rejects malformed source main SHA but keeps legacy snapshots without it readable', () => {
@@ -1246,7 +1298,7 @@ test('browser shows the shared rate-limit pause, recovery countdown, and histori
 });
 
 async function publishReceiptProjection(rows, { enableAntigravityModelRuns, enableV2ModelRuns = true,
-  pollDisposition = undefined } = {}) {
+  pollDisposition = undefined, pollWaitCode = undefined } = {}) {
   const at = Date.now();
   const host = 'DESKTOP-1B6PD2P';
   const mainSha = 'e'.repeat(40);
@@ -1310,7 +1362,7 @@ async function publishReceiptProjection(rows, { enableAntigravityModelRuns, enab
     readComments: () => structuredClone(comments),
   };
   return publishOperatorObservation(config, 't14210184', comments, mainSha,
-    dependencies, heads, null, new Map(), pollDisposition);
+    dependencies, heads, null, new Map(), pollDisposition, pollWaitCode);
 }
 
 test('queued W2 observation names the disabled model gate without inventing an attempt or blocking W1', async () => {
@@ -1353,6 +1405,7 @@ test('publisher adds poll_disposition without changing Worker state, current/lat
     pollDisposition: 'NO_READY_JOB_NO_MODEL_DISPATCH' });
   assert.equal(result.status, 'UPDATED');
   assert.equal(result.observation.native_worker.poll_disposition, 'NO_READY_JOB_NO_MODEL_DISPATCH');
+  assert.equal(result.observation.native_worker.poll_wait_code, 'NOT_APPLICABLE');
   assert.equal(result.observation.native_worker.state, 'POLL_EXECUTED_TASK_TRIGGER_UNVERIFIED');
   assert.equal(result.observation.native_worker.current_task, null);
   assert.equal(result.observation.native_worker.latest_task, null);
@@ -1368,6 +1421,23 @@ test('publisher adds poll_disposition without changing Worker state, current/lat
     pollDisposition: 7 });
   assert.equal(numeric.observation.native_worker.poll_disposition, 'UNKNOWN',
     'a non-enum publisher input degrades to UNKNOWN rather than inventing a PASS-like value');
+  assert.equal(numeric.observation.native_worker.poll_wait_code, 'UNKNOWN');
+
+  const waiting = await publishReceiptProjection([], { enableAntigravityModelRuns: false,
+    pollDisposition: 'WAITING_GATE_NO_MODEL_DISPATCH', pollWaitCode: 'MODEL_RUNS_NOT_ENABLED' });
+  assert.equal(waiting.observation.native_worker.poll_wait_code, 'MODEL_RUNS_NOT_ENABLED');
+  const selected = await publishReceiptProjection([], { enableAntigravityModelRuns: false,
+    pollDisposition: 'READY_JOB_SELECTED_NOT_DISPATCHED', pollWaitCode: 'MODEL_RUNS_NOT_ENABLED' });
+  assert.equal(selected.observation.native_worker.poll_wait_code, 'MODEL_RUNS_NOT_ENABLED',
+    'a blocked lane can be diagnosed while an independent READY job is selected');
+  const unsafe = await publishReceiptProjection([], { enableAntigravityModelRuns: false,
+    pollDisposition: 'WAITING_GATE_NO_MODEL_DISPATCH', pollWaitCode: 'C:\\private\\secret' });
+  assert.equal(unsafe.observation.native_worker.poll_wait_code, 'UNKNOWN');
+  const incompatible = await publishReceiptProjection([], { enableAntigravityModelRuns: false,
+    pollDisposition: 'NO_READY_JOB_NO_MODEL_DISPATCH', pollWaitCode: 'MODEL_RUNS_NOT_ENABLED' });
+  assert.equal(incompatible.observation.native_worker.poll_disposition, 'UNKNOWN');
+  assert.equal(incompatible.observation.native_worker.poll_wait_code, 'UNKNOWN',
+    'an incompatible disposition/code pair degrades both fields instead of publishing a false clear state');
 });
 
 test('worker observation reports captured W1 and blocked W2 diffs as unverified, never active or accepted', async () => {

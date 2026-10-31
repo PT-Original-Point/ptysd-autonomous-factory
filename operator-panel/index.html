@@ -368,7 +368,7 @@
     <article class="panel infra-card">
       <h3>Win11 Native Worker／Task Scheduler</h3><span id="native-badge" class="badge neutral">未確認</span>
       <p id="native-detail" class="infra-summary">排程就緒不等於 Worker 正在執行任務。</p>
-      <dl class="facts"><dt>原生 L0 決策（不等於 Worker 接受或模型活動）</dt><dd id="native-l0">UNKNOWN</dd><dt>正式排程／Action</dt><dd id="native-action">未確認</dd><dt>執行身分／單實例</dt><dd id="native-identity">未確認</dd><dt>最近結果／下一次執行</dt><dd id="native-last">未確認</dd><dt>OpenCode／Antigravity／Codex Executor 排程</dt><dd id="native-executor-tasks">未確認</dd><dt>舊 Monitor／2667</dt><dd id="native-retired">未確認</dd><dt>Worker 發布器</dt><dd id="native-publisher">未確認</dd></dl>
+      <dl class="facts"><dt>原生 L0 決策（不等於 Worker 接受或模型活動）</dt><dd id="native-l0">UNKNOWN</dd><dt>安全等待診斷碼（不代表接受或派工）</dt><dd id="native-l0-wait-code">UNKNOWN</dd><dt>正式排程／Action</dt><dd id="native-action">未確認</dd><dt>執行身分／單實例</dt><dd id="native-identity">未確認</dd><dt>最近結果／下一次執行</dt><dd id="native-last">未確認</dd><dt>OpenCode／Antigravity／Codex Executor 排程</dt><dd id="native-executor-tasks">未確認</dd><dt>舊 Monitor／2667</dt><dd id="native-retired">未確認</dd><dt>Worker 發布器</dt><dd id="native-publisher">未確認</dd></dl>
     </article>
     <article class="panel infra-card">
       <h3>GitHub Actions／Runner</h3><span id="runner-badge" class="badge neutral">未確認</span>
@@ -419,6 +419,27 @@
   const ACCEPTANCE_MARKER = 'PTYSD_V53R4_W2_PANEL_ACCEPTANCE_V1\n';
   const POLL_DISPOSITIONS = ['NO_READY_JOB_NO_MODEL_DISPATCH', 'WAITING_GATE_NO_MODEL_DISPATCH',
     'READY_JOB_SELECTED_NOT_DISPATCHED', 'UNKNOWN'];
+  const POLL_WAIT_CODES = ['NOT_APPLICABLE', 'UNKNOWN',
+    'HUMAN_GOAL_SOURCE_READ_UNKNOWN', 'HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN',
+    'HUMAN_GOAL_SCOPED_ACTION_MISSING', 'HUMAN_GOAL_SCOPED_ACTION_INVALID',
+    'HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED', 'HUMAN_GOAL_CODEX_POLICY_DISABLED',
+    'HUMAN_GOAL_CODEX_POLICY_INVALID', 'HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN',
+    'CODEX_EXECUTOR_SPOOL_OR_OWNER_NOT_READY', 'CODEX_EXECUTOR_TASK_READBACK_NOT_READY',
+    'MODEL_RUNS_NOT_ENABLED', 'MODEL_NOT_EXPLICITLY_ALLOWED', 'MODEL_CLI_NOT_QUALIFIED',
+    'MODEL_AUTH_NOT_READY', 'MODEL_AUTH_METADATA_UNKNOWN', 'MODEL_QUOTA_EMPTY',
+    'MODEL_QUOTA_UNKNOWN', 'MODEL_CREDIT_FALLBACK_NOT_DISABLED',
+    'MODEL_CREDIT_FALLBACK_STATUS_UNKNOWN', 'MODEL_EXECUTION_ATTESTATION_UNKNOWN',
+    'MODEL_EXECUTION_ATTESTATION_STALE', 'MODEL_PROJECT_SCOPE_UNVERIFIED',
+    'MODEL_TOOL_POLICY_UNVERIFIED', 'EXECUTOR_ROUTE_UNAVAILABLE',
+    'EXECUTOR_OS_ISOLATION_REQUIRED', 'TASK_SPEC_READ_UNKNOWN', 'TASK_SPEC_HASH_MISMATCH',
+    'EDIT_SCOPE_INVALID', 'SOURCE_BUNDLE_IDENTITY_MISMATCH'];
+  function validPollWaitCodeForDisposition(disposition, code) {
+    if (!POLL_DISPOSITIONS.includes(disposition) || !POLL_WAIT_CODES.includes(code)) return false;
+    if (disposition === 'UNKNOWN') return code === 'UNKNOWN';
+    if (disposition === 'WAITING_GATE_NO_MODEL_DISPATCH') return code !== 'NOT_APPLICABLE';
+    if (disposition === 'NO_READY_JOB_NO_MODEL_DISPATCH') return code === 'NOT_APPLICABLE';
+    return true;
+  }
   const POLL_DISPOSITION_LABELS = {
     NO_READY_JOB_NO_MODEL_DISPATCH:
       'NO_READY_JOB_NO_MODEL_DISPATCH：本次輪詢沒有 READY 工作；未派工、未呼叫模型。',
@@ -502,6 +523,11 @@
         (object(s.native_worker) &&
           Object.prototype.hasOwnProperty.call(s.native_worker, 'poll_disposition') &&
           !POLL_DISPOSITIONS.includes(s.native_worker.poll_disposition)) ||
+        (object(s.native_worker) &&
+          Object.prototype.hasOwnProperty.call(s.native_worker, 'poll_wait_code') &&
+          (!Object.prototype.hasOwnProperty.call(s.native_worker, 'poll_disposition') ||
+           !validPollWaitCodeForDisposition(s.native_worker.poll_disposition,
+             s.native_worker.poll_wait_code))) ||
         (s.source !== undefined && !object(s.source)) ||
         (s.source?.main_sha !== undefined &&
           (typeof s.source.main_sha !== 'string' || !/^[a-f0-9]{40}$/i.test(s.source.main_sha)))) return null;
@@ -3567,6 +3593,15 @@
     text('native-l0', osFreshness !== 'FRESH'
       ? 'UNKNOWN：' + (snapshot ? '最後觀測的原生 L0 決策不是目前狀態' : '沒有有效觀測')
       : POLL_DISPOSITION_LABELS[pollDisposition]);
+    const pollWaitCode = POLL_WAIT_CODES.includes(worker.poll_wait_code)
+      ? worker.poll_wait_code
+      : pollDisposition === 'WAITING_GATE_NO_MODEL_DISPATCH' || pollDisposition === 'UNKNOWN'
+        ? 'UNKNOWN' : 'NOT_APPLICABLE';
+    text('native-l0-wait-code', osFreshness !== 'FRESH'
+      ? 'UNKNOWN：最新等待診斷不是目前狀態'
+      : pollWaitCode === 'NOT_APPLICABLE'
+        ? 'NOT_APPLICABLE：本次觀測沒有等待閘門'
+        : pollWaitCode + '：安全診斷碼；不代表 Worker 接受、派工或模型活動。');
     text('native-action',task.registered === false ? 'PTYSD-Native-OpenCode 未註冊'
       : task.registered === true ? String(task.action_kind || 'Action 未知') + '；' + String(task.state || '狀態未知')
         : '未確認');

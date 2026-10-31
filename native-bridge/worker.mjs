@@ -23,6 +23,7 @@ import { parseCodexJob, validCodexWritePaths, codexTaskFingerprint, codexExecuti
   assertCodexExecutorTaskReady, CODEX_HUMAN_GOAL_SPEC_PATH } from './codex-continuation.mjs';
 import {
   OPERATOR_REPO, OPERATOR_PROJECT, OPERATOR_ISSUE, OPERATOR_COMMENT_ID, POLL_DISPOSITIONS,
+  derivePollWaitCode, normalizePollWaitCodeForDisposition, validPollWaitCodeForDisposition,
   collectWindowsObservation, collectRuntimeDeployment, encodeOperatorObservation, findOperatorComment,
   updateExistingOperatorComment,
 } from './operator-observation.mjs';
@@ -1243,8 +1244,13 @@ export function derivePollDisposition(input) {
 }
 export async function publishOperatorObservation(config, workerLogin, comments, mainSha,
   dependencies = {}, candidateSourceShas = new Map(), issueCommentsCount = null,
-  preflightBlockers = new Map(), pollDisposition = 'UNKNOWN') {
-  const disposition = POLL_DISPOSITIONS.includes(pollDisposition) ? pollDisposition : 'UNKNOWN';
+  preflightBlockers = new Map(), pollDisposition = 'UNKNOWN', pollWaitCode = undefined) {
+  let disposition = POLL_DISPOSITIONS.includes(pollDisposition) ? pollDisposition : 'UNKNOWN';
+  let waitCode = normalizePollWaitCodeForDisposition(disposition, pollWaitCode);
+  if (!validPollWaitCodeForDisposition(disposition, waitCode)) {
+    disposition = 'UNKNOWN';
+    waitCode = 'UNKNOWN';
+  }
   const marked = comments.filter(c =>
     typeof c?.body === 'string' && c.body.startsWith('PTYSD_OPERATOR_OBSERVATION_V1\n'));
   if (!marked.length) return { status: 'NOT_SEEDED' };
@@ -1310,6 +1316,7 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
     native_worker: {
       observed_at: observedAt,
       poll_disposition: disposition,
+      poll_wait_code: waitCode,
       state: windows.status !== 'FRESH' ? 'OS_OBSERVATION_UNKNOWN'
         : windows.native_task.state === 'RUNNING' ? 'TASK_RUNNING_DURING_POLL'
           : 'POLL_EXECUTED_TASK_TRIGGER_UNVERIFIED',
@@ -3258,11 +3265,15 @@ export async function runWorker(configInput, adapters = {}) {
   }
   let observation;
   try {
+    const pollInput = { next, waitingEligibility, humanGoalWaitingReason, preflightBlockers };
+    const pollDisposition = derivePollDisposition(pollInput);
     observation = await publishOperatorObservation(
       config, me, comments, head, adapters.observationDependencies, candidateSourceShas,
       Number.isSafeInteger(issue.comments) && issue.comments >= 0 ? issue.comments : null,
       preflightBlockers,
-      derivePollDisposition({ next, waitingEligibility, humanGoalWaitingReason, preflightBlockers }),
+      pollDisposition,
+      derivePollWaitCode({ waiting: pollDisposition === 'WAITING_GATE_NO_MODEL_DISPATCH',
+        waitingEligibility, humanGoalWaitingReason, preflightBlockers }),
     );
   } catch (error) {
     // Status publishing failure must not block a valid queued task.

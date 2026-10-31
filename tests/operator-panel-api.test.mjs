@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import { TextEncoder } from 'node:util';
 import { runInNewContext } from 'node:vm';
+import { POLL_WAIT_CODES } from '../native-bridge/operator-observation.mjs';
 
 const html = readFileSync(new URL('../operator-panel/index.html', import.meta.url), 'utf8');
 const v2QualificationWorkflow = readFileSync(
@@ -696,6 +697,7 @@ test('renderer shows poll_disposition as a separate native L0 decision and defau
   snapshot.windows = { status:'FRESH', observed_at:new Date(now).toISOString(),
     native_task:{ registered:true, enabled:true, state:'READY' } };
   snapshot.native_worker.poll_disposition = 'READY_JOB_SELECTED_NOT_DISPATCHED';
+  snapshot.native_worker.poll_wait_code = 'MODEL_RUNS_NOT_ENABLED';
   const writeBody = () => {
     comments[0].body = 'PTYSD_OPERATOR_OBSERVATION_V1\n' + JSON.stringify(snapshot);
   };
@@ -714,12 +716,21 @@ test('renderer shows poll_disposition as a separate native L0 decision and defau
   assert.match(domElements.get('native-l0').textContent, /READY_JOB_SELECTED_NOT_DISPATCHED/);
   assert.match(domElements.get('native-l0').textContent, /不代表 Worker 接受、模型活動或交付/);
   assert.doesNotMatch(domElements.get('native-l0').textContent, /PASS|已接受|驗收通過/);
+  assert.match(domElements.get('native-l0-wait-code').textContent, /MODEL_RUNS_NOT_ENABLED/);
+  assert.match(domElements.get('native-l0-wait-code').textContent, /不代表 Worker 接受、派工或模型活動/);
+
+  delete snapshot.native_worker.poll_wait_code;
+  writeBody();
+  panel.render(null, resources, null, now, rateState);
+  assert.match(domElements.get('native-l0').textContent, /READY_JOB_SELECTED_NOT_DISPATCHED/);
+  assert.match(domElements.get('native-l0-wait-code').textContent, /NOT_APPLICABLE/,
+    'a historical snapshot with disposition but no additive wait code stays readable');
 
   delete snapshot.native_worker.poll_disposition;
   writeBody();
   panel.render(null, resources, null, now, rateState);
   assert.match(domElements.get('native-l0').textContent, /UNKNOWN/);
-  assert.match(domElements.get('native-l0').textContent, /不推定 Worker 接受或模型活動/);
+  assert.match(domElements.get('native-l0-wait-code').textContent, /UNKNOWN/);
 
   snapshot.native_worker.poll_disposition = 'READY_JOB_DISPATCHED';
   writeBody();
@@ -727,6 +738,29 @@ test('renderer shows poll_disposition as a separate native L0 decision and defau
   assert.match(domElements.get('overall-title').textContent, /無法確認|未知/,
     'a present but malformed disposition fails closed instead of displaying a PASS-like value');
   assert.match(domElements.get('native-l0').textContent, /UNKNOWN/);
+
+  snapshot.native_worker.poll_disposition = 'WAITING_GATE_NO_MODEL_DISPATCH';
+  snapshot.native_worker.poll_wait_code = 'NOT_APPLICABLE';
+  writeBody();
+  panel.render(null, resources, null, now, rateState);
+  assert.match(domElements.get('overall-title').textContent, /無法確認|未知/,
+    'a waiting disposition cannot claim that no wait gate applied');
+  assert.match(domElements.get('native-l0-wait-code').textContent, /UNKNOWN/);
+
+  delete snapshot.native_worker.poll_wait_code;
+  writeBody();
+  panel.render(null, resources, null, now, rateState);
+  assert.match(domElements.get('native-l0').textContent, /WAITING_GATE_NO_MODEL_DISPATCH/);
+  assert.match(domElements.get('native-l0-wait-code').textContent, /UNKNOWN/,
+    'historical waiting observations without the additive reason stay readable but do not guess');
+});
+
+test('panel and native publisher share the same closed poll wait-code vocabulary', () => {
+  const literal = inlineScript.match(/const POLL_WAIT_CODES = \[([\s\S]*?)\];/)?.[1];
+  assert.ok(literal, 'panel wait-code vocabulary exists');
+  const panelCodes = [...literal.matchAll(/'([^']+)'/g)].map(match => match[1]);
+  assert.deepEqual(panelCodes, [...POLL_WAIT_CODES],
+    'publisher and panel accept exactly the same safe diagnostic codes in the same order');
 });
 
 test('recent events join #310 schema-6 dispatches to exact #407 request, source, kind, and attempt receipts', () => {

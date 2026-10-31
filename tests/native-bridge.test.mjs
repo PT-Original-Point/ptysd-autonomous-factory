@@ -527,7 +527,7 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
   } finally { unseeded.cleanup(); }
 });
 
-test('poll disposition separates an empty queue, a waiting preflight gate, and a selected job before dispatch', async () => {
+test('poll disposition and safe wait code separate an empty queue, a waiting gate, and a selected job', async () => {
   const readObservation = store => parseOperatorObservation(
     store.comments.find(comment => comment.body.startsWith(OPERATOR_MARKER)).body);
 
@@ -537,6 +537,7 @@ test('poll disposition separates an empty queue, a waiting preflight gate, and a
     assert.equal(result.state, 'NO_DELTA');
     const observation = readObservation(empty.store);
     assert.equal(observation.native_worker.poll_disposition, 'NO_READY_JOB_NO_MODEL_DISPATCH');
+    assert.equal(observation.native_worker.poll_wait_code, 'NOT_APPLICABLE');
     assert.equal(observation.native_worker.current_task, null);
     assert.equal(observation.native_worker.latest_task, null);
     assert.equal(observation.native_worker.files_modified, 'UNPROVEN');
@@ -558,6 +559,7 @@ test('poll disposition separates an empty queue, a waiting preflight gate, and a
     assert.equal(result.reason, 'OPENCODE_MODEL_RUNS_NOT_ENABLED');
     const observation = readObservation(waiting.store);
     assert.equal(observation.native_worker.poll_disposition, 'WAITING_GATE_NO_MODEL_DISPATCH');
+    assert.equal(observation.native_worker.poll_wait_code, 'MODEL_RUNS_NOT_ENABLED');
     assert.equal(observation.native_worker.files_modified, 'UNPROVEN');
     assert.equal(observation.native_worker.pull_request, null);
     assert.equal(observation.native_worker.ci, 'UNKNOWN');
@@ -571,6 +573,7 @@ test('poll disposition separates an empty queue, a waiting preflight gate, and a
     await selected.run();
     const observation = readObservation(selected.store);
     assert.equal(observation.native_worker.poll_disposition, 'READY_JOB_SELECTED_NOT_DISPATCHED');
+    assert.equal(observation.native_worker.poll_wait_code, 'NOT_APPLICABLE');
     assert.equal(observation.native_worker.latest_task.state, 'QUEUED_NOT_STARTED',
       'publication happens before the selected job is dispatched');
     assert.equal(selected.modelCalls.count, 0);
