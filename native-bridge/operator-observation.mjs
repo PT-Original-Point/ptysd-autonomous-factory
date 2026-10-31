@@ -345,7 +345,15 @@ try {
 } catch {}
 $native = $null
 if ($task) {
-  $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
+  $lastRun = $null
+  $lastResult = $null
+  try {
+    $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
+    if ($null -ne $info) {
+      if ($info.LastRunTime -and $info.LastRunTime.Year -gt 2000) { $lastRun = $info.LastRunTime.ToString('o') }
+      if ($null -ne $info.LastTaskResult) { $lastResult = '0x{0:X8}' -f [uint32]$info.LastTaskResult }
+    }
+  } catch {}
   $actionKind = 'OTHER'
   if (@($task.Actions).Count -eq 1) {
     $leaf = [IO.Path]::GetFileName([string]$task.Actions[0].Execute)
@@ -369,14 +377,12 @@ if ($task) {
   if ($task.Settings.StartWhenAvailable -is [bool]) {
     $startWhenAvailable = [bool]$task.Settings.StartWhenAvailable
   }
-  $lastRun = $null
-  if ($info.LastRunTime -and $info.LastRunTime.Year -gt 2000) { $lastRun = $info.LastRunTime.ToString('o') }
   $native = [pscustomobject]@{
     registered = $true
     enabled = [bool]$task.Settings.Enabled
     state = [string]$task.State
     last_run = $lastRun
-    last_result = ('0x{0:X8}' -f [uint32]$info.LastTaskResult)
+    last_result = $lastResult
     action_kind = $actionKind
     identity_class = $identityClass
     multiple_instances = [string]$task.Settings.MultipleInstances

@@ -423,6 +423,68 @@ test('Windows collector reads only named PTYSD tasks and publishes only allowlis
   assert.equal(malformed.error, 'WINDOWS_READBACK_FAILED');
 });
 
+test('primary task history failure preserves the exact task state with null run metadata', () => {
+  const observedAt = new Date(now).toISOString();
+  const baseTask = {
+    registered: true, enabled: true, state: 'Ready',
+    action_kind: 'WINDOWLESS_LAUNCHER', identity_class: 'INTERACTIVE_LIMITED',
+    multiple_instances: 'IgnoreNew', trigger_interval_minutes: 5,
+    start_when_available: true,
+  };
+  const baseRaw = {
+    observed_at: observedAt, legacy_monitor_registered: false, listener_2667: false,
+    opencode_process_count: 0, runner_service_count: 1, runner_service_running: 1,
+  };
+  const run = nativeTask => collectWindowsObservation({
+    platformName: 'win32',
+    execute: () => JSON.stringify({ ...baseRaw, native_task: nativeTask }),
+    now: () => observedAt,
+  });
+
+  const missingHistory = run({ ...baseTask, last_run: null, last_result: null });
+  assert.equal(missingHistory.status, 'FRESH');
+  assert.equal(missingHistory.native_task.registered, true);
+  assert.equal(missingHistory.native_task.enabled, true);
+  assert.equal(missingHistory.native_task.state, 'READY');
+  assert.equal(missingHistory.native_task.action_kind, 'WINDOWLESS_LAUNCHER');
+  assert.equal(missingHistory.native_task.identity_class, 'INTERACTIVE_LIMITED');
+  assert.equal(missingHistory.native_task.multiple_instances, 'IGNORENEW');
+  assert.equal(missingHistory.native_task.trigger_interval_minutes, 5);
+  assert.equal(missingHistory.native_task.start_when_available, true);
+  assert.equal(missingHistory.native_task.last_run, null);
+  assert.equal(missingHistory.native_task.last_result, null,
+    'missing history must never become a zero success result');
+
+  const successHistory = run({ ...baseTask,
+    last_run: new Date(now - 5 * 60 * 1000).toISOString(), last_result: '0x00000000' });
+  assert.equal(successHistory.status, 'FRESH');
+  assert.equal(successHistory.native_task.last_run, new Date(now - 5 * 60 * 1000).toISOString());
+  assert.equal(successHistory.native_task.last_result, '0X00000000');
+
+  const collectorSource = readFileSync(
+    new URL('../native-bridge/operator-observation.mjs', import.meta.url), 'utf8');
+  assert.match(collectorSource,
+    /try\s*\{\s*\$info = Get-ScheduledTaskInfo -TaskName \$task\.TaskName -TaskPath \$task\.TaskPath -ErrorAction Stop[\s\S]*?\}\s*catch\s*\{\s*\}/,
+    'the primary task history read is locally guarded');
+  assert.match(collectorSource, /\$lastRun = \$null\s*\$lastResult = \$null/,
+    'primary run metadata starts as unknown before the history read');
+  assert.match(collectorSource, /if \(\$null -ne \$info\.LastTaskResult\)/,
+    'a missing history value cannot be formatted as a result');
+  assert.match(collectorSource, /last_result = \$lastResult/);
+  assert.doesNotMatch(collectorSource,
+    /last_result = \('0x\{0:X8\}' -f \[uint32\]\$info\.LastTaskResult\)/,
+    'the primary result must not be formatted from an unguarded history object');
+
+  const failed = collectWindowsObservation({
+    platformName: 'win32',
+    execute: () => JSON.stringify({ ...baseRaw, native_task: null }),
+    now: () => observedAt,
+  });
+  assert.equal(failed.status, 'UNKNOWN');
+  assert.equal(failed.error, 'WINDOWS_READBACK_FAILED',
+    'task discovery/collection errors still fail closed');
+});
+
 test('failed Windows collection exposes a bounded error code, not command output', () => {
   const result = collectWindowsObservation({
     platformName: 'win32',
