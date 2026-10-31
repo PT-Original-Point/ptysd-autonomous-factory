@@ -371,11 +371,10 @@ function hasRequestBoundScopedEditDiff(receipt, job) {
     /^[a-f0-9]{64}$/i.test(receipt.changed_files_sha256 || '') &&
     Number.isSafeInteger(receipt.changed_files_count) && receipt.changed_files_count > 0;
 }
-// A verified candidate-root-only W2 diff also releases the W2 same-path lease,
-// even when the attempt is BLOCKED and its task acceptance or external effects
-// remain UNKNOWN. Every file-change tool target and changed path must be bound
-// to the isolated candidate root and complete scoped diff. This does not accept
-// the task, clear UNKNOWN effects, or release the path for another Worker lane.
+// A verified candidate-root-only W2 diff releases the same-path lease, including
+// for an independent W1 edit. Every file-change tool target and changed path
+// must be bound to the isolated candidate root and complete scoped diff. This
+// does not accept the task or clear UNKNOWN external effects.
 function hasIsolatedW2ScopedEditDiff(receipt, job) {
   const targets = receipt?.file_change_target_evidence;
   const fileToolEvents = receipt?.file_change_tool_completed_count +
@@ -420,11 +419,18 @@ function unresolvedEditAttempt(job, entries, { allowIsolatedW2ScopedDiff = false
     attemptEntries.sort((a, b) => a.id - b.id);
     const lastEntry = attemptEntries.at(-1);
     const last = lastEntry?.receipt;
+    const completedScopedDiff = hasCompletedScopedEditDiff(last, job);
+    const isolatedW2ScopedDiff = allowIsolatedW2ScopedDiff &&
+      hasIsolatedW2ScopedEditDiff(last, job);
+    const terminalDiffReleasesLease = completedScopedDiff || isolatedW2ScopedDiff;
+    // Receipts from configured dispatchers are source/request-bound before they
+    // reach this function. A different current CLI login does not keep a
+    // terminal edit locked when its complete scoped diff proves the writer
+    // finished. Acceptance and external effects remain separate.
     if (last?.state === 'STARTED' || (terminalStates.has(last?.state) &&
-        lastEntry.login !== workerLogin) || (terminalStates.has(last?.state) &&
-        last.external_effects !== 'NONE' && last.model_invoked !== false &&
-        !hasCompletedScopedEditDiff(last, job) &&
-        !(allowIsolatedW2ScopedDiff && hasIsolatedW2ScopedEditDiff(last, job)))) return true;
+        lastEntry.login !== workerLogin && !terminalDiffReleasesLease) ||
+        (terminalStates.has(last?.state) && last.external_effects !== 'NONE' &&
+        last.model_invoked !== false && !terminalDiffReleasesLease)) return true;
   }
   return false;
 }
@@ -1018,7 +1024,7 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
        writePathsOverlap(candidateWritePaths, ownerWritePaths) &&
        unresolvedWriteAttempt(owner.job, receipts.get(owner.job.request_id) || [], {
          workerLogin,
-        allowIsolatedW2ScopedDiff: v.job.kind === 'antigravity_edit' &&
+        allowIsolatedW2ScopedDiff: isEditExecutionKind(v.job.kind) &&
           owner.job.kind === 'antigravity_edit',
        });
     })) continue;

@@ -1274,12 +1274,14 @@ test('candidate-root lease release fails closed for mixed targets and other Work
     { ...com(811, encoded(prior)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
     { ...com(812, encoded(nextW2)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
     com(813, RECEIPT_MARKER + JSON.stringify(mixedReceipt), 'worker'),
-    com(814, encoded(mkjob({ host, request_id: 'PTYSD_W2_MIXED_TARGET_INDEPENDENT_PING' }))),
+    { ...com(814, encoded(makeEdit('PTYSD_W1_OVERLAPPING_MIXED_W2', 'opencode_edit'))),
+      issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(815, encoded(mkjob({ host, request_id: 'PTYSD_W2_MIXED_TARGET_INDEPENDENT_PING' }))),
   ];
   assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(mixedReceipt)));
   assert.equal(selectNext(mixedComments, ['t14210184'], 'worker', host, sourceSha, [],
-    new Map([[461, sourceSha]]))?.id, 814,
-  'mixed-root writes continue to hold the same-path lease');
+    new Map([[461, sourceSha]]))?.id, 815,
+  'mixed-root writes continue to hold the same-path lease across W1 and W2');
 
   const isolatedReceipt = receiptFor({
     status: 'CANDIDATE_ROOT_ONLY', tool_count: 3, target_count: 3,
@@ -1295,8 +1297,8 @@ test('candidate-root lease release fails closed for mixed targets and other Work
     com(824, encoded(mkjob({ host, request_id: 'PTYSD_CROSS_LANE_INDEPENDENT_PING' }))),
   ];
   assert.equal(selectNext(crossLaneComments, ['t14210184'], 'worker', host, sourceSha, [],
-    new Map([[461, sourceSha]]))?.id, 824,
-  'the W2 lease exception does not change cross-lane path arbitration');
+    new Map([[461, sourceSha]]))?.id, 822,
+  'a verified W2 candidate-root-only terminal releases the overlapping W1 path lease');
 });
 
 test('a terminal W1 edit releases its path lease so the next distinct W1 request is selected once', () => {
@@ -1343,7 +1345,7 @@ test('a terminal W1 edit releases its path lease so the next distinct W1 request
     issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
   const newerComment = { ...com(902, encoded(newer)),
     issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
-  const attemptComment = com(903, RECEIPT_MARKER + JSON.stringify(finished), 'worker');
+  const attemptComment = com(903, RECEIPT_MARKER + JSON.stringify(finished), 't14210184');
   const comments = [olderComment, attemptComment, newerComment];
   const before = structuredClone(comments);
   const sources = new Map([[sourcePr, sourceSha]]);
@@ -1366,6 +1368,50 @@ test('a terminal W1 edit releases its path lease so the next distinct W1 request
   assert.equal(comments.some(comment =>
     parseReceipt(comment.body)?.request_id === newer.request_id), false,
   'selecting the newer request does not invent an attempt receipt');
+});
+
+test('a foreign dispatcher terminal edit keeps its lease only when the exact scoped diff is complete', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = 'c'.repeat(40);
+  const sourcePr = 437;
+  const makeRequest = (requestId, editPaths) => withHumanGoal({
+    schema: 6, project_id: PROJECT, host, request_id: requestId, kind: 'opencode_edit',
+    source_sha: sourceSha,
+    spec_path: `native-bridge/tasks/${requestId.toLowerCase().replaceAll('_', '-')}.md`,
+    spec_sha256: hash, model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+    edit_paths: editPaths, source_pr: sourcePr,
+  });
+  const older = makeRequest('PTYSD_W1_FOREIGN_TERMINAL_OWNER', ['native-bridge/worker.mjs']);
+  const newer = makeRequest('PTYSD_W1_AFTER_FOREIGN_TERMINAL', ['native-bridge/worker.mjs']);
+  const independent = makeRequest('PTYSD_W1_FOREIGN_TERMINAL_INDEPENDENT', ['tests/other.test.mjs']);
+  const finished = receipt(older.request_id,
+    '99999999-9999-4999-8999-999999999999', 'FINISHED', older, {
+      outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED', exit_code: 0,
+      model_invoked: true, session_id: '77777777-7777-4777-8777-777777777777',
+      external_effects: 'UNKNOWN', source_diff_evidence: 'CAPTURED',
+      task_acceptance: 'UNKNOWN', coding_state: 'DIFF_CAPTURED_UNVERIFIED',
+      scope_valid: true, diff_sha256: 'd'.repeat(64), diff_bytes: 96,
+      changed_files: ['native-bridge/worker.mjs'],
+    });
+  const baseComments = [
+    { ...com(931, encoded(older)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(932, RECEIPT_MARKER + JSON.stringify(finished), 't14210184'),
+    { ...com(933, encoded(newer)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    { ...com(934, encoded(independent)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+  ];
+  assert.equal(finished.external_effects, 'UNKNOWN');
+  assert.equal(finished.task_acceptance, 'UNKNOWN');
+  assert.equal(selectNext(baseComments, ['t14210184'], 'wfvupu1212', host, sourceSha, [],
+    new Map([[sourcePr, sourceSha]]))?.id, 933,
+  'an allowlisted dispatcher terminal with a complete bound diff releases the finished W1 lease');
+
+  const incomplete = { ...finished, scope_valid: false };
+  assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(incomplete)));
+  const incompleteComments = baseComments.map(comment => comment.id === 932
+    ? { ...comment, body: RECEIPT_MARKER + JSON.stringify(incomplete) } : comment);
+  assert.equal(selectNext(incompleteComments, ['t14210184'], 'wfvupu1212', host,
+    sourceSha, [], new Map([[sourcePr, sourceSha]]))?.id, 934,
+  'a foreign terminal lacking a complete bound diff keeps overlapping work blocked');
 });
 
 const sourceAcceptanceComment = (job, completedReceipt) =>
