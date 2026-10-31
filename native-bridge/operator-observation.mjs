@@ -13,6 +13,14 @@ export const OPERATOR_REPO = 'PT-Original-Point/ptysd-autonomous-factory';
 export const OPERATOR_PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
 export const OPERATOR_ISSUE = 407;
 export const OPERATOR_COMMENT_ID = 6144415195;
+// Additive L0 poll decision. It says only what the Worker observed before
+// dispatch; it never means Worker acceptance or proven model activity.
+export const POLL_DISPOSITIONS = Object.freeze([
+  'NO_READY_JOB_NO_MODEL_DISPATCH',
+  'WAITING_GATE_NO_MODEL_DISPATCH',
+  'READY_JOB_SELECTED_NOT_DISPATCHED',
+  'UNKNOWN',
+]);
 const MAX_OPERATOR_COMMENT_BODY_LENGTH = 65_536;
 const FORBIDDEN_KEYS = /^(?:pid|process_id|command|commandline|command_line|argv|path|absolute_path|stdout|stderr|prompt|token|authorization|credential|diff|environment|username|user_name|user_id|email|computer_name|host_name)$/i;
 const GITHUB_LOGIN = /^[A-Za-z0-9-]{1,39}$/;
@@ -114,12 +122,16 @@ export function parseOperatorObservation(body) {
   try { value = JSON.parse(body.slice(OPERATOR_MARKER.length)); }
   catch { return null; }
   if (object(value)) normalizeLegacyRuntimeDeployment(value);
+  const hasPollDisposition = object(value?.native_worker) &&
+    Object.hasOwn(value.native_worker, 'poll_disposition');
+  const pollDisposition = hasPollDisposition ? value.native_worker.poll_disposition : undefined;
   if (!object(value) || value.schema !== 1 ||
       value.project_id !== OPERATOR_PROJECT || value.repo !== OPERATOR_REPO ||
       value.issue !== OPERATOR_ISSUE || value.host_alias !== 'win11-primary' ||
       !SNAPSHOT_ID.test(value.snapshot_id || '') ||
       !Number.isSafeInteger(value.sequence) || value.sequence < 1 ||
       !validTime(value.observed_at) ||
+      (hasPollDisposition && !POLL_DISPOSITIONS.includes(pollDisposition)) ||
       (value.published_at !== undefined && value.published_at !== null &&
         !validTime(value.published_at)) ||
       (value.publisher_login !== undefined && !GITHUB_LOGIN.test(value.publisher_login || '')) ||

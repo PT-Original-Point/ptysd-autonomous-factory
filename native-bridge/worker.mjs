@@ -22,7 +22,7 @@ import { parseCodexJob, validCodexWritePaths, codexTaskFingerprint, codexExecuti
   validateCodexExecutorRequest, validateCodexExecutorResult,
   assertCodexExecutorTaskReady, CODEX_HUMAN_GOAL_SPEC_PATH } from './codex-continuation.mjs';
 import {
-  OPERATOR_REPO, OPERATOR_PROJECT, OPERATOR_ISSUE, OPERATOR_COMMENT_ID,
+  OPERATOR_REPO, OPERATOR_PROJECT, OPERATOR_ISSUE, OPERATOR_COMMENT_ID, POLL_DISPOSITIONS,
   collectWindowsObservation, collectRuntimeDeployment, encodeOperatorObservation, findOperatorComment,
   updateExistingOperatorComment,
 } from './operator-observation.mjs';
@@ -1223,9 +1223,28 @@ function operatorPublisherStageValue(stage, read, identity) {
   try { return read(); }
   catch (error) { throw operatorPublisherStageError(stage, error, identity); }
 }
+// The disposition is a read-only L0 decision derived from the already-computed
+// selection/preflight result. It is published with the one existing observation
+// before any dispatch and never asserts Worker acceptance or model activity.
+export function derivePollDisposition(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return 'UNKNOWN';
+  const { next = null, waitingEligibility = null, humanGoalWaitingReason = null,
+    preflightBlockers = null } = input;
+  const validWaitReason = value => value === null ||
+    (typeof value === 'string' && value.trim().length > 0);
+  if (next !== null && (typeof next !== 'object' || Array.isArray(next))) return 'UNKNOWN';
+  if (preflightBlockers !== null && !(preflightBlockers instanceof Map)) return 'UNKNOWN';
+  if (!validWaitReason(waitingEligibility) || !validWaitReason(humanGoalWaitingReason))
+    return 'UNKNOWN';
+  if (next !== null) return 'READY_JOB_SELECTED_NOT_DISPATCHED';
+  if (waitingEligibility !== null || humanGoalWaitingReason !== null ||
+      (preflightBlockers?.size ?? 0) > 0) return 'WAITING_GATE_NO_MODEL_DISPATCH';
+  return 'NO_READY_JOB_NO_MODEL_DISPATCH';
+}
 export async function publishOperatorObservation(config, workerLogin, comments, mainSha,
   dependencies = {}, candidateSourceShas = new Map(), issueCommentsCount = null,
-  preflightBlockers = new Map()) {
+  preflightBlockers = new Map(), pollDisposition = 'UNKNOWN') {
+  const disposition = POLL_DISPOSITIONS.includes(pollDisposition) ? pollDisposition : 'UNKNOWN';
   const marked = comments.filter(c =>
     typeof c?.body === 'string' && c.body.startsWith('PTYSD_OPERATOR_OBSERVATION_V1\n'));
   if (!marked.length) return { status: 'NOT_SEEDED' };
@@ -1290,6 +1309,7 @@ export async function publishOperatorObservation(config, workerLogin, comments, 
     runtime_deployment: runtimeDeployment,
     native_worker: {
       observed_at: observedAt,
+      poll_disposition: disposition,
       state: windows.status !== 'FRESH' ? 'OS_OBSERVATION_UNKNOWN'
         : windows.native_task.state === 'RUNNING' ? 'TASK_RUNNING_DURING_POLL'
           : 'POLL_EXECUTED_TASK_TRIGGER_UNVERIFIED',
@@ -3242,6 +3262,7 @@ export async function runWorker(configInput, adapters = {}) {
       config, me, comments, head, adapters.observationDependencies, candidateSourceShas,
       Number.isSafeInteger(issue.comments) && issue.comments >= 0 ? issue.comments : null,
       preflightBlockers,
+      derivePollDisposition({ next, waitingEligibility, humanGoalWaitingReason, preflightBlockers }),
     );
   } catch (error) {
     // Status publishing failure must not block a valid queued task.

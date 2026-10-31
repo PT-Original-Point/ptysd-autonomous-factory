@@ -688,6 +688,47 @@ test('an empty formal schema-6 queue is not presented as no READY Codex Goal wor
   assert.doesNotMatch(next,/下一個 READY：UNKNOWN/);
 });
 
+test('renderer shows poll_disposition as a separate native L0 decision and defaults missing historical fields to UNKNOWN', () => {
+  domElements.clear();
+  const now = baseTime;
+  const comments = observationComments(now, { latestTask:false });
+  const snapshot = JSON.parse(comments[0].body.slice('PTYSD_OPERATOR_OBSERVATION_V1\n'.length));
+  snapshot.windows = { status:'FRESH', observed_at:new Date(now).toISOString(),
+    native_task:{ registered:true, enabled:true, state:'READY' } };
+  snapshot.native_worker.poll_disposition = 'READY_JOB_SELECTED_NOT_DISPATCHED';
+  const writeBody = () => {
+    comments[0].body = 'PTYSD_OPERATOR_OBSERVATION_V1\n' + JSON.stringify(snapshot);
+  };
+  writeBody();
+  const empty = { data:null, fetchedAt:now, error:null, url:'' };
+  const resources = {
+    issue:{ data:comments, fetchedAt:now, error:null, url:urls.issue },
+    pr:empty, main:{ data:{ sha:head }, fetchedAt:now, error:null, url:urls.main }, checks:empty,
+    dispatches:{ W1:{ data:null, fetchedAt:now, error:null }, W2:{ data:null, fetchedAt:now, error:null },
+      W3:{ data:null, fetchedAt:now, error:null } },
+    dispatchPulls:{}, dispatchChecks:{},
+  };
+  const rateState = { status:'READY', coordination:'SHARED_LOCKED', remaining:40,
+    lastError:null, lastSuccessAt:now, resetAt:null, pauseUntil:null, indefinite:false };
+  panel.render(null, resources, null, now, rateState);
+  assert.match(domElements.get('native-l0').textContent, /READY_JOB_SELECTED_NOT_DISPATCHED/);
+  assert.match(domElements.get('native-l0').textContent, /不代表 Worker 接受、模型活動或交付/);
+  assert.doesNotMatch(domElements.get('native-l0').textContent, /PASS|已接受|驗收通過/);
+
+  delete snapshot.native_worker.poll_disposition;
+  writeBody();
+  panel.render(null, resources, null, now, rateState);
+  assert.match(domElements.get('native-l0').textContent, /UNKNOWN/);
+  assert.match(domElements.get('native-l0').textContent, /不推定 Worker 接受或模型活動/);
+
+  snapshot.native_worker.poll_disposition = 'READY_JOB_DISPATCHED';
+  writeBody();
+  panel.render(null, resources, null, now, rateState);
+  assert.match(domElements.get('overall-title').textContent, /無法確認|未知/,
+    'a present but malformed disposition fails closed instead of displaying a PASS-like value');
+  assert.match(domElements.get('native-l0').textContent, /UNKNOWN/);
+});
+
 test('recent events join #310 schema-6 dispatches to exact #407 request, source, kind, and attempt receipts', () => {
   const w1Request='W1_EDITFILE_TELEMETRY_20261023_9C8247675F914DCBBC708DD2AB90A6C2';
   const w1Sha='221e0c0e4524e07bc06a2aae431fdd34d121b73d';

@@ -9,7 +9,7 @@ import './native-worker-install-bundle.test.mjs';
 import {
   OPERATOR_MARKER, encodeOperatorObservation, parseOperatorObservation,
   OPERATOR_COMMENT_ID, findOperatorComment, updateExistingOperatorComment, observationFreshness,
-  collectWindowsObservation, collectRuntimeDeployment,
+  collectWindowsObservation, collectRuntimeDeployment, POLL_DISPOSITIONS,
 } from '../native-bridge/operator-observation.mjs';
 import {
   JOB_MARKER, RECEIPT_MARKER, PROJECT, REPO,
@@ -53,6 +53,34 @@ test('operator snapshot requires exact project identity, time bounds, and de-ide
     /INVALID_OPERATOR_OBSERVATION/);
   assert.throws(() => encodeOperatorObservation(observation({ comment_author_login: 'bad/login' })),
     /INVALID_OPERATOR_OBSERVATION/);
+});
+
+test('operator snapshot accepts only the exact poll disposition enum and keeps historical observations readable', () => {
+  // Historical observations predate this additive field; both shapes stay valid.
+  assert.equal(parseOperatorObservation(encodeOperatorObservation(observation())).issue, 407);
+  const legacyNativeWorker = observation({
+    native_worker: { state: 'POLL_EXECUTED_TASK_TRIGGER_UNVERIFIED',
+      current_task: null, latest_task: null },
+  });
+  assert.equal(parseOperatorObservation(encodeOperatorObservation(legacyNativeWorker))
+    .native_worker.state, 'POLL_EXECUTED_TASK_TRIGGER_UNVERIFIED');
+  for (const value of POLL_DISPOSITIONS) {
+    const parsed = parseOperatorObservation(OPERATOR_MARKER + JSON.stringify(observation({
+      native_worker: { poll_disposition: value },
+    })));
+    assert.equal(parsed?.native_worker?.poll_disposition, value);
+  }
+  for (const malformed of [null, 7, true, {}, [], '', 'READY_JOB_DISPATCHED',
+    'no_ready_job_no_model_dispatch', 'UNKNOWN ']) {
+    const body = OPERATOR_MARKER + JSON.stringify(observation({
+      native_worker: { poll_disposition: malformed },
+    }));
+    assert.equal(parseOperatorObservation(body), null,
+      'a present poll_disposition must be one exact enum value');
+    assert.throws(() => encodeOperatorObservation(observation({
+      native_worker: { poll_disposition: malformed },
+    })), /INVALID_OPERATOR_OBSERVATION/);
+  }
 });
 
 test('operator snapshot rejects malformed source main SHA but keeps legacy snapshots without it readable', () => {
@@ -1217,7 +1245,8 @@ test('browser shows the shared rate-limit pause, recovery countdown, and histori
   assert.equal(elements.get('w3-badge').textContent,'狀態未確認');
 });
 
-async function publishReceiptProjection(rows, { enableAntigravityModelRuns, enableV2ModelRuns = true } = {}) {
+async function publishReceiptProjection(rows, { enableAntigravityModelRuns, enableV2ModelRuns = true,
+  pollDisposition = undefined } = {}) {
   const at = Date.now();
   const host = 'DESKTOP-1B6PD2P';
   const mainSha = 'e'.repeat(40);
@@ -1281,7 +1310,7 @@ async function publishReceiptProjection(rows, { enableAntigravityModelRuns, enab
     readComments: () => structuredClone(comments),
   };
   return publishOperatorObservation(config, 't14210184', comments, mainSha,
-    dependencies, heads);
+    dependencies, heads, null, new Map(), pollDisposition);
 }
 
 test('queued W2 observation names the disabled model gate without inventing an attempt or blocking W1', async () => {
@@ -1317,6 +1346,28 @@ test('idle W2 snapshot exposes the disabled model switch without inventing a tas
   assert.equal(w2.blocker_code, 'NO_CURRENT_W2_TASK');
   assert.equal(w2.model_execution_switch, 'DISABLED');
   assert.equal(Object.hasOwn(w2, 'attempt_id'), false);
+});
+
+test('publisher adds poll_disposition without changing Worker state, current/latest task, or acceptance semantics', async () => {
+  const result = await publishReceiptProjection([], { enableAntigravityModelRuns: false,
+    pollDisposition: 'NO_READY_JOB_NO_MODEL_DISPATCH' });
+  assert.equal(result.status, 'UPDATED');
+  assert.equal(result.observation.native_worker.poll_disposition, 'NO_READY_JOB_NO_MODEL_DISPATCH');
+  assert.equal(result.observation.native_worker.state, 'POLL_EXECUTED_TASK_TRIGGER_UNVERIFIED');
+  assert.equal(result.observation.native_worker.current_task, null);
+  assert.equal(result.observation.native_worker.latest_task, null);
+  assert.equal(result.observation.native_worker.files_modified, 'UNPROVEN');
+  assert.equal(result.observation.native_worker.ci, 'UNKNOWN');
+  const w1 = result.observation.workers.find(item => item.worker_id === 'W1');
+  assert.equal(Object.hasOwn(w1, 'task_acceptance'), false,
+    'poll_disposition must not add a Worker acceptance claim');
+  assert.equal(result.observation.workers.find(item => item.worker_id === 'W2').model_eligibility,
+    'UNKNOWN');
+
+  const numeric = await publishReceiptProjection([], { enableAntigravityModelRuns: false,
+    pollDisposition: 7 });
+  assert.equal(numeric.observation.native_worker.poll_disposition, 'UNKNOWN',
+    'a non-enum publisher input degrades to UNKNOWN rather than inventing a PASS-like value');
 });
 
 test('worker observation reports captured W1 and blocked W2 diffs as unverified, never active or accepted', async () => {
