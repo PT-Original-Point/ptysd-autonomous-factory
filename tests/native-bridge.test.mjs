@@ -5964,3 +5964,308 @@ test('parseReceipt rejects schema-6 Antigravity receipt with impossible file-tar
   assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(explicitlyUnidentifiedReceipt)),
     'summaries with explicitly unidentified tools must remain valid');
 });
+
+test('W2 executor preflight WAITING result reconciles without redispatch while independent W1 edit is dispatched in the same poll', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-w2-waiting-w1-continue-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const opencodeWorkspace = join(root, 'opencode-workspace');
+    const stateDir = join(root, 'state');
+    const w1ManifestDir = join(root, 'opencode-manifests');
+    const w1ResultsDir = join(root, 'opencode-results');
+    const w2ManifestDir = join(root, 'antigravity-manifests');
+    const w2ResultsDir = join(root, 'antigravity-results');
+
+    for (const dir of [
+      workspace,
+      opencodeWorkspace,
+      stateDir,
+      w1ManifestDir,
+      w1ResultsDir,
+      w2ManifestDir,
+      w2ResultsDir,
+      join(workspace, 'src'),
+      join(opencodeWorkspace, 'src'),
+    ]) {
+      mkdirSync(dir, { recursive: true });
+    }
+
+    writeFileSync(join(opencodeWorkspace, 'src', 'w1-worker.mjs'), 'export const value = 1;\n');
+    writeFileSync(join(workspace, 'src', 'w2-quota-canary.mjs'), 'export const value = 2;\n');
+
+    const host = hostname().toUpperCase();
+    const w2Spec = '# Synthetic W2 task spec; no model execution in this test.\n';
+    const w1Spec = '# Synthetic W1 task spec; model runs in executor only.\n';
+
+    const w2Job = withHumanGoal({
+      schema: 6,
+      project_id: PROJECT,
+      host,
+      request_id: 'PTYSD_W2_WAITING_RECONCILE_20261031',
+      kind: 'antigravity_edit',
+      source_sha: commit,
+      spec_path: 'native-bridge/tasks/w2-quota-canary.md',
+      spec_sha256: h(w2Spec),
+      model: ANTIGRAVITY_V2_MODEL,
+      variant: 'high',
+      edit_paths: ['src/w2-quota-canary.mjs'],
+      source_pr: 461,
+    });
+
+    const w1Job = withHumanGoal({
+      schema: 6,
+      project_id: PROJECT,
+      host,
+      request_id: 'PTYSD_W1_READY_WHILE_W2_WAITING_20261031',
+      kind: 'opencode_edit',
+      source_sha: commit,
+      spec_path: 'native-bridge/tasks/w1-edit.md',
+      spec_sha256: h(w1Spec),
+      model: 'opencode/deepseek-v4.1-flash-free',
+      variant: 'free',
+      edit_paths: ['src/w1-worker.mjs'],
+      source_pr: 437,
+    });
+
+    const w2AttemptId = '33333333-3333-4333-8333-333333333333';
+    const w2Started = receipt(w2Job.request_id, w2AttemptId, 'STARTED', w2Job);
+    const w2WaitingTerminal = receipt(w2Job.request_id, w2AttemptId, 'WAITING', w2Job, {
+      outcome: 'ANTIGRAVITY_NONFILE_TOOL_POLICY_UNVERIFIED',
+      exit_code: 48,
+      evidence_sha256: null,
+      evidence_bytes: 0,
+      model_invoked: false,
+      session_id: null,
+      session_started: null,
+      diff_sha256: null,
+      diff_bytes: null,
+    });
+
+    const w2WaitingResult = {
+      request_id: w2Job.request_id,
+      attempt_id: w2AttemptId,
+      terminal: w2WaitingTerminal,
+      local_evidence: {
+        executor_workspace_guard: {
+          registered_root_identity_sha256: 'a'.repeat(64),
+          registered_root_state_sha256: 'b'.repeat(64),
+          candidate_root_identity_sha256: 'c'.repeat(64),
+          candidate_root_state_sha256: 'd'.repeat(64),
+          registered_root_after_sha256: 'b'.repeat(64),
+          candidate_root_after_sha256: 'd'.repeat(64),
+          readback: 'COMPLETE',
+          registered_root_changed_paths: 0,
+          candidate_root_changed_paths: 0,
+        },
+      },
+    };
+
+    const w2ResultPath = join(w2ResultsDir, `result-${w2Job.request_id}-${w2AttemptId}.json`);
+    writeFileSync(w2ResultPath, JSON.stringify(w2WaitingResult), 'utf8');
+
+    const w2Comment = {
+      ...com(9101, encoded(w2Job), 't14210184'),
+      issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
+    };
+    const w2StartedReceiptComment = com(9102, RECEIPT_MARKER + JSON.stringify(w2Started), 'worker');
+    const w1Comment = {
+      ...com(9103, encoded(w1Job), 't14210184'),
+      issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
+    };
+    const receiptComments = [w2StartedReceiptComment];
+
+    const w1Executor = {
+      ...executorDescriptorForLane('OpenCode', 1001),
+      manifest_dir: w1ManifestDir,
+      results_dir: w1ResultsDir,
+      working_directory: opencodeWorkspace,
+    };
+    const w2Executor = {
+      ...executorDescriptorForLane('Antigravity', 1003),
+      manifest_dir: w2ManifestDir,
+      results_dir: w2ResultsDir,
+      working_directory: workspace,
+    };
+
+    const config = {
+      repo: REPO,
+      project_id: PROJECT,
+      host,
+      issue: 407,
+      workspace,
+      state_dir: stateDir,
+      dispatchers: ['t14210184'],
+      executors: { opencode: w1Executor, antigravity: w2Executor },
+      enable_v2_model_runs: true,
+      enable_antigravity_model_runs: true,
+      allowed_models: {
+        'opencode/deepseek-v4.1-flash-free': ['free'],
+        [ANTIGRAVITY_V2_MODEL]: ['high'],
+      },
+    };
+
+    const posted = [];
+    const logs = [];
+    let nextCommentId = 9200;
+    let w1BundleCalls = 0;
+    let w1DispatchCalls = 0;
+    let w2BundleCalls = 0;
+    let w2DispatchCalls = 0;
+    let inlineModelCalls = 0;
+
+    const pullFor = pr => ({
+      number: pr,
+      state: 'open',
+      base: { ref: 'main', repo: { id: 1352411536, full_name: REPO } },
+      head: { sha: commit, repo: { id: 1352411536, full_name: REPO } },
+    });
+
+    const adapters = {
+      goalCommentsRead: () => [humanGoalComment(), w2Comment, w1Comment],
+      readExecutorWorkspace: descriptor => {
+        if (descriptor === w1Executor) return opencodeWorkspace;
+        if (descriptor === w2Executor) return workspace;
+        throw new Error('UNEXPECTED_DESCRIPTOR_WORKSPACE');
+      },
+      apiRead(uri) {
+        if (uri === 'user') return { login: 'worker' };
+        if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
+        if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: commit } };
+        if (uri === `repos/${REPO}/issues/comments/6188322050`) return humanGoalComment();
+        if (uri === `repos/${REPO}/pulls/461`) return pullFor(461);
+        if (uri === `repos/${REPO}/pulls/437`) return pullFor(437);
+        const commentMatch = uri.match(new RegExp(`^repos/${REPO.replaceAll('/', '\\/')}/issues/comments/(\\d+)$`));
+        if (commentMatch) {
+          const id = Number(commentMatch[1]);
+          if (id === 6188322050) return humanGoalComment();
+          if (id === w2Comment.id) return w2Comment;
+          if (id === w1Comment.id) return w1Comment;
+          return receiptComments.find(item => item.id === id);
+        }
+        if (uri.startsWith(`repos/${REPO}/contents/`)) {
+          const spec = uri.includes('w2-quota-canary.md') ? w2Spec : w1Spec;
+          return { encoding: 'base64', content: Buffer.from(spec).toString('base64') };
+        }
+        throw new Error(`UNEXPECTED_API_ROUTE:${uri}`);
+      },
+      commentsRead: () => receiptComments,
+      assertExecutorTaskReady: descriptor => {
+        assert.equal(descriptor, w1Executor, 'only the ready W1 descriptor reaches Task Scheduler readiness');
+        return { ready: true };
+      },
+      createExecutorSourceBundle: ({ workspace: sourceWorkspace, descriptor, job, attemptId }) => {
+        if (descriptor === w2Executor) {
+          w2BundleCalls++;
+          throw new Error('W2_MUST_NOT_CREATE_SOURCE_BUNDLE');
+        }
+        assert.equal(descriptor, w1Executor);
+        assert.equal(sourceWorkspace, opencodeWorkspace);
+        assert.equal(job.request_id, w1Job.request_id);
+        assert.equal(job.source_sha, commit);
+        assert.equal(job.source_pr, 437);
+        assert.deepEqual(job.edit_paths, ['src/w1-worker.mjs']);
+        w1BundleCalls++;
+        return { attempt_id: attemptId, source_sha: job.source_sha, sha256: 'c'.repeat(64) };
+      },
+      dispatchToExecutor: (descriptor, manifest) => {
+        if (descriptor === w2Executor) {
+          w2DispatchCalls++;
+          throw new Error('W2_MUST_NOT_BE_DISPATCHED');
+        }
+        assert.equal(descriptor, w1Executor);
+        assert.equal(manifest.job.request_id, w1Job.request_id);
+        assert.equal(manifest.job.source_sha, commit);
+        assert.equal(manifest.job.source_pr, 437);
+        assert.deepEqual(manifest.job.edit_paths, ['src/w1-worker.mjs']);
+        assert.equal(manifest.source_bundle_sha256, 'c'.repeat(64));
+        w1DispatchCalls++;
+        return { outcome: 'SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION' };
+      },
+      writeReceipt: (receiptConfig, data, login) => {
+        assert.equal(receiptConfig.issue, 407);
+        posted.push(data);
+        receiptComments.push(com(nextCommentId++, RECEIPT_MARKER + JSON.stringify(data), login || 'worker'));
+      },
+      runPlan: () => {
+        inlineModelCalls++;
+        throw new Error('MODEL_MUST_NOT_BE_CALLED_INLINE');
+      },
+      observationDependencies: { collectWindowsObservation: () => ({ status: 'UNKNOWN' }) },
+      log: value => logs.push(value),
+    };
+
+    const result = await executeWorker(config, adapters);
+
+    // 1. Result of same-poll recovery dispatching W1
+    assert.equal(result.state, 'DISPATCHED');
+    assert.equal(result.request_id, w1Job.request_id);
+    assert.notEqual(result.attempt_id, w2AttemptId);
+    assert.equal(result.outcome, 'SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION');
+
+    // 2. Exactly one W1 bundle & dispatch; zero W2 bundle, dispatch, or inline model calls
+    assert.equal(w1BundleCalls, 1);
+    assert.equal(w1DispatchCalls, 1);
+    assert.equal(w2BundleCalls, 0);
+    assert.equal(w2DispatchCalls, 0);
+    assert.equal(inlineModelCalls, 0);
+
+    // 3. Exactly two receipts posted: W2 WAITING reconciled, then W1 STARTED dispatched
+    assert.equal(posted.length, 2);
+
+    const w2Receipt = posted[0];
+    assert.equal(w2Receipt.request_id, w2Job.request_id);
+    assert.equal(w2Receipt.attempt_id, w2AttemptId);
+    assert.equal(w2Receipt.state, 'WAITING');
+    assert.equal(w2Receipt.kind, 'antigravity_edit');
+    assert.equal(w2Receipt.model, ANTIGRAVITY_V2_MODEL);
+    assert.equal(w2Receipt.variant, 'high');
+    assert.equal(w2Receipt.model_invoked, false);
+    assert.equal(w2Receipt.session_id, null);
+    assert.equal(w2Receipt.session_started, null);
+    assert.equal(w2Receipt.diff_sha256, null);
+    assert.equal(w2Receipt.diff_bytes, null);
+    assert.equal(w2Receipt.evidence_sha256, null);
+    assert.equal(w2Receipt.evidence_bytes, 0);
+    assert.equal(w2Receipt.source_sha, commit);
+    assert.equal(w2Receipt.source_pr, 461);
+    assert.equal(w2Receipt.goal_comment_id, 6188322050);
+    assert.equal(w2Receipt.goal_body_sha256, h(humanGoalBody));
+    assert.equal(w2Receipt.eligibility_state, 'WAITING');
+    assert.equal(w2Receipt.outcome, 'ANTIGRAVITY_NONFILE_TOOL_POLICY_UNVERIFIED');
+
+    const w1Receipt = posted[1];
+    assert.equal(w1Receipt.request_id, w1Job.request_id);
+    assert.equal(w1Receipt.attempt_id, result.attempt_id);
+    assert.notEqual(w1Receipt.attempt_id, w2AttemptId);
+    assert.equal(w1Receipt.state, 'STARTED');
+    assert.equal(w1Receipt.kind, 'opencode_edit');
+    assert.equal(w1Receipt.model, 'opencode/deepseek-v4.1-flash-free');
+    assert.equal(w1Receipt.variant, 'free');
+    assert.equal(w1Receipt.source_sha, commit);
+    assert.equal(w1Receipt.source_pr, 437);
+    assert.equal(w1Receipt.goal_comment_id, 6188322050);
+    assert.equal(w1Receipt.goal_body_sha256, h(humanGoalBody));
+    assert.equal(w1Receipt.edit_paths_sha256, h(JSON.stringify(w1Job.edit_paths)));
+
+    // 4. Log assertions verifying W2 recovery and W1 dispatch
+    assert.ok(logs.includes(`RECOVERED_EXECUTOR_RESULT_WAITING_${w2Job.request_id}`));
+    assert.ok(logs.includes(`DISPATCHED_${w1Job.request_id}_SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION`));
+    assert.equal(logs.some(value => value.includes('OPENCODE_LANE_WAITING_ELIGIBILITY_')), false);
+
+    // 5. Subsequent selection leaves W2 eligible for later reevaluation while W1 is in flight
+    const allComments = [w2Comment, w1Comment, ...receiptComments];
+    const nextCandidate = selectNext(
+      allComments,
+      ['t14210184'],
+      'worker',
+      host,
+      commit,
+      [],
+      new Map([[461, commit], [437, commit]])
+    );
+    assert.equal(nextCandidate?.job.request_id, w2Job.request_id,
+      'the reconciled no-model W2 preflight WAITING receipt leaves the W2 task eligible for later reevaluation');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
