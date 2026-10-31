@@ -21,6 +21,101 @@ export const POLL_DISPOSITIONS = Object.freeze([
   'READY_JOB_SELECTED_NOT_DISPATCHED',
   'UNKNOWN',
 ]);
+// A closed, de-identified diagnostic vocabulary for gates seen during the
+// current L0 poll. Raw errors, paths, IDs, and provider text are never copied.
+export const POLL_WAIT_CODES = Object.freeze([
+  'NOT_APPLICABLE', 'UNKNOWN',
+  'HUMAN_GOAL_SOURCE_READ_UNKNOWN', 'HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN',
+  'HUMAN_GOAL_SCOPED_ACTION_MISSING', 'HUMAN_GOAL_SCOPED_ACTION_INVALID',
+  'HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED', 'HUMAN_GOAL_CODEX_POLICY_DISABLED',
+  'HUMAN_GOAL_CODEX_POLICY_INVALID', 'HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN',
+  'CODEX_EXECUTOR_SPOOL_OR_OWNER_NOT_READY', 'CODEX_EXECUTOR_TASK_READBACK_NOT_READY',
+  'MODEL_RUNS_NOT_ENABLED', 'MODEL_NOT_EXPLICITLY_ALLOWED', 'MODEL_CLI_NOT_QUALIFIED',
+  'MODEL_AUTH_NOT_READY', 'MODEL_AUTH_METADATA_UNKNOWN', 'MODEL_QUOTA_EMPTY',
+  'MODEL_QUOTA_UNKNOWN', 'MODEL_CREDIT_FALLBACK_NOT_DISABLED',
+  'MODEL_CREDIT_FALLBACK_STATUS_UNKNOWN', 'MODEL_EXECUTION_ATTESTATION_UNKNOWN',
+  'MODEL_EXECUTION_ATTESTATION_STALE', 'MODEL_PROJECT_SCOPE_UNVERIFIED',
+  'MODEL_TOOL_POLICY_UNVERIFIED', 'EXECUTOR_ROUTE_UNAVAILABLE',
+  'EXECUTOR_OS_ISOLATION_REQUIRED', 'TASK_SPEC_READ_UNKNOWN', 'TASK_SPEC_HASH_MISMATCH',
+  'EDIT_SCOPE_INVALID', 'SOURCE_BUNDLE_IDENTITY_MISMATCH',
+]);
+const POLL_WAIT_REASON_CODES = new Map([
+  ['HUMAN_GOAL_SOURCE_READ_UNKNOWN', 'HUMAN_GOAL_SOURCE_READ_UNKNOWN'],
+  ['HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN', 'HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN'],
+  ['HUMAN_GOAL_SCOPED_ACTION_MISSING', 'HUMAN_GOAL_SCOPED_ACTION_MISSING'],
+  ['HUMAN_GOAL_SCOPED_ACTION_INVALID', 'HUMAN_GOAL_SCOPED_ACTION_INVALID'],
+  ['HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED', 'HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED'],
+  ['HUMAN_GOAL_CODEX_POLICY_DISABLED', 'HUMAN_GOAL_CODEX_POLICY_DISABLED'],
+  ['HUMAN_GOAL_CODEX_POLICY_INVALID', 'HUMAN_GOAL_CODEX_POLICY_INVALID'],
+  ['HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN', 'HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN'],
+  ['CODEX_EXECUTOR_SPOOL_OR_OWNER_NOT_READY', 'CODEX_EXECUTOR_SPOOL_OR_OWNER_NOT_READY'],
+  ['CODEX_EXECUTOR_TASK_READBACK_NOT_READY', 'CODEX_EXECUTOR_TASK_READBACK_NOT_READY'],
+  ['MODEL_RUNS_NOT_ENABLED', 'MODEL_RUNS_NOT_ENABLED'],
+  ['OPENCODE_MODEL_RUNS_NOT_ENABLED', 'MODEL_RUNS_NOT_ENABLED'],
+  ['ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED', 'MODEL_RUNS_NOT_ENABLED'],
+  ['MODEL_NOT_EXPLICITLY_ALLOWED', 'MODEL_NOT_EXPLICITLY_ALLOWED'],
+  ['OPENCODE_MODEL_NOT_EXPLICITLY_ALLOWED', 'MODEL_NOT_EXPLICITLY_ALLOWED'],
+  ['OPENCODE_V2_CLI_NOT_QUALIFIED', 'MODEL_CLI_NOT_QUALIFIED'],
+  ['ANTIGRAVITY_CLI_NOT_QUALIFIED', 'MODEL_CLI_NOT_QUALIFIED'],
+  ['OPENCODE_V2_AUTH_NOT_READY', 'MODEL_AUTH_NOT_READY'],
+  ['ANTIGRAVITY_AUTH_NOT_LOGGED_IN', 'MODEL_AUTH_NOT_READY'],
+  ['ANTIGRAVITY_CLI_AUTH_NOT_VERIFIED', 'MODEL_AUTH_NOT_READY'],
+  ['OPENCODE_V2_AUTH_METADATA_UNKNOWN', 'MODEL_AUTH_METADATA_UNKNOWN'],
+  ['ANTIGRAVITY_QUOTA_EMPTY', 'MODEL_QUOTA_EMPTY'],
+  ['ANTIGRAVITY_AGGREGATE_QUOTA_UNKNOWN', 'MODEL_QUOTA_UNKNOWN'],
+  ['ANTIGRAVITY_CREDIT_OVERAGE_NOT_DISABLED', 'MODEL_CREDIT_FALLBACK_NOT_DISABLED'],
+  ['ANTIGRAVITY_CREDIT_FALLBACK_SETTING_UNKNOWN', 'MODEL_CREDIT_FALLBACK_STATUS_UNKNOWN'],
+  ['ANTIGRAVITY_EXECUTION_ATTESTATION_UNKNOWN', 'MODEL_EXECUTION_ATTESTATION_UNKNOWN'],
+  ['ANTIGRAVITY_EXECUTION_ATTESTATION_STALE', 'MODEL_EXECUTION_ATTESTATION_STALE'],
+  ['ANTIGRAVITY_PROJECT_SCOPE_UNVERIFIED', 'MODEL_PROJECT_SCOPE_UNVERIFIED'],
+  ['ANTIGRAVITY_NONFILE_TOOL_POLICY_UNVERIFIED', 'MODEL_TOOL_POLICY_UNVERIFIED'],
+  ['ANTIGRAVITY_CUA_MCP_TOOL_POLICY_UNVERIFIED', 'MODEL_TOOL_POLICY_UNVERIFIED'],
+  ['EXECUTOR_NOT_CONFIGURED', 'EXECUTOR_ROUTE_UNAVAILABLE'],
+  ['EXECUTOR_NOT_CONFIGURED_FOR_OPENCODE', 'EXECUTOR_ROUTE_UNAVAILABLE'],
+  ['EXECUTOR_NOT_CONFIGURED_FOR_ANTIGRAVITY', 'EXECUTOR_ROUTE_UNAVAILABLE'],
+  ['EXECUTOR_OS_ISOLATION_REQUIRED', 'EXECUTOR_OS_ISOLATION_REQUIRED'],
+  ['PREFLIGHT_SPEC_UNREADABLE', 'TASK_SPEC_READ_UNKNOWN'],
+  ['SPEC_UNREADABLE', 'TASK_SPEC_READ_UNKNOWN'],
+  ['PREFLIGHT_SPEC_HASH_MISMATCH', 'TASK_SPEC_HASH_MISMATCH'],
+  ['SPEC_HASH_MISMATCH', 'TASK_SPEC_HASH_MISMATCH'],
+  ['EDIT_SCOPE_INVALID', 'EDIT_SCOPE_INVALID'],
+  ['EXECUTOR_SOURCE_BUNDLE_EXECUTOR_SOURCE_BUNDLE_IDENTITY_MISMATCH',
+    'SOURCE_BUNDLE_IDENTITY_MISMATCH'],
+]);
+export function normalizePollWaitReason(reason) {
+  if (typeof reason !== 'string' || !reason || reason !== reason.trim()) return 'UNKNOWN';
+  return POLL_WAIT_REASON_CODES.get(reason) || 'UNKNOWN';
+}
+export function derivePollWaitCode(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return 'UNKNOWN';
+  const { waiting = false, waitingEligibility = null, humanGoalWaitingReason = null,
+    preflightBlockers = null } = input;
+  if (typeof waiting !== 'boolean' ||
+      (waitingEligibility !== null && typeof waitingEligibility !== 'string') ||
+      (humanGoalWaitingReason !== null && typeof humanGoalWaitingReason !== 'string') ||
+      (preflightBlockers !== null && !(preflightBlockers instanceof Map))) return 'UNKNOWN';
+  const reasons = [waitingEligibility, humanGoalWaitingReason,
+    ...(preflightBlockers ? [...preflightBlockers.values()] : [])]
+    .filter(value => value !== null);
+  if (!reasons.length) return waiting ? 'UNKNOWN' : 'NOT_APPLICABLE';
+  const normalized = reasons.map(normalizePollWaitReason);
+  if (normalized.includes('UNKNOWN') || new Set(normalized).size !== 1) return 'UNKNOWN';
+  return normalized[0];
+}
+export function validPollWaitCodeForDisposition(disposition, code) {
+  if (!POLL_DISPOSITIONS.includes(disposition) || !POLL_WAIT_CODES.includes(code)) return false;
+  if (disposition === 'UNKNOWN') return code === 'UNKNOWN';
+  if (disposition === 'WAITING_GATE_NO_MODEL_DISPATCH') return code !== 'NOT_APPLICABLE';
+  if (disposition === 'NO_READY_JOB_NO_MODEL_DISPATCH') return code === 'NOT_APPLICABLE';
+  return true;
+}
+export function normalizePollWaitCodeForDisposition(disposition, code) {
+  if (!POLL_DISPOSITIONS.includes(disposition)) return 'UNKNOWN';
+  if (code === undefined)
+    return disposition === 'WAITING_GATE_NO_MODEL_DISPATCH' || disposition === 'UNKNOWN'
+      ? 'UNKNOWN' : 'NOT_APPLICABLE';
+  return validPollWaitCodeForDisposition(disposition, code) ? code : 'UNKNOWN';
+}
 const MAX_OPERATOR_COMMENT_BODY_LENGTH = 65_536;
 const FORBIDDEN_KEYS = /^(?:pid|process_id|command|commandline|command_line|argv|path|absolute_path|stdout|stderr|prompt|token|authorization|credential|diff|environment|username|user_name|user_id|email|computer_name|host_name)$/i;
 const GITHUB_LOGIN = /^[A-Za-z0-9-]{1,39}$/;
@@ -125,6 +220,9 @@ export function parseOperatorObservation(body) {
   const hasPollDisposition = object(value?.native_worker) &&
     Object.hasOwn(value.native_worker, 'poll_disposition');
   const pollDisposition = hasPollDisposition ? value.native_worker.poll_disposition : undefined;
+  const hasPollWaitCode = object(value?.native_worker) &&
+    Object.hasOwn(value.native_worker, 'poll_wait_code');
+  const pollWaitCode = hasPollWaitCode ? value.native_worker.poll_wait_code : undefined;
   if (!object(value) || value.schema !== 1 ||
       value.project_id !== OPERATOR_PROJECT || value.repo !== OPERATOR_REPO ||
       value.issue !== OPERATOR_ISSUE || value.host_alias !== 'win11-primary' ||
@@ -132,6 +230,8 @@ export function parseOperatorObservation(body) {
       !Number.isSafeInteger(value.sequence) || value.sequence < 1 ||
       !validTime(value.observed_at) ||
       (hasPollDisposition && !POLL_DISPOSITIONS.includes(pollDisposition)) ||
+      (hasPollWaitCode && (!hasPollDisposition ||
+        !validPollWaitCodeForDisposition(pollDisposition, pollWaitCode))) ||
       (value.published_at !== undefined && value.published_at !== null &&
         !validTime(value.published_at)) ||
       (value.publisher_login !== undefined && !GITHUB_LOGIN.test(value.publisher_login || '')) ||
