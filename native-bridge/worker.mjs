@@ -507,6 +507,128 @@ function unresolvedWriteAttempt(job, entries, options = {}) {
     ? unresolvedEditAttempt(job, entries, options)
     : false;
 }
+function sameBoundEditTask(left, right) {
+  return left?.schema === 6 && right?.schema === 6 &&
+    left.request_id !== right.request_id && left.project_id === right.project_id &&
+    left.host.toUpperCase() === right.host.toUpperCase() && left.kind === right.kind &&
+    left.source_sha === right.source_sha && left.source_pr === right.source_pr &&
+    left.spec_path === right.spec_path && left.spec_sha256 === right.spec_sha256 &&
+    left.model === right.model && left.variant === right.variant &&
+    left.goal_comment_id === right.goal_comment_id &&
+    left.goal_body_sha256 === right.goal_body_sha256 &&
+    JSON.stringify(left.edit_paths) === JSON.stringify(right.edit_paths);
+}
+export function parseCodexSourceAcceptance(comment, dispatchers) {
+  const body = comment?.body;
+  if (comment?.issue_url !== `https://api.github.com/repos/${REPO}/issues/${OPERATOR_ISSUE}` ||
+      !dispatchers.includes(comment?.user?.login) || typeof body !== 'string' ||
+      body.length > MAX_GITHUB_ISSUE_COMMENT_BODY_LENGTH) return null;
+  const r2Marker = 'PTYSD_V53R4_R2_EVIDENCE_RECONCILIATION_V1\n';
+  const v1Marker = 'PTYSD_V53R4_CODEX_SOURCE_ACCEPTANCE_V1\n';
+  const format = body.startsWith(r2Marker) ? 'R2' : body.startsWith(v1Marker) ? 'V1' : null;
+  if (!format) return null;
+  const fields = Object.create(null);
+  for (const line of body.split(/\r?\n/)) {
+    const separator = line.indexOf('=');
+    if (separator < 1) continue;
+    const key = line.slice(0, separator);
+    if (Object.hasOwn(fields, key)) return null;
+    fields[key] = line.slice(separator + 1);
+  }
+  const expectedRecordType = format === 'R2'
+    ? 'ADDITIVE_CODEX_SOURCE_AND_DIFF_RECONCILIATION_NOT_NATIVE_WORKER_RECEIPT'
+    : 'ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_NATIVE_WORKER_RECEIPT';
+  if (fields.record_type !== expectedRecordType || fields.repo !== REPO ||
+      fields.project_id !== PROJECT || !HASH.test(fields.goal_body_sha256 || '') ||
+      !/^[A-Z][A-Z0-9_-]{7,79}$/.test(fields.request_id || '') ||
+      !/^[a-f0-9-]{36}$/i.test(fields.attempt_id || '') ||
+      !/^[1-9][0-9]*$/.test(fields.source_pr || '') ||
+      !SHA.test(fields.source_head || fields.source_sha || '') ||
+      fields.source_head && fields.source_sha && fields.source_head !== fields.source_sha ||
+      !/^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(fields.spec_path || '') ||
+      !HASH.test(fields.spec_sha256 || '') || typeof fields.model !== 'string' ||
+      !HASH.test(fields.worker_diff_sha256 || fields.diff_sha256 || '') ||
+      fields.worker_diff_sha256 && fields.diff_sha256 &&
+        fields.worker_diff_sha256 !== fields.diff_sha256) return null;
+  if (fields.goal_comment_id !== undefined && fields.human_goal_comment_id !== undefined &&
+      fields.goal_comment_id !== fields.human_goal_comment_id) return null;
+  const goalCommentId = fields.goal_comment_id || fields.human_goal_comment_id;
+  if (!/^[1-9][0-9]*$/.test(goalCommentId || '')) return null;
+  let resultPr;
+  let resultHead;
+  let mergeSha;
+  let checks;
+  if (format === 'R2') {
+    const merged = /^PR_([1-9][0-9]*)_MERGED$/.exec(fields.integration || '');
+    if (!merged) return null;
+    resultPr = Number(merged[1]);
+    resultHead = fields[`pr_${resultPr}_head`];
+    mergeSha = fields.integration_commit;
+    checks = fields[`pr_${resultPr}_checks`];
+    if (fields.source_acceptance !== `ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR_${resultPr}`)
+      return null;
+  } else {
+    if (!/^[1-9][0-9]*$/.test(fields.result_pr || '')) return null;
+    resultPr = Number(fields.result_pr);
+    resultHead = fields.result_head;
+    mergeSha = fields.result_pr_merge_commit;
+    checks = fields.trusted_exact_head_checks;
+    if (fields.source_acceptance !==
+        `ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_RESULT_PR_${resultPr}`) return null;
+  }
+  if (!Number.isSafeInteger(resultPr) || !SHA.test(resultHead || '') || !SHA.test(mergeSha || '') ||
+      !(fields.codex_review?.startsWith('PASS') ||
+        fields.codex_patch_scope_review?.startsWith('PASS'))) return null;
+  const checkStatuses = new Map();
+  for (const value of (checks || '').split(/[;,]/)) {
+    const match = /^([A-Za-z0-9_-]+)[:=]([A-Z_]+)$/.exec(value.trim());
+    if (!match) continue;
+    const [, name, conclusion] = match;
+    if (checkStatuses.has(name)) return null;
+    checkStatuses.set(name, conclusion);
+  }
+  if (!['check-native-only', 'csg-trusted-verifier-hosted', 'v2-native-windows']
+    .every(name => checkStatuses.get(name) === 'SUCCESS')) return null;
+  return {
+    request_id: fields.request_id,
+    attempt_id: fields.attempt_id,
+    goal_comment_id: Number(goalCommentId),
+    goal_body_sha256: fields.goal_body_sha256,
+    source_pr: Number(fields.source_pr),
+    source_sha: fields.source_head || fields.source_sha,
+    spec_path: fields.spec_path,
+    spec_sha256: fields.spec_sha256,
+    model: fields.model,
+    diff_sha256: fields.worker_diff_sha256 || fields.diff_sha256,
+  };
+}
+function hasCodexAcceptedSourceForAttempt(job, receiptValue, comments, dispatchers) {
+  return comments.some(comment => {
+    const acceptance = parseCodexSourceAcceptance(comment, dispatchers);
+    return acceptance && acceptance.request_id === job.request_id &&
+      acceptance.attempt_id === receiptValue.attempt_id &&
+      (acceptance.goal_comment_id === null || acceptance.goal_comment_id === job.goal_comment_id) &&
+      acceptance.goal_body_sha256 === job.goal_body_sha256 &&
+      acceptance.source_pr === job.source_pr && acceptance.source_sha === job.source_sha &&
+      acceptance.spec_path === job.spec_path && acceptance.spec_sha256 === job.spec_sha256 &&
+      acceptance.model === job.model && acceptance.diff_sha256 === receiptValue.diff_sha256;
+  });
+}
+function hasEquivalentCompletedEditTask(job, jobs, receipts, comments, dispatchers, workerLogin) {
+  if (job?.schema !== 6 || !isEditExecutionKind(job.kind)) return false;
+  for (const prior of jobs.values()) {
+    if (prior.duplicate || !sameBoundEditTask(job, prior.job)) continue;
+    const entries = receipts.get(prior.job.request_id) || [];
+    if (entries.some(entry => entry.login === workerLogin &&
+        entry.receipt.request_id === prior.job.request_id &&
+        entry.receipt.state === 'FINISHED' &&
+        hasCompletedScopedEditDiff(entry.receipt, prior.job) &&
+        (prior.job.kind !== 'antigravity_edit' ||
+          hasIsolatedW2ScopedEditDiff(entry.receipt, prior.job)) &&
+        hasCodexAcceptedSourceForAttempt(prior.job, entry.receipt, comments, dispatchers))) return true;
+  }
+  return false;
+}
 export function writePathsOverlap(left, right, platform = process.platform) {
   const normalize = value => {
     const rawParts = value.replaceAll('\\', '/').replace(/\/+$/, '').split('/');
@@ -876,6 +998,11 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
       (v.job.schema === 4 || entry.receipt.source_sha === v.job.source_sha));
     if (sourceIdentityMismatch || v.duplicate || blockedKinds.includes(v.job.kind) ||
         hasBlockingRequestReceipt(r)) continue;
+    // Distinct request IDs must not replay the same exact schema-6 work after
+    // a Worker FINISHED a complete scoped diff. This suppresses only an
+    // identical source/spec/model/goal/edit scope; task_acceptance and external
+    // effects remain untouched and UNKNOWN, while a different READY task runs.
+    if (hasEquivalentCompletedEditTask(v.job, jobs, receipts, comments, dispatchers, workerLogin)) continue;
     // A stale unsigned/unclaimed job must not starve a newer exact-main task.
     if (v.job.source_pr !== undefined) {
       if (candidateSourceShas.get(v.job.source_pr)?.toLowerCase() !== v.job.source_sha.toLowerCase()) continue;

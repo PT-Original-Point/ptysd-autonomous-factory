@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync,
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { parseJob, selectNext, parseReceipt, receipt, PROJECT, REPO, JOB_MARKER,
+import { parseJob, selectNext, parseReceipt, parseCodexSourceAcceptance, receipt, PROJECT, REPO, JOB_MARKER,
   RECEIPT_MARKER, checkModelAuthorization, terminalStateForResult,
   runWorker as runWorkerImplementation, main as runWorker, writeReceipt, ISSUE_TITLE, guardConfig,
   runPlan as executeOpenCodeTask, verifyCapturedEvidence, antigravityExecutionAuthorization,
@@ -1366,6 +1366,165 @@ test('a terminal W1 edit releases its path lease so the next distinct W1 request
   assert.equal(comments.some(comment =>
     parseReceipt(comment.body)?.request_id === newer.request_id), false,
   'selecting the newer request does not invent an attempt receipt');
+});
+
+const sourceAcceptanceComment = (job, completedReceipt) =>
+  `PTYSD_V53R4_R2_EVIDENCE_RECONCILIATION_V1\n` +
+  `record_type=ADDITIVE_CODEX_SOURCE_AND_DIFF_RECONCILIATION_NOT_NATIVE_WORKER_RECEIPT\n` +
+  `repo=${REPO}\nproject_id=${PROJECT}\nhuman_goal_comment_id=${job.goal_comment_id}\n` +
+  `goal_body_sha256=${job.goal_body_sha256}\n` +
+  `request_id=${job.request_id}\nattempt_id=${completedReceipt.attempt_id}\n` +
+  `source_pr=${job.source_pr}\nsource_head=${job.source_sha}\n` +
+  `spec_path=${job.spec_path}\nspec_sha256=${job.spec_sha256}\nmodel=${job.model}\n` +
+  `worker_diff_sha256=${completedReceipt.diff_sha256}\ndiff_sha256=${completedReceipt.diff_sha256}\n` +
+  `codex_review=PASS_EXACT_DIFF_AND_SCOPE\nintegration=PR_665_MERGED\n` +
+  `integration_commit=080e592b2cd691494f1297c47dd307a275bd52f1\n` +
+  `pr_665_head=450d483e7258c62772a8fd5a620aacf9b8dde3aa\n` +
+  `pr_665_checks=check-native-only=SUCCESS;csg-trusted-verifier-hosted=SUCCESS;v2-native-windows=SUCCESS\n` +
+  `source_acceptance=ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR_665`;
+
+test('a completed scoped edit suppresses only an exact duplicate request and leaves other READY work selectable', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = '497f60d5377a8a08c6a303e246d5f5378f4db45f';
+  const sourcePr = 664;
+  const goalHash = '2f1829da0e1f5105a384be03904b2289c57c05e8a44215c4824fb6b8631d8f7b';
+  const makeRequest = (requestId, overrides = {}) => withHumanGoal({
+    schema: 6, project_id: PROJECT, host, request_id: requestId,
+    kind: 'opencode_edit', source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/w1-native-task-info-partial-readback.md',
+    spec_sha256: '228ad870822a567e6e8fb52ac74543288092e9797fb6fa0f96e2efbe2e9d8de7',
+    model: 'opencode/deepseek-v4.1-flash-free', variant: null,
+    edit_paths: ['native-bridge/operator-observation.mjs', 'tests/operator-observation.test.mjs'],
+    source_pr: sourcePr, ...overrides,
+  });
+  const completed = { ...makeRequest('W1_TASKINFO_PARTIAL_20261101_A84C91E2'), goal_body_sha256: goalHash };
+  const duplicate = { ...makeRequest(
+    'W1_TASKINFO_PARTIAL_DUP_20261101'),
+  goal_body_sha256: goalHash };
+  const independent = makeRequest('PTYSD_W1_INDEPENDENT_READY', {
+    spec_path: 'native-bridge/tasks/w1-independent-ready.md',
+    edit_paths: ['tests/native-bridge.test.mjs'],
+  });
+  const finished = receipt(completed.request_id,
+    '84e8dfee-a704-43ef-9cc5-3bb6da0279c7', 'FINISHED', completed, {
+      outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED', exit_code: 0,
+      model_invoked: true, session_id: 'ses_e6d482e8cffenfCUm8UHz4hlBV',
+      external_effects: 'UNKNOWN', source_diff_evidence: 'CAPTURED',
+      task_acceptance: 'UNKNOWN', coding_state: 'DIFF_CAPTURED_UNVERIFIED',
+      scope_valid: true,
+      diff_sha256: '25d5c925579246b66c238211df289cee3ef19e457832d509f45938a4e139214e',
+      diff_bytes: 5480,
+      changed_files: ['native-bridge/operator-observation.mjs', 'tests/operator-observation.test.mjs'],
+    });
+  const comments = [
+    { ...com(901, encoded(duplicate)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    { ...com(902, encoded(completed)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(903, RECEIPT_MARKER + JSON.stringify(finished), 'worker'),
+    { ...com(904, encoded(independent)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    { ...com(905, sourceAcceptanceComment(completed, finished), 't14210184'),
+      issue_url: `https://api.github.com/repos/${REPO}/issues/407` },
+  ];
+  assert.ok(parseCodexSourceAcceptance(comments.at(-1), ['t14210184']));
+  assert.equal(finished.task_acceptance, 'UNKNOWN');
+  assert.equal(finished.external_effects, 'UNKNOWN');
+  const selected = selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[sourcePr, sourceSha]]));
+  assert.equal(selected?.id, 904,
+    'the identical unstarted duplicate is suppressed without starving another READY edit');
+  assert.equal(comments.some(comment => parseReceipt(comment.body)?.request_id === duplicate.request_id), false,
+    'duplicate suppression does not invent or rewrite a receipt');
+  for (const [caseIndex, rejected] of [
+    sourceAcceptanceComment(completed, finished).replace(
+      'ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR_665', 'REJECTED'),
+    sourceAcceptanceComment(completed, finished).replace(`source_head=${sourceSha}`,
+      `source_head=${'a'.repeat(40)}`),
+    sourceAcceptanceComment(completed, finished).replace('v2-native-windows=SUCCESS',
+      'v2-native-windows=FAILURE'),
+    sourceAcceptanceComment(completed, finished) + ';check-native-only=SUCCESS',
+  ].entries()) {
+    const withoutValidAcceptance = comments.filter(comment => comment.id !== 905)
+      .concat({ ...com(905, rejected, 't14210184'),
+        issue_url: `https://api.github.com/repos/${REPO}/issues/407` });
+    assert.equal(selectNext(withoutValidAcceptance, ['t14210184'], 'worker', host,
+      sourceSha, [], new Map([[sourcePr, sourceSha]]))?.id, 901,
+    `invalid source acceptance case ${caseIndex} cannot suppress a queued request`);
+  }
+  assert.equal(parseCodexSourceAcceptance({
+    ...comments.at(-1), issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
+  }, ['t14210184']), null, 'acceptance outside the formal receipt issue cannot suppress work');
+  const noGoalBinding = sourceAcceptanceComment(completed, finished)
+    .replace(`human_goal_comment_id=${completed.goal_comment_id}\n`, '');
+  assert.equal(parseCodexSourceAcceptance({ ...comments.at(-1), body: noGoalBinding },
+    ['t14210184']), null, 'acceptance without the exact Human GOAL binding fails closed');
+});
+
+test('the formal W2 V1 Codex acceptance format is parsed only from the canonical receipt issue', () => {
+  const acceptance = [
+    'PTYSD_V53R4_CODEX_SOURCE_ACCEPTANCE_V1',
+    'record_type=ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_NATIVE_WORKER_RECEIPT',
+    `repo=${REPO}`,
+    `project_id=${PROJECT}`,
+    'goal_comment_id=6188322050',
+    'goal_body_sha256=2f1829da0e1f5105a384be03904b2289c57c05e8a44215c4824fb6b8631d8f7b',
+    'request_id=W2_SAME_POLL_WAITING_RECOVERY_20261101_CE5F40A1',
+    'attempt_id=9855fb47-d48b-4c53-8a8b-81c4d3f90155',
+    'source_pr=666',
+    'source_head=cd236aa968e4cb5b7875700b94f6b3f856442885',
+    'spec_path=native-bridge/tasks/w2-executor-readiness-failure-keeps-w1-moving.md',
+    'spec_sha256=32ce0c12b911400317e0d5f07c12b5d961146731d56d6a57c57a27d259e8034d',
+    'model=gemini-3.8-flash-high',
+    'worker_diff_sha256=ec5cd249a76a47ba8407b937992ef390576b0cd8e010a9dba0c146bed3caa22a',
+    'codex_patch_scope_review=PASS_EXACT_SINGLE_PATH_DIFF_MATCHES_TASK_SPEC',
+    'result_pr=667',
+    'result_head=a7f377c4bf7cdd5c4b9af165870bd435b60406d6',
+    'result_pr_merge_commit=6cfe6986ff2a38c5f04bbc0db18b383863d9945c',
+    'trusted_exact_head_checks=check-native-only:SUCCESS;csg-trusted-verifier-hosted:SUCCESS;v2-native-windows:SUCCESS',
+    'source_acceptance=ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_RESULT_PR_667',
+  ].join('\n');
+  const comment = { ...com(920, acceptance),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/407` };
+  const parsed = parseCodexSourceAcceptance(comment, ['t14210184']);
+  assert.equal(parsed?.request_id, 'W2_SAME_POLL_WAITING_RECOVERY_20261101_CE5F40A1');
+  assert.equal(parsed?.source_sha, 'cd236aa968e4cb5b7875700b94f6b3f856442885');
+  assert.equal(parsed?.goal_comment_id, 6188322050);
+  assert.equal(parseCodexSourceAcceptance({ ...comment, issue_url:
+    `https://api.github.com/repos/${REPO}/issues/310` }, ['t14210184']), null);
+  assert.equal(parseCodexSourceAcceptance(comment, ['other-dispatcher']), null);
+});
+
+test('a different spec identity is not suppressed by a completed edit with an overlapping path', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = 'c'.repeat(40);
+  const sourcePr = 437;
+  const makeRequest = (requestId, specSha) => withHumanGoal({
+    schema: 6, project_id: PROJECT, host, request_id: requestId,
+    kind: 'opencode_edit', source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/w1-next-request-after-terminal.md', spec_sha256: specSha,
+    model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+    edit_paths: ['native-bridge/worker.mjs'], source_pr: sourcePr,
+  });
+  const completed = makeRequest('PTYSD_W1_PRIOR_SPEC_COMPLETED', hash);
+  const differentSpec = makeRequest('PTYSD_W1_DIFFERENT_SPEC_READY', 'e'.repeat(64));
+  const finished = receipt(completed.request_id,
+    '99999999-9999-4999-8999-999999999999', 'FINISHED', completed, {
+      outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED', exit_code: 0,
+      model_invoked: true, session_id: '77777777-7777-4777-8777-777777777777',
+      external_effects: 'UNKNOWN', source_diff_evidence: 'CAPTURED',
+      task_acceptance: 'UNKNOWN', coding_state: 'DIFF_CAPTURED_UNVERIFIED',
+      scope_valid: true, diff_sha256: 'd'.repeat(64), diff_bytes: 96,
+      changed_files: ['native-bridge/worker.mjs'],
+    });
+  const comments = [
+    { ...com(911, encoded(completed)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(912, RECEIPT_MARKER + JSON.stringify(finished), 'worker'),
+    { ...com(913, encoded(differentSpec)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    { ...com(914, sourceAcceptanceComment(completed, finished), 't14210184'),
+      issue_url: `https://api.github.com/repos/${REPO}/issues/407` },
+  ];
+  const selected = selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[sourcePr, sourceSha]]));
+  assert.equal(selected?.job.request_id, differentSpec.request_id,
+    'the guard requires exact spec identity and leaves a distinct task eligible');
 });
 
 test('a later W1 poll starts and dispatches the next distinct edit after the prior terminal receipt', async () => {
