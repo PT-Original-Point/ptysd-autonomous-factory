@@ -13,7 +13,8 @@ import { parseJob, selectNext, parseReceipt, parseCodexSourceAcceptance, receipt
   captureScopedEditDiff,
   codexTerminalReceipt, selectNextWithCodexClaim, readPinnedCandidateSources, executorForJobKind,
   writePathsOverlap,
-  publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight } from '../native-bridge/worker.mjs';
+  publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight, derivePollDisposition }
+  from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, OPERATOR_COMMENT_ID, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
 import { makeCodexExecutorRequest, codexScopedActionStatus, codexTaskFingerprint,
@@ -190,7 +191,7 @@ test('model Executor routing isolates W1 and W2 identities, tasks, manifests and
 function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservation = null,
   priorObservationBody = null,
   readCommentFailure = null, readCommentsFailure = null, patchCommentFailure = null,
-  seededObservation = true,
+  seededObservation = true, includeDefaultJob = true,
   collectWindowsFailure = null, windowsObservation = null, goalComments = [], taskComments = [], candidatePulls = {},
   issueCommentsCount = null, configOverrides = {} } = {}) {
   const root = mkdtempSync(join(homedir(), '.ptysd-worker-observation-'));
@@ -209,7 +210,7 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
       ...(seededObservation ? [{ ...com(observationId, priorObservationBody || encodeOperatorObservation(
         priorObservation || seededOperatorObservation(observationId, 17, commit, Date.now() - 60_000),
       ), publisher), updated_at: new Date(Date.now() - 60_000).toISOString() }] : []),
-      com(702, encoded(job), 't14210184'),
+      ...(includeDefaultJob ? [com(702, encoded(job), 't14210184')] : []),
       ...taskComments,
     ],
     patches: 0,
@@ -430,6 +431,8 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
     let value = parseOperatorObservation(observations[0].body);
     assert.equal(value.sequence, 18);
     assert.equal(value.published_at, undefined);
+    assert.equal(value.native_worker.poll_disposition, 'READY_JOB_SELECTED_NOT_DISPATCHED',
+      'the observation is published after selection and before dispatch');
     assert.equal(Date.parse(observations[0].updated_at), Date.parse(value.observed_at) + 1000,
       'the published timestamp is the provider readback, not the local observation time');
     assert.ok(successful.logs.includes('OPERATOR_OBSERVATION_UPDATED'));
@@ -454,6 +457,8 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
     assert.equal(observations.length, 1);
     assert.equal(observations[0].id, successful.observationId);
     assert.equal(value.sequence, 28);
+    assert.equal(value.native_worker.poll_disposition, 'NO_READY_JOB_NO_MODEL_DISPATCH',
+      'ten completed idle ticks have no READY job and no model dispatch');
     assert.equal(successful.receiptWrites.length, 2);
     assert.equal(successful.logs.filter(x => x === 'NO_DELTA_NO_LLM').length, 10);
     assert.equal(successful.modelCalls.count, 0,
@@ -520,6 +525,78 @@ test('Worker main publishes the seeded observation, verifies sequence readback, 
     assert.equal(diagnostic.error_code, 'OPERATOR_OBSERVATION_NOT_SEEDED');
     assert.equal(diagnostic.source_sha, commit);
   } finally { unseeded.cleanup(); }
+});
+
+test('poll disposition separates an empty queue, a waiting preflight gate, and a selected job before dispatch', async () => {
+  const readObservation = store => parseOperatorObservation(
+    store.comments.find(comment => comment.body.startsWith(OPERATOR_MARKER)).body);
+
+  const empty = makeObservationWorkerFixture({ includeDefaultJob: false });
+  try {
+    const result = await empty.run();
+    assert.equal(result.state, 'NO_DELTA');
+    const observation = readObservation(empty.store);
+    assert.equal(observation.native_worker.poll_disposition, 'NO_READY_JOB_NO_MODEL_DISPATCH');
+    assert.equal(observation.native_worker.current_task, null);
+    assert.equal(observation.native_worker.latest_task, null);
+    assert.equal(observation.native_worker.files_modified, 'UNPROVEN');
+    assert.equal(empty.modelCalls.count, 0);
+    assert.equal(empty.codexDispatchCalls.count, 0);
+  } finally { empty.cleanup(); }
+
+  const host = hostname().toUpperCase();
+  const waitingJob = { schema: 4, project_id: PROJECT, host,
+    request_id: 'PTYSD_POLL_DISPOSITION_WAITING_20261101', kind: 'opencode_edit',
+    source_sha: commit, spec_path: 'native-bridge/tasks/poll-disposition.md',
+    spec_sha256: hash, model: 'opencode/deepseek-v4.1-flash-free', variant: null,
+    edit_paths: ['native-bridge/worker.mjs'] };
+  const waiting = makeObservationWorkerFixture({ includeDefaultJob: false,
+    taskComments: [com(704, encoded(waitingJob), 't14210184')] });
+  try {
+    const result = await waiting.run();
+    assert.equal(result.state, 'WAITING_ELIGIBILITY');
+    assert.equal(result.reason, 'OPENCODE_MODEL_RUNS_NOT_ENABLED');
+    const observation = readObservation(waiting.store);
+    assert.equal(observation.native_worker.poll_disposition, 'WAITING_GATE_NO_MODEL_DISPATCH');
+    assert.equal(observation.native_worker.files_modified, 'UNPROVEN');
+    assert.equal(observation.native_worker.pull_request, null);
+    assert.equal(observation.native_worker.ci, 'UNKNOWN');
+    assert.equal(waiting.modelCalls.count, 0,
+      'a preflight gate must not invoke the model adapter');
+    assert.equal(waiting.codexDispatchCalls.count, 0);
+  } finally { waiting.cleanup(); }
+
+  const selected = makeObservationWorkerFixture();
+  try {
+    await selected.run();
+    const observation = readObservation(selected.store);
+    assert.equal(observation.native_worker.poll_disposition, 'READY_JOB_SELECTED_NOT_DISPATCHED');
+    assert.equal(observation.native_worker.latest_task.state, 'QUEUED_NOT_STARTED',
+      'publication happens before the selected job is dispatched');
+    assert.equal(selected.modelCalls.count, 0);
+  } finally { selected.cleanup(); }
+});
+
+test('poll disposition derivation fails closed to UNKNOWN for non-derivable inputs', () => {
+  assert.equal(derivePollDisposition({ next: null, waitingEligibility: null,
+    humanGoalWaitingReason: null, preflightBlockers: new Map() }),
+  'NO_READY_JOB_NO_MODEL_DISPATCH');
+  assert.equal(derivePollDisposition({ next: null,
+    preflightBlockers: new Map([['PTYSD_REQUEST', 'MODEL_RUNS_NOT_ENABLED']]) }),
+  'WAITING_GATE_NO_MODEL_DISPATCH');
+  assert.equal(derivePollDisposition({ next: null, waitingEligibility: 'MODEL_NOT_ENABLED',
+    preflightBlockers: new Map() }), 'WAITING_GATE_NO_MODEL_DISPATCH');
+  assert.equal(derivePollDisposition({ next: null, humanGoalWaitingReason: 'HUMAN_GOAL_READ_UNKNOWN',
+    preflightBlockers: new Map() }), 'WAITING_GATE_NO_MODEL_DISPATCH');
+  assert.equal(derivePollDisposition({ next: { job: { request_id: 'PTYSD_REQUEST' } },
+    preflightBlockers: new Map() }), 'READY_JOB_SELECTED_NOT_DISPATCHED');
+  assert.equal(derivePollDisposition(null), 'UNKNOWN');
+  assert.equal(derivePollDisposition({ next: null, preflightBlockers: {} }), 'UNKNOWN');
+  assert.equal(derivePollDisposition({ next: 'selected' }), 'UNKNOWN');
+  assert.equal(derivePollDisposition({ next: null, waitingEligibility: '' }), 'UNKNOWN');
+  assert.equal(derivePollDisposition({ next: null, waitingEligibility: 7 }), 'UNKNOWN');
+  assert.equal(derivePollDisposition({ next: null, waitingEligibility: 'MODEL_NOT_ENABLED',
+    humanGoalWaitingReason: false }), 'UNKNOWN');
 });
 
 test('Worker reports the failing observation API stage without persisting provider error text', async () => {

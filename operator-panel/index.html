@@ -368,7 +368,7 @@
     <article class="panel infra-card">
       <h3>Win11 Native Worker／Task Scheduler</h3><span id="native-badge" class="badge neutral">未確認</span>
       <p id="native-detail" class="infra-summary">排程就緒不等於 Worker 正在執行任務。</p>
-      <dl class="facts"><dt>正式排程／Action</dt><dd id="native-action">未確認</dd><dt>執行身分／單實例</dt><dd id="native-identity">未確認</dd><dt>最近結果／下一次執行</dt><dd id="native-last">未確認</dd><dt>OpenCode／Antigravity／Codex Executor 排程</dt><dd id="native-executor-tasks">未確認</dd><dt>舊 Monitor／2667</dt><dd id="native-retired">未確認</dd><dt>Worker 發布器</dt><dd id="native-publisher">未確認</dd></dl>
+      <dl class="facts"><dt>原生 L0 決策（不等於 Worker 接受或模型活動）</dt><dd id="native-l0">UNKNOWN</dd><dt>正式排程／Action</dt><dd id="native-action">未確認</dd><dt>執行身分／單實例</dt><dd id="native-identity">未確認</dd><dt>最近結果／下一次執行</dt><dd id="native-last">未確認</dd><dt>OpenCode／Antigravity／Codex Executor 排程</dt><dd id="native-executor-tasks">未確認</dd><dt>舊 Monitor／2667</dt><dd id="native-retired">未確認</dd><dt>Worker 發布器</dt><dd id="native-publisher">未確認</dd></dl>
     </article>
     <article class="panel infra-card">
       <h3>GitHub Actions／Runner</h3><span id="runner-badge" class="badge neutral">未確認</span>
@@ -417,6 +417,17 @@
   const JOB_MARKER = 'PTYSD_NATIVE_JOB_V1\n';
   const RECEIPT_MARKER = 'PTYSD_NATIVE_RECEIPT_V1\n';
   const ACCEPTANCE_MARKER = 'PTYSD_V53R4_W2_PANEL_ACCEPTANCE_V1\n';
+  const POLL_DISPOSITIONS = ['NO_READY_JOB_NO_MODEL_DISPATCH', 'WAITING_GATE_NO_MODEL_DISPATCH',
+    'READY_JOB_SELECTED_NOT_DISPATCHED', 'UNKNOWN'];
+  const POLL_DISPOSITION_LABELS = {
+    NO_READY_JOB_NO_MODEL_DISPATCH:
+      'NO_READY_JOB_NO_MODEL_DISPATCH：本次輪詢沒有 READY 工作；未派工、未呼叫模型。',
+    WAITING_GATE_NO_MODEL_DISPATCH:
+      'WAITING_GATE_NO_MODEL_DISPATCH：工作停在既有資格／前置檢查閘門；未派工、未呼叫模型。',
+    READY_JOB_SELECTED_NOT_DISPATCHED:
+      'READY_JOB_SELECTED_NOT_DISPATCHED：觀測發布前已選取工作但尚未派工；不代表 Worker 接受、模型活動或交付。',
+    UNKNOWN: 'UNKNOWN：此觀測沒有可核對的原生 L0 決策；不推定 Worker 接受或模型活動。',
+  };
   const W2_SOURCE_ACCEPTANCE_MARKER = 'PTYSD_V53R4_W2_SOURCE_ACCEPTANCE_V1';
   const W1_SOURCE_ACCEPTANCE_MARKER = 'PTYSD_V53R4_R6_W1_SOURCE_ACCEPTANCE_AFTER_MERGE_V1';
   const W1_PATCH_IDENTITY_MARKER = 'PTYSD_V53R4_R6_W1_SOURCE_PATCH_BYTE_IDENTITY_RECONCILIATION_V1';
@@ -488,6 +499,9 @@
         !Number.isFinite(Date.parse(s.expires_at)) ||
         Date.parse(s.expires_at) <= Date.parse(s.observed_at) ||
         Date.parse(s.expires_at) - Date.parse(s.observed_at) > 15 * 60 * 1000 ||
+        (object(s.native_worker) &&
+          Object.prototype.hasOwnProperty.call(s.native_worker, 'poll_disposition') &&
+          !POLL_DISPOSITIONS.includes(s.native_worker.poll_disposition)) ||
         (s.source !== undefined && !object(s.source)) ||
         (s.source?.main_sha !== undefined &&
           (typeof s.source.main_sha !== 'string' || !/^[a-f0-9]{40}$/i.test(s.source.main_sha)))) return null;
@@ -3548,6 +3562,11 @@
           osFreshness === 'STALE' ? 'warn' : 'neutral');
     text('native-detail',osFreshness === 'FRESH'
       ? '排程只代表輪詢機制；退出碼 0 不代表模型呼叫或程式交付。' : '最近排程資訊不是目前狀態。');
+    const pollDisposition = POLL_DISPOSITIONS.includes(worker.poll_disposition)
+      ? worker.poll_disposition : 'UNKNOWN';
+    text('native-l0', osFreshness !== 'FRESH'
+      ? 'UNKNOWN：' + (snapshot ? '最後觀測的原生 L0 決策不是目前狀態' : '沒有有效觀測')
+      : POLL_DISPOSITION_LABELS[pollDisposition]);
     text('native-action',task.registered === false ? 'PTYSD-Native-OpenCode 未註冊'
       : task.registered === true ? String(task.action_kind || 'Action 未知') + '；' + String(task.state || '狀態未知')
         : '未確認');
