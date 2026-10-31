@@ -6250,6 +6250,151 @@ test('parseReceipt rejects schema-6 Antigravity receipt with impossible file-tar
     'summaries with explicitly unidentified tools must remain valid');
 });
 
+test('unreadable W2 executor result stays UNKNOWN without starving an independent W1 edit in the same poll', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-w2-unreadable-w1-continue-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const opencodeWorkspace = join(root, 'opencode-workspace');
+    const stateDir = join(root, 'state');
+    const w1ManifestDir = join(root, 'opencode-manifests');
+    const w1ResultsDir = join(root, 'opencode-results');
+    const w2ManifestDir = join(root, 'antigravity-manifests');
+    const w2ResultsDir = join(root, 'antigravity-results');
+    for (const dir of [workspace, opencodeWorkspace, stateDir, w1ManifestDir, w1ResultsDir,
+      w2ManifestDir, w2ResultsDir, join(workspace, 'src'), join(opencodeWorkspace, 'src')])
+      mkdirSync(dir, { recursive: true });
+
+    const host = hostname().toUpperCase();
+    const w2Spec = '# Synthetic W2 task; its executor result is deliberately unreadable.\n';
+    const w1Spec = '# Synthetic independent W1 task; no model call in this test.\n';
+    const w2Job = withHumanGoal({ schema: 6, project_id: PROJECT, host,
+      request_id: 'PTYSD_W2_UNREADABLE_RESULT_20261101', kind: 'antigravity_edit',
+      source_sha: commit, spec_path: 'native-bridge/tasks/w2-unreadable-result.md',
+      spec_sha256: h(w2Spec), model: ANTIGRAVITY_V2_MODEL, variant: 'high',
+      edit_paths: ['src/w2-file.mjs'], source_pr: 461 });
+    const w1Job = withHumanGoal({ schema: 6, project_id: PROJECT, host,
+      request_id: 'PTYSD_W1_AFTER_W2_UNKNOWN_20261101', kind: 'opencode_edit',
+      source_sha: commit, spec_path: 'native-bridge/tasks/w1-independent.md',
+      spec_sha256: h(w1Spec), model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+      edit_paths: ['src/w1-file.mjs'], source_pr: 437 });
+    const w2AttemptId = '33333333-3333-4333-8333-333333333333';
+    const w2Started = receipt(w2Job.request_id, w2AttemptId, 'STARTED', w2Job, {
+      model_invoked: true, external_effects: 'UNKNOWN',
+    });
+    const corruptBytes = '{ incomplete executor result';
+    const w2ResultPath = join(w2ResultsDir,
+      `result-${w2Job.request_id}-${w2AttemptId}.json`);
+    writeFileSync(w2ResultPath, corruptBytes, 'utf8');
+
+    const w2Comment = { ...com(9101, encoded(w2Job), 't14210184'),
+      issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+    const w1Comment = { ...com(9102, encoded(w1Job), 't14210184'),
+      issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+    const startedComment = com(9103, RECEIPT_MARKER + JSON.stringify(w2Started), 'worker');
+    const receiptComments = [startedComment];
+    const w1Executor = { ...executorDescriptorForLane('OpenCode', 1001),
+      manifest_dir: w1ManifestDir, results_dir: w1ResultsDir, working_directory: opencodeWorkspace };
+    const w2Executor = { ...executorDescriptorForLane('Antigravity', 1003),
+      manifest_dir: w2ManifestDir, results_dir: w2ResultsDir, working_directory: workspace };
+    const config = { repo: REPO, project_id: PROJECT, host, issue: 407, workspace, state_dir: stateDir,
+      dispatchers: ['t14210184'], executors: { opencode: w1Executor, antigravity: w2Executor },
+      enable_v2_model_runs: true, enable_antigravity_model_runs: true,
+      allowed_models: { 'opencode/deepseek-v4.1-flash-free': ['free'],
+        [ANTIGRAVITY_V2_MODEL]: ['high'] } };
+    const posted = [], logs = [];
+    let nextCommentId = 9200, w1BundleCalls = 0, w1DispatchCalls = 0;
+    let w2BundleCalls = 0, w2DispatchCalls = 0, inlineModelCalls = 0;
+    const pullFor = number => ({ number, state: 'open',
+      base: { ref: 'main', repo: { id: 1352411536, full_name: REPO } },
+      head: { sha: commit, repo: { id: 1352411536, full_name: REPO } } });
+    const allIssueComments = [humanGoalComment(), w2Comment, w1Comment];
+    const adapters = {
+      goalCommentsRead: () => allIssueComments,
+      readExecutorWorkspace: descriptor => {
+        if (descriptor === w1Executor) return opencodeWorkspace;
+        if (descriptor === w2Executor) return workspace;
+        throw new Error('UNEXPECTED_DESCRIPTOR_WORKSPACE');
+      },
+      apiRead(uri) {
+        if (uri === 'user') return { login: 'worker' };
+        if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
+        if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: commit } };
+        if (uri === `repos/${REPO}/issues/comments/6188322050`) return humanGoalComment();
+        const commentMatch = uri.match(new RegExp(
+          `^repos/${REPO.replaceAll('/', '\\/')}\/issues\/comments\\/(\\d+)$`));
+        if (commentMatch) return allIssueComments.find(item => item.id === Number(commentMatch[1])) ||
+          receiptComments.find(item => item.id === Number(commentMatch[1]));
+        const pullMatch = uri.match(new RegExp(`^repos/${REPO.replaceAll('/', '\\/')}\/pulls\\/(\\d+)$`));
+        if (pullMatch) return pullFor(Number(pullMatch[1]));
+        if (uri.startsWith(`repos/${REPO}/contents/`)) {
+          const spec = uri.includes('w2-unreadable-result.md') ? w2Spec : w1Spec;
+          return { encoding: 'base64', content: Buffer.from(spec).toString('base64') };
+        }
+        throw new Error(`UNEXPECTED_API_ROUTE:${uri}`);
+      },
+      commentsRead: () => receiptComments,
+      assertExecutorTaskReady: descriptor => {
+        assert.equal(descriptor, w1Executor,
+          'the malformed W2 attempt is fenced before Task Scheduler readiness checks');
+        return { ready: true };
+      },
+      createExecutorSourceBundle: ({ workspace: sourceWorkspace, descriptor, job, attemptId }) => {
+        if (descriptor === w2Executor) {
+          w2BundleCalls++;
+          throw new Error('UNKNOWN_W2_MUST_NOT_CREATE_BUNDLE');
+        }
+        assert.equal(descriptor, w1Executor);
+        assert.equal(sourceWorkspace, opencodeWorkspace);
+        assert.equal(job.request_id, w1Job.request_id);
+        assert.equal(job.source_sha, commit);
+        assert.equal(job.source_pr, 437);
+        assert.deepEqual(job.edit_paths, ['src/w1-file.mjs']);
+        w1BundleCalls++;
+        return { attempt_id: attemptId, source_sha: job.source_sha, sha256: 'c'.repeat(64) };
+      },
+      dispatchToExecutor: (descriptor, manifest) => {
+        if (descriptor === w2Executor) {
+          w2DispatchCalls++;
+          throw new Error('UNKNOWN_W2_MUST_NOT_DISPATCH');
+        }
+        assert.equal(descriptor, w1Executor);
+        assert.equal(manifest.job.request_id, w1Job.request_id);
+        assert.equal(manifest.job.source_sha, commit);
+        w1DispatchCalls++;
+        return { outcome: 'SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION' };
+      },
+      writeReceipt: (_receiptConfig, data, login) => {
+        posted.push(data);
+        receiptComments.push(com(nextCommentId++, RECEIPT_MARKER + JSON.stringify(data), login));
+      },
+      runPlan: () => { inlineModelCalls++; throw new Error('MODEL_MUST_NOT_RUN_INLINE'); },
+      observationDependencies: { collectWindowsObservation: () => ({ status: 'UNKNOWN' }) },
+      log: value => logs.push(value),
+    };
+
+    const result = await executeWorker(config, adapters);
+    assert.equal(result.state, 'DISPATCHED', JSON.stringify({ result, logs }));
+    assert.equal(result.request_id, w1Job.request_id);
+    assert.equal(result.outcome, 'SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION');
+    assert.equal(w1BundleCalls, 1);
+    assert.equal(w1DispatchCalls, 1);
+    assert.equal(w2BundleCalls, 0);
+    assert.equal(w2DispatchCalls, 0);
+    assert.equal(inlineModelCalls, 0);
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].request_id, w1Job.request_id);
+    assert.equal(posted[0].state, 'STARTED');
+    assert.equal(readFileSync(w2ResultPath, 'utf8'), corruptBytes,
+      'the ambiguous W2 result remains preserved for later reconciliation');
+    assert.equal(parseReceipt(receiptComments[0].body)?.external_effects, 'UNKNOWN');
+    assert.ok(logs.some(value => value.startsWith(
+      `LOCAL_RESULT_RECONCILIATION_UNKNOWN_${w2Job.request_id}_`) && value.endsWith('_NO_REPLAY')),
+    'the exact W2 result stays unresolved and is never replayed');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('W2 executor preflight WAITING result reconciles without redispatch while independent W1 edit is dispatched in the same poll', async () => {
   const root = mkdtempSync(join(homedir(), '.ptysd-w2-waiting-w1-continue-'));
   try {
