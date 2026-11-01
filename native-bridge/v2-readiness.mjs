@@ -201,13 +201,106 @@ if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notm
 
 export const ANTIGRAVITY_V2_MODEL = 'gemini-3.8-flash-high';
 const ANTIGRAVITY_MODEL_ROW = /^([a-z][a-z0-9.-]{1,79})[\t ]+\S/;
-const ANTIGRAVITY_USAGE_ROW = /^Gemini Models\s+(Weekly|Five Hour) Limit Remaining\s+(\d{1,3})%\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)$/;
+
+
+const REQUIRED_USAGE_COUNTERS = Object.freeze([
+  'input_tokens',
+  'output_tokens',
+  'thinking_tokens',
+  'cache_read_tokens',
+  'total_tokens',
+]);
+
+export function inspectAntigravityZeroInferenceEnvelope(payload) {
+  let envelope = payload;
+  if (typeof envelope === 'string') {
+    if (Buffer.byteLength(envelope) > MAX_AGY_USAGE_BYTES) {
+      return { validZeroInference: false, positiveActivity: false };
+    }
+    try {
+      envelope = JSON.parse(envelope);
+    } catch {
+      return { validZeroInference: false, positiveActivity: false };
+    }
+  }
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+    return { validZeroInference: false, positiveActivity: false };
+  }
+
+  let positiveActivity = false;
+  if (typeof envelope.num_turns === 'number' && Number.isFinite(envelope.num_turns) && envelope.num_turns > 0) {
+    positiveActivity = true;
+  }
+  const usage = envelope.usage;
+  if (usage && typeof usage === 'object' && !Array.isArray(usage)) {
+    for (const key of Object.keys(usage)) {
+      const val = usage[key];
+      if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+        positiveActivity = true;
+        break;
+      }
+    }
+  }
+
+  if (envelope.status !== 'SUCCESS' || (envelope.success !== undefined && envelope.success !== true)) {
+    return { validZeroInference: false, positiveActivity };
+  }
+  if (envelope.error !== undefined && envelope.error !== null) {
+    return { validZeroInference: false, positiveActivity };
+  }
+
+  if (!envelope.command || typeof envelope.command !== 'object' || Array.isArray(envelope.command)) {
+    return { validZeroInference: false, positiveActivity };
+  }
+  if (envelope.command.name !== 'usage') {
+    return { validZeroInference: false, positiveActivity };
+  }
+  if (envelope.command.status !== undefined && envelope.command.status !== 'SUCCESS') {
+    return { validZeroInference: false, positiveActivity };
+  }
+  if (envelope.command.error !== undefined && envelope.command.error !== null) {
+    return { validZeroInference: false, positiveActivity };
+  }
+
+  if (typeof envelope.num_turns !== 'number' || !Number.isFinite(envelope.num_turns) ||
+      envelope.num_turns !== 0 || Object.is(envelope.num_turns, -0)) {
+    return { validZeroInference: false, positiveActivity };
+  }
+
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
+    return { validZeroInference: false, positiveActivity };
+  }
+
+  for (const counter of REQUIRED_USAGE_COUNTERS) {
+    if (!Object.hasOwn(usage, counter)) {
+      return { validZeroInference: false, positiveActivity };
+    }
+    const val = usage[counter];
+    if (typeof val !== 'number' || !Number.isFinite(val) || val !== 0 || Object.is(val, -0)) {
+      return { validZeroInference: false, positiveActivity };
+    }
+  }
+
+  for (const key of Object.keys(usage)) {
+    const val = usage[key];
+    if (typeof val === 'number' && (!Number.isFinite(val) || val < 0)) {
+      return { validZeroInference: false, positiveActivity };
+    }
+  }
+
+  return { validZeroInference: !positiveActivity, positiveActivity };
+}
 
 export function summarizeAntigravityUsage(stdout) {
   const unknown = { status: 'GEMINI_AGGREGATE_QUOTA_UNKNOWN', source: 'GEMINI_MODELS_AGGREGATE',
     weekly_remaining_percent: null, weekly_reset_at: null,
     five_hour_remaining_percent: null, five_hour_reset_at: null };
-  if (typeof stdout !== 'string' || Buffer.byteLength(stdout) > MAX_AGY_USAGE_BYTES)
+  if (typeof stdout !== 'string' && (typeof stdout !== 'object' || stdout === null))
+    return unknown;
+  if (typeof stdout === 'string' && Buffer.byteLength(stdout) > MAX_AGY_USAGE_BYTES)
+    return unknown;
+  const inspection = inspectAntigravityZeroInferenceEnvelope(stdout);
+  if (!inspection.validZeroInference)
     return unknown;
   try {
     const snapshot = parseAntigravityUsageQuotaSnapshot(stdout);
@@ -220,31 +313,11 @@ export function summarizeAntigravityUsage(stdout) {
       five_hour_reset_at: snapshot.gemini_5h_reset_time,
     };
   } catch {
-    // Older CLI versions emitted a human-readable quota table. Keep parsing it
-    // as a fallback, while the readiness probe requests and prefers JSON.
+    return unknown;
   }
-  const rows = new Map();
-  for (const rawLine of stdout.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line.startsWith('Gemini Models')) continue;
-    const match = line.match(ANTIGRAVITY_USAGE_ROW);
-    if (!match) return unknown;
-    const [, period, percentText, resetAt] = match;
-    const percent = Number(percentText);
-    const resetMs = Date.parse(resetAt);
-    if (!Number.isInteger(percent) || percent < 0 || percent > 100 ||
-        !Number.isFinite(resetMs) || new Date(resetMs).toISOString().replace('.000Z', 'Z') !== resetAt ||
-        rows.has(period))
-      return unknown;
-    rows.set(period, { percent, resetAt });
-  }
-  const weekly = rows.get('Weekly');
-  const fiveHour = rows.get('Five Hour');
-  if (!weekly || !fiveHour) return unknown;
-  return { status: 'GEMINI_AGGREGATE_QUOTA_READ', source: 'GEMINI_MODELS_AGGREGATE',
-    weekly_remaining_percent: weekly.percent, weekly_reset_at: weekly.resetAt,
-    five_hour_remaining_percent: fiveHour.percent, five_hour_reset_at: fiveHour.resetAt };
 }
+
+
 
 const CANONICAL_UTC_WHOLE_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const CANONICAL_UTC_MILLISECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -621,7 +694,7 @@ export function runAntigravityV2Readiness(bin, directory, runner = runAntigravit
       five_hour_remaining_percent: null, five_hour_reset_at: null },
     credit_fallback_setting: creditFallbackSetting,
     entitlement: 'UNKNOWN', cost: 'UNKNOWN',
-    write_scope: 'UNKNOWN', inference_executed: false,
+    write_scope: 'UNKNOWN', inference_executed: 'UNKNOWN',
     credential_values_collected: false, issues: [] };
   if (typeof bin !== 'string' || !(isAbsolute(bin) || win32.isAbsolute(bin)) ||
       typeof directory !== 'string' || !(isAbsolute(directory) || win32.isAbsolute(directory))) {
@@ -729,18 +802,28 @@ export function runAntigravityV2Readiness(bin, directory, runner = runAntigravit
     const usageOutput = runner(bin, [...projectArgs, '--print', '/usage', '--output-format', 'json'],
       { ...options, timeout: 15000, maxBuffer: MAX_AGY_USAGE_BYTES });
     const usage = metadataText(usageOutput);
+    const inspection = inspectAntigravityZeroInferenceEnvelope(usage);
+    if (inspection.positiveActivity) {
+      result.inference_executed = true;
+    } else if (inspection.validZeroInference) {
+      result.inference_executed = false;
+    } else {
+      result.inference_executed = 'UNKNOWN';
+    }
     result.gemini_aggregate_quota = summarizeAntigravityUsage(usage);
     if (antigravityAuthenticationEvidence(typeof usageOutput === 'string' ? usageOutput :
       usageOutput?.stdout, usageOutput?.stderr) === 'LOGIN_REQUIRED') {
       result.authentication_evidence = 'LOGIN_REQUIRED';
       result.issues.push('ANTIGRAVITY_AUTH_NOT_LOGGED_IN');
-    } else if (result.gemini_aggregate_quota.status === 'GEMINI_AGGREGATE_QUOTA_READ') {
+    } else if (result.gemini_aggregate_quota.status === 'GEMINI_AGGREGATE_QUOTA_READ' &&
+      result.inference_executed === false) {
       // The CLI documents /usage as a quota refresh from its backend. Record
       // only metadata authentication; model entitlement and cost remain UNKNOWN.
       result.authentication_checked = true;
       result.authentication_evidence = 'AUTHENTICATED_QUOTA_READ';
     } else result.issues.push('ANTIGRAVITY_USAGE_OUTPUT_UNRECOGNIZED');
   } catch (error) {
+    result.inference_executed = 'UNKNOWN';
     if (error?.authenticationEvidence === 'LOGIN_REQUIRED') {
       result.authentication_evidence = 'LOGIN_REQUIRED';
       result.issues.push('ANTIGRAVITY_AUTH_NOT_LOGGED_IN');

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { summarizeV2AuthJson, summarizeV2AuthProviderJson, summarizeV2Models, readV2ProviderAuth,
   runV2Readiness, summarizeAntigravityCreditSetting, summarizeAntigravityV2Models,
-  runAntigravityV2Readiness, summarizeAntigravityUsage, summarizeAntigravityToolPolicy,
+  runAntigravityV2Readiness, summarizeAntigravityUsage, inspectAntigravityZeroInferenceEnvelope, summarizeAntigravityToolPolicy,
   readAntigravityProjectBinding, resolveAntigravityProjectId,
   antigravityV2ReadinessExecutionFailure, readAntigravityV2RunEvidence,
   runAntigravityMetadata, ANTIGRAVITY_FILE_TOOL_FAILURE_REASONS,
@@ -98,8 +98,39 @@ test('Antigravity metadata parser recognizes only the pinned model ID, not its d
 });
 
 const fixedNow = '2026-11-01T12:00:00Z';
-const validAntigravityUsage = 'Gemini Models\tWeekly Limit Remaining\t95%\t2026-11-08T12:00:00Z\n' +
-  'Gemini Models\tFive Hour Limit Remaining\t99%\t2026-11-01T17:00:00Z\n';
+const validAntigravityUsage = JSON.stringify({
+  status: 'SUCCESS',
+  num_turns: 0,
+  usage: {
+    input_tokens: 0,
+    output_tokens: 0,
+    thinking_tokens: 0,
+    cache_read_tokens: 0,
+    total_tokens: 0,
+  },
+  command: {
+    name: 'usage',
+    data: {
+      groups: [
+        {
+          name: 'Gemini Models',
+          buckets: [
+            {
+              id: 'gemini-weekly',
+              remaining_fraction: 0.95,
+              reset_time: '2026-11-08T12:00:00Z',
+            },
+            {
+              id: 'gemini-5h',
+              remaining_fraction: 0.99,
+              reset_time: '2026-11-01T17:00:00Z',
+            },
+          ],
+        },
+      ],
+    },
+  },
+});
 
 const testProjectId = 'b8fbf647-6c41-4932-9d0a-8a7af257a27a';
 
@@ -391,7 +422,7 @@ test('Antigravity W2 does not query or execute a project with a mismatched works
       { USERPROFILE: profile }, () => true, testProjectId);
     assert.equal(result.status, 'ANTIGRAVITY_PROJECT_SCOPE_UNVERIFIED');
     assert.equal(result.project_scope_evidence, 'PROJECT_WORKSPACE_MISMATCH');
-    assert.equal(result.inference_executed, false);
+    assert.equal(result.inference_executed, 'UNKNOWN');
     assert.equal(antigravityV2ReadinessExecutionFailure(result), 'ANTIGRAVITY_PROJECT_SCOPE_UNVERIFIED');
     assert.equal(calls, 0);
   } finally {
@@ -425,18 +456,45 @@ test('Antigravity CLI policy requires Deny rules for commands, network, browser 
 });
 
 test('Antigravity usage parser keeps only validated aggregate Gemini quota rows', () => {
-  const raw = [
-    'Gemini Models\tWeekly Limit Remaining\t95%\t2026-10-23T22:50:38Z',
-    'Gemini Models\tFive Hour Limit Remaining\t99%\t2026-10-18T05:46:39Z',
-    'Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-25T00:58:04Z',
-  ].join('\n');
-  const result = summarizeAntigravityUsage(raw);
+  const envelope = {
+    status: 'SUCCESS',
+    num_turns: 0,
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      thinking_tokens: 0,
+      cache_read_tokens: 0,
+      total_tokens: 0,
+    },
+    command: {
+      name: 'usage',
+      data: {
+        groups: [
+          {
+            name: 'Gemini Models',
+            buckets: [
+              { id: 'gemini-weekly', remaining_fraction: 0.95, reset_time: '2026-10-23T22:50:38Z' },
+              { id: 'gemini-5h', remaining_fraction: 0.99, reset_time: '2026-10-18T05:46:39Z' },
+            ],
+          },
+          {
+            name: 'Claude and GPT models',
+            buckets: [
+              { id: 'claude-weekly', remaining_fraction: 1.0, reset_time: '2026-10-25T00:58:04Z' },
+            ],
+          },
+        ],
+      },
+    },
+  };
+  const rawEnvelope = JSON.stringify(envelope);
+  const result = summarizeAntigravityUsage(rawEnvelope);
   assert.deepEqual(result, { status: 'GEMINI_AGGREGATE_QUOTA_READ',
     source: 'GEMINI_MODELS_AGGREGATE', weekly_remaining_percent: 95,
-    weekly_reset_at: '2026-10-23T22:50:38Z', five_hour_remaining_percent: 99,
-    five_hour_reset_at: '2026-10-18T05:46:39Z' });
+    weekly_reset_at: '2026-10-23T22:50:38.000Z', five_hour_remaining_percent: 99,
+    five_hour_reset_at: '2026-10-18T05:46:39.000Z' });
   assert.equal(JSON.stringify(result).includes('Claude'), false);
-  assert.equal(JSON.stringify(result).includes(raw), false);
+  assert.equal(JSON.stringify(result).includes(rawEnvelope), false);
 });
 
 test('Antigravity usage parser fails closed on missing, malformed, duplicate, invalid or oversized rows', () => {
@@ -456,6 +514,299 @@ test('Antigravity usage parser fails closed on missing, malformed, duplicate, in
     'x'.repeat(32 * 1024 + 1),
   ]) assert.deepEqual(summarizeAntigravityUsage(raw), unknown());
   assert.deepEqual(summarizeAntigravityUsage(null), unknown());
+});
+
+function makeCanonicalZeroInferenceEnvelope(overrides = {}) {
+  return {
+    status: 'SUCCESS',
+    num_turns: 0,
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      thinking_tokens: 0,
+      cache_read_tokens: 0,
+      total_tokens: 0,
+    },
+    command: {
+      name: 'usage',
+      data: {
+        groups: [
+          {
+            name: 'Gemini Models',
+            buckets: [
+              {
+                id: 'gemini-weekly',
+                remaining_fraction: 0.95,
+                reset_time: '2026-11-08T12:00:00Z',
+              },
+              {
+                id: 'gemini-5h',
+                remaining_fraction: 0.99,
+                reset_time: '2026-11-01T17:00:00Z',
+              },
+            ],
+          },
+        ],
+      },
+    },
+    ...overrides,
+  };
+}
+
+test('positive: inspectAntigravityZeroInferenceEnvelope and summarizeAntigravityUsage accept valid zero-inference envelope', () => {
+  const env = makeCanonicalZeroInferenceEnvelope();
+  const raw = JSON.stringify(env);
+  const inspection = inspectAntigravityZeroInferenceEnvelope(raw);
+  assert.equal(inspection.validZeroInference, true);
+  assert.equal(inspection.positiveActivity, false);
+
+  const quota = summarizeAntigravityUsage(raw);
+  assert.equal(quota.status, 'GEMINI_AGGREGATE_QUOTA_READ');
+  assert.equal(quota.weekly_remaining_percent, 95);
+  assert.equal(quota.weekly_reset_at, '2026-11-08T12:00:00.000Z');
+  assert.equal(quota.five_hour_remaining_percent, 99);
+  assert.equal(quota.five_hour_reset_at, '2026-11-01T17:00:00.000Z');
+});
+
+test('positive: readiness probe establishes authenticated quota readiness from zero-turn all-zero-counter envelope', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'pty-agy-pos-zero-probe-'));
+  const settingsDir = join(profile, '.gemini', 'antigravity-cli');
+  mkdirSync(settingsDir, { recursive: true });
+  writeFileSync(join(settingsDir, 'settings.json'), JSON.stringify({
+    useG1Credits: false,
+    permissions: { deny: ['command(*)', 'unsandboxed(*)', 'read_url(*)', 'execute_url(*)', 'mcp(*)'] },
+  }));
+  const help = '--project --add-dir --print --output-format stream-json --model --effort --sandbox --mode accept-edits';
+  const raw = JSON.stringify(makeCanonicalZeroInferenceEnvelope());
+  const runner = (_bin, args) => {
+    const rest = args[0] === `--project=${testProjectId}` ? args.slice(1) : args;
+    if (rest[0] === '--version') return '1.4.2';
+    if (rest[0] === '--help') return help;
+    if (rest[0] === 'models') return 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n';
+    if (rest[0] === '--print' && rest[1] === '/usage') return raw;
+    throw new Error('Unexpected command');
+  };
+  try {
+    writeAntigravityProject(profile, testProjectId, process.cwd());
+    const result = runAntigravityV2Readiness(process.execPath, process.cwd(), runner,
+      { USERPROFILE: profile, PATH: 'clean' }, () => true, testProjectId);
+    assert.equal(result.status, 'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH');
+    assert.equal(result.inference_executed, false);
+    assert.equal(result.authentication_checked, true);
+    assert.equal(result.authentication_evidence, 'AUTHENTICATED_QUOTA_READ');
+    assert.equal(result.gemini_aggregate_quota.status, 'GEMINI_AGGREGATE_QUOTA_READ');
+    assert.equal(antigravityV2ReadinessExecutionFailure(result, fixedNow), null);
+  } finally {
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('negative: rejects missing usage counters or missing usage object', () => {
+  const counters = ['input_tokens', 'output_tokens', 'thinking_tokens', 'cache_read_tokens', 'total_tokens'];
+  for (const missingCounter of counters) {
+    const env = makeCanonicalZeroInferenceEnvelope();
+    delete env.usage[missingCounter];
+    const raw = JSON.stringify(env);
+    assert.equal(inspectAntigravityZeroInferenceEnvelope(raw).validZeroInference, false);
+    assert.equal(summarizeAntigravityUsage(raw).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+  }
+
+  for (const missingUsage of [undefined, null]) {
+    const env = makeCanonicalZeroInferenceEnvelope();
+    if (missingUsage === undefined) delete env.usage;
+    else env.usage = null;
+    const raw = JSON.stringify(env);
+    assert.equal(inspectAntigravityZeroInferenceEnvelope(raw).validZeroInference, false);
+    assert.equal(summarizeAntigravityUsage(raw).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+  }
+});
+
+test('negative: rejects nonzero usage counters and reports positive inference activity', () => {
+  const counters = ['input_tokens', 'output_tokens', 'thinking_tokens', 'cache_read_tokens', 'total_tokens'];
+  for (const counter of counters) {
+    for (const val of [1, 5, 100]) {
+      const env = makeCanonicalZeroInferenceEnvelope();
+      env.usage[counter] = val;
+      const raw = JSON.stringify(env);
+      const inspection = inspectAntigravityZeroInferenceEnvelope(raw);
+      assert.equal(inspection.validZeroInference, false, `counter ${counter}=${val} must not be zero-inference`);
+      assert.equal(inspection.positiveActivity, true, `counter ${counter}=${val} must be positive activity`);
+      assert.equal(summarizeAntigravityUsage(raw).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+    }
+  }
+});
+
+test('negative: rejects positive turn counts and reports positive inference activity', () => {
+  for (const turns of [1, 2, 5, 10]) {
+    const env = makeCanonicalZeroInferenceEnvelope({ num_turns: turns });
+    const raw = JSON.stringify(env);
+    const inspection = inspectAntigravityZeroInferenceEnvelope(raw);
+    assert.equal(inspection.validZeroInference, false, `turns=${turns} must not be zero-inference`);
+    assert.equal(inspection.positiveActivity, true, `turns=${turns} must be positive activity`);
+    assert.equal(summarizeAntigravityUsage(raw).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+  }
+});
+
+test('negative: rejects wrong command names or missing command object', () => {
+  for (const wrongCommand of ['credits', '/usage', 'help', '', 'USAGE', 'Usage']) {
+    const env = makeCanonicalZeroInferenceEnvelope();
+    env.command.name = wrongCommand;
+    const raw = JSON.stringify(env);
+    assert.equal(inspectAntigravityZeroInferenceEnvelope(raw).validZeroInference, false);
+    assert.equal(summarizeAntigravityUsage(raw).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+  }
+
+  for (const badCmd of [null, undefined, {}, []]) {
+    const env = makeCanonicalZeroInferenceEnvelope({ command: badCmd });
+    const raw = JSON.stringify(env);
+    assert.equal(inspectAntigravityZeroInferenceEnvelope(raw).validZeroInference, false);
+    assert.equal(summarizeAntigravityUsage(raw).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+  }
+});
+
+test('negative: rejects failed outer status, error envelopes, and command errors', () => {
+  for (const badStatus of ['ERROR', 'FAILED', 'UNKNOWN', '', 'success', 'Success', null, undefined]) {
+    const env = makeCanonicalZeroInferenceEnvelope({ status: badStatus });
+    const raw = JSON.stringify(env);
+    assert.equal(inspectAntigravityZeroInferenceEnvelope(raw).validZeroInference, false);
+    assert.equal(summarizeAntigravityUsage(raw).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+  }
+
+  const envWithFalseSuccess = makeCanonicalZeroInferenceEnvelope({ success: false });
+  assert.equal(inspectAntigravityZeroInferenceEnvelope(JSON.stringify(envWithFalseSuccess)).validZeroInference, false)
+  assert.equal(summarizeAntigravityUsage(JSON.stringify(envWithFalseSuccess)).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+  const envWithError = makeCanonicalZeroInferenceEnvelope({ error: { code: 'FAIL' } });
+  assert.equal(inspectAntigravityZeroInferenceEnvelope(JSON.stringify(envWithError)).validZeroInference, false);
+  assert.equal(summarizeAntigravityUsage(JSON.stringify(envWithError)).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+
+  const envWithCmdError = makeCanonicalZeroInferenceEnvelope();
+  envWithCmdError.command.error = 'DENIED';
+  assert.equal(inspectAntigravityZeroInferenceEnvelope(JSON.stringify(envWithCmdError)).validZeroInference, false);
+  assert.equal(summarizeAntigravityUsage(JSON.stringify(envWithCmdError)).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+
+  const envWithCmdStatusFail = makeCanonicalZeroInferenceEnvelope();
+  envWithCmdStatusFail.command.status = 'ERROR';
+  assert.equal(inspectAntigravityZeroInferenceEnvelope(JSON.stringify(envWithCmdStatusFail)).validZeroInference, false);
+  assert.equal(summarizeAntigravityUsage(JSON.stringify(envWithCmdStatusFail)).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+});
+
+test('negative: rejects malformed types, non-finite values, and negative values', () => {
+  const malformedTurns = ['0', true, false, null, undefined, -1, -5, NaN, Infinity, -Infinity, {}, []];
+  for (const badTurn of malformedTurns) {
+    const env = makeCanonicalZeroInferenceEnvelope({ num_turns: badTurn });
+    const raw = JSON.stringify(env);
+    assert.equal(inspectAntigravityZeroInferenceEnvelope(raw).validZeroInference, false,
+      `num_turns=${String(badTurn)} must fail`);
+    assert.equal(summarizeAntigravityUsage(raw).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+  }
+
+  const malformedCounters = ['0', true, false, null, undefined, -1, -10, NaN, Infinity, -Infinity, {}, []];
+  const counters = ['input_tokens', 'output_tokens', 'thinking_tokens', 'cache_read_tokens', 'total_tokens'];
+  for (const counter of counters) {
+    for (const badVal of malformedCounters) {
+      const env = makeCanonicalZeroInferenceEnvelope();
+      env.usage[counter] = badVal;
+      const raw = JSON.stringify(env);
+      assert.equal(inspectAntigravityZeroInferenceEnvelope(raw).validZeroInference, false,
+        `${counter}=${String(badVal)} must fail`);
+      assert.equal(summarizeAntigravityUsage(raw).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+    }
+  }
+
+  for (const badUsage of ['none', 123, true, [], [0, 0, 0, 0, 0]]) {
+    const env = makeCanonicalZeroInferenceEnvelope({ usage: badUsage });
+    const raw = JSON.stringify(env);
+    assert.equal(inspectAntigravityZeroInferenceEnvelope(raw).validZeroInference, false);
+    assert.equal(summarizeAntigravityUsage(raw).status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
+  }
+});
+
+test('negative: readiness gate refuses every invalid/unknown case and leaks no credentials or account IDs', () => {
+  const secretKey = 'CRITICAL-SECRETS-API-KEY-VALUE-DO-NOT-LEAK';
+  const privateAccount = 'account-user-id-987654321';
+  const privateEmail = 'secret-agent@internal.domain';
+
+  const testCases = [
+    { label: 'missing input_tokens', env: () => { const e = makeCanonicalZeroInferenceEnvelope(); delete e.usage.input_tokens; return e; } },
+    { label: 'missing output_tokens', env: () => { const e = makeCanonicalZeroInferenceEnvelope(); delete e.usage.output_tokens; return e; } },
+    { label: 'missing thinking_tokens', env: () => { const e = makeCanonicalZeroInferenceEnvelope(); delete e.usage.thinking_tokens; return e; } },
+    { label: 'missing cache_read_tokens', env: () => { const e = makeCanonicalZeroInferenceEnvelope(); delete e.usage.cache_read_tokens; return e; } },
+    { label: 'missing total_tokens', env: () => { const e = makeCanonicalZeroInferenceEnvelope(); delete e.usage.total_tokens; return e; } },
+    { label: 'missing usage object', env: () => { const e = makeCanonicalZeroInferenceEnvelope(); delete e.usage; return e; } },
+    { label: 'nonzero input_tokens', env: () => makeCanonicalZeroInferenceEnvelope({ usage: { input_tokens: 10, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 10 } }), expectedInference: true },
+    { label: 'nonzero output_tokens', env: () => makeCanonicalZeroInferenceEnvelope({ usage: { input_tokens: 0, output_tokens: 5, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 5 } }), expectedInference: true },
+    { label: 'nonzero thinking_tokens', env: () => makeCanonicalZeroInferenceEnvelope({ usage: { input_tokens: 0, output_tokens: 0, thinking_tokens: 20, cache_read_tokens: 0, total_tokens: 20 } }), expectedInference: true },
+    { label: 'nonzero cache_read_tokens', env: () => makeCanonicalZeroInferenceEnvelope({ usage: { input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 15, total_tokens: 15 } }), expectedInference: true },
+    { label: 'nonzero total_tokens', env: () => makeCanonicalZeroInferenceEnvelope({ usage: { input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 50 } }), expectedInference: true },
+    { label: 'positive turn count 1', env: () => makeCanonicalZeroInferenceEnvelope({ num_turns: 1 }), expectedInference: true },
+    { label: 'positive turn count 5', env: () => makeCanonicalZeroInferenceEnvelope({ num_turns: 5 }), expectedInference: true },
+    { label: 'wrong command credits', env: () => { const e = makeCanonicalZeroInferenceEnvelope(); e.command.name = 'credits'; return e; } },
+    { label: 'wrong command /usage', env: () => { const e = makeCanonicalZeroInferenceEnvelope(); e.command.name = '/usage'; return e; } },
+    { label: 'failed status ERROR', env: () => makeCanonicalZeroInferenceEnvelope({ status: 'ERROR' }) },
+    { label: 'failed status FAILED', env: () => makeCanonicalZeroInferenceEnvelope({ status: 'FAILED' }) },
+    { label: 'missing status', env: () => { const e = makeCanonicalZeroInferenceEnvelope(); delete e.status; return e; } },
+    { label: 'string turn count', env: () => makeCanonicalZeroInferenceEnvelope({ num_turns: '0' }) },
+    { label: 'boolean turn count', env: () => makeCanonicalZeroInferenceEnvelope({ num_turns: false }) },
+    { label: 'negative turn count', env: () => makeCanonicalZeroInferenceEnvelope({ num_turns: -1 }) },
+    { label: 'string token counter', env: () => makeCanonicalZeroInferenceEnvelope({ usage: { input_tokens: '0', output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 0 } }) },
+    { label: 'negative token counter', env: () => makeCanonicalZeroInferenceEnvelope({ usage: { input_tokens: -5, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 0 } }) },
+    { label: 'non-finite NaN counter', env: () => makeCanonicalZeroInferenceEnvelope({ usage: { input_tokens: NaN, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 0 } }) },
+    { label: 'quota-shaped raw text table', rawPayload: 'Gemini Models\tWeekly Limit Remaining\t95%\t2026-11-08T12:00:00Z\nGemini Models\tFive Hour Limit Remaining\t99%\t2026-11-01T17:00:00Z\n' },
+    { label: 'payload containing secrets', env: () => ({ ...makeCanonicalZeroInferenceEnvelope({ num_turns: 1 }), secret_key: secretKey, account_id: privateAccount, email: privateEmail }), expectedInference: true },
+  ];
+
+  const profile = mkdtempSync(join(tmpdir(), 'pty-agy-neg-refusal-'));
+  const settingsDir = join(profile, '.gemini', 'antigravity-cli');
+  mkdirSync(settingsDir, { recursive: true });
+  writeFileSync(join(settingsDir, 'settings.json'), JSON.stringify({
+    useG1Credits: false,
+    permissions: { deny: ['command(*)', 'unsandboxed(*)', 'read_url(*)', 'execute_url(*)', 'mcp(*)'] },
+  }));
+  const help = '--project --add-dir --print --output-format stream-json --model --effort --sandbox --mode accept-edits';
+
+  try {
+    writeAntigravityProject(profile, testProjectId, process.cwd());
+    for (const tc of testCases) {
+      const payload = tc.rawPayload ?? JSON.stringify(tc.env());
+      const runner = (_bin, args) => {
+        const rest = args[0] === `--project=${testProjectId}` ? args.slice(1) : args;
+        if (rest[0] === '--version') return '1.4.2';
+        if (rest[0] === '--help') return help;
+        if (rest[0] === 'models') return 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n';
+        if (rest[0] === '--print' && rest[1] === '/usage') return payload;
+        throw new Error('Unexpected command');
+      };
+      const inspected = inspectAntigravityZeroInferenceEnvelope(payload);
+      const inspectedJson = JSON.stringify(inspected);
+      assert.equal(inspectedJson.includes(secretKey), false, `${tc.label} inspection must not leak secretKey`);
+      assert.equal(inspectedJson.includes(privateAccount), false, `${tc.label} inspection must not leak privateAccount`);
+      assert.equal(inspectedJson.includes(privateEmail), false, `${tc.label} inspection must not leak privateEmail`);
+
+      const result = runAntigravityV2Readiness(process.execPath, process.cwd(), runner,
+        { USERPROFILE: profile, PATH: 'clean' }, () => true, testProjectId);
+
+      assert.equal(result.authentication_checked, false, `${tc.label} must not verify auth`);
+      assert.notEqual(result.authentication_evidence, 'AUTHENTICATED_QUOTA_READ', `${tc.label} must not have AUTHENTICATED_QUOTA_READ`);
+      assert.notEqual(result.status, 'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH', `${tc.label} must not qualify status`);
+
+      if (tc.expectedInference === true) {
+        assert.equal(result.inference_executed, true, `${tc.label} must report positive inference as true`);
+      } else {
+        assert.equal(result.inference_executed, 'UNKNOWN', `${tc.label} must report insufficient evidence as UNKNOWN`);
+      }
+
+      const failure = antigravityV2ReadinessExecutionFailure(result, fixedNow);
+      assert.notEqual(failure, null, `${tc.label} execution gate must refuse`);
+      assert.equal(failure, 'ANTIGRAVITY_CLI_NOT_QUALIFIED', `${tc.label} must fail with safe code`);
+
+      const serialized = JSON.stringify(result);
+      assert.equal(serialized.includes(secretKey), false, `${tc.label} must not leak secretKey`);
+      assert.equal(serialized.includes(privateAccount), false, `${tc.label} must not leak privateAccount`);
+      assert.equal(serialized.includes(privateEmail), false, `${tc.label} must not leak privateEmail`);
+    }
+  } finally {
+    rmSync(profile, { recursive: true, force: true });
+  }
 });
 
 test('Antigravity metadata readiness requires explicit no-G1 setting and leaves auth to the Worker gate', () => {
@@ -1065,12 +1416,12 @@ test('Antigravity readiness preserves explicit login failure even when quota tex
       : {stdout:validAntigravityUsage,stderr:'You are not logged into Antigravity.'};
   try {
     const r=runAntigravityV2Readiness(process.execPath,process.cwd(),runner,{USERPROFILE:profile},()=>true);
-    assert.equal(r.gemini_aggregate_quota.status,'GEMINI_AGGREGATE_QUOTA_READ');
+    assert.equal(r.gemini_aggregate_quota.status,'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
     assert.equal(r.authentication_checked,false);
     assert.equal(r.authentication_evidence,'LOGIN_REQUIRED');
     assert.ok(r.issues.includes('ANTIGRAVITY_AUTH_NOT_LOGGED_IN'));
     assert.equal(antigravityV2ReadinessExecutionFailure(r),'ANTIGRAVITY_PROJECT_SCOPE_UNVERIFIED');
-    assert.equal(r.inference_executed,false);
+    assert.equal(r.inference_executed,'UNKNOWN');
   } finally { rmSync(profile,{recursive:true,force:true}); }
 });
 
@@ -1104,7 +1455,7 @@ test('Antigravity readiness classifies real nonzero auth output without exposing
   assert.equal(r.authentication_evidence,'LOGIN_REQUIRED');
   assert.ok(r.issues.includes('ANTIGRAVITY_AUTH_NOT_LOGGED_IN'));
   assert.equal(r.issues.includes('ANTIGRAVITY_USAGE_COMMAND_FAILED'),false);
-  assert.equal(r.inference_executed,false);
+  assert.equal(r.inference_executed,'UNKNOWN');
   assert.equal(JSON.stringify(r).includes(privateMarker),false);
 });
 
@@ -1118,7 +1469,7 @@ test('Antigravity readiness leaves non-auth usage exit failures unverified', () 
   assert.equal(r.authentication_evidence,'UNVERIFIED');
   assert.ok(r.issues.includes('ANTIGRAVITY_USAGE_COMMAND_FAILED'));
   assert.equal(r.issues.includes('ANTIGRAVITY_AUTH_NOT_LOGGED_IN'),false);
-  assert.equal(r.inference_executed,false);
+  assert.equal(r.inference_executed,'UNKNOWN');
 });
 
 test('Antigravity nonzero usage exit cannot authenticate or read quota even with valid stdout', () => {
@@ -1137,7 +1488,7 @@ test('Antigravity nonzero usage exit cannot authenticate or read quota even with
   assert.equal(r.gemini_aggregate_quota?.five_hour_remaining_percent,null);
   assert.ok(r.issues.includes('ANTIGRAVITY_USAGE_COMMAND_FAILED'));
   assert.equal(r.issues.includes('ANTIGRAVITY_AUTH_NOT_LOGGED_IN'),false);
-  assert.equal(r.inference_executed,false);
+  assert.equal(r.inference_executed,'UNKNOWN');
   assert.notEqual(antigravityV2ReadinessExecutionFailure(r),null);
 });
 
@@ -1152,7 +1503,7 @@ test('Antigravity readiness requires add-dir but does not invent a model or effo
   assert.equal(r.add_dir_flag_supported,false);
   assert.equal(r.mode_flag_supported,false);
   assert.ok(r.issues.includes('REQUIRED_HEADLESS_FLAGS_NOT_CONFIRMED'));
-  assert.equal(r.inference_executed,false);
+  assert.equal(r.inference_executed,'UNKNOWN');
   assert.equal(r.authentication_checked,false);
   assert.equal(r.entitlement,'UNKNOWN');
   assert.equal(r.cost,'UNKNOWN');
@@ -1190,7 +1541,7 @@ test('Antigravity readiness requires the advertised accept-edits mode, not only 
   assert.equal(r.accept_edits_mode_supported,false);
   assert.equal(r.status,'METADATA_QUALIFICATION_INCOMPLETE');
   assert.ok(r.issues.includes('REQUIRED_HEADLESS_FLAGS_NOT_CONFIRMED'));
-  assert.equal(r.inference_executed,false);
+  assert.equal(r.inference_executed,'UNKNOWN');
 });
 
 test('Antigravity metadata commands never start before Google Authenticode verification', () => {
@@ -1199,7 +1550,7 @@ test('Antigravity metadata commands never start before Google Authenticode verif
     ()=>{calls++;return ''},{PATH:'clean'},()=>false);
   assert.equal(r.status,'ANTIGRAVITY_GOOGLE_SIGNATURE_NOT_VERIFIED');
   assert.equal(r.signature_verified,false);
-  assert.equal(r.inference_executed,false);
+  assert.equal(r.inference_executed,'UNKNOWN');
   assert.equal(calls,0);
 });
 
@@ -1209,7 +1560,7 @@ test('Antigravity readiness rejects a relative executable without launching comm
   assert.equal(calls,0);
   assert.equal(r.status,'READINESS_UNKNOWN');
   assert.deepEqual(r.issues,['ABSOLUTE_EXECUTABLE_AND_CWD_REQUIRED']);
-  assert.equal(r.inference_executed,false);
+  assert.equal(r.inference_executed,'UNKNOWN');
 });
 
 test('Antigravity metadata failures stay UNKNOWN and do not expose command errors', () => {
@@ -1942,6 +2293,8 @@ test('Antigravity read-only stream reports no file change without weakening acce
 test('Antigravity readiness requests JSON usage and parses the official envelope without inference', () => {
   const usage = JSON.stringify({
     status: 'SUCCESS',
+    num_turns: 0,
+    usage: { input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 0 },
     command: {
       name: 'usage',
       data: {
@@ -2091,20 +2444,20 @@ test('Antigravity JSON usage readiness rejects mismatched command name or nested
       assert.equal(readiness.authentication_evidence, 'UNVERIFIED');
       assert.ok(readiness.issues.includes('ANTIGRAVITY_USAGE_OUTPUT_UNRECOGNIZED'));
 
-      // Execution-readiness gate fails with aggregate-quota-unknown reason
+      // Unknown inference status prevents readiness even when auth/quota fields are forged.
       assert.equal(readiness.gemini_aggregate_quota?.status, 'GEMINI_AGGREGATE_QUOTA_UNKNOWN');
       assert.equal(readiness.gemini_aggregate_quota?.weekly_remaining_percent, null);
       assert.equal(readiness.gemini_aggregate_quota?.five_hour_remaining_percent, null);
-      assert.equal(antigravityV2ReadinessExecutionFailure(readiness), 'ANTIGRAVITY_CLI_AUTH_NOT_VERIFIED');
+      assert.equal(antigravityV2ReadinessExecutionFailure(readiness), 'ANTIGRAVITY_CLI_NOT_QUALIFIED');
       assert.equal(antigravityV2ReadinessExecutionFailure({
         ...readiness,
         authentication_checked: true,
         authentication_evidence: 'AUTHENTICATED_QUOTA_READ',
         issues: [],
-      }), 'ANTIGRAVITY_AGGREGATE_QUOTA_UNKNOWN');
+      }), 'ANTIGRAVITY_CLI_NOT_QUALIFIED');
 
-      // No inference executed, no synthetic marker exposed
-      assert.equal(readiness.inference_executed, false);
+      // Inference status remains unknown, with no synthetic marker exposed
+      assert.equal(readiness.inference_executed, 'UNKNOWN');
       assert.equal(JSON.stringify(readiness).includes(syntheticMarker), false);
       assert.equal(JSON.stringify(readiness).includes(syntheticAccountId), false);
       assert.deepEqual(calls[3], [`--project=${testProjectId}`, '--print', '/usage', '--output-format', 'json']);
