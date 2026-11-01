@@ -1978,6 +1978,7 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     'After each edit, reread the changed span and verify the intended result before proceeding. ' +
 
     'Do not run shell commands, access the network, inspect credentials, or edit any other path. ' +
+    'This file-edit-only rule overrides any task-spec verification section: never run tests, builds, or other commands; Codex will run listed verification after this session. ' +
     'Do not request broader permissions. ' +
 
     'If a required permission or file is unavailable, report the blocker without requesting broader access.';
