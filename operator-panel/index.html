@@ -460,6 +460,7 @@
     return code + '：安全診斷碼；不代表 Worker 接受、派工或模型活動。';
   }
   const W2_SOURCE_ACCEPTANCE_MARKER = 'PTYSD_V53R4_W2_SOURCE_ACCEPTANCE_V1';
+  const CODEX_SOURCE_ACCEPTANCE_MARKER = 'PTYSD_V53R4_CODEX_SOURCE_ACCEPTANCE_V1';
   const W1_SOURCE_ACCEPTANCE_MARKER = 'PTYSD_V53R4_R6_W1_SOURCE_ACCEPTANCE_AFTER_MERGE_V1';
   const W1_PATCH_IDENTITY_MARKER = 'PTYSD_V53R4_R6_W1_SOURCE_PATCH_BYTE_IDENTITY_RECONCILIATION_V1';
   const V2_NATIVE_WORKFLOW_PATH_FILTERS = [
@@ -771,8 +772,12 @@
         new RegExp('^' + name + ':SUCCESS(?:\\(run_\\d+\\))?$').test(item));
     });
   }
-  function w2SourceAcceptanceResultPr(issueComments, job, receipt, receiptCommentId) {
+  function w2SourceAcceptanceResultPr(issueComments, job, receipt, receiptCommentId,
+      jobCommentId = null, goalReferenceVerified = false, now = Date.now()) {
     if (!job || !receipt || !Number.isSafeInteger(receiptCommentId)) return null;
+    const canonical=codexSourceAcceptanceResultPr(issueComments,'W2',job,
+      {id:receiptCommentId,receipt},receiptCommentId,jobCommentId,goalReferenceVerified,now);
+    if (canonical) return canonical;
     const candidates=[];
     for (const comment of issueComments || []) {
       const parsed=parseW2SourceAcceptanceFields(comment);
@@ -846,8 +851,206 @@
     }
     return verified.join('; ');
   }
+  function parseCodexSourceAcceptanceFields(comment) {
+    const id=Number(comment?.id);
+    const body=comment?.body;
+    const marker=CODEX_SOURCE_ACCEPTANCE_MARKER + '\n';
+    if (!Number.isSafeInteger(id) || id < 1 || !DISPATCHERS.has(comment?.user?.login || '') ||
+        typeof body !== 'string' || !body.startsWith(marker) ||
+        body.split(CODEX_SOURCE_ACCEPTANCE_MARKER).length !== 2) return null;
+    const sections={metadata:{}};
+    const seenKeys=new Set();
+    let section='metadata';
+    for (const line of body.slice(marker.length).split(/\r?\n/)) {
+      const value=line.trim();
+      if (!value) continue;
+      if (['W1_NATIVE_TASK','W2_NATIVE_TASK','RESULT_PR'].includes(value)) {
+        if (Object.hasOwn(sections,value.toLowerCase())) return null;
+        section=value.toLowerCase();
+        sections[section]={};
+        continue;
+      }
+      const split=line.indexOf('=');
+      if (split < 1) return null;
+      const key=line.slice(0,split).trim();
+      const fieldValue=line.slice(split+1).trim();
+      if (!/^[a-z][a-z0-9_]*$/.test(key) || !fieldValue ||
+          seenKeys.has(key)) return null;
+      seenKeys.add(key);
+      sections[section][key]=fieldValue;
+    }
+    if (!sections.result_pr || (!sections.w1_native_task && !sections.w2_native_task)) return null;
+    return {id,metadata:sections.metadata,task:sections.w1_native_task || sections.w2_native_task,
+      lane:sections.w1_native_task ? 'W1' : 'W2',result:sections.result_pr};
+  }
+  function codexSourceAcceptanceStatic(comment, workerId, job, receiptItem, receiptCommentId,
+      jobCommentId, issueComments, goalReferenceVerified = false, now = Date.now()) {
+    const parsed=parseCodexSourceAcceptanceFields(comment);
+    const receipt=receiptItem?.receipt || receiptItem;
+    const commentId=Number(parsed?.id);
+    const terminalId=Number(receiptCommentId);
+    const taskCommentId=Number(jobCommentId);
+    if (!parsed || !['W1','W2'].includes(workerId) || parsed.lane !== workerId ||
+        !goalReferenceVerified || !job || !receipt || receipt.state !== 'FINISHED' ||
+        job.kind !== (workerId === 'W1' ? 'opencode_edit' : 'antigravity_edit') ||
+        !Number.isFinite(Date.parse(comment?.created_at || '')) ||
+        Date.parse(comment.created_at) > now ||
+        !Number.isSafeInteger(taskCommentId) || taskCommentId < 1 ||
+        !Number.isSafeInteger(terminalId) || terminalId < 1 || commentId <= terminalId ||
+        Number(receiptItem?.id || terminalId) !== terminalId) return null;
+    const {metadata,task,result}=parsed;
+    const receipts=dispatchReceipt(issueComments,job,receipt.attempt_id,taskCommentId,now);
+    const started=receipts.items.filter(item=>item.receipt.state === 'STARTED');
+    if (receipts.status !== 'MATCHED' || receipts.latest?.id !== terminalId || started.length !== 1)
+      return null;
+    const changedPaths=String(task.changed_paths || '').split(/[;,]\s*/).map(path=>path.trim())
+      .filter(Boolean);
+    const distinctPaths=new Set(changedPaths);
+    const tests=String(task.focused_test || task.local_test || task.source_test || '');
+    const testMatch=tests.match(/^node --test\s+(.+);(\d+)_total;(\d+)_passed;0_failed;(\d+)_skipped$/);
+    const testPaths=testMatch?.[1].trim().split(/\s+/) || [];
+    const testCounts=testMatch ? testMatch.slice(2).map(Number) : [];
+    const validTests=Boolean(testMatch) && testPaths.length > 0 &&
+      testPaths.every(path=>validEditPath(path) && job.edit_paths?.includes(path)) &&
+      testPaths.some(path=>changedPaths.includes(path)) &&
+      testCounts[0] > 0 && testCounts[0] === testCounts[1] + testCounts[2];
+    const resultPr=/^\d{1,9}$/.test(result.result_pr || '') ? Number(result.result_pr) : null;
+    const resultHead=safeSha(result.result_head)?.toLowerCase() || null;
+    const resultBaseSha=safeSha(result.result_base_sha)?.toLowerCase() || null;
+    const declaredChecks=String(result.trusted_exact_head_checks || '').split(';')
+      .map(item=>item.trim()).filter(Boolean);
+    const checkMap=new Map();
+    for (const declaration of declaredChecks) {
+      const match=declaration.match(/^([a-z0-9-]+):SUCCESS(?:\(run_(\d+)(?:-attempt-(\d+))?\))?$/);
+      if (!match || checkMap.has(match[1])) return null;
+      checkMap.set(match[1],{runId:match[2] ? Number(match[2]) : null,
+        attempt:match[3] ? Number(match[3]) : null});
+    }
+    const requiredChecks=['check-native-only','csg-trusted-verifier-hosted'];
+    const v2NativeApplies=changedPaths.some(path=>V2_NATIVE_WORKFLOW_PATH_FILTERS.some(filter=>
+      filter.endsWith('/**') ? path.startsWith(filter.slice(0,-3) + '/') : path === filter));
+    if (v2NativeApplies) requiredChecks.push('v2-native-windows');
+    const knownChecks=new Set(['check-native-only','csg-trusted-verifier-hosted','v2-native-windows']);
+    const checksDeclared=requiredChecks.every(name=>checkMap.has(name)) &&
+      [...checkMap.keys()].every(name=>knownChecks.has(name));
+    const mergeValue=result.result_pr_merge_commit || result.merge_commit || '';
+    const mainValue=result.current_main_sha || result.main_readback || '';
+    const mergedAcceptance=result.source_acceptance ===
+      `ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_RESULT_PR_${resultPr}`;
+    const headOnlyAcceptance=result.source_acceptance === 'ACCEPTED_FOR_PR_HEAD_ONLY';
+    const mergeCommit=safeSha(mergeValue)?.toLowerCase() || null;
+    const mainReadback=safeSha(mainValue)?.toLowerCase() || null;
+    const mergeStateValid=mergedAcceptance
+      ? Boolean(mergeCommit && mainReadback && mergeCommit === mainReadback)
+      : headOnlyAcceptance && (!mergeValue || mergeValue === 'NOT_PERFORMED') &&
+        (!mainValue || mainValue === 'NOT_PERFORMED');
+    const runtime=result.runtime_deployment || '';
+    const runtimeNotClaimed=runtime === 'NOT_PERFORMED' || runtime === 'UNKNOWN' ||
+      runtime.startsWith('UNKNOWN_NOT_VERIFIED_');
+    if (metadata.record_type !== 'ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_NATIVE_WORKER_RECEIPT' ||
+        metadata.repo !== REPO || metadata.project_id !== PROJECT ||
+        metadata.goal_comment_id !== String(job.goal_comment_id) ||
+        metadata.goal_body_sha256 !== job.goal_body_sha256 ||
+        (metadata.prestate_latest_issue407_comment &&
+          metadata.prestate_latest_issue407_comment !== String(terminalId)) ||
+        task.request_id !== job.request_id || task.attempt_id !== receipt.attempt_id ||
+        task.started_comment_id !== String(started[0].id) ||
+        task.terminal_comment_id !== String(terminalId) ||
+        task.source_pr !== String(job.source_pr) ||
+        String(task.source_head || '').toLowerCase() !== String(job.source_sha).toLowerCase() ||
+        task.spec_path !== job.spec_path || task.spec_sha256 !== job.spec_sha256 ||
+        task.model !== job.model || task.session_id !== receipt.session_id ||
+        !/^[a-f0-9]{64}$/i.test(task.worker_diff_sha256 || '') ||
+        task.worker_diff_sha256.toLowerCase() !== String(receipt.diff_sha256 || '').toLowerCase() ||
+        !/^\d+$/.test(task.worker_diff_bytes || '') ||
+        Number(task.worker_diff_bytes) !== Number(receipt.diff_bytes) ||
+        !Number.isSafeInteger(receipt.changed_files_count) ||
+        changedPaths.length !== receipt.changed_files_count || distinctPaths.size !== changedPaths.length ||
+        changedPaths.length < 1 || changedPaths.some(path=>!validEditPath(path) || !job.edit_paths?.includes(path)) ||
+        task.codex_patch_scope_review?.startsWith('PASS_') !== true ||
+        !validTests || task.git_diff_check !== 'PASS' || !resultPr || !resultHead || !resultBaseSha ||
+        !checksDeclared || !mergeStateValid || !runtimeNotClaimed ||
+        result.worker_task_acceptance !== 'UNKNOWN' || result.external_effects !== 'UNKNOWN' ||
+        result.live_acceptance !== 'NOT_CLAIMED' ||
+        (!mergedAcceptance && !headOnlyAcceptance)) return null;
+    return {parsed,workerId,receipt,receiptCommentId:terminalId,jobCommentId:taskCommentId,
+      startedCommentId:started[0].id,changedPaths,resultPr,resultHead,resultBaseSha,mergeCommit,
+      mainReadback,mergedAcceptance,checksDeclared:checkMap,focusedTest:tests};
+  }
+  function codexSourceAcceptanceResultPr(issueComments, workerId, job, receiptItem,
+      receiptCommentId, jobCommentId, goalReferenceVerified = false, now = Date.now()) {
+    const matched=[];
+    for (const comment of issueComments || []) {
+      const candidate=codexSourceAcceptanceStatic(comment,workerId,job,receiptItem,
+        receiptCommentId,jobCommentId,issueComments,goalReferenceVerified,now);
+      if (candidate) matched.push(candidate);
+    }
+    return matched.length === 1 ? matched[0].resultPr : null;
+  }
+  function codexTrustedResultChecks(checkData, acceptance) {
+    const head=safeSha(acceptance?.resultHead)?.toLowerCase();
+    if (!head || !Array.isArray(checkData?.check_runs) || !acceptance?.checksDeclared) return null;
+    const verified=[];
+    for (const [name,declaration] of acceptance.checksDeclared) {
+      const runs=checkData.check_runs.filter(run=>run?.name === name &&
+        safeSha(run.head_sha)?.toLowerCase() === head && Number(run?.app?.id) === 15368 &&
+        run?.app?.slug === 'github-actions' && run?.app?.name === 'GitHub Actions')
+        .sort((a,b)=>(Number(a.id)||0)-(Number(b.id)||0));
+      const latest=runs.at(-1);
+      if (!latest || latest.status !== 'completed' || latest.conclusion !== 'success' ||
+          (declaration.runId && Number(latest.check_suite?.id || latest.run_id) !== declaration.runId) ||
+          (declaration.attempt && Number(latest.run_attempt) !== declaration.attempt)) return null;
+      verified.push(name + ':SUCCESS');
+    }
+    return verified.join('; ');
+  }
+  function parseCodexSourceAcceptance(comment, workerId, job, receiptItem, receiptCommentId,
+      jobCommentId, issueComments, resultPull = null, resultChecks = null,
+      goalReferenceVerified = false, now = Date.now()) {
+    const acceptance=codexSourceAcceptanceStatic(comment,workerId,job,receiptItem,
+      receiptCommentId,jobCommentId,issueComments,goalReferenceVerified,now);
+    if (!acceptance || !candidatePullIdentityMatches(resultPull,{number:acceptance.resultPr}) ||
+        String(resultPull?.base?.ref || '').toLowerCase() !== 'main' ||
+        String(resultPull?.base?.sha || '').toLowerCase() !== acceptance.resultBaseSha ||
+        safeSha(resultPull?.head?.sha)?.toLowerCase() !== acceptance.resultHead) return null;
+    const pullState=String(resultPull?.state || '').toLowerCase();
+    const pullMerged=resultPull?.merged === true || Boolean(resultPull?.merged_at || resultPull?.mergedAt);
+    const resultMerge=safeSha(resultPull?.merge_commit_sha)?.toLowerCase() || null;
+    const merged=acceptance.mergedAcceptance && pullState === 'closed' && pullMerged &&
+      resultMerge === acceptance.mergeCommit;
+    const headOnly=acceptance.parsed.result.source_acceptance === 'ACCEPTED_FOR_PR_HEAD_ONLY' &&
+      ((pullState === 'open' && !pullMerged) || (pullState === 'closed' && pullMerged));
+    const trustedChecks=codexTrustedResultChecks(resultChecks,acceptance);
+    if ((!merged && !headOnly) || !trustedChecks) return null;
+    const resultPrState=merged ? 'MERGED' : pullMerged ? 'MERGED_AFTER_HEAD_ACCEPTANCE' : 'OPEN_HEAD_ONLY';
+    return {schema:1,project_id:PROJECT,
+      record_type:'ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT',
+      request_id:job.request_id,attempt_id:acceptance.receipt.attempt_id,
+      source_pr:job.source_pr,source_sha:job.source_sha,
+      codex_source_acceptance:'ACCEPTED',exact_head_ci:'SUCCESS',
+      worker_task_acceptance:'UNKNOWN',external_effects:'UNKNOWN',live_acceptance:'NOT_CLAIMED',
+      sourceAcceptance:{comment_id:acceptance.parsed.id,
+        started_comment_id:acceptance.startedCommentId,
+        worker_terminal_comment_id:acceptance.receiptCommentId,
+        diff_sha256:String(acceptance.receipt.diff_sha256).toLowerCase(),
+        result_pr:acceptance.resultPr,result_head:acceptance.resultHead,
+        result_pr_state:resultPrState,
+        merge_commit:merged ? acceptance.mergeCommit : pullMerged ? resultMerge : null,
+        main_readback:merged ? acceptance.mainReadback : null,
+        result_base_sha:acceptance.resultBaseSha,
+        exact_head_checks:trustedChecks,source_test:acceptance.focusedTest,
+        changed_paths:acceptance.changedPaths.join('; '),
+        runtime_deployment:acceptance.parsed.result.runtime_deployment || 'UNKNOWN'},
+      resultPr:{number:acceptance.resultPr,resultHead:acceptance.resultHead,
+        baseSha:acceptance.resultBaseSha,mergeCommit:merged ? acceptance.mergeCommit : null,
+        merged:pullMerged,acceptedAsMerged:merged,checks:trustedChecks}};
+  }
   function parseW2SourceAcceptance(comment, job, receipt, receiptCommentId, resultPull = null,
-      resultChecks = null, goalReferenceVerified = false) {
+      resultChecks = null, goalReferenceVerified = false, issueComments = [], jobCommentId = null, now = Date.now()) {
+    if (String(comment?.body || '').startsWith(CODEX_SOURCE_ACCEPTANCE_MARKER + '\n')) {
+      return parseCodexSourceAcceptance(comment,'W2',job,receipt,receiptCommentId,
+        jobCommentId,issueComments,resultPull,resultChecks,goalReferenceVerified,now);
+    }
     const parsed=parseW2SourceAcceptanceFields(comment);
     if (!parsed) return null;
     const {id,fields}=parsed;
@@ -1610,6 +1813,8 @@
       pr:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       main:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, generation:0 },
       checks:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
+      w1ResultPr:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
+      w1ResultChecks:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       w2ResultPr:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       w2ResultChecks:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       dispatches:Object.create(null), dispatchPulls:Object.create(null), dispatchChecks:Object.create(null),
@@ -1689,6 +1894,21 @@
       const url=Number.isSafeInteger(prNumber) && prNumber > 0
         ? API + '/pulls/' + prNumber : '';
       const resource=resources.w2ResultPr;
+      if (resource.url !== url) clearResource(resource,url);
+      return url || null;
+    }
+    function bindW1ResultPull(prNumber) {
+      const url=Number.isSafeInteger(prNumber) && prNumber > 0
+        ? API + '/pulls/' + prNumber : '';
+      const resource=resources.w1ResultPr;
+      if (resource.url !== url) clearResource(resource,url);
+      return url || null;
+    }
+    function bindW1ResultChecks(head) {
+      const expectedSha=safeSha(head);
+      const url=expectedSha
+        ? API + '/commits/' + expectedSha + '/check-runs?per_page=100' : '';
+      const resource=resources.w1ResultChecks;
       if (resource.url !== url) clearResource(resource,url);
       return url || null;
     }
@@ -1778,7 +1998,7 @@
     return { resources, loadResource, bindPullRequest, bindGoalAuthority, bindGoalLatest,
       bindIssueLatest, bindChecksHead, checksSummaryForHead,
       bindDispatchComment, bindDispatchPull, bindDispatchChecks, dispatchChecksSummaryForHead,
-      bindW2ResultPull, bindW2ResultChecks, now };
+      bindW1ResultPull, bindW1ResultChecks, bindW2ResultPull, bindW2ResultChecks, now };
   }
   function adaptivePollInterval(key, apiClient) {
     const state=apiClient.getRateState?.() || {};
@@ -2016,15 +2236,43 @@
       ? goalResource.latestComments : Array.isArray(goalResource?.data) ? goalResource.data : [];
     const issueComments=Array.isArray(issueResource?.latestComments)
       ? issueResource.latestComments : Array.isArray(issueResource?.data) ? issueResource.data : [];
+    const w1Latest=goalResource?.latestComplete
+      ? latestSchema6Job(goalComments,'opencode_edit') : null;
+    const w1Job=w1Latest?.job || null;
+    const w1GoalReferenceVerified=schema6GoalReferenceVerified(w1Job,goalResource?.identity || null,
+      goalResource?.latestComplete === true);
+    const w1Receipts=w1Job && issueResource?.latestComplete
+      ? dispatchReceipt(issueComments,w1Job,null,w1Latest.id,resourceStore.now()) : null;
+    const w1Receipt=w1Receipts?.status === 'MATCHED' ? w1Receipts.latest : null;
+    const w1ResultPr=w1GoalReferenceVerified && w1Receipt?.receipt?.state === 'FINISHED'
+      ? codexSourceAcceptanceResultPr(issueComments,'W1',w1Job,w1Receipt,w1Receipt.id,
+        w1Latest.id,w1GoalReferenceVerified,resourceStore.now()) : null;
+    const w1ResultPrUrl=resourceStore.bindW1ResultPull(w1ResultPr);
+    if (!recoveryProbeCompleted && !apiClient.isPaused?.() && w1ResultPrUrl)
+      await resourceStore.loadResource('w1ResultPr',w1ResultPrUrl,adaptivePollInterval('pr',apiClient),force);
+    const w1ResultPrResource=resourceStore.resources.w1ResultPr;
+    const w1ResultPull=w1ResultPrResource.url === w1ResultPrUrl &&
+      resourceFreshness(w1ResultPrResource,resourceStore.now(),PR_POLL_MS) === 'FRESH' &&
+      !w1ResultPrResource.error ? w1ResultPrResource.data : null;
+    const w1ResultHead=candidatePullIdentityMatches(w1ResultPull,{number:w1ResultPr}) &&
+      String(w1ResultPull?.base?.ref || '').toLowerCase() === 'main'
+      ? safeSha(w1ResultPull?.head?.sha) : null;
+    const w1ResultChecksUrl=resourceStore.bindW1ResultChecks(w1ResultHead);
+    if (!recoveryProbeCompleted && !apiClient.isPaused?.() && w1ResultChecksUrl)
+      await resourceStore.loadResource('w1ResultChecks',w1ResultChecksUrl,
+        adaptivePollInterval('checks',apiClient),force);
     const w2Job=goalResource?.latestComplete
       ? latestSchema6Job(goalComments,'antigravity_edit')?.job || null : null;
+    const w2Latest=goalResource?.latestComplete
+      ? latestSchema6Job(goalComments,'antigravity_edit') : null;
     const w2Evidence=goalResource?.latestComplete && issueResource?.latestComplete
       ? w2EvidenceData(goalComments,issueComments,safeSha(resourceStore.resources.main.data?.sha),
         goalResource.identity || null,true,true)
       : null;
     const resultPr=w2Evidence?.native?.goalReferenceVerified && w2Evidence?.native?.receipt
       ? w2SourceAcceptanceResultPr(issueComments,w2Job,w2Evidence.native.receipt,
-        w2Evidence.native.receiptCommentId)
+        w2Evidence.native.receiptCommentId,w2Latest?.id,
+        w2Evidence.native.goalReferenceVerified,resourceStore.now())
       : null;
     const resultPrUrl=resourceStore.bindW2ResultPull(resultPr);
     if (!recoveryProbeCompleted && !apiClient.isPaused?.() && resultPrUrl)
@@ -2274,7 +2522,8 @@
     }
     return fields;
   }
-  function w1SourceAcceptanceData(comments, job, receiptItem, reconciliation, jobCommentId) {
+  function w1SourceAcceptanceData(comments, job, receiptItem, reconciliation, jobCommentId,
+      resultPull = null, resultChecks = null, now = Date.now()) {
     const receipt=receiptItem?.receipt;
     const sourceSha=String(job?.source_sha || '').toLowerCase();
     if (!job || job.kind !== 'opencode_edit' || !safeSha(sourceSha) || !receiptItem ||
@@ -2282,8 +2531,34 @@
         String(receipt.source_sha || '').toLowerCase() !== sourceSha ||
         !/^[a-f0-9]{64}$/i.test(receipt.diff_sha256 || '') ||
         !Number.isSafeInteger(receipt.diff_bytes) || receipt.diff_bytes <= 0 ||
-        !reconciliation || !String(reconciliation.diffReconciliation || '').startsWith('PASS') ||
-        !reconciliation.resultPr || !Number.isSafeInteger(jobCommentId) || jobCommentId < 1) return null;
+        !Number.isSafeInteger(jobCommentId) || jobCommentId < 1) return null;
+    const canonical=[];
+    for (const comment of comments || []) {
+      const acceptance=parseCodexSourceAcceptance(comment,'W1',job,receiptItem,
+        receiptItem.id,jobCommentId,comments,resultPull,resultChecks,true,now);
+      if (acceptance) canonical.push(acceptance);
+    }
+    if (canonical.length === 1) {
+      const result=canonical[0];
+      const sourceAcceptance=result.sourceAcceptance;
+      const resultPr={number:sourceAcceptance.result_pr,head:sourceAcceptance.merge_commit ||
+        sourceAcceptance.result_head,resultHead:sourceAcceptance.result_head,
+        state:sourceAcceptance.result_pr_state,merged:sourceAcceptance.result_pr_state !== 'OPEN_HEAD_ONLY',
+        checks:sourceAcceptance.exact_head_checks};
+      return {acceptance:{id:sourceAcceptance.comment_id},identity:null,
+        resultHead:sourceAcceptance.result_head,resultPr:resultPr.number,
+        mergeCommit:sourceAcceptance.merge_commit,sourcePr:job.source_pr,sourceSha,
+        requestId:job.request_id,attemptId:receipt.attempt_id,
+        workerDiffSha256:String(receipt.diff_sha256).toLowerCase(),
+        readbackMainSha:sourceAcceptance.main_readback,focusedTest:sourceAcceptance.source_test,
+        checks:sourceAcceptance.exact_head_checks,externalEffects:'UNKNOWN',
+        liveAcceptance:'NOT_CLAIMED',resultPrDetails:resultPr,status:'ACCEPTED',
+        label:`PR #${resultPr.number} SOURCE_ACCEPTED; ${sourceAcceptance.result_pr_state}; ` +
+          `exact-head checks ${sourceAcceptance.exact_head_checks}; #407 Codex source acceptance #${sourceAcceptance.comment_id}`};
+    }
+    if (canonical.length > 1 || !reconciliation ||
+        !String(reconciliation.diffReconciliation || '').startsWith('PASS') ||
+        !reconciliation.resultPr) return null;
     const sourcePr=job.source_pr;
     const receiptId=Number(receiptItem.id);
     const reconciliationId=Number(reconciliation.id);
@@ -2600,9 +2875,26 @@
       const reconciliation=reconciliationForTask(comments,id,job,latest,now);
       base.goalReferenceVerified=id === 'W1'
         ? schema6GoalReferenceVerified(job,goalIdentity,goalSourceComplete) : null;
+      let w1ResultPull=null, w1ResultChecks=null;
+      if (id === 'W1' && base.goalReferenceVerified && latest?.receipt?.state === 'FINISHED') {
+        const resultNumber=codexSourceAcceptanceResultPr(comments,'W1',job,latest,latest.id,
+          commentId,base.goalReferenceVerified,now);
+        const resultResource=resources.w1ResultPr;
+        const resultUrl=resultNumber ? API + '/pulls/' + resultNumber : '';
+        if (resultResource?.url === resultUrl &&
+            resourceFreshness(resultResource,now,PR_POLL_MS) === 'FRESH' && !resultResource.error)
+          w1ResultPull=resultResource.data;
+        const resultHead=safeSha(w1ResultPull?.head?.sha);
+        const checksResource=resources.w1ResultChecks;
+        const checksUrl=resultHead ? API + '/commits/' + resultHead + '/check-runs?per_page=100' : '';
+        if (checksResource?.url === checksUrl &&
+            resourceFreshness(checksResource,now,CHECKS_POLL_MS) === 'FRESH' && !checksResource.error)
+          w1ResultChecks=checksResource.data;
+      }
       base.codexSourceAcceptance=id === 'W1'
         ? base.goalReferenceVerified
-          ? w1SourceAcceptanceData(comments,job,latest,reconciliation,commentId) : null
+          ? w1SourceAcceptanceData(comments,job,latest,reconciliation,commentId,
+            w1ResultPull,w1ResultChecks,now) : null
         : null;
       base.receiptProvenance=receiptProvenance(latest);
       base.status=fallbackState;
@@ -2652,7 +2944,7 @@
         '；' + String(test) + '；' + (resultPr ? '結果 PR #' + resultPr : '結果 PR 未由同任務收據提供') +
         '；CI ' + String(task.ci || task.ci_status || '未確認') +
         '；驗收 ' + String(task.task_acceptance || task.acceptance || '未確認');
-      base.resultPr=reconciliation?.resultPr || null;
+      base.resultPr=reconciliation?.resultPr || base.codexSourceAcceptance?.resultPrDetails || null;
       base.resultPrUrl=base.resultPr
         ? 'https://github.com/' + REPO + '/pull/' + base.resultPr.number : null;
       base.externalEffectClass=reconciliation?.externalEffectClass ||
@@ -2662,14 +2954,20 @@
       base.recoveredFileHashes=reconciliation?.recoveredFileHashes || [];
       base.receiptVsStream=reconciliation?.receiptVsStream || 'UNKNOWN';
       base.resultDetails=id === 'W1' && base.resultPr
-        ? '結果 PR #' + base.resultPr.number + '：#407 記錄已合併；integration_commit／resultPr.head ' +
-          base.resultPr.head + '；' +
-          '對帳時 CI ' + base.resultPr.checks +
-          '（SKIPPED／CANCELLED 不計 PASS 或 FAILED）；#407 留言 #' + reconciliation.id +
-          (base.codexSourceAcceptance
-            ? '；Codex source acceptance 另列為 ACCEPTED；原始 Worker task_acceptance=' +
-              base.formalAcceptance + '；external_effects=' + base.codexSourceAcceptance.externalEffects + '。'
-            : '；Codex source acceptance 與 Worker task_acceptance 分開核對。')
+        ? base.codexSourceAcceptance?.resultPrDetails
+          ? '結果 PR #' + base.resultPr.number + '：Codex source acceptance ' +
+            base.codexSourceAcceptance.resultPrDetails.checks + '；結果 HEAD ' +
+            base.codexSourceAcceptance.resultPrDetails.resultHead + '；Codex acceptance ' +
+            base.codexSourceAcceptance.status + '；Worker task_acceptance=' +
+            base.formalAcceptance + '；external_effects=UNKNOWN；live_acceptance=NOT_CLAIMED。'
+          : '結果 PR #' + base.resultPr.number + '：#407 記錄已合併；integration_commit／resultPr.head ' +
+            base.resultPr.head + '；' +
+            '對帳時 CI ' + base.resultPr.checks +
+            '（SKIPPED／CANCELLED 不計 PASS 或 FAILED）；#407 留言 #' + reconciliation.id +
+            (base.codexSourceAcceptance
+              ? '；Codex source acceptance 另列為 ACCEPTED；原始 Worker task_acceptance=' +
+                base.formalAcceptance + '；external_effects=' + base.codexSourceAcceptance.externalEffects + '。'
+              : '；Codex source acceptance 與 Worker task_acceptance 分開核對。')
         : id === 'W2' && reconciliation
           ? '原收據 ZERO_DIFF 與同 attempt 工具流／三檔回收證據衝突；' +
             reconciliation.externalEffectClass + '／外部效果 ' + reconciliation.externalEffects +
@@ -2682,7 +2980,9 @@
       base.summaryProgress=id === 'W1'
         ? 'Worker ' + base.workerTerminal + '；Codex 差異核對 ' +
           (reconciliation?.diffReconciliation || 'UNKNOWN') +
-          (base.resultPr ? '；#407 記錄結果 PR #' + base.resultPr.number + ' 已合併' : '') +
+          (base.resultPr ? '；結果 PR #' + base.resultPr.number +
+            (base.codexSourceAcceptance?.resultPrDetails?.state === 'OPEN_HEAD_ONLY'
+              ? ' exact HEAD 已驗收' : ' 已合併') : '') +
           (base.codexSourceAcceptance ? '；Codex source acceptance 已確認' : '') +
           '；Worker task_acceptance=' + String(receipt?.task_acceptance || task.task_acceptance || 'UNKNOWN') +
           '；external_effects=' + String(receipt?.external_effects || 'UNKNOWN')
@@ -3093,7 +3393,8 @@
       for (const c of (issueComments || [])) {
         if (!c?.body) continue;
         const sourceAcceptance=parseW2SourceAcceptance(c,currentJob,matchedReceipt,
-          matchedReceiptCommentId,resultPull,resultChecks,goalReferenceVerified);
+          matchedReceiptCommentId,resultPull,resultChecks,goalReferenceVerified,
+          issueComments,latest?.id,Date.now());
         if (sourceAcceptance) candidateAcceptances.push({ id:Number(c.id), acc:sourceAcceptance });
         const acc = parseMarkedAfterHeading(c.body, ACCEPTANCE_MARKER);
         if (validW2Acceptance(acc) &&
@@ -3397,6 +3698,8 @@
           sourceStatusLabel(resources.goalLatest?.data ? resources.goalLatest : resources.goal,
             now,resources.goalLatest?.data ? GOAL_LATEST_POLL_MS : GOAL_INDEX_POLL_MS))] : []),
       '任務來源 PR ' + sourceStatusLabel(resources.pr,now,PR_POLL_MS),
+      ...(resources.w1ResultPr?.url ? ['W1 結果 PR ' + sourceStatusLabel(resources.w1ResultPr,now,PR_POLL_MS)] : []),
+      ...(resources.w1ResultChecks?.url ? ['W1 結果 PR checks ' + sourceStatusLabel(resources.w1ResultChecks,now,CHECKS_POLL_MS)] : []),
       ...(resources.w2ResultPr?.url ? ['W2 結果 PR ' + sourceStatusLabel(resources.w2ResultPr,now,PR_POLL_MS)] : []),
       ...(resources.w2ResultChecks?.url ? ['W2 結果 PR checks ' + sourceStatusLabel(resources.w2ResultChecks,now,CHECKS_POLL_MS)] : []),
       'checks ' + sourceStatusLabel(resources.checks,now,CHECKS_POLL_MS),
@@ -3834,6 +4137,8 @@
     workerChangeLabel, normalizeFormalTask, classifyRecentEvents,
     validSchema6DispatchJob, validSchema6DispatchComment, dispatchTaskSource, schema6TaskSource,
     dispatchReceipt,
+    parseCodexSourceAcceptanceFields, codexSourceAcceptanceStatic, codexSourceAcceptanceResultPr,
+    parseCodexSourceAcceptance, w1SourceAcceptanceData,
     dispatchCardData, renderDispatchCard, w1SourceHarvestLabel, render,
     freshnessOfSnapshot, createApiClient, createResourceStore, renderRateStatus,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,

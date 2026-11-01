@@ -2629,6 +2629,214 @@ test('W2 additive FINISHED acceptance supports the canonical fields and reads an
     'a source-acceptance record before its terminal receipt cannot trigger result-PR lookup');
 });
 
+test('canonical Codex source acceptance binds W1 and W2 jobs, receipts, result PRs, and exact trusted checks', async () => {
+  const now=Date.now();
+  const humanGoal={id:6188322050,user:{login:'t14210184'},issue_url:apiRoot+'/issues/310',
+    body:'<!-- PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015 -->\nHuman-authorized bounded construction.'};
+  const goalIdentity=await panel.hashHumanGoalComment(humanGoal);
+  assert.ok(goalIdentity?.body_sha256);
+  const trustedActionsApp={id:15368,slug:'github-actions',name:'GitHub Actions'};
+  const makeFixture=(workerId,offset)=>{
+    const kind=workerId==='W1'?'opencode_edit':'antigravity_edit';
+    const prefix=workerId==='W1'?'W1':'W2';
+    const model=workerId==='W1'?'opencode/deepseek-v4.1-flash-free':'gemini-3.8-flash-high';
+    const changedPaths=workerId==='W1'?['tests/native-bridge.test.mjs']:
+      ['tests/executor.test.mjs','tests/native-bridge.test.mjs'];
+    const sourcePr=workerId==='W1'?679:689;
+    const resultPr=workerId==='W1'?700:701;
+    const id=6507000000+offset*10;
+    const jobCommentId=id;
+    const startedId=id+1;
+    const terminalId=id+2;
+    const acceptanceId=id+3;
+    const attemptId=workerId==='W1'?'94fbdc22-ab56-4a9e-b4f1-cf24bf73aa5e':
+      '69e08a0a-14c7-4d30-84ee-8406d52695ee';
+    const sourceSha=(workerId==='W1'?'a':'d').repeat(40);
+    const resultHead=(workerId==='W1'?'c':'9').repeat(40);
+    const baseSha=(workerId==='W1'?'b':'8').repeat(40);
+    const mergeSha='e'.repeat(40);
+    const diffSha=(workerId==='W1'?'1':'2').repeat(64);
+    const sessionId=workerId==='W1'?'ses_panel_w1_canonical_acceptance':'panel-w2-session-690';
+    const job={schema:6,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+      request_id:`${prefix}_PANEL_CANONICAL_ACCEPTANCE_${offset}_20261101`,kind,source_sha:sourceSha,
+      spec_path:`native-bridge/tasks/${workerId.toLowerCase()}-panel-canonical-${offset}.md`,
+      spec_sha256:(workerId==='W1'?'3':'4').repeat(64),model,
+      variant:workerId==='W1'?'free':'high',edit_paths:changedPaths,source_pr:sourcePr,
+      goal_comment_id:6188322050,goal_body_sha256:goalIdentity.body_sha256};
+    const started={schema:1,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+      request_id:job.request_id,attempt_id:attemptId,state:'STARTED',kind,source_sha:sourceSha,
+      source_pr:sourcePr,goal_comment_id:6188322050};
+    const receipt={schema:1,project_id:'CHATGPT_GLOBAL_SKILL_GOVERNANCE',host:'DESKTOP-1B6PD2P',
+      request_id:job.request_id,attempt_id:attemptId,state:'FINISHED',kind,source_sha:sourceSha,
+      source_pr:sourcePr,outcome:workerId==='W1'?'V2_EDIT_DIFF_CAPTURED_UNVERIFIED':
+        'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED_FILE_TOOL_FAILURES_RETAINED',
+      session_id:sessionId,diff_sha256:diffSha,diff_bytes:workerId==='W1'?12130:15047,
+      changed_files_count:changedPaths.length,changed_files_sha256:'5'.repeat(64),
+      task_acceptance:'UNKNOWN',external_effects:'UNKNOWN'};
+    const taskFields=[
+      `request_id=${job.request_id}`,`attempt_id=${attemptId}`,`started_comment_id=${startedId}`,
+      `terminal_comment_id=${terminalId}`,`source_pr=${sourcePr}`,`source_head=${sourceSha}`,
+      `spec_path=${job.spec_path}`,`spec_sha256=${job.spec_sha256}`,`model=${model}`,
+      `session_id=${sessionId}`,`worker_diff_sha256=${diffSha}`,`worker_diff_bytes=${receipt.diff_bytes}`,
+      `changed_paths=${changedPaths.join(workerId==='W1'?';':',')}`,
+      `codex_patch_scope_review=PASS_EXACT_TASK_PATHS`,
+      workerId==='W1'
+        ? 'focused_test=node --test tests/native-bridge.test.mjs;100_total;97_passed;0_failed;3_skipped'
+        : 'local_test=node --test tests/executor.test.mjs tests/native-bridge.test.mjs;149_total;146_passed;0_failed;3_skipped',
+      'git_diff_check=PASS',
+    ].join('\n');
+    const resultFields=[
+      `result_pr=${resultPr}`,`result_head=${resultHead}`,`result_base_sha=${baseSha}`,
+      `result_pr_merge_commit=${mergeSha}`,`current_main_sha=${mergeSha}`,
+      'trusted_exact_head_checks=check-native-only:SUCCESS;csg-trusted-verifier-hosted:SUCCESS;v2-native-windows:SUCCESS',
+      'nonacceptance_checks=csg-trusted-verifier:PENDING_NOT_COUNTED_AS_PASS;bounded-driver-acceptance:SKIPPED',
+      `source_acceptance=ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_RESULT_PR_${resultPr}`,
+      'worker_task_acceptance=UNKNOWN','external_effects=UNKNOWN','runtime_deployment=NOT_PERFORMED',
+      'live_acceptance=NOT_CLAIMED',
+    ].join('\n');
+    const acceptance={id:acceptanceId,user:{login:'t14210184'},created_at:new Date(now-1000).toISOString(),
+      body:['PTYSD_V53R4_CODEX_SOURCE_ACCEPTANCE_V1',
+        'record_type=ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_NATIVE_WORKER_RECEIPT',
+        ...(workerId==='W2'?[`prestate_latest_issue407_comment=${terminalId}`]:[]),
+        'repo=PT-Original-Point/ptysd-autonomous-factory',
+        'project_id=CHATGPT_GLOBAL_SKILL_GOVERNANCE','goal_comment_id=6188322050',
+        `goal_body_sha256=${goalIdentity.body_sha256}`,`${prefix}_NATIVE_TASK`,taskFields,
+        'RESULT_PR',resultFields].join('\n')};
+    const issueComments=[
+      {id:startedId,user:{login:'t14210184'},created_at:new Date(now-3000).toISOString(),
+        body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(started)},
+      {id:terminalId,user:{login:'t14210184'},created_at:new Date(now-2000).toISOString(),
+        body:'PTYSD_NATIVE_RECEIPT_V1\n'+JSON.stringify(receipt)},
+      acceptance,
+    ];
+    const jobComment={id:jobCommentId,user:{login:'t14210184'},body:'PTYSD_NATIVE_JOB_V1\n'+JSON.stringify(job)};
+    const resultPull={number:resultPr,state:'closed',merged:true,merged_at:new Date(now-500).toISOString(),
+      merge_commit_sha:mergeSha,
+      base:{ref:'main',sha:baseSha,repo:{id:1352411536,full_name:repository}},
+      head:{sha:resultHead,repo:{id:1352411536,full_name:repository}}};
+    const resultChecks={check_runs:['check-native-only','csg-trusted-verifier-hosted','v2-native-windows']
+      .map((name,index)=>({id:7000+offset*10+index,name,head_sha:resultHead,status:'completed',
+        conclusion:'success',app:trustedActionsApp}))};
+    return {workerId,job,jobComment,jobCommentId,startedId,terminalId,acceptance,issueComments,
+      receiptItem:{id:terminalId,receipt,created_at:new Date(now-2000).toISOString()},
+      resultPull,resultChecks,resultPr,resultHead,baseSha,mergeSha,attemptId,sourceSha,diffSha};
+  };
+  const w1=makeFixture('W1',1);
+  const w1Accepted=panel.w1SourceAcceptanceData(w1.issueComments,w1.job,w1.receiptItem,null,
+    w1.jobCommentId,w1.resultPull,w1.resultChecks,now);
+  assert.equal(w1Accepted?.status,'ACCEPTED');
+  assert.equal(w1Accepted?.resultPr,w1.resultPr);
+  assert.equal(w1Accepted?.externalEffects,'UNKNOWN');
+  assert.equal(w1Accepted?.liveAcceptance,'NOT_CLAIMED');
+
+  const w2=makeFixture('W2',2);
+  const goalComments=[humanGoal,w2.jobComment];
+  const w2Evidence=panel.w2EvidenceData(goalComments,w2.issueComments,'f'.repeat(40),goalIdentity,
+    true,true,{requestId:w2.job.request_id,attemptId:w2.attemptId},w2.resultPull,w2.resultChecks);
+  assert.equal(w2Evidence.native.codexAcceptance?.codex_source_acceptance,'ACCEPTED');
+  assert.equal(w2Evidence.native.codexAcceptance?.sourceAcceptance.result_pr,w2.resultPr);
+  assert.equal(w2Evidence.native.codexAcceptance?.worker_task_acceptance,'UNKNOWN');
+  assert.equal(w2Evidence.native.codexAcceptance?.external_effects,'UNKNOWN');
+  assert.equal(w2Evidence.native.codexAcceptance?.live_acceptance,'NOT_CLAIMED');
+  assert.equal(w2Evidence.native.receipt.task_acceptance,'UNKNOWN');
+  assert.equal(w2Evidence.native.receipt.external_effects,'UNKNOWN');
+
+  const setField=(body,key,value)=>body.split('\n').map(line=>
+    line.startsWith(key+'=')?key+'='+value:line).join('\n');
+  const parseW1=(body=w1.acceptance.body,author='t14210184',pull=w1.resultPull,checks=w1.resultChecks,
+      comments=w1.issueComments)=>panel.parseCodexSourceAcceptance(
+        {...w1.acceptance,body,user:{login:author}},'W1',w1.job,w1.receiptItem,w1.terminalId,
+        w1.jobCommentId,comments,pull,checks,true,now);
+  const badBodies=[
+    setField(w1.acceptance.body,'request_id','W1_WRONG_REQUEST_20261101'),
+    setField(w1.acceptance.body,'attempt_id','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
+    setField(w1.acceptance.body,'goal_comment_id','6188322051'),
+    setField(w1.acceptance.body,'goal_body_sha256','0'.repeat(64)),
+    setField(w1.acceptance.body,'source_pr','999'),
+    setField(w1.acceptance.body,'source_head','0'.repeat(40)),
+    setField(w1.acceptance.body,'spec_path','native-bridge/tasks/wrong.md'),
+    setField(w1.acceptance.body,'spec_sha256','0'.repeat(64)),
+    setField(w1.acceptance.body,'model','opencode/wrong-model'),
+    setField(w1.acceptance.body,'session_id','wrong-session'),
+    setField(w1.acceptance.body,'worker_diff_sha256','0'.repeat(64)),
+    setField(w1.acceptance.body,'worker_diff_bytes','1'),
+    setField(w1.acceptance.body,'changed_paths','native-bridge/worker.mjs'),
+    setField(w1.acceptance.body,'result_pr','702'),
+    setField(w1.acceptance.body,'result_head','0'.repeat(40)),
+    setField(w1.acceptance.body,'result_base_sha','0'.repeat(40)),
+    setField(w1.acceptance.body,'result_pr_merge_commit','0'.repeat(40)),
+    setField(w1.acceptance.body,'current_main_sha','0'.repeat(40)),
+    setField(w1.acceptance.body,'source_acceptance','UNKNOWN'),
+    setField(w1.acceptance.body,'source_acceptance','REJECTED'),
+    setField(w1.acceptance.body,'worker_task_acceptance','PASS'),
+    setField(w1.acceptance.body,'external_effects','NONE'),
+    setField(w1.acceptance.body,'trusted_exact_head_checks','check-native-only:SUCCESS;csg-trusted-verifier-hosted:SUCCESS'),
+    w1.acceptance.body+'\nrequest_id=W1_CONFLICTING_DUPLICATE',
+  ];
+  for(const body of badBodies) assert.equal(parseW1(body),null,'mismatched, missing, duplicate, or elevated canonical fields fail closed');
+  assert.equal(parseW1(w1.acceptance.body.split('\n').filter(line=>!line.startsWith('source_acceptance=')).join('\n')),null,
+    'a merged result PR without an explicit exact source acceptance remains UNKNOWN');
+  assert.equal(panel.w1SourceAcceptanceData(w1.issueComments.filter(comment=>comment.id!==w1.acceptance.id),
+    w1.job,w1.receiptItem,null,w1.jobCommentId,w1.resultPull,w1.resultChecks,now),null,
+    'a merged PR without a matching #407 acceptance record is not Worker or Codex acceptance');
+  assert.equal(parseW1(w1.acceptance.body,'untrusted-user'),null,'non-dispatcher acceptance is rejected');
+  assert.equal(panel.parseCodexSourceAcceptance(w1.acceptance,'W2',w1.job,w1.receiptItem,
+    w1.terminalId,w1.jobCommentId,w1.issueComments,w1.resultPull,w1.resultChecks,true,now),null,
+    'a W1 acceptance cannot attach to the W2 lane');
+  assert.equal(parseW1(w1.acceptance.body,'t14210184',
+    {...w1.resultPull,head:{...w1.resultPull.head,sha:'0'.repeat(40)}}),null,
+    'the live result PR HEAD must equal the accepted result HEAD');
+  assert.equal(parseW1(w1.acceptance.body,'t14210184',
+    {...w1.resultPull,base:{...w1.resultPull.base,sha:'0'.repeat(40)}}),null,
+    'the live result PR base SHA must equal the accepted base');
+  assert.equal(parseW1(w1.acceptance.body,'t14210184',
+    {...w1.resultPull,merge_commit_sha:'0'.repeat(40)}),null,
+    'the live result PR merge SHA must equal the accepted merge and main readback');
+  assert.equal(parseW1(w1.acceptance.body,'t14210184',w1.resultPull,
+    {check_runs:w1.resultChecks.check_runs.map(run=>run.name==='check-native-only'
+      ? {...run,head_sha:'0'.repeat(40)}:run)}),null,
+    'a successful but mismatched Check HEAD cannot satisfy acceptance');
+  assert.equal(parseW1(w1.acceptance.body,'t14210184',w1.resultPull,
+    {check_runs:w1.resultChecks.check_runs.map(run=>run.name==='csg-trusted-verifier-hosted'
+      ? {...run,conclusion:'failure'}:run)}),null,
+    'a failed required trusted check cannot satisfy acceptance');
+  assert.equal(parseW1(w1.acceptance.body,'t14210184',w1.resultPull,
+    {check_runs:w1.resultChecks.check_runs.map(run=>run.name==='v2-native-windows'
+      ? {...run,app:{id:999,slug:'untrusted',name:'Untrusted'}}:run)}),null,
+    'same-named checks from an untrusted GitHub App are rejected');
+  assert.equal(parseW1(w1.acceptance.body,'t14210184',w1.resultPull,w1.resultChecks,
+    w1.issueComments.filter(comment=>comment.id!==w1.startedId)),null,
+    'without the exact STARTED receipt link, acceptance is rejected');
+
+  const goalUrl=apiRoot+'/issues/310/comments?per_page=100&sort=created&direction=desc';
+  const cycleGoalComments=[humanGoal,w1.jobComment];
+  const cycleIssueComments=[...observationComments(now,{latestTask:false}),...w1.issueComments];
+  const resultChecksUrl=apiRoot+'/commits/'+w1.resultHead+'/check-runs?per_page=100';
+  const calls=[];
+  const client=panel.createApiClient(async url=>{
+    calls.push(url);
+    if(url===urls.issue)return response(200,cycleIssueComments,quotaHeaders(now));
+    if(url===goalUrl)return response(200,cycleGoalComments,quotaHeaders(now));
+    if(url===urls.main)return response(200,{sha:'f'.repeat(40)},quotaHeaders(now));
+    if(url===apiRoot+'/pulls/'+w1.resultPr)return response(200,w1.resultPull,quotaHeaders(now));
+    if(url===resultChecksUrl)return response(200,w1.resultChecks,quotaHeaders(now));
+    throw new Error('unexpected API URL: '+url);
+  },{now:()=>now});
+  const store=panel.createResourceStore(client,()=>now);
+  await panel.runSyncCycle(store,client,{...urls,goal:goalUrl});
+  assert.ok(calls.includes(apiRoot+'/pulls/'+w1.resultPr),
+    'W1 canonical acceptance causes a same-source result PR read');
+  assert.ok(calls.includes(resultChecksUrl),
+    'W1 result checks are read at the exact PR HEAD');
+  assert.equal(store.resources.w1ResultPr.data.number,w1.resultPr);
+  assert.equal(store.resources.w1ResultChecks.url,resultChecksUrl);
+  const card=panel.dispatchCardData('W1',{workers:[]},w1.issueComments,store.resources,
+    {status:'UNKNOWN'},now,null,cycleGoalComments,goalIdentity,true);
+  assert.equal(card.codexSourceAcceptance?.status,'ACCEPTED');
+  assert.equal(card.formalAcceptance,'UNKNOWN');
+  assert.match(card.resultDetails,/external_effects=UNKNOWN/);
+});
+
 test('a direct Antigravity CLI session alone never appears as a schema-6 native W2 task', () => {
   const comment = { id:6438594849, user:{login:'t14210184'}, created_at:'2026-10-27T09:45:07Z',
     body:['record_type=ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT',
