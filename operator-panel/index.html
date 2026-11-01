@@ -208,7 +208,7 @@
   <section class="worker-grid" aria-label="W1 W2 W3 Worker 狀態">
     <article class="panel worker-card">
       <div class="worker-head">
-        <div><div class="worker-title-line"><div><span class="worker-id">W1</span><h2 class="worker-name">OpenCode</h2></div><span id="w1-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">OpenCode CLI V2</span><span id="w1-model-switch" class="worker-harness">模型執行開關：UNKNOWN</span><div class="worker-latest"><span id="w1-header-progress">最新任務進度未確認</span><time id="w1-last-event">最後任務事件：未確認</time></div></div>
+        <div><div class="worker-title-line"><div><span class="worker-id">W1</span><h2 class="worker-name">OpenCode</h2></div><span id="w1-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">OpenCode CLI V2</span><span id="w1-model-switch" class="worker-harness">模型執行開關：UNKNOWN</span><div class="worker-latest"><span id="w1-header-progress">最新任務進度未確認</span><time id="w1-last-event">最後任務事件：未確認</time><time id="w1-observed">Win11 現場觀測：UNKNOWN · 時間未確認</time></div></div>
         <div class="worker-live"><span class="worker-live-label">即時施工</span><span id="w1-badge" class="badge neutral">狀態未確認</span></div>
       </div>
       <div class="field"><strong>正式任務</strong><span id="w1-task">未確認</span></div>
@@ -224,7 +224,7 @@
     </article>
     <article class="panel worker-card">
       <div class="worker-head">
-        <div><div class="worker-title-line"><div><span class="worker-id">W2</span><h2 class="worker-name">Antigravity</h2></div><span id="w2-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">只接受已核准的原生執行證據</span><span id="w2-model-switch" class="worker-harness">模型執行開關：UNKNOWN</span><span id="w2-model-eligibility" class="worker-harness">模型執行資格：UNKNOWN</span><div class="worker-latest"><span id="w2-header-progress">最新任務進度未確認</span><time id="w2-last-event">最後任務事件：未確認</time></div></div>
+        <div><div class="worker-title-line"><div><span class="worker-id">W2</span><h2 class="worker-name">Antigravity</h2></div><span id="w2-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">只接受已核准的原生執行證據</span><span id="w2-model-switch" class="worker-harness">模型執行開關：UNKNOWN</span><span id="w2-model-eligibility" class="worker-harness">模型執行資格：UNKNOWN</span><div class="worker-latest"><span id="w2-header-progress">最新任務進度未確認</span><time id="w2-last-event">最後任務事件：未確認</time><time id="w2-observed">Win11 現場觀測：UNKNOWN · 時間未確認</time></div></div>
         <div class="worker-live"><span class="worker-live-label">即時施工</span><span id="w2-badge" class="badge neutral">狀態未確認</span></div>
       </div>
       <div class="field"><strong>原生派工（Issue #310 schema-6）</strong><span id="w2-native-task">未確認</span></div>
@@ -3080,6 +3080,8 @@
     text(id.toLowerCase() + '-last-event',data?.eventAt
       ? '最後任務事件：' + readTime(data.eventAt)
       : '最後任務事件：未確認');
+    if (id === 'W1' || id === 'W2')
+      text(id.toLowerCase() + '-observed',data?.observationLabel || 'Win11 現場觀測：UNKNOWN · 時間未確認');
     for (const [suffix,url,label] of [
       ['job-link',data?.jobUrl,'Issue #310 派工'],
       ['receipt-link',data?.receiptUrl,id === 'W3' ? '工具回傳證據' : 'Issue #407 收據'],
@@ -3646,6 +3648,16 @@
     if (windows.status !== 'FRESH') return 'UNKNOWN';
     return fieldFreshness(windows.observed_at, MAX_LIVE_AGE_MS, now);
   }
+  function workerObservationLabel(result, snapshotFreshness, now) {
+    if (!result?.snapshot || !['FRESH','STALE'].includes(result.status))
+      return 'Win11 現場觀測：UNKNOWN · 時間未確認';
+    const observedAt = result.snapshot.windows?.observed_at;
+    const timestampFreshness = fieldFreshness(observedAt, MAX_LIVE_AGE_MS, now);
+    const freshness = snapshotFreshness === 'STALE' || timestampFreshness === 'STALE' ? 'STALE'
+      : snapshotFreshness === 'FRESH' && timestampFreshness === 'FRESH' ? 'FRESH' : 'UNKNOWN';
+    const time = timestampFreshness === 'UNKNOWN' ? '時間未確認' : readTime(observedAt);
+    return `Win11 現場觀測：${freshness} · ${time}`;
+  }
   function resourceFreshness(resource, now, maxAge = 15 * 60 * 1000) {
     if (!resource?.data || !resource.fetchedAt) return 'UNKNOWN';
     return now - resource.fetchedAt > maxAge ? 'STALE' : 'FRESH';
@@ -3784,6 +3796,7 @@
         : '顯示目前可讀到的 GitHub PR／CI；沒有新鮮 Win11 觀測時，Worker 狀態為 UNKNOWN。');
     text('metric-observed', observation.snapshot ? readTime(observation.snapshot.windows?.observed_at) +
       (osFreshness === 'STALE' ? '（STALE）' : osFreshness === 'UNKNOWN' ? '（UNKNOWN）' : '') : '未取得有效觀測');
+    const workerObservation = workerObservationLabel(observation, osFreshness, now);
     const successfulTimes = Object.values(resources).map(r => r.fetchedAt || 0).filter(Boolean);
     text('metric-synced', successfulTimes.length ? readTime(Math.max(...successfulTimes)) : '尚未成功讀回');
     const snapshot = observation.snapshot;
@@ -3825,7 +3838,7 @@
       }
       dispatchData[id]=dispatchCardData(id,snapshot,comments,resources,records[id],now,lifecycle,
         goalComments,resources.goal?.identity || null,resources.goal?.latestComplete === true);
-      renderDispatchCard(id,dispatchData[id]);
+      renderDispatchCard(id,{...dispatchData[id],observationLabel:workerObservation});
     }
     const cardData = {};
     for (const id of ['W1','W2','W3'])
@@ -4140,7 +4153,7 @@
     parseCodexSourceAcceptanceFields, codexSourceAcceptanceStatic, codexSourceAcceptanceResultPr,
     parseCodexSourceAcceptance, w1SourceAcceptanceData,
     dispatchCardData, renderDispatchCard, w1SourceHarvestLabel, render,
-    freshnessOfSnapshot, createApiClient, createResourceStore, renderRateStatus,
+    freshnessOfSnapshot, workerObservationLabel, createApiClient, createResourceStore, renderRateStatus,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
     w2EvidenceData, renderW2Evidence, workerMetricSummary, modelExecutionSwitchLabel,
     w2ModelEligibility, w2ModelEligibilityLabel, findLastTerminalReceipt,

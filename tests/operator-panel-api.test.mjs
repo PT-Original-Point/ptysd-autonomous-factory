@@ -1608,6 +1608,40 @@ test('future timestamps never masquerade as current observations or dispatch eve
     'future observed_at is untrusted even when GitHub metadata is current');
 });
 
+test('W1 and W2 show native observation freshness separately from their last task event', () => {
+  const now=baseTime;
+  const freshAt=new Date(now-30_000).toISOString();
+  const oldEventAt=new Date(now-24*60*60*1000).toISOString();
+  const freshResult={status:'FRESH',snapshot:{windows:{observed_at:freshAt}}};
+  const freshLabel=panel.workerObservationLabel(freshResult,'FRESH',now);
+  assert.match(freshLabel,/Win11 現場觀測：FRESH/);
+  assert.doesNotMatch(freshLabel,/任務事件|Session|驗收/);
+
+  for (const id of ['W1','W2']) {
+    panel.renderDispatchCard(id,{eventAt:oldEventAt,observationLabel:freshLabel});
+    assert.equal(domElements.get(id.toLowerCase()+'-observed').textContent,freshLabel);
+    assert.match(domElements.get(id.toLowerCase()+'-last-event').textContent,/最後任務事件：/);
+    assert.notEqual(domElements.get(id.toLowerCase()+'-observed').textContent,
+      domElements.get(id.toLowerCase()+'-last-event').textContent);
+  }
+
+  const staleAt=new Date(now-11*60*1000).toISOString();
+  assert.match(panel.workerObservationLabel(
+    {status:'STALE',snapshot:{windows:{observed_at:staleAt}}},'STALE',now),
+  /Win11 現場觀測：STALE/);
+  assert.match(panel.workerObservationLabel(freshResult,'STALE',now),
+    /Win11 現場觀測：STALE/);
+
+  for (const observedAt of [undefined,'not-a-time',new Date(now+1000).toISOString()]) {
+    const label=panel.workerObservationLabel(
+      {status:'FRESH',snapshot:{windows:{observed_at:observedAt}}},'FRESH',now);
+    assert.match(label,/Win11 現場觀測：UNKNOWN · 時間未確認/);
+    assert.doesNotMatch(label,/2027|2026/);
+  }
+  assert.match(panel.workerObservationLabel(null,'UNKNOWN',now),
+    /Win11 現場觀測：UNKNOWN · 時間未確認/);
+});
+
 test('future and foreign attempt receipts cannot override a valid matching dispatch', () => {
   const now=Date.parse('2026-10-24T14:00:00Z');
   const request_id='W1_PANEL_STRICT_MATCH_20261024';
