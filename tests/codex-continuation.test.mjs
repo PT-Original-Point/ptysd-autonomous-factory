@@ -1375,6 +1375,112 @@ test('executor terminal receipt keeps model_invoked false when CLI spawn produce
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('executor records and recovers a terminal result for a rejected source bundle without replay', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-source-bundle-rejected-'));
+  const spool = join(dir, 'spool');
+  const bundles = join(spool, 'bundles');
+  mkdirSync(bundles, { recursive: true });
+  try {
+    const bundlePath = join(bundles, 'rejected.bundle');
+    writeFileSync(bundlePath, 'bundle bytes whose digest does not match the request');
+    const spec = '# Invalid source bundle must be a terminal no-model result.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_BUNDLE_REJECTED_20261102',
+      spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-4000-8000-000000000184';
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath, '0'.repeat(64));
+    publishCodexExecutorRequest(spool, request);
+
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: join(dir, 'workspaces'),
+      codex_executable: join(dir, 'codex.exe') });
+    let modelRuns = 0;
+    const execution = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid,
+      environment: {},
+      qualifyCodex: async () => {},
+      runCodex: async () => { modelRuns++; throw new Error('MODEL_MUST_NOT_START'); },
+    });
+
+    assert.equal(execution.state, 'RESULT_SAVED', JSON.stringify(execution));
+    assert.equal(execution.model_invoked, false);
+    assert.equal(execution.outcome, 'SOURCE_BUNDLE_PREFLIGHT_FAILED_NO_MODEL');
+    assert.equal(modelRuns, 0);
+    assert.equal(existsSync(join(config.workspace_root, attemptId)), false,
+      'bundle rejection happens before workspace creation');
+
+    const resultPath = executorResultPath(spool, picked.request_id, attemptId);
+    const saved = JSON.parse(readFileSync(resultPath, 'utf8'));
+    validateCodexExecutorResult(saved, { request_id: picked.request_id,
+      attempt_id: attemptId, source_sha: picked.source_sha, task_fingerprint: request.fingerprint });
+    assert.equal(saved.model_invoked, false);
+    assert.equal(saved.session_id, null);
+    assert.equal(saved.termination_state, 'NOT_STARTED');
+    assert.deepEqual(saved.preflight_block_reasons, ['EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH']);
+    assert.equal(terminalStateForResult(saved), 'BLOCKED');
+
+    const started = { schema: 1, project_id: picked.project_id, host: picked.host,
+      request_id: picked.request_id, attempt_id: attemptId, state: 'STARTED', kind: 'codex_plan',
+      source_sha: picked.source_sha, model: picked.model, reasoning_effort: picked.reasoning_effort,
+      task_fingerprint: request.fingerprint };
+    const receipts = [];
+    const recovered = await reconcileCodexExecutorResult(started, { codex_spool: spool }, worker,
+      new Set(), { writeReceiptOnce: async (_config, receipt) => receipts.push(receipt) });
+    assert.deepEqual(recovered, { status: 'RECOVERED' });
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0].state, 'BLOCKED');
+    assert.equal(receipts[0].outcome, 'SOURCE_BUNDLE_PREFLIGHT_FAILED_NO_MODEL');
+    assert.equal(receipts[0].model_invoked, false);
+
+    const poll = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid,
+      environment: {},
+      qualifyCodex: async () => {},
+      runCodex: async () => { modelRuns++; throw new Error('REPLAY_FORBIDDEN'); },
+    });
+    assert.deepEqual(poll, { state: 'IDLE', model_invoked: false });
+    assert.equal(modelRuns, 0, 'a saved terminal result prevents replay of this attempt');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor keeps a bundle rejection unresolved when the attempt workspace already exists', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-bundle-workspace-unknown-'));
+  const spool = join(dir, 'spool');
+  const bundles = join(spool, 'bundles');
+  const workspaceRoot = join(dir, 'workspaces');
+  mkdirSync(bundles, { recursive: true });
+  try {
+    const spec = '# Existing workspace prevents a false no-effect result.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_BUNDLE_WORKSPACE_20261102',
+      spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-4000-8000-000000000185';
+    const bundlePath = join(bundles, 'workspace-unknown.bundle');
+    writeFileSync(bundlePath, 'bundle bytes whose digest does not match the request');
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath, '1'.repeat(64));
+    publishCodexExecutorRequest(spool, request);
+    mkdirSync(join(workspaceRoot, attemptId), { recursive: true });
+
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: workspaceRoot,
+      codex_executable: join(dir, 'codex.exe') });
+    let modelRuns = 0;
+    const execution = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid,
+      environment: {},
+      qualifyCodex: async () => {},
+      runCodex: async () => { modelRuns++; throw new Error('MODEL_MUST_NOT_START'); },
+    });
+
+    assert.equal(execution.state, 'BLOCKED');
+    assert.deepEqual(execution.reasons, ['EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH',
+      'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED']);
+    assert.equal(modelRuns, 0);
+    assert.equal(existsSync(executorResultPath(spool, picked.request_id, attemptId)), false,
+      'existing worktree contents are not mislabeled as a no-effect terminal result');
+    assert.equal(existsSync(join(spool, 'claims', `${picked.request_id}-${attemptId}.json`)), true,
+      'the exact claim remains a no-replay barrier when workspace effects are unknown');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('executor persists the scalar process-tree readback from its real capture pipeline', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pty-codex-process-tree-result-'));
   try {

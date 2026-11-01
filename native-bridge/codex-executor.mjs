@@ -649,7 +649,10 @@ function codexProjectConfigPermissionIssue(worktree) {
   return legacySandbox ? 'CODEX_PROJECT_CONFIG_LEGACY_SANDBOX_SETTING' : null;
 }
 
-function persistNoModelResult(config, picked, request, outcome, reasons, deps = {}) {
+function persistNoModelResult(config, picked, request, outcome, reasons, deps = {},
+  expectedWorktreeState = 'PRESENT') {
+  if (!['ABSENT', 'PRESENT'].includes(expectedWorktreeState))
+    throw new Error('PREFLIGHT_WORKTREE_STATE_INVALID');
   const requestId = request?.job?.request_id;
   const attemptId = request?.attempt_id;
   const requestPath = join(config.spool_dir, 'requests', `${requestId}-${attemptId}.json`);
@@ -675,10 +678,15 @@ function persistNoModelResult(config, picked, request, outcome, reasons, deps = 
   const worktree = resolve(workspaceRoot, attemptId);
   const rel = relative(workspaceRoot, worktree);
   if (rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) return null;
-  let worktreeInfo;
+  let worktreeInfo = null;
   try { worktreeInfo = lstatSync(worktree); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  if (!worktreeInfo.isDirectory() || worktreeInfo.isSymbolicLink()) return null;
+  catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    if (expectedWorktreeState !== 'ABSENT') return null;
+  }
+  if (expectedWorktreeState === 'ABSENT') {
+    if (worktreeInfo) return null;
+  } else if (!worktreeInfo?.isDirectory() || worktreeInfo.isSymbolicLink()) return null;
 
   const emptyOutputHash = createHash('sha256').update('').digest('hex');
   writeResult(resultPath, {
@@ -763,13 +771,38 @@ export async function runExecutorOnce(config, deps = {}) {
     }
     const bundleRoot = resolve(config.spool_dir, 'bundles');
     const bundlePath = resolve(request.bundle_path);
-    const bundleRel = relative(bundleRoot, bundlePath);
-    if (bundleRel.startsWith(`..${sep}`) || bundleRel === '..' || isAbsolute(bundleRel))
-      throw new Error('EXECUTOR_BUNDLE_PATH_ESCAPE');
-    const bundleInfo = lstatSync(bundlePath);
-    if (!bundleInfo.isFile() || bundleInfo.isSymbolicLink()) throw new Error('EXECUTOR_BUNDLE_NOT_REGULAR_FILE');
-    const bundleSha = await digestFile(bundlePath);
-    if (bundleSha !== request.bundle_sha256) throw new Error('EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH');
+    let bundleSha;
+    try {
+      const bundleRel = relative(bundleRoot, bundlePath);
+      if (bundleRel.startsWith(`..${sep}`) || bundleRel === '..' || isAbsolute(bundleRel))
+        throw new Error('EXECUTOR_BUNDLE_PATH_ESCAPE');
+      const bundleInfo = lstatSync(bundlePath);
+      if (!bundleInfo.isFile() || bundleInfo.isSymbolicLink())
+        throw new Error('EXECUTOR_BUNDLE_NOT_REGULAR_FILE');
+      bundleSha = await digestFile(bundlePath);
+      if (bundleSha !== request.bundle_sha256)
+        throw new Error('EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH');
+    } catch (error) {
+      // Bundle identity is checked before workspace creation and model launch.
+      // Persist a terminal no-model result only while the exact claim and lock
+      // still prove ownership; otherwise preserve the claim as a no-replay stop.
+      const reason = safeErrorCode(error, 'EXECUTOR_SOURCE_BUNDLE_PREFLIGHT_FAILED');
+      const outcome = 'SOURCE_BUNDLE_PREFLIGHT_FAILED_NO_MODEL';
+      let failedResultPath = null;
+      try { failedResultPath = persistNoModelResult(config, picked, request, outcome, [reason], deps,
+        'ABSENT'); }
+      catch (persistError) {
+        return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+          attempt_id: request.attempt_id,
+          reasons: [reason, safeErrorCode(persistError, 'PREFLIGHT_RESULT_WRITE_FAILED')] };
+      }
+      if (!failedResultPath)
+        return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+          attempt_id: request.attempt_id, reasons: [reason, 'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED'] };
+      updateActiveLock(activeLock, 'RESULT_SAVED', request);
+      return { state: 'RESULT_SAVED', model_invoked: false, request_id: request.job.request_id,
+        attempt_id: request.attempt_id, outcome, result_path: failedResultPath };
+    }
     const root = resolve(config.workspace_root);
     const worktree = resolve(root, request.attempt_id);
     const rel = relative(root, worktree);
