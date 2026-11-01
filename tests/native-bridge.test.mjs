@@ -3883,7 +3883,10 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
       model_catalog:{status:'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT',pinned_model_cataloged:true,
         catalog_count:1,catalog_sha256:h(ANTIGRAVITY_V2_MODEL)},
       gemini_aggregate_quota:{status:'GEMINI_AGGREGATE_QUOTA_READ',
-        source:'GEMINI_MODELS_AGGREGATE',weekly_remaining_percent:95,five_hour_remaining_percent:99},
+        source:'GEMINI_MODELS_AGGREGATE',weekly_remaining_percent:95,
+        weekly_reset_at:new Date(now+7*24*60*60*1000).toISOString(),
+        five_hour_remaining_percent:99,
+        five_hour_reset_at:new Date(now+5*60*60*1000).toISOString()},
       credit_fallback_setting:'CREDIT_FALLBACK_DISABLED',issues:[]};
     const overage=await executeOpenCodeTask('Synthetic; no inference.',{...config,
       antigravity_execution_attestation:{...attestation,use_g1_credits:true}},job,randomUUID(),{
