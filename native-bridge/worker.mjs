@@ -648,6 +648,53 @@ function hasEquivalentCompletedEditTask(job, jobs, receipts, comments, dispatche
   }
   return false;
 }
+function hasExplicitNoModelNoEffectEditReceipt(receiptValue) {
+  return (receiptValue?.state === 'WAITING' || terminalStates.has(receiptValue?.state)) &&
+    receiptValue.model_invoked === false && receiptValue.session_started === false &&
+    Object.hasOwn(receiptValue, 'session_id') && receiptValue.session_id === null &&
+    receiptValue.external_effects === 'NONE' &&
+    receiptValue.tool_execution_evidence === 'OBSERVED' && receiptValue.tool_execution_count === 0 &&
+    receiptValue.file_change_tool_evidence === 'OBSERVED' &&
+    receiptValue.file_change_tool_completed_count === 0 &&
+    receiptValue.file_change_tool_failed_count === 0 &&
+    receiptValue.file_change_tool_incomplete_count === 0 &&
+    (receiptValue.diff_bytes === null || receiptValue.diff_bytes === undefined || receiptValue.diff_bytes === 0) &&
+    (receiptValue.changed_files_count === null || receiptValue.changed_files_count === undefined ||
+      receiptValue.changed_files_count === 0);
+}
+function hasBoundedEquivalentEditReceipt(receiptValue, job, login, workerLogin) {
+  const completedScopedDiff = hasCompletedScopedEditDiff(receiptValue, job) ||
+    job.kind === 'antigravity_edit' && hasIsolatedW2ScopedEditDiff(receiptValue, job);
+  return completedScopedDiff || login === workerLogin && hasExplicitNoModelNoEffectEditReceipt(receiptValue);
+}
+function hasEquivalentUnresolvedEditAttempt(job, jobs, receipts, workerLogin) {
+  if (job?.schema !== 6 || !isEditExecutionKind(job.kind)) return false;
+  for (const prior of jobs.values()) {
+    if (prior.duplicate || !sameBoundEditTask(job, prior.job)) continue;
+    const entries = receipts.get(prior.job.request_id) || [];
+    if (!entries.length) continue;
+    if (entries.some(entry => !Number.isSafeInteger(entry.id) || entry.id < 1 ||
+        entry.receipt.request_id !== prior.job.request_id ||
+        entry.receipt.host.toUpperCase() !== prior.job.host.toUpperCase() ||
+        entry.receipt.kind !== prior.job.kind || entry.receipt.source_sha !== prior.job.source_sha)) return true;
+    const attempts = new Map();
+    for (const entry of entries) {
+      const attemptId = entry.receipt.attempt_id;
+      if (!attempts.has(attemptId)) attempts.set(attemptId, []);
+      attempts.get(attemptId).push(entry);
+    }
+    for (const attemptEntries of attempts.values()) {
+      attemptEntries.sort((a, b) => a.id - b.id);
+      const lastEntry = attemptEntries.at(-1);
+      if (!lastEntry ||
+          !hasBoundedEquivalentEditReceipt(lastEntry.receipt, prior.job, lastEntry.login, workerLogin) ||
+          attemptEntries.some(entry => entry.receipt.state !== 'STARTED' &&
+            !hasBoundedEquivalentEditReceipt(entry.receipt, prior.job, entry.login, workerLogin)))
+        return true;
+    }
+  }
+  return false;
+}
 export function writePathsOverlap(left, right, platform = process.platform) {
   const normalize = value => {
     const rawParts = value.replaceAll('\\', '/').replace(/\/+$/, '').split('/');
@@ -1022,6 +1069,11 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     // identical source/spec/model/goal/edit scope; task_acceptance and external
     // effects remain untouched and UNKNOWN, while a different READY task runs.
     if (hasEquivalentCompletedEditTask(v.job, jobs, receipts, comments, dispatchers, workerLogin)) continue;
+    // A prior model/session/tool attempt with unresolved effects must not be
+    // replayed by publishing the same exact task under a different request ID.
+    // Only an explicit no-model/no-effect receipt permits that retry; unrelated
+    // READY work remains eligible.
+    if (hasEquivalentUnresolvedEditAttempt(v.job, jobs, receipts, workerLogin)) continue;
     // A stale unsigned/unclaimed job must not starve a newer exact-main task.
     if (v.job.source_pr !== undefined) {
       if (candidateSourceShas.get(v.job.source_pr)?.toLowerCase() !== v.job.source_sha.toLowerCase()) continue;
