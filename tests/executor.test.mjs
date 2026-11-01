@@ -745,6 +745,114 @@ test('executor persists a recoverable Antigravity preflight wait for the exact p
   } finally { f.dispose(); }
 });
 
+test('executor persists a recoverable Antigravity quota-window-expired preflight wait for the exact pinned source attempt', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler executor lifecycle is Windows-only');
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root);
+    const spec = 'Synthetic W2 quota window preflight; no model invocation is permitted.';
+    const job = {
+      schema: 6,
+      project_id: PROJECT,
+      host: hostname().toUpperCase(),
+      request_id: 'PTYSD_ANTIGRAVITY_QUOTA_WINDOW_WAIT_20261101',
+      kind: 'antigravity_edit',
+      source_sha: source.sourceSha,
+      spec_path: 'native-bridge/tasks/w2-review.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gemini-3.8-flash-high',
+      variant: 'high',
+      edit_paths: ['README.md'],
+      source_pr: 448,
+      goal_comment_id: 6188322050,
+      goal_body_sha256: 'c'.repeat(64),
+    };
+    const bundle = createExecutorSourceBundle({
+      workspace: source.workspace,
+      descriptor: f.descriptor,
+      job,
+      attemptId: ATTEMPT_EDIT,
+      filesystemPath: localPathMap(f),
+    });
+    writeFileSync(join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`), JSON.stringify(
+      makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)), { flag: 'wx' });
+    let executeCalls = 0;
+    const result = await executePendingManifest({
+      manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID,
+      filesystemPath: localPathMap(f),
+      config: {
+        project_id: PROJECT,
+        repo: REPO,
+        host: hostname().toUpperCase(),
+        executor_runtime: {
+          user_sid: EXECUTOR_SID,
+          publisher_sid: PUBLISHER_SID,
+          manifest_dir: f.manifestDir,
+          results_dir: f.resultsDir,
+        },
+        workspace: source.workspace,
+        state_dir: f.resultsDir,
+      },
+      execute: async (_spec, executionConfig, receivedJob) => {
+        executeCalls++;
+        assert.equal(receivedJob.kind, 'antigravity_edit');
+        assert.equal(executionConfig.workspace, candidateWorkspacePath(f.resultsDir, ATTEMPT_EDIT));
+        return {
+          outcome: 'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID',
+          exit_code: 48,
+          eligibility_state: 'WAITING',
+          model_invoked: false,
+          evidence_sha256: null,
+          evidence_bytes: 0,
+        };
+      },
+    });
+    assert.equal(executeCalls, 1);
+    assert.equal(result.terminal_state, 'WAITING');
+    const saved = JSON.parse(readFileSync(executorResultPath(f.resultsDir, job.request_id, ATTEMPT_EDIT), 'utf8'));
+    const receiptObj = saved.terminal;
+    assert.equal(receiptObj.schema, 1);
+    assert.equal(receiptObj.project_id, PROJECT);
+    assert.equal(receiptObj.host, hostname().toUpperCase());
+    assert.equal(receiptObj.request_id, job.request_id);
+    assert.equal(receiptObj.attempt_id, ATTEMPT_EDIT);
+    assert.equal(receiptObj.source_sha, source.sourceSha);
+    assert.equal(receiptObj.kind, 'antigravity_edit');
+    assert.equal(receiptObj.model, 'gemini-3.8-flash-high');
+    assert.equal(receiptObj.variant, 'high');
+    assert.equal(receiptObj.source_pr, 448);
+    assert.equal(receiptObj.goal_comment_id, 6188322050);
+    assert.equal(receiptObj.goal_body_sha256, 'c'.repeat(64));
+    assert.equal(receiptObj.edit_paths_sha256,
+      createHash('sha256').update(JSON.stringify(job.edit_paths)).digest('hex'));
+    assert.equal(receiptObj.model_invoked, false);
+    assert.equal(receiptObj.session_started, null,
+      'a WAITING receipt preserves unavailable session-start evidence as UNKNOWN');
+    assert.equal(receiptObj.session_id, null);
+    assert.equal(receiptObj.diff_sha256, null);
+    assert.equal(receiptObj.diff_bytes, null,
+      'a quota preflight wait has no captured edit diff');
+    assert.equal(receiptObj.task_acceptance, 'UNKNOWN');
+    assert.equal(receiptObj.external_effects, 'UNKNOWN');
+    assert.equal(receiptObj.state, 'WAITING');
+    assert.equal(receiptObj.outcome, 'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+    assert.equal(receiptObj.eligibility_state, 'WAITING');
+    assert.equal(receiptObj.exit_code, 48);
+
+    const parsed = parseReceipt(RECEIPT_MARKER + JSON.stringify(receiptObj));
+    assert.ok(parsed, 'the persisted WAITING terminal must parse as a valid receipt');
+    assert.equal(parsed.state, 'WAITING');
+    assert.equal(parsed.outcome, 'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+    assert.equal(parsed.model_invoked, false);
+
+    const workspace = candidateWorkspacePath(f.resultsDir, ATTEMPT_EDIT);
+    assert.ok(existsSync(workspace), 'the candidate workspace remains available until receipt reconciliation');
+    cleanupExecutorAttempt({ ...f.descriptor, manifest_dir: f.manifestDir, results_dir: f.resultsDir }, ATTEMPT_EDIT);
+    assert.equal(existsSync(workspace), false, 'receipt reconciliation removes the exact attempt workspace');
+  } finally { f.dispose(); }
+});
+
 test('Antigravity attempt stays outside the registered project and cleanup refuses its legacy junction path', async t => {
   if (process.platform !== 'win32') return t.skip('Task Scheduler executor lifecycle is Windows-only');
   const f=fixture();
