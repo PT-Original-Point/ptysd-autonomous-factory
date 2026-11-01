@@ -265,6 +265,8 @@ export function parseReceipt(body) {
           !RECOVERABLE_MODEL_PREFLIGHT_OUTCOMES.has(o.outcome))) ||
         typeof o.request_id !== 'string' || !REQUEST.test(o.request_id) ||
          o.source_pr !== undefined && (!Number.isSafeInteger(o.source_pr) || o.source_pr < 1) ||
+        o.changed_file_tree_sha256 !== undefined &&
+          (!isEditExecutionKind(o.kind) || !HASH.test(o.changed_file_tree_sha256 || '')) ||
         (o.goal_comment_id === undefined) !== (o.goal_body_sha256 === undefined) ||
         o.goal_comment_id !== undefined && (!Number.isSafeInteger(o.goal_comment_id) ||
           o.goal_comment_id < 1 || !HASH.test(o.goal_body_sha256 || '')) ||
@@ -537,6 +539,25 @@ function sameBoundEditTask(left, right) {
     left.goal_body_sha256 === right.goal_body_sha256 &&
     JSON.stringify(left.edit_paths) === JSON.stringify(right.edit_paths);
 }
+function boundEditTaskScopeKey(job) {
+  return JSON.stringify([
+    job.project_id, job.host.toUpperCase(), job.kind, job.source_sha, job.source_pr,
+    job.spec_path, job.spec_sha256, job.model, job.variant, job.goal_comment_id,
+    job.goal_body_sha256, job.edit_paths,
+  ]);
+}
+const SOURCE_ACCEPTANCE_WORKFLOWS = Object.freeze({
+  'check-native-only': Object.freeze({
+    path: '.github/workflows/v53-r4-main-source-retirement.yml', event: 'pull_request',
+  }),
+  'csg-trusted-verifier-hosted': Object.freeze({
+    path: '.github/workflows/csg-trusted-verifier-hosted.yml', event: 'pull_request_target',
+  }),
+  'v2-native-windows': Object.freeze({
+    path: '.github/workflows/v53r4-v2-cli-qualification.yml', event: 'pull_request',
+  }),
+});
+const REQUIRED_SOURCE_ACCEPTANCE_CHECKS = Object.freeze(Object.keys(SOURCE_ACCEPTANCE_WORKFLOWS));
 export function parseCodexSourceAcceptance(comment, dispatchers) {
   const body = comment?.body;
   if (comment?.issue_url !== `https://api.github.com/repos/${REPO}/issues/${OPERATOR_ISSUE}` ||
@@ -569,6 +590,11 @@ export function parseCodexSourceAcceptance(comment, dispatchers) {
       !HASH.test(fields.worker_diff_sha256 || fields.diff_sha256 || '') ||
       fields.worker_diff_sha256 && fields.diff_sha256 &&
         fields.worker_diff_sha256 !== fields.diff_sha256) return null;
+  const workerChangedFilesCount = Number(fields.worker_changed_files_count);
+  if (!HASH.test(fields.worker_changed_files_sha256 || '') ||
+      !/^[1-9][0-9]*$/.test(fields.worker_changed_files_count || '') ||
+      !Number.isSafeInteger(workerChangedFilesCount) || workerChangedFilesCount < 1 ||
+      !HASH.test(fields.worker_changed_file_tree_sha256 || '')) return null;
   if (fields.goal_comment_id !== undefined && fields.human_goal_comment_id !== undefined &&
       fields.goal_comment_id !== fields.human_goal_comment_id) return null;
   const goalCommentId = fields.goal_comment_id || fields.human_goal_comment_id;
@@ -598,16 +624,23 @@ export function parseCodexSourceAcceptance(comment, dispatchers) {
   if (!Number.isSafeInteger(resultPr) || !SHA.test(resultHead || '') || !SHA.test(mergeSha || '') ||
       !(fields.codex_review?.startsWith('PASS') ||
         fields.codex_patch_scope_review?.startsWith('PASS'))) return null;
-  const checkStatuses = new Map();
+  const trustedChecks = Object.create(null);
   for (const value of (checks || '').split(/[;,]/)) {
-    const match = /^([A-Za-z0-9_-]+)[:=]([A-Z_]+)$/.exec(value.trim());
-    if (!match) continue;
-    const [, name, conclusion] = match;
-    if (checkStatuses.has(name)) return null;
-    checkStatuses.set(name, conclusion);
+    if (!value.trim()) continue;
+    const match = /^(check-native-only|csg-trusted-verifier-hosted|v2-native-windows)[:=]([A-Z_]+)(?::run-([1-9][0-9]*)-attempt-([1-9][0-9]*))?$/.exec(value.trim());
+    if (!match) return null;
+    const [, name, conclusion, runIdText, runAttemptText] = match;
+    if (Object.hasOwn(trustedChecks, name) || conclusion !== 'SUCCESS') return null;
+    if (runIdText === undefined || runAttemptText === undefined) return null;
+    const runId = Number(runIdText);
+    const runAttempt = Number(runAttemptText);
+    if (!Number.isSafeInteger(runId) || runId < 1 ||
+        !Number.isSafeInteger(runAttempt) || runAttempt < 1) return null;
+    trustedChecks[name] = { conclusion, run_id: runId, run_attempt: runAttempt };
   }
-  if (!['check-native-only', 'csg-trusted-verifier-hosted', 'v2-native-windows']
-    .every(name => checkStatuses.get(name) === 'SUCCESS')) return null;
+  if (Object.keys(trustedChecks).length !== REQUIRED_SOURCE_ACCEPTANCE_CHECKS.length ||
+      !REQUIRED_SOURCE_ACCEPTANCE_CHECKS.every(name =>
+        trustedChecks[name]?.conclusion === 'SUCCESS')) return null;
   return {
     request_id: fields.request_id,
     attempt_id: fields.attempt_id,
@@ -619,21 +652,379 @@ export function parseCodexSourceAcceptance(comment, dispatchers) {
     spec_sha256: fields.spec_sha256,
     model: fields.model,
     diff_sha256: fields.worker_diff_sha256 || fields.diff_sha256,
+    worker_changed_files_sha256: fields.worker_changed_files_sha256,
+    worker_changed_files_count: workerChangedFilesCount,
+    worker_changed_file_tree_sha256: fields.worker_changed_file_tree_sha256,
+    result_pr: resultPr,
+    result_head: resultHead.toLowerCase(),
+    result_merge_commit: mergeSha.toLowerCase(),
+    trusted_checks: trustedChecks,
   };
 }
-function hasCodexAcceptedSourceForAttempt(job, receiptValue, comments, dispatchers) {
-  return comments.some(comment => {
-    const acceptance = parseCodexSourceAcceptance(comment, dispatchers);
-    return acceptance && acceptance.request_id === job.request_id &&
+function sourceAcceptanceEvidenceKey(acceptance) {
+  return JSON.stringify([
+    acceptance.request_id, acceptance.attempt_id, acceptance.goal_comment_id,
+    acceptance.goal_body_sha256, acceptance.source_pr, acceptance.source_sha,
+    acceptance.spec_path, acceptance.spec_sha256, acceptance.model,
+    acceptance.diff_sha256, acceptance.worker_changed_files_sha256,
+    acceptance.worker_changed_files_count, acceptance.worker_changed_file_tree_sha256,
+    acceptance.result_pr, acceptance.result_head,
+    acceptance.result_merge_commit,
+    REQUIRED_SOURCE_ACCEPTANCE_CHECKS.map(name => {
+      const check = acceptance.trusted_checks?.[name];
+      return [name, check?.run_id ?? null, check?.run_attempt ?? null];
+    }),
+  ]);
+}
+function sourceAcceptanceMatchesAttempt(acceptance, job, receiptValue) {
+  return acceptance && acceptance.request_id === job.request_id &&
       acceptance.attempt_id === receiptValue.attempt_id &&
-      (acceptance.goal_comment_id === null || acceptance.goal_comment_id === job.goal_comment_id) &&
+      acceptance.goal_comment_id === job.goal_comment_id &&
       acceptance.goal_body_sha256 === job.goal_body_sha256 &&
       acceptance.source_pr === job.source_pr && acceptance.source_sha === job.source_sha &&
       acceptance.spec_path === job.spec_path && acceptance.spec_sha256 === job.spec_sha256 &&
-      acceptance.model === job.model && acceptance.diff_sha256 === receiptValue.diff_sha256;
+      acceptance.model === job.model && acceptance.diff_sha256 === receiptValue.diff_sha256 &&
+      acceptance.worker_changed_files_sha256 === receiptValue.changed_files_sha256 &&
+      acceptance.worker_changed_files_count === receiptValue.changed_files_count &&
+      acceptance.worker_changed_file_tree_sha256 === receiptValue.changed_file_tree_sha256;
+}
+async function verifyLiveCodexSourceAcceptance(acceptance, job, receiptValue,
+  apiRead, log, caches) {
+  const logFailure = code => {
+    log(code + '_PR_' + acceptance.result_pr);
+    return false;
+  };
+  let workflows = caches.workflows;
+  if (workflows === undefined) {
+    try {
+      const response = await apiRead('repos/' + REPO + '/actions/workflows?per_page=100');
+      if (!Array.isArray(response?.workflows) ||
+          !Number.isSafeInteger(response.total_count) ||
+          response.total_count !== response.workflows.length) {
+        workflows = null;
+      } else {
+        workflows = new Map();
+        for (const name of REQUIRED_SOURCE_ACCEPTANCE_CHECKS) {
+          const definition = SOURCE_ACCEPTANCE_WORKFLOWS[name];
+          const matches = response.workflows.filter(value =>
+            value?.path === definition.path && value?.state === 'active' &&
+            Number.isSafeInteger(value?.id) && value.id > 0);
+          if (matches.length !== 1) { workflows = null; break; }
+          workflows.set(name, { id: matches[0].id, path: definition.path,
+            event: definition.event });
+        }
+      }
+    } catch { workflows = null; }
+    caches.workflows = workflows;
+  }
+  if (!workflows) return logFailure('SOURCE_ACCEPTANCE_TRUSTED_WORKFLOW_CATALOG_UNKNOWN');
+
+  let pull = caches.pulls.get(acceptance.result_pr);
+  if (pull === undefined) {
+    try { pull = await apiRead('repos/' + REPO + '/pulls/' + acceptance.result_pr); }
+    catch { pull = null; }
+    caches.pulls.set(acceptance.result_pr, pull);
+  }
+  if (!pull || pull.number !== acceptance.result_pr || pull.state !== 'closed' ||
+      pull.merged !== true || typeof pull.merged_at !== 'string' ||
+      !Number.isFinite(Date.parse(pull.merged_at)) ||
+      pull.base?.ref !== 'main' ||
+      pull.base?.repo?.full_name?.toLowerCase() !== REPO.toLowerCase() ||
+      !Number.isSafeInteger(pull.base?.repo?.id) || pull.base.repo.id < 1 ||
+      !SHA.test(pull.base?.sha || '') ||
+      pull.head?.repo?.full_name?.toLowerCase() !== REPO.toLowerCase() ||
+      !Number.isSafeInteger(pull.head?.repo?.id) || pull.head.repo.id < 1 ||
+      typeof pull.head?.ref !== 'string' || !pull.head.ref || pull.head.ref.length > 255 ||
+      pull.head?.sha?.toLowerCase() !== acceptance.result_head ||
+      pull.merge_commit_sha?.toLowerCase() !== acceptance.result_merge_commit)
+    return logFailure('SOURCE_ACCEPTANCE_RESULT_PR_IDENTITY_OR_MERGE_UNVERIFIED');
+  const optionalRepoFullNameMatches = repository =>
+    repository?.full_name === undefined || repository.full_name === null ||
+    (typeof repository.full_name === 'string' &&
+      repository.full_name.toLowerCase() === REPO.toLowerCase());
+  const pullHeadIdentityMatches = value => value?.number === acceptance.result_pr &&
+    value.base?.ref === pull.base.ref && value.base?.sha?.toLowerCase() === pull.base.sha.toLowerCase() &&
+    value.base?.repo?.id === pull.base.repo.id &&
+    optionalRepoFullNameMatches(value.base.repo) &&
+    value.head?.ref === pull.head.ref && value.head?.sha?.toLowerCase() === pull.head.sha.toLowerCase() &&
+    value.head?.repo?.id === pull.head.repo.id &&
+    optionalRepoFullNameMatches(value.head.repo);
+  const uniquePrForHeadBranch = async () => {
+    const headRef = pull.head.ref;
+    if (typeof headRef !== 'string' || !headRef || headRef.length > 255) return false;
+    const key = pull.head.repo.id + ':' + headRef;
+    let associated = caches.pullsByHead.get(key);
+    if (associated === undefined) {
+      const ownerAndHead = encodeURIComponent(REPO.split('/')[0] + ':' + headRef);
+      try {
+        const response = await apiRead('repos/' + REPO + '/pulls?state=all&head=' +
+          ownerAndHead + '&per_page=100');
+        associated = Array.isArray(response) && response.length < 100 && response.length === 1
+          ? response[0] : null;
+      } catch { associated = null; }
+      caches.pullsByHead.set(key, associated);
+    }
+    return pullHeadIdentityMatches(associated);
+  };
+
+  const expectedFilesSha = receiptValue?.changed_files_sha256;
+  const expectedFilesCount = receiptValue?.changed_files_count;
+  const expectedFileTreeSha = receiptValue?.changed_file_tree_sha256;
+  if (!HASH.test(expectedFilesSha || '') || !HASH.test(expectedFileTreeSha || '') ||
+      !Number.isSafeInteger(expectedFilesCount) ||
+      expectedFilesCount < 1)
+    return logFailure('SOURCE_ACCEPTANCE_WORKER_DIFF_PATHS_UNVERIFIED');
+  let pullFiles = caches.pullFiles.get(acceptance.result_pr);
+  if (pullFiles === undefined) {
+    try {
+      const response = await apiRead('repos/' + REPO + '/pulls/' +
+        acceptance.result_pr + '/files?per_page=100');
+      pullFiles = Array.isArray(response) && response.length < 100 ? response : null;
+    } catch { pullFiles = null; }
+    caches.pullFiles.set(acceptance.result_pr, pullFiles);
+  }
+  if (!pullFiles) return logFailure('SOURCE_ACCEPTANCE_RESULT_PR_FILES_UNKNOWN');
+  const resultPaths = new Set();
+  for (const file of pullFiles) {
+    if (typeof file?.filename !== 'string' || file.filename.length === 0)
+      return logFailure('SOURCE_ACCEPTANCE_RESULT_PR_FILE_IDENTITY_INVALID');
+    resultPaths.add(file.filename);
+    if (file.status === 'renamed') {
+      if (typeof file.previous_filename !== 'string' || file.previous_filename.length === 0)
+        return logFailure('SOURCE_ACCEPTANCE_RESULT_PR_RENAME_IDENTITY_INVALID');
+      resultPaths.add(file.previous_filename);
+    }
+  }
+  const resultFilePaths = [...resultPaths].sort();
+  if (resultFilePaths.some(value => value.startsWith('.github/workflows/')))
+    return logFailure('SOURCE_ACCEPTANCE_RESULT_PR_MODIFIES_CI_WORKFLOW');
+  if (resultPaths.size !== expectedFilesCount ||
+      resultFilePaths.some(value => !job.edit_paths.includes(value)) ||
+      digest(Buffer.from(JSON.stringify(resultFilePaths), 'utf8')) !== expectedFilesSha)
+    return logFailure('SOURCE_ACCEPTANCE_RESULT_PR_DIFF_PATHS_MISMATCH');
+
+  const treeForCommit = async commitSha => {
+    if (!SHA.test(commitSha || '')) return null;
+    let commit = caches.commits.get(commitSha);
+    if (commit === undefined) {
+      try { commit = await apiRead('repos/' + REPO + '/commits/' + commitSha); }
+      catch { commit = null; }
+      caches.commits.set(commitSha, commit);
+    }
+    const treeSha = commit?.sha?.toLowerCase() === commitSha.toLowerCase()
+      ? commit.commit?.tree?.sha?.toLowerCase() : null;
+    if (!SHA.test(treeSha || '')) return null;
+    let tree = caches.trees.get(treeSha);
+    if (tree === undefined) {
+      try {
+        const response = await apiRead('repos/' + REPO + '/git/trees/' + treeSha + '?recursive=1');
+        if (response?.truncated !== false || !Array.isArray(response.tree)) tree = null;
+        else {
+          tree = new Map();
+          for (const entry of response.tree) {
+            if (typeof entry?.path !== 'string' || tree.has(entry.path)) { tree = null; break; }
+            tree.set(entry.path, entry);
+          }
+        }
+      } catch { tree = null; }
+      caches.trees.set(treeSha, tree);
+    }
+    return tree;
+  };
+  const baseTree = await treeForCommit(pull.base.sha);
+  const resultTree = await treeForCommit(pull.head.sha);
+  const mergedTree = await treeForCommit(acceptance.result_merge_commit);
+  if (!baseTree || !resultTree || !mergedTree)
+    return logFailure('SOURCE_ACCEPTANCE_RESULT_PR_TREE_READBACK_UNKNOWN');
+  const treeState = [];
+  for (const path of resultFilePaths) {
+    const before = baseTree.get(path) ?? null;
+    const after = resultTree.get(path) ?? null;
+    const merged = mergedTree.get(path) ?? null;
+    for (const entry of [before, after, merged]) {
+      if (entry && (entry.type !== 'blob' || !/^(100644|100755|120000)$/.test(entry.mode || '') ||
+          !SHA.test(entry.sha || '')))
+        return logFailure('SOURCE_ACCEPTANCE_RESULT_PR_TREE_ENTRY_INVALID');
+    }
+    if ((after?.mode ?? null) !== (merged?.mode ?? null) ||
+        (after?.sha?.toLowerCase() ?? null) !== (merged?.sha?.toLowerCase() ?? null))
+      return logFailure('SOURCE_ACCEPTANCE_MERGED_TREE_DIFFERS_FROM_RESULT_HEAD');
+    treeState.push([path, before?.mode ?? null, before?.sha?.toLowerCase() ?? null,
+      after?.mode ?? null, after?.sha?.toLowerCase() ?? null]);
+  }
+  if (digest(Buffer.from(JSON.stringify(treeState), 'utf8')) !== expectedFileTreeSha)
+    return logFailure('SOURCE_ACCEPTANCE_RESULT_PR_FILE_TREE_MISMATCH');
+
+  const head = acceptance.result_head;
+  let checkRuns = caches.checkRuns.get(head);
+  if (checkRuns === undefined) {
+    try {
+      const response = await apiRead('repos/' + REPO + '/commits/' + head +
+        '/check-runs?per_page=100');
+      checkRuns = Array.isArray(response?.check_runs) &&
+        Number.isSafeInteger(response.total_count) &&
+        response.total_count === response.check_runs.length ? response.check_runs : null;
+    } catch { checkRuns = null; }
+    caches.checkRuns.set(head, checkRuns);
+  }
+  if (!checkRuns) return logFailure('SOURCE_ACCEPTANCE_EXACT_HEAD_CHECK_READBACK_UNKNOWN');
+
+  for (const name of REQUIRED_SOURCE_ACCEPTANCE_CHECKS) {
+    const claim = acceptance.trusted_checks[name];
+    const expectedWorkflow = workflows.get(name);
+    if (!claim || !expectedWorkflow) return logFailure('SOURCE_ACCEPTANCE_CHECK_BINDING_MISSING');
+    const matching = checkRuns.filter(check => check?.name === name &&
+      check?.head_sha?.toLowerCase() === head);
+    matching.sort((left, right) => {
+      const leftTime = Date.parse(left.started_at || left.created_at || '');
+      const rightTime = Date.parse(right.started_at || right.created_at || '');
+      return rightTime - leftTime || (right.id || 0) - (left.id || 0);
+    });
+    const check = matching[0];
+    if (!check || check.status !== 'completed' || check.conclusion !== 'success' ||
+        !Number.isSafeInteger(check.id) || check.app?.slug !== 'github-actions' ||
+        !Number.isFinite(Date.parse(check.created_at || '')) ||
+        !Number.isFinite(Date.parse(check.started_at || '')) ||
+        !Number.isFinite(Date.parse(check.completed_at || '')))
+      return logFailure('SOURCE_ACCEPTANCE_REQUIRED_CHECK_NOT_GREEN_ON_EXACT_HEAD');
+
+    const details = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/([1-9][0-9]*)\/job\/([1-9][0-9]*)$/i
+      .exec(check.details_url || '');
+    if (!details || details[1].toLowerCase() !== REPO.toLowerCase())
+      return logFailure('SOURCE_ACCEPTANCE_CHECK_RUN_LINK_UNVERIFIED');
+    const runId = Number(details[2]);
+    const jobId = Number(details[3]);
+    if (!Number.isSafeInteger(runId) || !Number.isSafeInteger(jobId) ||
+        claim.run_id !== runId || check.id !== jobId)
+      return logFailure('SOURCE_ACCEPTANCE_CHECK_JOB_OR_RUN_ID_MISMATCH');
+
+    let workflowRun = caches.runs.get(runId);
+    if (workflowRun === undefined) {
+      try { workflowRun = await apiRead('repos/' + REPO + '/actions/runs/' + runId); }
+      catch { workflowRun = null; }
+      caches.runs.set(runId, workflowRun);
+    }
+    let workflowPrAssociationMatches = false;
+    if (Array.isArray(workflowRun?.pull_requests)) {
+      if (workflowRun.pull_requests.length === 1)
+        workflowPrAssociationMatches = pullHeadIdentityMatches(workflowRun.pull_requests[0]);
+      else if (workflowRun.pull_requests.length === 0 &&
+          workflowRun.head_branch === pull.head.ref)
+        workflowPrAssociationMatches = await uniquePrForHeadBranch();
+    }
+    if (!workflowRun || workflowRun.id !== runId ||
+        workflowRun.workflow_id !== expectedWorkflow.id ||
+        workflowRun.path !== expectedWorkflow.path ||
+        workflowRun.repository?.full_name?.toLowerCase() !== REPO.toLowerCase() ||
+        workflowRun.repository?.id !== pull.base.repo.id ||
+        workflowRun.head_repository?.full_name?.toLowerCase() !== REPO.toLowerCase() ||
+        workflowRun.head_repository?.id !== pull.head.repo.id ||
+        workflowRun.head_sha?.toLowerCase() !== head ||
+        workflowRun.head_branch !== pull.head.ref ||
+        workflowRun.event !== expectedWorkflow.event ||
+        !workflowPrAssociationMatches ||
+        workflowRun.status !== 'completed' || workflowRun.conclusion !== 'success' ||
+        !Number.isSafeInteger(workflowRun.run_attempt) || workflowRun.run_attempt < 1 ||
+        claim.run_attempt !== workflowRun.run_attempt)
+      return logFailure('SOURCE_ACCEPTANCE_TRUSTED_WORKFLOW_RUN_ATTEMPT_UNVERIFIED');
+
+    const attempt = workflowRun.run_attempt;
+    const jobsKey = runId + ':' + attempt;
+    let runJobs = caches.jobs.get(jobsKey);
+    if (runJobs === undefined) {
+      try {
+        const response = await apiRead('repos/' + REPO + '/actions/runs/' + runId +
+          '/attempts/' + attempt + '/jobs?per_page=100');
+        runJobs = Array.isArray(response?.jobs) &&
+          Number.isSafeInteger(response.total_count) &&
+          response.total_count === response.jobs.length ? response.jobs : null;
+      } catch { runJobs = null; }
+      caches.jobs.set(jobsKey, runJobs);
+    }
+    if (!runJobs) return logFailure('SOURCE_ACCEPTANCE_EXACT_RUN_ATTEMPT_JOBS_UNKNOWN');
+    const matchingJobs = runJobs.filter(value => value?.id === jobId);
+    if (matchingJobs.length !== 1) return logFailure('SOURCE_ACCEPTANCE_CHECK_JOB_NOT_IN_RUN_ATTEMPT');
+    const verifiedJob = matchingJobs[0];
+    if (verifiedJob.name !== name || verifiedJob.status !== 'completed' ||
+        verifiedJob.conclusion !== 'success' || verifiedJob.head_sha?.toLowerCase() !== head ||
+        verifiedJob.run_attempt !== attempt ||
+        verifiedJob.check_run_url !== 'https://api.github.com/repos/' + REPO +
+          '/check-runs/' + check.id)
+      return logFailure('SOURCE_ACCEPTANCE_CHECK_JOB_OR_ATTEMPT_MISMATCH');
+  }
+  return true;
+}
+// A dispatcher-authored acceptance comment is an attestation, not canonical
+// PR/CI evidence. Re-read GitHub only when it could suppress an exact duplicate.
+export async function readVerifiedCodexSourceAcceptances(comments, dispatchers, workerLogin,
+  host, apiRead, log = () => {}) {
+  const jobs = new Map();
+  const receipts = new Map();
+  const acceptances = [];
+  for (const comment of comments) {
+    const login = comment.user?.login;
+    const job = dispatchers.includes(login) ? parseJob(comment.body) : null;
+    if (job?.schema === 6 && isEditExecutionKind(job.kind) &&
+        job.host.toUpperCase() === host.toUpperCase()) {
+      if (!jobs.has(job.request_id))
+        jobs.set(job.request_id, { job, duplicate: false, body: comment.body });
+      else if (jobs.get(job.request_id).body !== comment.body)
+        jobs.get(job.request_id).duplicate = true;
+    }
+    if (receiptMayBlockReplay(login, workerLogin, dispatchers)) {
+      const receiptValue = parseReceipt(comment.body);
+      if (receiptValue) {
+        if (!receipts.has(receiptValue.request_id)) receipts.set(receiptValue.request_id, []);
+        receipts.get(receiptValue.request_id).push({ login, receipt: receiptValue });
+      }
+    }
+    const acceptance = parseCodexSourceAcceptance(comment, dispatchers);
+    if (acceptance) acceptances.push(acceptance);
+  }
+  const scopeCounts = new Map();
+  for (const row of jobs.values()) {
+    if (row.duplicate) continue;
+    const key = boundEditTaskScopeKey(row.job);
+    scopeCounts.set(key, (scopeCounts.get(key) || 0) + 1);
+  }
+  const candidates = new Map();
+  for (const prior of jobs.values()) {
+    if (prior.duplicate || scopeCounts.get(boundEditTaskScopeKey(prior.job)) < 2) continue;
+    const priorEntries = receipts.get(prior.job.request_id) || [];
+    const completed = priorEntries.filter(entry => entry.login === workerLogin &&
+      entry.receipt.state === 'FINISHED' &&
+      hasCompletedScopedEditDiff(entry.receipt, prior.job) &&
+      (prior.job.kind !== 'antigravity_edit' ||
+        hasIsolatedW2ScopedEditDiff(entry.receipt, prior.job)));
+    if (!completed.length) continue;
+    for (const entry of completed) {
+      const acceptance = acceptances.find(value =>
+        sourceAcceptanceMatchesAttempt(value, prior.job, entry.receipt));
+      if (acceptance) candidates.set(sourceAcceptanceEvidenceKey(acceptance), {
+        acceptance, job: prior.job, receipt: entry.receipt,
+      });
+    }
+  }
+  const verified = new Set();
+  const caches = { workflows: undefined, pulls: new Map(), pullFiles: new Map(),
+    pullsByHead: new Map(), commits: new Map(), trees: new Map(),
+    checkRuns: new Map(), runs: new Map(), jobs: new Map() };
+  for (const [key, candidate] of candidates) {
+    if (await verifyLiveCodexSourceAcceptance(candidate.acceptance, candidate.job,
+      candidate.receipt, apiRead, log, caches)) verified.add(key);
+  }
+  return verified;
+}
+function hasCodexAcceptedSourceForAttempt(job, receiptValue, comments, dispatchers,
+  verifiedSourceAcceptanceKeys) {
+  return comments.some(comment => {
+    const acceptance = parseCodexSourceAcceptance(comment, dispatchers);
+    return sourceAcceptanceMatchesAttempt(acceptance, job, receiptValue) &&
+      verifiedSourceAcceptanceKeys.has(sourceAcceptanceEvidenceKey(acceptance));
   });
 }
-function hasEquivalentCompletedEditTask(job, jobs, receipts, comments, dispatchers, workerLogin) {
+function hasEquivalentCompletedEditTask(job, jobs, receipts, comments, dispatchers, workerLogin,
+  verifiedSourceAcceptanceKeys) {
   if (job?.schema !== 6 || !isEditExecutionKind(job.kind)) return false;
   for (const prior of jobs.values()) {
     if (prior.duplicate || !sameBoundEditTask(job, prior.job)) continue;
@@ -644,7 +1035,8 @@ function hasEquivalentCompletedEditTask(job, jobs, receipts, comments, dispatche
         hasCompletedScopedEditDiff(entry.receipt, prior.job) &&
         (prior.job.kind !== 'antigravity_edit' ||
           hasIsolatedW2ScopedEditDiff(entry.receipt, prior.job)) &&
-        hasCodexAcceptedSourceForAttempt(prior.job, entry.receipt, comments, dispatchers))) return true;
+        hasCodexAcceptedSourceForAttempt(prior.job, entry.receipt, comments, dispatchers,
+          verifiedSourceAcceptanceKeys))) return true;
   }
   return false;
 }
@@ -996,7 +1388,8 @@ export async function readPinnedCandidateSources(comments, dispatchers, workerLo
   return sourceShas;
 }
 export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha = null,
-  blockedKinds = [], candidateSourceShas = new Map(), verifiedNoWriteAttemptKeys = new Set()) {
+  blockedKinds = [], candidateSourceShas = new Map(), verifiedNoWriteAttemptKeys = new Set(),
+  verifiedSourceAcceptanceKeys = new Set()) {
   const jobs = new Map();
   const receipts = new Map();
   for (const c of comments) {
@@ -1068,7 +1461,8 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     // a Worker FINISHED a complete scoped diff. This suppresses only an
     // identical source/spec/model/goal/edit scope; task_acceptance and external
     // effects remain untouched and UNKNOWN, while a different READY task runs.
-    if (hasEquivalentCompletedEditTask(v.job, jobs, receipts, comments, dispatchers, workerLogin)) continue;
+    if (hasEquivalentCompletedEditTask(v.job, jobs, receipts, comments, dispatchers, workerLogin,
+      verifiedSourceAcceptanceKeys)) continue;
     // A prior model/session/tool attempt with unresolved effects must not be
     // replayed by publishing the same exact task under a different request ID.
     // Only an explicit no-model/no-effect receipt permits that retry; unrelated
@@ -1100,15 +1494,15 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
 }
 export function selectNextWithCodexClaim(comments, dispatchers, workerLogin, host,
   liveMainSha, stateDir, blockedKinds = [], candidateSourceShas = new Map(),
-  verifiedNoWriteAttemptKeys = new Set()) {
+  verifiedNoWriteAttemptKeys = new Set(), verifiedSourceAcceptanceKeys = new Set()) {
   const next = selectNext(comments, dispatchers, workerLogin, host, liveMainSha,
-    blockedKinds, candidateSourceShas, verifiedNoWriteAttemptKeys);
+    blockedKinds, candidateSourceShas, verifiedNoWriteAttemptKeys, verifiedSourceAcceptanceKeys);
   if (next?.job.kind !== 'codex_plan' ||
       !existsSync(join(stateDir, `codex-claim-${next.job.request_id}.json`)))
     return { next, unresolvedRequestId: null };
   const blocked = [...new Set([...blockedKinds, 'codex_plan'])];
   return { next: selectNext(comments, dispatchers, workerLogin, host, liveMainSha,
-    blocked, candidateSourceShas, verifiedNoWriteAttemptKeys),
+    blocked, candidateSourceShas, verifiedNoWriteAttemptKeys, verifiedSourceAcceptanceKeys),
     unresolvedRequestId: next.job.request_id };
 }
 function gh(args, options = {}) {
@@ -1731,6 +2125,50 @@ async function captureGitStdout(workspace, stateDir, requestId, attemptId, label
   rmSync(stderrPath, { force: false });
   return { output, result, stdoutPath };
 }
+async function captureChangedFileTreeSha256(workspace, stateDir, job, attemptId,
+  changedFiles, readProcessTree, platformName = platform()) {
+  if (!Array.isArray(changedFiles) || changedFiles.some(path => typeof path !== 'string') ||
+      new Set(changedFiles).size !== changedFiles.length)
+    throw new Error('EDIT_GIT_CHANGED_FILE_TREE_INPUT_INVALID');
+  if (changedFiles.length === 0)
+    return digest(Buffer.from('[]', 'utf8'));
+  const raw = await captureGitStdout(workspace, stateDir, job.request_id, attemptId,
+    'changed-file-tree', ['diff', '--raw', '--no-abbrev', '--no-renames', 'HEAD', '--',
+      ...changedFiles], false, readProcessTree, platformName);
+  const records = raw.output.toString('utf8').split(/\r?\n/).filter(Boolean);
+  const allowedModes = new Set(['100644', '100755', '120000']);
+  const states = new Map();
+  for (const line of records) {
+    const match = /^:([0-7]{6}) ([0-7]{6}) ([a-f0-9]{40}) ([a-f0-9]{40}) ([A-Z])\t(.+)$/.exec(line);
+    if (!match) throw new Error('EDIT_GIT_CHANGED_FILE_TREE_FORMAT_INVALID');
+    const [, oldMode, newMode, oldSha, newSha, status, path] = match;
+    if (!changedFiles.includes(path) || states.has(path) || !['A', 'D', 'M', 'T'].includes(status))
+      throw new Error('EDIT_GIT_CHANGED_FILE_TREE_PATH_OR_STATUS_INVALID');
+    const before = oldMode === '000000' && /^0+$/.test(oldSha)
+      ? null : { mode: oldMode, sha: oldSha };
+    let after = newMode === '000000' && /^0+$/.test(newSha)
+      ? null : { mode: newMode, sha: newSha };
+    if ((before && (!allowedModes.has(before.mode) || /^0+$/.test(before.sha))) ||
+        (after && !allowedModes.has(after.mode)) ||
+        (status === 'A' && before) || (status === 'D' && after) ||
+        (!['A', 'D'].includes(status) && (!before || !after)))
+      throw new Error('EDIT_GIT_CHANGED_FILE_TREE_ENTRY_INVALID');
+    if (after && /^0+$/.test(after.sha)) {
+      const object = await captureGitStdout(workspace, stateDir, job.request_id, attemptId,
+        `changed-file-blob-${states.size}`, ['hash-object', `--path=${path}`, '--', path],
+        false, readProcessTree, platformName);
+      const sha = object.output.toString('utf8').trim().toLowerCase();
+      if (!SHA.test(sha)) throw new Error('EDIT_GIT_CHANGED_FILE_TREE_BLOB_HASH_INVALID');
+      after = { ...after, sha };
+    }
+    states.set(path, [path, before?.mode ?? null, before?.sha ?? null,
+      after?.mode ?? null, after?.sha ?? null]);
+  }
+  if (states.size !== changedFiles.length || changedFiles.some(path => !states.has(path)))
+    throw new Error('EDIT_GIT_CHANGED_FILE_TREE_PATH_SET_MISMATCH');
+  const canonical = changedFiles.map(path => states.get(path));
+  return digest(Buffer.from(JSON.stringify(canonical), 'utf8'));
+}
 function parseGitStatusPaths(bytes) {
   const records = bytes.toString('utf8').split('\0').filter(Boolean);
   return records.map(record => {
@@ -1895,9 +2333,14 @@ export async function captureScopedEditDiff({ workspace, state_dir, job, attempt
     renameSync(diff.stdoutPath, diffPath);
   }
   const local = diff.result.local_evidence || {};
+  const changedFileTreeSha256 = scopeValid
+    ? await captureChangedFileTreeSha256(workspace, state_dir, job, attempt_id,
+      changedFiles, readProcessTree, platformName)
+    : null;
   return {
     file: basename(diffPath), sha256: local.stdout_sha256,
     bytes: local.stdout_bytes, changed_files: changedFiles,
+    changed_file_tree_sha256: changedFileTreeSha256,
     allowed_paths: job.edit_paths, scope_valid: scopeValid,
   };
 }
@@ -2313,10 +2756,21 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
       coding_state: diff.changed_files.length ? 'DIFF_CAPTURED_UNVERIFIED' : 'UNVERIFIED',
       scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
       ...diff, local_evidence: localEvidence };
-  if (!diff.changed_files.length || diff.bytes === 0)
+  if (!diff.changed_files.length || diff.bytes === 0) {
+    if (runEvidence.file_change_tool_failed_count)
+      return { ...diffEvidencedResult, outcome: 'ANTIGRAVITY_EDIT_FILE_TOOL_FAILURES_NO_DIFF',
+        cli_exit_code: evidencedResult.exit_code, exit_code: -1, coding_state: 'NO_DIFF',
+        scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
+        ...diff, local_evidence: localEvidence };
+    if (runEvidence.file_change_tool_incomplete_count)
+      return { ...diffEvidencedResult, outcome: 'ANTIGRAVITY_EDIT_FILE_TOOL_INCOMPLETE_NO_DIFF',
+        cli_exit_code: evidencedResult.exit_code, exit_code: -1, coding_state: 'NO_DIFF',
+        scope_valid: true, diff_sha256: diff.sha256, diff_bytes: diff.bytes,
+        ...diff, local_evidence: localEvidence };
     return { ...diffEvidencedResult, outcome: 'ANTIGRAVITY_EDIT_NO_DIFF', cli_exit_code: evidencedResult.exit_code,
       exit_code: 47, coding_state: 'NO_DIFF', scope_valid: true,
       diff_sha256: diff.sha256, diff_bytes: diff.bytes, ...diff, local_evidence: localEvidence };
+  }
   if (evidencedResult.exit_code !== 0 || runEvidence.cli_status !== 'SUCCESS' ||
       runEvidence.file_change_tool_incomplete_count)
     return { ...diffEvidencedResult, outcome: 'ANTIGRAVITY_EDIT_PROCESS_FAILED_DIFF_PRESERVED',
@@ -2359,17 +2813,22 @@ export function nativePreflight(config, job, dependencies = {}) {
     native_executables_checked: cli.candidates_checked,
     model_allowlist_entries: Object.keys(config.allowed_models || {}).length,
     v2_model_execution_enabled: config.enable_v2_model_runs === true,
-    cli_version: cli.version ?? 'NOT_FOUND_OR_WRONG_MAJOR', model_auth: 'NOT_TESTED',
+    cli_version: cli.version ?? cli.rejected_versions?.[0] ?? 'NOT_FOUND_OR_WRONG_MAJOR',
+    cli_qualification_reason: cli.reason ?? (cli.ready ? 'QUALIFIED' : 'UNKNOWN'),
+    model_auth: 'NOT_TESTED',
     antigravity_v2: antigravity,
     elevated: 'NOT_CHECKED', old_windows_services: 'NOT_CHECKED',
   };
-  return { outcome: cli.ready ? 'OPENCODE_V2_VERSION_CONFIRMED_NO_MODEL_AUTH' : 'OPENCODE_V2_CLI_NOT_QUALIFIED',
+  return { outcome: cli.ready ? 'OPENCODE_V2_VERSION_CONFIRMED_NO_MODEL_AUTH'
+    : cli.reason === 'OPEN_CODE_V2_VERSION_POLICY_REJECTED'
+      ? 'OPENCODE_V2_CLI_VERSION_POLICY_REJECTED' : 'OPENCODE_V2_CLI_NOT_QUALIFIED',
     exit_code: 0, ...localEvidence(config, job.request_id, facts) };
 }
 function nativeV2Qualify(config, job) {
   const cli = qualifyOpenCodeV2();
-  if (!cli.ready) return { outcome: 'OPENCODE_V2_CLI_NOT_QUALIFIED',
-    exit_code: 43, evidence_sha256: null, evidence_bytes: 0 };
+  if (!cli.ready) return { outcome: cli.reason === 'OPEN_CODE_V2_VERSION_POLICY_REJECTED'
+    ? 'OPENCODE_V2_CLI_VERSION_POLICY_REJECTED' : 'OPENCODE_V2_CLI_NOT_QUALIFIED',
+  exit_code: 43, evidence_sha256: null, evidence_bytes: 0 };
   const summary = runV2Readiness(cli.bin, config.state_dir);
   const facts = { schema: 1, project_id: PROJECT, host: config.host, kind: job.kind,
     request_id: job.request_id, source_sha: job.source_sha, v2_cli_version: cli.version,
@@ -2402,7 +2861,8 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
   if (!checkModelAuthorization(job, config))
     return waiting('MODEL_NOT_EXPLICITLY_ALLOWED', 42);
   const cli = qualify();
-  if (!cli.ready) return waiting('OPENCODE_V2_CLI_NOT_QUALIFIED', 43);
+  if (!cli.ready) return waiting(cli.reason === 'OPEN_CODE_V2_VERSION_POLICY_REJECTED'
+    ? 'OPENCODE_V2_CLI_VERSION_POLICY_REJECTED' : 'OPENCODE_V2_CLI_NOT_QUALIFIED', 43);
   let providerAuth;
   try {
     providerAuth = readProviderAuth(cli.bin, job.model.split('/')[0], config.workspace);
@@ -2621,6 +3081,8 @@ export function receipt(requestId, attemptId, state, job, result = null) {
       changed_files_sha256: result?.changed_files ?
         digest(Buffer.from(JSON.stringify(result.changed_files), 'utf8')) : null,
       changed_files_count: result?.changed_files?.length ?? null,
+      ...(HASH.test(result?.changed_file_tree_sha256 || '')
+        ? { changed_file_tree_sha256: result.changed_file_tree_sha256 } : {}),
       coding_state: result?.coding_state ?? 'UNVERIFIED',
       scope_valid: result?.scope_valid ?? null,
       cli_exit_code: result?.cli_exit_code ?? result?.exit_code ?? null } : {}),
@@ -3371,6 +3833,8 @@ export async function runWorker(configInput, adapters = {}) {
   const candidateSourceShas = await readPinnedCandidateSources(comments,
     config.dispatchers, me, config.host, apiRead, log, [...blockedKinds],
     () => humanGoalComments ?? goalCommentsRead());
+  const verifiedSourceAcceptanceKeys = await readVerifiedCodexSourceAcceptances(
+    comments, config.dispatchers, me, config.host, apiRead, log);
   const authorizedW1JobExists = comments.some(comment => {
     if (!config.dispatchers.includes(comment.user?.login)) return false;
     const job = parseJob(comment.body);
@@ -3386,7 +3850,8 @@ export async function runWorker(configInput, adapters = {}) {
     const job = parseJob(comment.body);
     return !job || !skippedRequestIds.has(job.request_id);
   }), config.dispatchers, me, config.host, head, config.state_dir,
-  [...blockedKinds], candidateSourceShas, verifiedNoWriteAttemptKeys);
+  [...blockedKinds], candidateSourceShas, verifiedNoWriteAttemptKeys,
+  verifiedSourceAcceptanceKeys);
   let selected = selectNextCandidate();
   let next = selected.next;
   if (selected.unresolvedRequestId)

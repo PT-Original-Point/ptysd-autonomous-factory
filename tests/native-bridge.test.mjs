@@ -14,7 +14,7 @@ import { parseJob, selectNext, parseReceipt, parseCodexSourceAcceptance, receipt
   codexTerminalReceipt, selectNextWithCodexClaim, readPinnedCandidateSources, executorForJobKind,
   writePathsOverlap,
   publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight, derivePollDisposition,
-  isRecoverableModelPreflightWait }
+  isRecoverableModelPreflightWait, readVerifiedCodexSourceAcceptances }
   from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, OPERATOR_COMMENT_ID, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
@@ -1697,13 +1697,16 @@ const sourceAcceptanceComment = (job, completedReceipt) =>
   `source_pr=${job.source_pr}\nsource_head=${job.source_sha}\n` +
   `spec_path=${job.spec_path}\nspec_sha256=${job.spec_sha256}\nmodel=${job.model}\n` +
   `worker_diff_sha256=${completedReceipt.diff_sha256}\ndiff_sha256=${completedReceipt.diff_sha256}\n` +
+  `worker_changed_files_sha256=${completedReceipt.changed_files_sha256}\n` +
+  `worker_changed_files_count=${completedReceipt.changed_files_count}\n` +
+  `worker_changed_file_tree_sha256=${completedReceipt.changed_file_tree_sha256}\n` +
   `codex_review=PASS_EXACT_DIFF_AND_SCOPE\nintegration=PR_665_MERGED\n` +
-  `integration_commit=080e592b2cd691494f1297c47dd307a275bd52f1\n` +
+  `integration_commit=660e592b2cd691494f1297c47dd307a275bd52f1\n` +
   `pr_665_head=450d483e7258c62772a8fd5a620aacf9b8dde3aa\n` +
-  `pr_665_checks=check-native-only=SUCCESS;csg-trusted-verifier-hosted=SUCCESS;v2-native-windows=SUCCESS\n` +
+  `pr_665_checks=check-native-only=SUCCESS:run-1001-attempt-1;csg-trusted-verifier-hosted=SUCCESS:run-1002-attempt-1;v2-native-windows=SUCCESS:run-1003-attempt-1\n` +
   `source_acceptance=ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR_665`;
 
-test('a completed scoped edit suppresses only an exact duplicate request and leaves other READY work selectable', () => {
+test('a completed scoped edit suppresses only an exact duplicate after live result PR and CI readback', async () => {
   const host = 'DESKTOP-1B6PD2P';
   const sourceSha = '497f60d5377a8a08c6a303e246d5f5378f4db45f';
   const sourcePr = 664;
@@ -1725,6 +1728,25 @@ test('a completed scoped edit suppresses only an exact duplicate request and lea
     spec_path: 'native-bridge/tasks/w1-independent-ready.md',
     edit_paths: ['tests/native-bridge.test.mjs'],
   });
+  const resultHead = '450d483e7258c62772a8fd5a620aacf9b8dde3aa';
+  const baseSha = '080e592b2cd691494f1297c47dd307a275bd52f1';
+  const mergeSha = '660e592b2cd691494f1297c47dd307a275bd52f1';
+  const repoId = 1352411536;
+  const baseTreeSha = 'a'.repeat(40);
+  const headTreeSha = 'b'.repeat(40);
+  const mergeTreeSha = 'c'.repeat(40);
+  const baseTreeEntries = [
+    { path: 'native-bridge/operator-observation.mjs', mode: '100644', type: 'blob', sha: '1'.repeat(40) },
+    { path: 'tests/operator-observation.test.mjs', mode: '100644', type: 'blob', sha: '2'.repeat(40) },
+  ];
+  const headTreeEntries = [
+    { path: 'native-bridge/operator-observation.mjs', mode: '100644', type: 'blob', sha: '3'.repeat(40) },
+    { path: 'tests/operator-observation.test.mjs', mode: '100644', type: 'blob', sha: '4'.repeat(40) },
+  ];
+  const workerTreeSha = h(JSON.stringify([
+    ['native-bridge/operator-observation.mjs', '100644', '1'.repeat(40), '100644', '3'.repeat(40)],
+    ['tests/operator-observation.test.mjs', '100644', '2'.repeat(40), '100644', '4'.repeat(40)],
+  ]));
   const finished = receipt(completed.request_id,
     '84e8dfee-a704-43ef-9cc5-3bb6da0279c7', 'FINISHED', completed, {
       outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED', exit_code: 0,
@@ -1735,6 +1757,7 @@ test('a completed scoped edit suppresses only an exact duplicate request and lea
       diff_sha256: '25d5c925579246b66c238211df289cee3ef19e457832d509f45938a4e139214e',
       diff_bytes: 5480,
       changed_files: ['native-bridge/operator-observation.mjs', 'tests/operator-observation.test.mjs'],
+      changed_file_tree_sha256: workerTreeSha,
     });
   const comments = [
     { ...com(901, encoded(duplicate)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
@@ -1744,11 +1767,120 @@ test('a completed scoped edit suppresses only an exact duplicate request and lea
     { ...com(905, sourceAcceptanceComment(completed, finished), 't14210184'),
       issue_url: `https://api.github.com/repos/${REPO}/issues/407` },
   ];
-  assert.ok(parseCodexSourceAcceptance(comments.at(-1), ['t14210184']));
+  const parsedAcceptance = parseCodexSourceAcceptance(comments.at(-1), ['t14210184']);
+  assert.ok(parsedAcceptance);
+  assert.equal(parsedAcceptance.result_pr, 665);
+  assert.equal(parsedAcceptance.trusted_checks['check-native-only'].run_id, 1001);
   assert.equal(finished.task_acceptance, 'UNKNOWN');
   assert.equal(finished.external_effects, 'UNKNOWN');
+  const names = ['check-native-only', 'csg-trusted-verifier-hosted', 'v2-native-windows'];
+  const runIds = [1001, 1002, 1003];
+  const jobIds = [3001, 3002, 3003];
+  const workflowRows = [
+    { id: 101, path: '.github/workflows/v53-r4-main-source-retirement.yml', state: 'active' },
+    { id: 102, path: '.github/workflows/csg-trusted-verifier-hosted.yml', state: 'active' },
+    { id: 103, path: '.github/workflows/v53r4-v2-cli-qualification.yml', state: 'active' },
+  ];
+  const resultFiles = [
+    { filename: 'native-bridge/operator-observation.mjs', status: 'modified' },
+    { filename: 'tests/operator-observation.test.mjs', status: 'modified' },
+  ];
+  const checkRuns = names.map((name, index) => ({
+    id: jobIds[index], name, head_sha: resultHead, status: 'completed',
+    conclusion: 'success', created_at: '2026-11-01T10:00:00Z',
+    started_at: '2026-11-01T10:00:01Z', completed_at: '2026-11-01T10:00:02Z',
+    app: { slug: 'github-actions' },
+    details_url: 'https://github.com/' + REPO + '/actions/runs/' + runIds[index] +
+      '/job/' + jobIds[index],
+  }));
+  const validPull = {
+    number: 665, state: 'closed', merged: true, merged_at: '2026-11-01T10:02:00Z',
+    head: { ref: 'codex/source-acceptance-test-20261101', sha: resultHead,
+      repo: { full_name: REPO, id: repoId } }, merge_commit_sha: mergeSha,
+    base: { ref: 'main', sha: baseSha, repo: { full_name: REPO, id: repoId } },
+  };
+  const prByHeadPath = 'repos/' + REPO + '/pulls?state=all&head=' +
+    encodeURIComponent('PT-Original-Point:' + validPull.head.ref) + '&per_page=100';
+  const apiFor = (overrides = {}) => async path => {
+    if (path === 'repos/' + REPO + '/actions/workflows?per_page=100') {
+      const workflows = overrides.workflows || workflowRows;
+      return { total_count: workflows.length, workflows };
+    }
+    if (path === 'repos/' + REPO + '/pulls/665')
+      return { ...validPull, ...(overrides.pull || {}) };
+    if (path === prByHeadPath) return overrides.prsByHead || [validPull];
+    if (path === 'repos/' + REPO + '/pulls/665/files?per_page=100')
+      return overrides.resultFiles || resultFiles;
+    const commitMatch = /^repos\/[^/]+\/[^/]+\/commits\/([a-f0-9]{40})$/.exec(path);
+    if (commitMatch) {
+      const commitSha = commitMatch[1];
+      const treeByCommit = new Map([[baseSha, baseTreeSha], [resultHead, headTreeSha],
+        [mergeSha, mergeTreeSha]]);
+      const treeSha = treeByCommit.get(commitSha);
+      if (!treeSha) throw new Error('Unexpected commit read: ' + path);
+      return { sha: commitSha, commit: { tree: { sha: treeSha } } };
+    }
+    const treeMatch = /^repos\/[^/]+\/[^/]+\/git\/trees\/([a-f0-9]{40})\?recursive=1$/.exec(path);
+    if (treeMatch) {
+      const treeBySha = new Map([
+        [baseTreeSha, overrides.baseTreeEntries || baseTreeEntries],
+        [headTreeSha, overrides.headTreeEntries || headTreeEntries],
+        [mergeTreeSha, overrides.mergeTreeEntries || headTreeEntries],
+      ]);
+      const tree = treeBySha.get(treeMatch[1]);
+      if (!tree) throw new Error('Unexpected tree read: ' + path);
+      return { truncated: false, tree };
+    }
+    if (path === 'repos/' + REPO + '/commits/' + resultHead + '/check-runs?per_page=100')
+      return {
+        total_count: (overrides.checkRuns || checkRuns).length,
+        check_runs: (overrides.checkRuns || checkRuns).map(check => ({ ...check })),
+      };
+    const runMatch = /^repos\/[^/]+\/[^/]+\/actions\/runs\/([1-9][0-9]*)$/.exec(path);
+    if (runMatch) {
+      const id = Number(runMatch[1]);
+      const index = runIds.indexOf(id);
+      return {
+        id, workflow_id: overrides.workflowIdIndex === index ? 999 : workflowRows[index]?.id,
+        path: overrides.workflowPathIndex === index ? '.github/workflows/forged.yml' :
+          workflowRows[index]?.path,
+        repository: { full_name: REPO, id: repoId },
+        head_repository: { full_name: REPO, id: repoId },
+        head_sha: resultHead, head_branch: overrides.workflowHeadBranch || validPull.head.ref,
+        status: 'completed', conclusion: 'success',
+        event: index === 1 ? 'pull_request_target' : 'pull_request',
+        run_attempt: overrides.runAttempt && index === 0 ? overrides.runAttempt : 1,
+        pull_requests: overrides.workflowPullRequestsEmpty ? [] : [{
+          number: overrides.workflowPullRequestNumber ?? 665,
+          base: { ref: 'main', sha: overrides.workflowBaseSha || baseSha,
+            repo: { id: overrides.workflowBaseRepoId ?? repoId, full_name: null } },
+          head: { ref: validPull.head.ref, sha: resultHead,
+            repo: { id: overrides.workflowHeadRepoId ?? repoId, full_name: null } },
+        }],
+      };
+    }
+    const jobsMatch = /^repos\/[^/]+\/[^/]+\/actions\/runs\/([1-9][0-9]*)\/attempts\/([1-9][0-9]*)\/jobs\?per_page=100$/.exec(path);
+    if (jobsMatch) {
+      const id = Number(jobsMatch[1]);
+      const index = runIds.indexOf(id);
+      const job = {
+        id: jobIds[index], name: names[index], status: 'completed', conclusion: 'success',
+        head_sha: resultHead, run_attempt: 1,
+        check_run_url: 'https://api.github.com/repos/' + REPO + '/check-runs/' + jobIds[index],
+      };
+      if (overrides.jobNameIndex === index) job.name = 'forged-job-name';
+      if (overrides.jobAttemptIndex === index) job.run_attempt = 2;
+      return { total_count: 1, jobs: [job] };
+    }
+    throw new Error('Unexpected live acceptance read: ' + path);
+  };
+  const verificationFailures = [];
+  const verifiedAcceptanceKeys = await readVerifiedCodexSourceAcceptances(
+    comments, ['t14210184'], 'worker', host, apiFor(), code => verificationFailures.push(code));
+  assert.deepEqual(verificationFailures, [], 'valid live evidence has no rejection code');
+  assert.equal(verifiedAcceptanceKeys.size, 1);
   const selected = selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [],
-    new Map([[sourcePr, sourceSha]]));
+    new Map([[sourcePr, sourceSha]]), new Set(), verifiedAcceptanceKeys);
   assert.equal(selected?.id, 904,
     'the identical unstarted duplicate is suppressed without starving another READY edit');
   assert.equal(comments.some(comment => parseReceipt(comment.body)?.request_id === duplicate.request_id), false,
@@ -1758,6 +1890,11 @@ test('a completed scoped edit suppresses only an exact duplicate request and lea
       'ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR_665', 'REJECTED'),
     sourceAcceptanceComment(completed, finished).replace(`source_head=${sourceSha}`,
       `source_head=${'a'.repeat(40)}`),
+    sourceAcceptanceComment(completed, finished).replace(
+      /worker_changed_file_tree_sha256=.*\n/, ''),
+    sourceAcceptanceComment(completed, finished).replace(
+      `worker_changed_file_tree_sha256=${workerTreeSha}`,
+      `worker_changed_file_tree_sha256=${'f'.repeat(64)}`),
     sourceAcceptanceComment(completed, finished).replace('v2-native-windows=SUCCESS',
       'v2-native-windows=FAILURE'),
     sourceAcceptanceComment(completed, finished) + ';check-native-only=SUCCESS',
@@ -1776,6 +1913,75 @@ test('a completed scoped edit suppresses only an exact duplicate request and lea
     .replace(`human_goal_comment_id=${completed.goal_comment_id}\n`, '');
   assert.equal(parseCodexSourceAcceptance({ ...comments.at(-1), body: noGoalBinding },
     ['t14210184']), null, 'acceptance without the exact Human GOAL binding fails closed');
+  const noRunAttemptBinding = sourceAcceptanceComment(completed, finished)
+    .replace(/:run-[1-9][0-9]*-attempt-[1-9][0-9]*/g, '');
+  assert.equal(parseCodexSourceAcceptance({ ...comments.at(-1), body: noRunAttemptBinding },
+    ['t14210184']), null, 'acceptance without exact CI run and attempt bindings fails closed');
+
+  const invalidReadbacks = [
+    { pull: { number: 666 } },
+    { pull: { head: { sha: 'a'.repeat(40) } } },
+    { pull: { merge_commit_sha: 'b'.repeat(40) } },
+    { checkRuns: checkRuns.map((check, index) => index === 0
+      ? { ...check, head_sha: 'c'.repeat(40) } : check) },
+    { checkRuns: checkRuns.map((check, index) => index === 0
+      ? { ...check, conclusion: 'failure' } : check) },
+    { runAttempt: 2 },
+    { workflowIdIndex: 0 },
+    { workflowPathIndex: 0 },
+    { jobNameIndex: 0 },
+    { jobAttemptIndex: 0 },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_RESULT_PR_FILE_TREE_MISMATCH',
+      headTreeEntries: headTreeEntries.map((entry, index) => index === 0
+        ? { ...entry, sha: '5'.repeat(40) } : entry),
+      mergeTreeEntries: headTreeEntries.map((entry, index) => index === 0
+        ? { ...entry, sha: '5'.repeat(40) } : entry) },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_RESULT_PR_FILE_TREE_MISMATCH',
+      baseTreeEntries: baseTreeEntries.map((entry, index) => index === 0
+        ? { ...entry, sha: '6'.repeat(40) } : entry) },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_MERGED_TREE_DIFFERS_FROM_RESULT_HEAD',
+      mergeTreeEntries: headTreeEntries.map((entry, index) => index === 1
+        ? { ...entry, sha: '8'.repeat(40) } : entry) },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_TRUSTED_WORKFLOW_RUN_ATTEMPT_UNVERIFIED',
+      workflowPullRequestNumber: 666 },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_TRUSTED_WORKFLOW_RUN_ATTEMPT_UNVERIFIED',
+      workflowBaseSha: '7'.repeat(40) },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_TRUSTED_WORKFLOW_RUN_ATTEMPT_UNVERIFIED',
+      workflowBaseRepoId: repoId + 1 },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_TRUSTED_WORKFLOW_RUN_ATTEMPT_UNVERIFIED',
+      workflowPullRequestsEmpty: true, workflowHeadBranch: 'codex/other-result' },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_TRUSTED_WORKFLOW_RUN_ATTEMPT_UNVERIFIED',
+      workflowPullRequestsEmpty: true, prsByHead: [{ ...validPull, number: 666 }] },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_TRUSTED_WORKFLOW_RUN_ATTEMPT_UNVERIFIED',
+      workflowPullRequestsEmpty: true, prsByHead: [validPull, { ...validPull, number: 666 }] },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_TRUSTED_WORKFLOW_RUN_ATTEMPT_UNVERIFIED',
+      workflowPullRequestsEmpty: true,
+      prsByHead: [{ ...validPull, base: { ...validPull.base, ref: 'release' } }] },
+    { resultFiles: [{ filename: 'unrelated/file.mjs', status: 'modified' }] },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_RESULT_PR_MODIFIES_CI_WORKFLOW',
+      resultFiles: [{ filename: '.github/workflows/v53-r4-main-source-retirement.yml',
+        status: 'modified' }] },
+    { expectedFailure: 'SOURCE_ACCEPTANCE_RESULT_PR_MODIFIES_CI_WORKFLOW',
+      resultFiles: [{ filename: '.github/workflows/untrusted-check.yml',
+        status: 'modified' }] },
+  ];
+  for (const [caseIndex, readback] of invalidReadbacks.entries()) {
+    const failures = [];
+    const unverified = await readVerifiedCodexSourceAcceptances(
+      comments, ['t14210184'], 'worker', host, apiFor(readback),
+      code => failures.push(code));
+    assert.equal(unverified.size, 0, `tampered live result/CI evidence case ${caseIndex}`);
+    if (readback.expectedFailure)
+      assert.ok(failures.some(code => code.startsWith(readback.expectedFailure)),
+        `expected rejection ${readback.expectedFailure} for case ${caseIndex}; got ${failures.join(',')}`);
+    assert.equal(selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [],
+      new Map([[sourcePr, sourceSha]]), new Set(), unverified)?.id, 901,
+    `invalid live result/CI evidence case ${caseIndex} cannot suppress the duplicate`);
+  }
+  const mergedRunAcceptance = await readVerifiedCodexSourceAcceptances(
+    comments, ['t14210184'], 'worker', host, apiFor({ workflowPullRequestsEmpty: true }));
+  assert.equal(mergedRunAcceptance.size, 1,
+    'a merged run with an empty pull_requests field remains bound through its unique exact head-branch PR readback');
 });
 
 test('an equivalent schema-6 edit does not replay a model-executed attempt with unknown effects', () => {
@@ -1872,11 +2078,14 @@ test('the formal W2 V1 Codex acceptance format is parsed only from the canonical
     'spec_sha256=32ce0c12b911400317e0d5f07c12b5d961146731d56d6a57c57a27d259e8034d',
     'model=gemini-3.8-flash-high',
     'worker_diff_sha256=ec5cd249a76a47ba8407b937992ef390576b0cd8e010a9dba0c146bed3caa22a',
+    'worker_changed_files_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+    'worker_changed_files_count=1',
+    'worker_changed_file_tree_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
     'codex_patch_scope_review=PASS_EXACT_SINGLE_PATH_DIFF_MATCHES_TASK_SPEC',
     'result_pr=667',
     'result_head=a7f377c4bf7cdd5c4b9af165870bd435b60406d6',
     'result_pr_merge_commit=6cfe6986ff2a38c5f04bbc0db18b383863d9945c',
-    'trusted_exact_head_checks=check-native-only:SUCCESS;csg-trusted-verifier-hosted:SUCCESS;v2-native-windows:SUCCESS',
+    'trusted_exact_head_checks=check-native-only:SUCCESS:run-1101-attempt-1;csg-trusted-verifier-hosted:SUCCESS:run-1102-attempt-1;v2-native-windows:SUCCESS:run-1103-attempt-1',
     'source_acceptance=ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_RESULT_PR_667',
   ].join('\n');
   const comment = { ...com(920, acceptance),
@@ -3822,7 +4031,7 @@ test('OpenCode V2 edit intake captures exact scoped diff without treating exit z
     let processTreeState='DEAD',modelLaunches=0;
     const execute=async (request_id,target,content,resultOverrides={})=>executeOpenCodeTask('Make the assigned source edit.',
       config,makeJob(request_id),randomUUID(),{
-        qualifyOpenCodeV2:()=>({ready:true,bin:'fake-opencode-v2.exe',version:'2.0.27'}),
+        qualifyOpenCodeV2:()=>({ready:true,bin:'fake-opencode-v2.exe',version:'2.2.5'}),
         readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_RECORD_PRESENT'}),
         gitPlatform:'win32',
         readGitProcessTree:pid=>({state:processTreeState,root_pid:pid,
@@ -4535,6 +4744,67 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
     assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(fileFailureReceipt)).file_change_tool_failed_count,1);
 
     git(workspace,'checkout','--','src/worker.mjs');
+    for (const scenario of [
+      {name:'failed',state:'ERROR',outcome:'ANTIGRAVITY_EDIT_FILE_TOOL_FAILURES_NO_DIFF',
+        failureCount:1,incompleteCount:0},
+      {name:'incomplete',state:'ACTIVE',outcome:'ANTIGRAVITY_EDIT_FILE_TOOL_INCOMPLETE_NO_DIFF',
+        failureCount:0,incompleteCount:1},
+    ]) {
+      const session=`conv_antigravity_file_${scenario.name}_zero_diff_20261027`;
+      let launches=0;
+      const noDiff=await executeOpenCodeTask(`Synthetic; retain a zero-Diff ${scenario.name} file-tool result.`,
+        config,job,randomUUID(),{now:()=>now,baseEnv:env,localAppData,
+          runAntigravityV2Readiness:()=>readiness,
+          readGitProcessTree:pid=>({state:'DEAD',root_pid:pid,process_ids:[],census_complete:true,
+            observed_at:new Date(now).toISOString(),error:null}),
+          async runCapturedProcess(_bin,_args,options){
+            launches++;
+            const target=join(workspace,'src','worker.mjs');
+            const events=[
+              {event:'init',conversation_id:session,init:{model:ANTIGRAVITY_V2_MODEL,
+                cwd:workspace,permission_mode:'request-review'}},
+              {event:'step_update',step_update:{conversation_id:session,step_index:0,
+                state:'ACTIVE',step_type:'tool',tool_name:'write_to_file',
+                tool_info:{parameters:{TargetFile:target}}}},
+              ...(scenario.state==='ERROR' ? [{event:'step_update',step_update:{
+                conversation_id:session,step_index:0,state:'ERROR',step_type:'tool',
+                tool_name:'write_to_file',tool_info:{parameters:{TargetFile:target},
+                  error:{code:'WRITE_REJECTED'}}}}] : []),
+              {event:'result',result:{conversation_id:session,status:'SUCCESS',response:'',
+                usage:{input_tokens:12,output_tokens:3,thinking_tokens:0,cache_read_tokens:0,total_tokens:15}}},
+            ];
+            const out=Buffer.from(events.map(event=>JSON.stringify(event)).join('\n')+'\n');
+            const err=Buffer.alloc(0);
+            writeFileSync(options.stdoutPath,out,{flag:'wx'});
+            writeFileSync(options.stderrPath,err,{flag:'wx'});
+            const combined=createHash('sha256').update(out).update(Buffer.from('\n--- STDERR ---\n')).update(err).digest('hex');
+            return {outcome:'SYNTHETIC_PROCESS_EXITED',exit_code:0,evidence_sha256:combined,
+              evidence_bytes:out.length+Buffer.byteLength('\n--- STDERR ---\n'),local_evidence:{
+                stdout_file:basename(options.stdoutPath),stdout_sha256:createHash('sha256').update(out).digest('hex'),
+                stdout_bytes:out.length,stderr_file:basename(options.stderrPath),
+                stderr_sha256:createHash('sha256').update(err).digest('hex'),stderr_bytes:0,
+                termination_state:'NOT_REQUESTED'}};
+          }});
+      assert.equal(launches,1);
+      assert.equal(noDiff.outcome,scenario.outcome);
+      assert.equal(noDiff.cli_exit_code,0);
+      assert.equal(noDiff.exit_code,-1);
+      assert.equal(noDiff.file_change_tool_failed_count,scenario.failureCount);
+      assert.equal(noDiff.file_change_tool_incomplete_count,scenario.incompleteCount);
+      assert.equal(noDiff.tool_execution_failed_count,scenario.failureCount);
+      assert.equal(noDiff.tool_execution_incomplete_count,scenario.incompleteCount);
+      assert.deepEqual(noDiff.changed_files,[]);
+      assert.equal(noDiff.diff_bytes,0);
+      assert.equal(noDiff.task_acceptance,'UNKNOWN');
+      assert.equal(noDiff.external_effects,'UNKNOWN');
+      assert.equal(terminalStateForResult(noDiff),'BLOCKED');
+      const noDiffReceipt=receipt(job.request_id,randomUUID(),'BLOCKED',job,noDiff);
+      assert.equal(noDiffReceipt.outcome,scenario.outcome);
+      assert.equal(noDiffReceipt.task_acceptance,'UNKNOWN');
+      assert.equal(noDiffReceipt.external_effects,'UNKNOWN');
+      assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(noDiffReceipt)).outcome,scenario.outcome);
+    }
+
     const unrelatedWipPath=join(registeredProjectRoot,'registered-root-only.txt');
     const unrelatedWip='pre-existing unrelated registered-root WIP\n';
     writeFileSync(unrelatedWipPath,unrelatedWip);
@@ -4987,11 +5257,23 @@ test('captureScopedEditDiff captures the exact candidate root including tracked 
     const editPaths=['package.json','native-bridge/antigravity-quota.mjs',
       'tests/antigravity-quota.test.mjs'];
     const captured=await captureScopedEditDiff({workspace,state_dir:stateDir,
-      job:{kind:'antigravity_edit',request_id:'PTYSD_SYNTHETIC_ROOT_DIFF_20261023',
-        source_sha:sourceSha,edit_paths:editPaths},attempt_id:randomUUID()});
+      job:{schema:6,project_id:PROJECT,host:hostname().toUpperCase(),
+        kind:'antigravity_edit',request_id:'PTYSD_SYNTHETIC_ROOT_DIFF_20261023',
+        source_sha:sourceSha,source_pr:1,goal_comment_id:6188322050,
+        goal_body_sha256:hash,edit_paths:editPaths},attempt_id:randomUUID()});
     assert.equal(captured.scope_valid,true);
     assert.deepEqual(captured.changed_files,[...editPaths].sort());
+    assert.match(captured.changed_file_tree_sha256,/^[a-f0-9]{64}$/);
     assert.ok(captured.bytes>0);
+    const capturedReceipt=receipt('PTYSD_SYNTHETIC_ROOT_DIFF_20261023',randomUUID(),
+      'FINISHED',{schema:6,project_id:PROJECT,host:hostname().toUpperCase(),
+        kind:'antigravity_edit',source_sha:sourceSha,source_pr:1,goal_comment_id:6188322050,
+        goal_body_sha256:hash,edit_paths:editPaths,model:'gemini-3.8-flash-high',variant:'high'},
+      {outcome:'ANTIGRAVITY_EDIT_DIFF_CAPTURED_UNVERIFIED',exit_code:0,model_invoked:true,
+        source_diff_evidence:'CAPTURED',task_acceptance:'UNKNOWN',external_effects:'UNKNOWN',
+        diff_sha256:captured.sha256,diff_bytes:captured.bytes,...captured});
+    assert.equal(parseReceipt(RECEIPT_MARKER+JSON.stringify(capturedReceipt))
+      ?.changed_file_tree_sha256,captured.changed_file_tree_sha256);
     const patch=readFileSync(join(stateDir,captured.file),'utf8');
     for (const path of editPaths) assert.ok(patch.includes(path),`patch must include ${path}`);
   } finally { rmSync(home,{recursive:true,force:true}); }
@@ -5010,7 +5292,7 @@ test('OpenCode missing provider auth is recoverable WAITING and never launches t
     const result=await executeOpenCodeTask('Synthetic auth gate; no model use.',
       {workspace,state_dir:stateDir,enable_v2_model_runs:true,
         allowed_models:{'opencode/spark':['high']}},job,'00000000-0000-4000-8000-000000000021',{
-        qualifyOpenCodeV2:()=>({ready:true,bin:'fake-opencode-v2.exe',version:'2.0.27'}),
+        qualifyOpenCodeV2:()=>({ready:true,bin:'fake-opencode-v2.exe',version:'2.2.5'}),
         readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_RECORD_ABSENT'}),
         runCapturedProcess:async()=>{modelLaunches++;throw new Error('MODEL_LAUNCH_FORBIDDEN_IN_TEST');},
       });
@@ -5749,7 +6031,7 @@ fakeShellIntegration('V2 metadata task completes source-pinned GitHub receipts w
     const opencodeScript=[
       '#!/usr/bin/env node',
       'const fs=require("fs"),a=process.argv.slice(2);fs.appendFileSync(process.env.PROBE_CALLS,a.join(" ")+"\\n");',
-      'if(a.length===1&&a[0]==="--version")console.log("opencode v2.0.27");',
+      'if(a.length===1&&a[0]==="--version")console.log("opencode v2.2.5");',
       'else if(a[0]==="auth"&&a[1]==="list")console.log(JSON.stringify([{provider:"opencode",token:"PRIVATE_TOKEN_CANARY"}]));',
       'else if(a[0]==="models")console.log("opencode/spark-free");',
       'else process.exit(89);'
@@ -6615,7 +6897,7 @@ test('native preflight records Antigravity readiness without claiming model enti
       allowed_models:{},enable_v2_model_runs:false},
     mkjob({kind:'native_preflight',host:hostname().toUpperCase(),
       request_id:'PTYSD_ANTIGRAVITY_PREFLIGHT_20261018'}),{
-      qualifyOpenCodeV2:()=>({ready:true,candidates_checked:1,version:'2.0.32'}),
+      qualifyOpenCodeV2:()=>({ready:true,candidates_checked:1,version:'2.2.5'}),
       localAppData:join(root,'LOCALAPPDATA'),
       baseEnv:{PATH:'clean'},
       resolveAntigravityProjectId:(directory,env)=>{
