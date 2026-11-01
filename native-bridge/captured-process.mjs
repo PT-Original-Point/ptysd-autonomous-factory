@@ -165,16 +165,18 @@ export async function runCapturedProcess(command, args, {
   terminate = terminateProcessTree,
   platformName = platform(),
   readProcessTree = readWindowsProcessTree,
+  beforeSpawn = () => {},
   onSpawn = () => {},
 } = {}) {
   if (typeof command !== 'string' || !command || !Array.isArray(args) ||
       typeof cwd !== 'string' || !cwd || typeof stdoutPath !== 'string' ||
       typeof stderrPath !== 'string' || stdoutPath === stderrPath ||
-      typeof onSpawn !== 'function' ||
+      typeof beforeSpawn !== 'function' || typeof onSpawn !== 'function' ||
       (stdinText !== undefined && typeof stdinText !== 'string' && !Buffer.isBuffer(stdinText))) {
     throw new TypeError('CAPTURED_PROCESS_ARGUMENTS_INVALID');
   }
 
+  beforeSpawn();
   const child = spawnProcess(command, args, {
     cwd, env, shell: false, windowsHide: true,
     stdio: [stdinText === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
