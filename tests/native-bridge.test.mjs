@@ -1778,6 +1778,84 @@ test('a completed scoped edit suppresses only an exact duplicate request and lea
     ['t14210184']), null, 'acceptance without the exact Human GOAL binding fails closed');
 });
 
+test('an equivalent schema-6 edit does not replay a model-executed attempt with unknown effects', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = 'd'.repeat(40);
+  const sourcePr = 448;
+  const makeRequest = (requestId, overrides = {}) => withHumanGoal({
+    schema: 6, project_id: PROJECT, host, request_id: requestId,
+    kind: 'opencode_edit', source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/w1-no-diff-replay-guard.md', spec_sha256: hash,
+    model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+    edit_paths: ['native-bridge/worker.mjs'], source_pr: sourcePr, ...overrides,
+  });
+  const prior = makeRequest('W1_NO_DIFF_UNKNOWN_EFFECT_PRIOR');
+  const duplicate = makeRequest('W1_NO_DIFF_UNKNOWN_EFFECT_DUPLICATE');
+  const independent = makeRequest('W1_NO_DIFF_UNKNOWN_EFFECT_INDEPENDENT', {
+    spec_path: 'native-bridge/tasks/w1-independent-ready.md',
+    edit_paths: ['tests/operator-observation.test.mjs'],
+  });
+  const attemptId = '5c34b57d-d81f-4463-897b-1b5bd89ebaf1';
+  const blocked = receipt(prior.request_id, attemptId, 'BLOCKED', prior, {
+    outcome: 'V2_EDIT_NO_DIFF', exit_code: 47,
+    model_invoked: true, session_started: true,
+    session_id: 'ses_unknown_effect_attempt_20261101',
+    external_effects: 'UNKNOWN', source_diff_evidence: 'CAPTURED',
+    task_acceptance: 'UNKNOWN', coding_state: 'NO_DIFF', scope_valid: true,
+    diff_sha256: h(''), diff_bytes: 0, changed_files: [],
+    tool_execution_evidence: 'OBSERVED', tool_execution_count: 0,
+    file_change_tool_evidence: 'OBSERVED', file_change_tool_completed_count: 0,
+    file_change_tool_failed_count: 0, file_change_tool_incomplete_count: 0,
+  });
+  const jobComment = (id, job) => ({ ...com(id, encoded(job)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` });
+  const comments = [jobComment(941, prior), jobComment(942, duplicate),
+    jobComment(943, independent),
+    com(944, RECEIPT_MARKER + JSON.stringify(blocked), 'worker')];
+  const verifiedNoWriteAttemptKeys = new Set([`${prior.request_id}\0${attemptId}`]);
+
+  assert.equal(blocked.external_effects, 'UNKNOWN');
+  assert.equal(blocked.task_acceptance, 'UNKNOWN');
+  const selected = selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[sourcePr, sourceSha]]), verifiedNoWriteAttemptKeys);
+  assert.equal(selected?.id, 943,
+    'the exact duplicate stays blocked while non-overlapping READY work remains selectable');
+  assert.equal(comments.filter(comment => parseReceipt(comment.body)?.request_id === duplicate.request_id).length, 0,
+    'suppression does not fabricate or rewrite a Worker receipt');
+});
+
+test('an equivalent schema-6 edit may be retried only after explicit no-model no-effect evidence', () => {
+  const host = 'DESKTOP-1B6PD2P';
+  const sourceSha = 'e'.repeat(40);
+  const sourcePr = 449;
+  const makeRequest = requestId => withHumanGoal({
+    schema: 6, project_id: PROJECT, host, request_id: requestId,
+    kind: 'antigravity_edit', source_sha: sourceSha,
+    spec_path: 'native-bridge/tasks/w2-cli-preflight-no-model-retry.md', spec_sha256: hash,
+    model: 'gemini-3.8-flash-high', variant: 'high',
+    edit_paths: ['native-bridge/v2-readiness.mjs'], source_pr: sourcePr,
+  });
+  const prior = makeRequest('W2_PREFLIGHT_NO_EFFECT_PRIOR');
+  const retry = makeRequest('W2_PREFLIGHT_NO_EFFECT_RETRY');
+  const attemptId = '627ec5bc-7a8e-4b43-8900-dfa2e8cb0eb8';
+  const waiting = receipt(prior.request_id, attemptId, 'WAITING', prior, {
+    outcome: 'ANTIGRAVITY_QUOTA_EMPTY', model_invoked: false,
+    session_started: false, session_id: null, external_effects: 'NONE',
+    tool_execution_evidence: 'OBSERVED', tool_execution_count: 0,
+    file_change_tool_evidence: 'OBSERVED', file_change_tool_completed_count: 0,
+    file_change_tool_failed_count: 0, file_change_tool_incomplete_count: 0,
+  });
+  const comments = [
+    { ...com(951, encoded(prior)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    { ...com(952, encoded(retry)), issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    com(953, RECEIPT_MARKER + JSON.stringify(waiting), 'worker'),
+  ];
+  const selected = selectNext(comments, ['t14210184'], 'worker', host, sourceSha, [],
+    new Map([[sourcePr, sourceSha]]));
+  assert.equal(selected?.id, 952,
+    'a proven preflight wait with no model, session, tools, or external effects remains retryable');
+});
+
 test('the formal W2 V1 Codex acceptance format is parsed only from the canonical receipt issue', () => {
   const acceptance = [
     'PTYSD_V53R4_CODEX_SOURCE_ACCEPTANCE_V1',
