@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 import { runCapturedProcess } from '../native-bridge/captured-process.mjs';
@@ -21,8 +21,11 @@ import {
   executorResultPath, validateCodexExecutorResult,
 } from '../native-bridge/codex-continuation.mjs';
 import { buildCodexChildEnvironment, changedPaths, runCodex, runExecutorOnce, takeNextRequest } from '../native-bridge/codex-executor.mjs';
-import { codexTerminalReceipt, dispatchCodexJob, selectNext, selectNextWithCodexClaim,
-  reconcileCodexExecutorResult, terminalStateForResult, writeCodexReceiptOnce } from '../native-bridge/worker.mjs';
+import { ISSUE_TITLE, PROJECT, REPO, codexTerminalReceipt, dispatchCodexJob, parseJob,
+  parseReceipt, runWorker, selectNext, selectNextWithCodexClaim, reconcileCodexExecutorResult,
+  terminalStateForResult, writeCodexReceiptOnce } from '../native-bridge/worker.mjs';
+import { OPERATOR_COMMENT_ID, encodeOperatorObservation, parseOperatorObservation }
+  from '../native-bridge/operator-observation.mjs';
 
 test('Codex scoped-action preflight distinguishes missing, malformed, and ready Human instructions', () => {
   assert.deepEqual(codexScopedActionStatus('# Goal\nNo action section.'),
@@ -2427,4 +2430,306 @@ test('schema-4 Codex claim stays unresolved while the exact schema-6 W1 lane is 
     assert.deepEqual(readdirSync(dir), [`codex-claim-${historicalCodexJob.request_id}.json`],
       'the only local claim remains the untouched historical Codex claim');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runWorker dispatches the exact schema-6 W1 lane once while the schema-4 Codex gate waits', async () => {
+  const base = mkdtempSync(join(homedir(), 'pty-w1-schema6-lane-'));
+  const workspace = join(base, 'workspace');
+  const stateDir = join(base, 'state');
+  const spool = join(base, 'spool');
+  try {
+    mkdirSync(join(workspace, 'tests'), { recursive: true });
+    mkdirSync(stateDir, { recursive: true });
+    mkdirSync(spool, { recursive: true });
+
+    const host = hostname().toUpperCase();
+    const me = worker;
+    const mainSha = 'c'.repeat(40);
+    const candidateHeadSha = 'd'.repeat(40);
+    const sourcePr = 407;
+    const goalIssueUrl = `https://api.github.com/repos/${REPO}/issues/310`;
+    const issueUrl = `https://api.github.com/repos/${REPO}/issues/407`;
+
+    // Byte-pinned Human GOAL with a valid GOAL marker but no schema-4 Codex
+    // scoped-action section and no configured schema-4 Codex execution policy.
+    const currentGoalCommentId = 6188322050;
+    const currentGoalMarker = 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261101';
+    const currentGoalBody = `# PTYSD R4 delete-first autonomy GOAL\n${currentGoalMarker}\n\n` +
+      'Source-only regression. No unique Codex action section is present.\n';
+    assert.equal(currentGoalBody.includes('Codex 下一動作'), false);
+    assert.deepEqual(codexScopedActionStatus(currentGoalBody),
+      { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' },
+      'the schema-4 scoped-action gate stays blocked for the current GOAL bytes');
+    const currentGoalSha = createHash('sha256').update(currentGoalBody).digest('hex');
+    const currentGoalComment = { id: currentGoalCommentId, body: currentGoalBody,
+      user: { login: author }, issue_url: goalIssueUrl };
+
+    const historicalGoalCommentId = 6188322049;
+    const historicalGoalMarker = 'PTYSD_V53R4_R4_INDEPENDENT_LANE_HISTORICAL_20261020';
+    const historicalGoalBody = `# Historical schema-4 directive\n${historicalGoalMarker}\n\n` +
+      '**Codex 下一動作**：Repair the bounded historical source task.\n';
+    assert.equal(codexScopedActionStatus(historicalGoalBody).ready, true);
+    const historicalGoalSha = createHash('sha256').update(historicalGoalBody).digest('hex');
+    const historicalGoalComment = { id: historicalGoalCommentId, body: historicalGoalBody,
+      user: { login: author }, issue_url: goalIssueUrl };
+
+    const historicalCodexJob = job({ schema: 4, host, source_sha: mainSha,
+      request_id: `PTYSD_HUMAN_GOAL_${historicalGoalCommentId}_${
+        historicalGoalSha.slice(0, 42).toUpperCase()}`,
+      spec_path: CODEX_HUMAN_GOAL_SPEC_PATH,
+      spec_sha256: createHash('sha256').update('# Historical schema-4 task\n').digest('hex'),
+      write_paths: ['native-bridge/worker.mjs'], goal_comment_id: historicalGoalCommentId,
+      goal_body_sha256: historicalGoalSha, goal_author: author,
+      goal_marker: historicalGoalMarker });
+    assert.ok(parseCodexJob(body(historicalCodexJob)),
+      'the historical schema-4 fixture is a valid Codex job');
+    const claim = claimCodexAttempt(stateDir, historicalCodexJob,
+      '00000000-0000-4000-8000-0000000000a1');
+    assert.equal(claim.claimed, true);
+    const claimBytes = readFileSync(claim.path);
+    const historicalJobComment = { id: 6188322051, body: body(historicalCodexJob),
+      user: { login: author }, issue_url: issueUrl };
+
+    const w1CommentId = 6188322052;
+    const specPath = 'native-bridge/tasks/w1-independent-lane.md';
+    const specText = '# Schema-6 W1 independent lane task\n\nEdit only the reviewed test file.\n';
+    const w1Job = {
+      schema: 6, project_id: PROJECT, host,
+      request_id: 'PTYSD_W1_SCHEMA6_INDEPENDENT_LANE_20261101',
+      kind: 'opencode_edit', source_sha: candidateHeadSha,
+      spec_path: specPath,
+      spec_sha256: createHash('sha256').update(specText).digest('hex'),
+      model: 'opencode/deepseek-v4.1-flash-free', variant: null,
+      edit_paths: ['tests/codex-continuation.test.mjs'], source_pr: sourcePr,
+      goal_comment_id: currentGoalCommentId, goal_body_sha256: currentGoalSha,
+    };
+    assert.deepEqual(parseJob(body(w1Job)), w1Job,
+      'the single schema-6 W1 fixture is a valid, exactly keyed job');
+    const w1JobComment = { id: w1CommentId, body: body(w1Job),
+      user: { login: author }, issue_url: issueUrl };
+
+    const pull = {
+      number: sourcePr, state: 'open',
+      base: { ref: 'main', repo: { id: 1352411536, full_name: REPO } },
+      head: { sha: candidateHeadSha, repo: { id: 1352411536, full_name: REPO } },
+    };
+    assert.equal(w1Job.source_pr, pull.number);
+    assert.equal(w1Job.source_sha, pull.head.sha);
+    assert.equal(w1Job.goal_comment_id, currentGoalComment.id);
+    assert.equal(w1Job.goal_body_sha256, currentGoalSha);
+
+    const nowMs = Date.now();
+    const seedObservedAt = new Date(nowMs - 60_000).toISOString();
+    const seedExpiresAt = new Date(nowMs - 60_000 + 10 * 60_000).toISOString();
+    const seedSequence = 3;
+    const seedObservation = {
+      schema: 1, project_id: PROJECT, repo: REPO, issue: 407, host_alias: 'win11-primary',
+      snapshot_id: '00000000-0000-4000-8000-0000000000c0',
+      sequence: seedSequence, observed_at: seedObservedAt, expires_at: seedExpiresAt,
+      source: { kind: 'WIN11_NATIVE_TASK_READBACK', comment_id: OPERATOR_COMMENT_ID,
+        issue_comments_observed_at: seedObservedAt, main_sha: mainSha },
+      native_worker: { observed_at: seedObservedAt,
+        poll_disposition: 'NO_READY_JOB_NO_MODEL_DISPATCH', poll_wait_code: 'NOT_APPLICABLE',
+        state: 'UNKNOWN' },
+    };
+    const observationComment = { id: OPERATOR_COMMENT_ID, user: { login: me },
+      body: encodeOperatorObservation(seedObservation), updated_at: seedObservedAt,
+      issue_url: issueUrl };
+    const issueComments = [observationComment, historicalJobComment, w1JobComment];
+
+    const apiRead = uri => {
+      if (uri === 'user') return { login: me };
+      if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open',
+        pull_request: undefined, comments: issueComments.length };
+      if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: mainSha } };
+      if (uri === `repos/${REPO}/contents/${specPath}?ref=${candidateHeadSha}`)
+        return { encoding: 'base64', content: Buffer.from(specText, 'utf8').toString('base64') };
+      if (uri === `repos/${REPO}/issues/comments/${currentGoalCommentId}`) return currentGoalComment;
+      if (uri === `repos/${REPO}/issues/comments/${historicalGoalCommentId}`) return historicalGoalComment;
+      if (uri === `repos/${REPO}/issues/comments/${w1CommentId}`) return w1JobComment;
+      if (uri === `repos/${REPO}/pulls/${sourcePr}`) return pull;
+      throw new Error(`UNEXPECTED_API_READ_${uri}`);
+    };
+
+    const events = [];
+    const logs = [];
+    const receipts = [];
+    const executorDispatches = [];
+    const codexDispatches = [];
+    const bundleCalls = [];
+    let patchedObservationBody = null;
+    const fixedAttemptId = '00000000-0000-4000-8000-0000000000b1';
+    const bundleSha = createHash('sha256').update('synthetic source bundle').digest('hex');
+
+    const observationDependencies = {
+      now: () => new Date(nowMs),
+      collectWindowsObservation: () => ({ status: 'UNKNOWN',
+        observed_at: new Date(nowMs).toISOString(), native_task: { enabled: null },
+        opencode_process_count: null, runner_service_count: null, runner_service_running: null }),
+      collectRuntimeDeployment: () => ({
+        status: 'UNKNOWN', observed_at: new Date(nowMs).toISOString(),
+        bundle_sha256: createHash('sha256').update('runtime-deployment').digest('hex'),
+        component_sha256: Object.fromEntries([
+          'worker.mjs', 'opencode-v2.mjs', 'v2-readiness.mjs', 'codex-continuation.mjs',
+          'antigravity-quota.mjs', 'operator-observation.mjs', 'captured-process.mjs',
+          'safe-error-code.mjs', 'executor.mjs', 'windows-executor.mjs',
+        ].map(name => [name, null])),
+        reason_code: 'RUNTIME_FILES_UNAVAILABLE',
+      }),
+      readRunnerRegistration: () => ({ total_count: 0 }),
+      readComment: async id => {
+        assert.equal(id, OPERATOR_COMMENT_ID);
+        return observationComment;
+      },
+      patchComment: async (id, nextBody) => {
+        assert.equal(id, OPERATOR_COMMENT_ID);
+        observationComment.body = nextBody;
+        observationComment.updated_at = new Date(nowMs).toISOString();
+        patchedObservationBody = nextBody;
+        events.push('observation');
+      },
+      readComments: () => issueComments,
+    };
+
+    const descriptor = {
+      task_name: '\\PTYSD-OpenCode-Executor',
+      user_sid: 'S-1-5-21-1111111111-2222222222-3333333333-1001',
+      publisher_sid: 'S-1-5-21-1111111111-2222222222-3333333333-1002',
+      execution_phase: 'VM_ISOLATED',
+      source_bundle_per_attempt: true,
+      wscript_path: 'C:\\Windows\\System32\\wscript.exe',
+      launcher_path: 'C:\\PTYSD\\bin\\HiddenNodeLauncher.exe',
+      node_bin: 'C:\\Program Files\\nodejs\\node.exe',
+      script_path: 'C:\\PTYSD\\bin\\executor.mjs',
+      config_path: 'C:\\PTYSD\\config\\executor.json',
+      manifest_dir: 'C:\\PTYSD\\manifest',
+      results_dir: 'C:\\PTYSD\\results',
+      working_directory: 'C:\\PTYSD\\work',
+    };
+    const config = {
+      repo: REPO, project_id: PROJECT, host, issue: 407,
+      dispatchers: [author], workspace, state_dir: stateDir, codex_spool: spool,
+      enable_v2_model_runs: true,
+      allowed_models: { 'opencode/deepseek-v4.1-flash-free': [null] },
+      executor_lane: 'opencode', executor: descriptor,
+    };
+    assert.equal(config.human_goal_codex_policy, undefined,
+      'no schema-4 Codex execution policy is configured');
+
+    const result = await runWorker(config, {
+      apiRead,
+      commentsRead: () => issueComments,
+      goalCommentsRead: () => [historicalGoalComment, currentGoalComment],
+      writeReceipt: (_config, data, login) => {
+        assert.equal(login, me);
+        receipts.push(data);
+        events.push('receipt:STARTED');
+      },
+      assertCodexExecutorTaskReady: () => {
+        throw new Error('CODEX_TASK_READBACK_MUST_NOT_RUN');
+      },
+      assertExecutorTaskReady: () => ({ ready: true }),
+      readExecutorWorkspace: () => workspace,
+      createExecutorSourceBundle: ({ job: bundleJob }) => {
+        bundleCalls.push(bundleJob.request_id);
+        return { attempt_id: fixedAttemptId, source_sha: bundleJob.source_sha, sha256: bundleSha };
+      },
+      dispatchToExecutor: (usedDescriptor, request) => {
+        assert.equal(usedDescriptor, descriptor);
+        executorDispatches.push(request);
+        events.push('executor:dispatch');
+        return { outcome: 'EXECUTOR_REQUESTED_NOT_ACCEPTANCE' };
+      },
+      dispatchCodexJob: options => {
+        codexDispatches.push(options);
+        events.push('codex:dispatch');
+        throw new Error('CODEX_MUST_NOT_DISPATCH');
+      },
+      triggerPendingExecutorAttempt: () => {
+        throw new Error('PENDING_TRIGGER_MUST_NOT_RUN');
+      },
+      observationDependencies,
+      log: message => logs.push(message),
+    });
+
+    assert.deepEqual(result, { state: 'DISPATCHED',
+      request_id: w1Job.request_id, attempt_id: fixedAttemptId,
+      outcome: 'EXECUTOR_REQUESTED_NOT_ACCEPTANCE' });
+    assert.deepEqual(events, ['observation', 'receipt:STARTED', 'executor:dispatch'],
+      'the same poll observes, records STARTED, then dispatches exactly once');
+    assert.equal(codexDispatches.length, 0,
+      'the schema-4 Codex lane must not build or dispatch a request');
+    assert.equal(executorDispatches.length, 1, 'the W1 lane is dispatched exactly once');
+    assert.equal(receipts.length, 1, 'one W1 STARTED receipt is recorded');
+    assert.equal(bundleCalls.length, 1);
+    assert.equal(bundleCalls[0], w1Job.request_id);
+    assert.ok(logs.includes(
+      `HUMAN_GOAL_SCOPED_ACTION_MISSING_${currentGoalCommentId}_NO_MODEL`));
+    assert.ok(logs.includes(
+      `HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED_${currentGoalCommentId}_NO_MODEL`));
+    assert.ok(logs.includes(
+      `CODEX_LOCAL_CLAIM_UNRECONCILED_${historicalCodexJob.request_id}_NO_REPLAY`));
+    assert.ok(logs.includes(
+      `DISPATCHED_${w1Job.request_id}_EXECUTOR_REQUESTED_NOT_ACCEPTANCE`));
+    assert.equal(logs.some(message => message.startsWith('CODEX_EXECUTOR_REQUESTED')), false);
+    assert.equal(receipts.some(data => data.request_id === historicalCodexJob.request_id), false,
+      'the prior Codex request must not be replayed');
+
+    assert.ok(patchedObservationBody);
+    const observation = parseOperatorObservation(patchedObservationBody);
+    assert.ok(observation);
+    assert.equal(observation.native_worker.poll_disposition,
+      'READY_JOB_SELECTED_NOT_DISPATCHED');
+    assert.equal(observation.native_worker.poll_wait_code,
+      'HUMAN_GOAL_SCOPED_ACTION_MISSING');
+
+    const started = receipts[0];
+    assert.equal(started.schema, 1);
+    assert.equal(started.project_id, PROJECT);
+    assert.equal(started.host, host);
+    assert.equal(started.request_id, w1Job.request_id);
+    assert.equal(started.attempt_id, fixedAttemptId);
+    assert.equal(started.state, 'STARTED');
+    assert.equal(started.kind, 'opencode_edit');
+    assert.equal(started.source_sha, candidateHeadSha);
+    assert.equal(started.source_pr, sourcePr);
+    assert.equal(started.goal_comment_id, currentGoalCommentId);
+    assert.equal(started.goal_body_sha256, currentGoalSha);
+    assert.equal(started.edit_paths_sha256,
+      createHash('sha256').update(JSON.stringify(w1Job.edit_paths)).digest('hex'));
+    assert.equal(started.model, w1Job.model);
+    assert.equal(started.variant, null);
+    assert.equal(started.outcome, 'DISPATCH_ACK_NOT_ACCEPTANCE');
+    assert.equal(started.exit_code, null);
+    assert.equal(started.model_invoked, null);
+    assert.equal(started.session_id, null);
+    assert.equal(started.session_started, null);
+    assert.equal(started.task_acceptance, 'UNKNOWN');
+    assert.equal(started.external_effects, 'UNKNOWN');
+    assert.equal(started.source_diff_evidence, 'NOT_INSPECTED');
+    assert.equal(started.diff_sha256, null);
+    assert.equal(started.diff_bytes, null);
+    assert.equal(started.changed_files_sha256, null);
+    assert.equal(started.changed_files_count, null);
+    assert.equal(started.coding_state, 'UNVERIFIED');
+    assert.equal(started.scope_valid, null);
+    assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(started)),
+      'the STARTED receipt remains a valid native receipt');
+
+    const dispatched = executorDispatches[0];
+    assert.equal(dispatched.request_id, w1Job.request_id);
+    assert.equal(dispatched.attempt_id, fixedAttemptId);
+    assert.equal(dispatched.source_sha, candidateHeadSha);
+    assert.equal(dispatched.source_bundle_sha256, bundleSha);
+    assert.equal(dispatched.spec, specText);
+    assert.deepEqual(dispatched.job, w1Job);
+
+    assert.deepEqual(readFileSync(claim.path), claimBytes,
+      'the historical Codex claim remains byte-identical');
+    assert.deepEqual(readdirSync(stateDir), [`codex-claim-${historicalCodexJob.request_id}.json`],
+      'no W1 claim or other local artifact is created');
+    assert.equal(existsSync(join(stateDir, `codex-claim-${w1Job.request_id}.json`)), false);
+    assert.deepEqual(readdirSync(spool), [],
+      'the stubbed source bundle and dispatch must not write a Codex spool');
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });
