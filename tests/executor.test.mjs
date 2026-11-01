@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync,
+import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync,
   writeFileSync } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +16,7 @@ import {
   assertExecutorTaskReady, buildExecutorTaskXml, claimPendingManifest,
   candidateBundlePath, candidateWorkspacePath, cleanupExecutorAttempt,
   createExecutorSourceBundle, dispatchToExecutor, executorResultPath, makeExecutorManifest,
-  readExecutorWorkspace,
+  prepareExecutorAttempt, readExecutorWorkspace, readPendingExecutorAttempt,
   getCurrentWindowsSid, triggerPendingExecutorAttempt,
   executorTaskArguments, validateExecutorRoutingMap, validateExecutorTaskXml,
   validateWindowsTaskAction,
@@ -166,6 +166,9 @@ function fixture() {
   return { root, manifestDir, resultsDir, descriptor,
     currentSid: () => PUBLISHER_SID,
     readTaskXml: () => buildExecutorTaskXml(descriptor),
+    readTaskState: () => ({ task_name: 'OpenCodeExecutor', task_path: '\\PTYSD\\',
+      user_sid: descriptor.user_sid, logon_type: 'Password', run_level: 'Limited',
+      enabled: true, state: 'Ready' }),
     dispose: () => rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -285,6 +288,9 @@ test('WIN11_TRANSITION accepts the current publisher SID with an interactive tok
       currentSid: () => PUBLISHER_SID,
       filesystemPath: localPathMap(f),
       readTaskXml: () => xml,
+      readTaskState: () => ({ task_name: 'OpenCodeExecutor', task_path: '\\PTYSD\\',
+        user_sid: PUBLISHER_SID, logon_type: 'InteractiveToken', run_level: 'Limited',
+        enabled: true, state: 'Ready' }),
     }).ready, true);
     assert.throws(() => buildExecutorTaskXml({ ...descriptor, execution_phase: 'VM_ISOLATED' }),
       /EXECUTOR_IDENTITY_NOT_SEPARATE/);
@@ -325,13 +331,17 @@ test('WIN11_TRANSITION dispatch creates one pending manifest and triggers the ex
       execution_phase: 'WIN11_TRANSITION' };
     const xml = buildExecutorTaskXml(descriptor);
     const filesystemPath = localPathMap(f);
-    const job = modelJob('Make one bounded source edit in the authorized candidate workspace.');
+    const spec = 'Pinned synthetic task specification.';
+    const job = modelJob(spec);
     let starts = 0;
     const dispatched = dispatchToExecutor(descriptor, {
       request_id: job.request_id, attempt_id: ATTEMPT, source_sha: job.source_sha,
-      job, spec: 'Pinned synthetic task specification.',
+      job, spec,
     }, { currentSid: () => PUBLISHER_SID, filesystemPath,
       readTaskXml: taskName => { assert.equal(taskName, descriptor.task_name); return xml; },
+      readTaskState: () => ({ task_name: 'OpenCodeExecutor', task_path: '\\PTYSD\\',
+        user_sid: PUBLISHER_SID, logon_type: 'InteractiveToken', run_level: 'Limited',
+        enabled: true, state: 'Ready' }),
       runTask: taskName => { assert.equal(taskName, descriptor.task_name); starts++; } });
     assert.equal(dispatched.outcome, 'EXECUTOR_TASK_DISPATCHED_NOT_ACCEPTANCE');
     assert.equal(starts, 1);
@@ -387,14 +397,14 @@ test('dispatcher exclusive-creates one manifest and only starts the pre-read exe
   try {
     const filesystemPath = localPathMap(f);
     assert.deepEqual(assertExecutorTaskReady(f.descriptor, {
-      currentSid: f.currentSid, readTaskXml: f.readTaskXml, filesystemPath,
+      currentSid: f.currentSid, readTaskXml: f.readTaskXml, readTaskState: f.readTaskState, filesystemPath,
     }).mailbox, 'EMPTY');
     const spec = 'Review the public README and report observations only.';
     const job = modelJob(spec);
     let starts = 0;
     const result = dispatchToExecutor(f.descriptor, {
       request_id: job.request_id, attempt_id: ATTEMPT, source_sha: job.source_sha, job, spec,
-    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml, filesystemPath,
+    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml, readTaskState: f.readTaskState, filesystemPath,
       runTask: taskName => { assert.equal(taskName, f.descriptor.task_name); starts++; } });
     assert.equal(result.outcome, 'EXECUTOR_TASK_DISPATCHED_NOT_ACCEPTANCE');
     assert.equal(result.exit_code, 0);
@@ -408,7 +418,7 @@ test('dispatcher exclusive-creates one manifest and only starts the pre-read exe
     assert.throws(() => dispatchToExecutor(f.descriptor, {
       request_id: job.request_id, attempt_id: '00000000-0000-4000-8000-000000000002',
       source_sha: job.source_sha, job, spec,
-    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml, filesystemPath,
+    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml, readTaskState: f.readTaskState, filesystemPath,
       runTask: () => { starts++; } }), /EXECUTOR_ATTEMPT_UNRESOLVED/);
     assert.equal(starts, 1, 'a second job cannot overlap or replace an unresolved attempt');
   } finally { f.dispose(); }
@@ -424,14 +434,14 @@ test('unknown Task Scheduler start is retained as an unresolved attempt and is n
     const manifest = { request_id: job.request_id, attempt_id: ATTEMPT,
       source_sha: job.source_sha, job, spec };
     assert.throws(() => dispatchToExecutor(f.descriptor, manifest, {
-      currentSid: f.currentSid, readTaskXml: f.readTaskXml, filesystemPath,
+      currentSid: f.currentSid, readTaskXml: f.readTaskXml, readTaskState: f.readTaskState, filesystemPath,
       runTask: () => { starts++; throw new Error('native result ambiguous'); },
     }), /EXECUTOR_TASK_START_UNKNOWN/);
     assert.equal(starts, 1);
     assert.ok(readdirSync(f.manifestDir).includes(`${ATTEMPT}.pending.json`));
     assert.throws(() => dispatchToExecutor(f.descriptor, {
       ...manifest, attempt_id: '00000000-0000-4000-8000-000000000002',
-    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml, filesystemPath,
+    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml, readTaskState: f.readTaskState, filesystemPath,
       runTask: () => { starts++; } }), /EXECUTOR_ATTEMPT_UNRESOLVED/);
     assert.equal(starts, 1);
   } finally { f.dispose(); }
@@ -460,7 +470,7 @@ test('attempt source bundle pins one exact commit and is attached to the Task Sc
     const result = dispatchToExecutor(f.descriptor, {
       request_id: job.request_id, attempt_id: ATTEMPT, source_sha: job.source_sha, job, spec,
       source_bundle_sha256: bundle.sha256,
-    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml,
+    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml, readTaskState: f.readTaskState,
       filesystemPath: localPathMap(f), runTask: () => { starts++; } });
     assert.equal(starts, 1);
     assert.equal(result.attempt_id, ATTEMPT);
@@ -479,6 +489,7 @@ test('attempt source bundle pins one exact commit and is attached to the Task Sc
     const editDispatch=dispatchToExecutor(f.descriptor,{request_id:editJob.request_id,
       attempt_id:ATTEMPT_EDIT,source_sha:editJob.source_sha,job:editJob,spec,
       source_bundle_sha256:editBundle.sha256},{currentSid:f.currentSid,readTaskXml:f.readTaskXml,
+      readTaskState:f.readTaskState,
       filesystemPath:localPathMap(f),runTask:()=>{starts++;}});
     assert.equal(editDispatch.attempt_id,ATTEMPT_EDIT);
     const editPending=JSON.parse(readFileSync(join(f.manifestDir,`${ATTEMPT_EDIT}.pending.json`),'utf8'));
@@ -1501,8 +1512,25 @@ test('Worker integration publishes one STARTED receipt, dispatches the executor,
         comments.push({ id: nextId++, body, user: { login } });
       },
       assertExecutorTaskReady: descriptor => { verifyCalls++; assert.equal(descriptor, config.executor); },
-      dispatchToExecutor: (_descriptor, envelope) => {
+      readPendingExecutorAttempt: () => null,
+      prepareExecutorAttempt: (_descriptor, manifest) => {
+        const payload = makeExecutorManifest(manifest.job, manifest.spec, manifest.attempt_id,
+          manifest.source_bundle_sha256 ?? null);
+        return { outcome: 'EXECUTOR_ATTEMPT_PREPARED_NOT_DISPATCHED',
+          attempt_id: manifest.attempt_id,
+          manifest_sha256: createHash('sha256').update(JSON.stringify(payload)).digest('hex') };
+      },
+      triggerPendingExecutorAttempt: (descriptor, attemptId, identity) => {
+        assert.equal(identity.newAttempt, true);
+        assert.equal(identity.expectedJob.request_id, job.request_id);
+        assert.equal(identity.expectedSpec, spec);
+        assert.match(identity.expectedManifestSha256, /^[a-f0-9]{64}$/);
         dispatchCalls++;
+        assert.match(identity.source_bundle_sha256, /^[a-f0-9]{64}$/);
+        assert.ok(existsSync(candidateBundlePath(manifestDir, attemptId)));
+        return { outcome: 'EXECUTOR_TASK_DISPATCHED_NOT_ACCEPTANCE', exit_code: 0 };
+      },
+      dispatchToExecutor: (_descriptor, envelope) => {
         assert.equal(envelope.job.request_id, job.request_id);
         assert.equal(envelope.spec, spec);
         assert.match(envelope.source_bundle_sha256, /^[a-f0-9]{64}$/);
@@ -1527,6 +1555,110 @@ test('Worker integration publishes one STARTED receipt, dispatches the executor,
     assert.equal(dispatchCalls, 1, 'the same request remains blocked while its executor result is unknown');
     assert.equal(modelCalls, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Worker restart ignores an interrupted staging file and dispatches the same unstarted request', async () => {
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root, 'worker-partial-stage-recovery');
+    const spec = 'Bounded synthetic edit; test recovery without invoking a model.';
+    const job = { ...modelJob(spec), schema: 4,
+      request_id: 'PTYSD_WORKER_PARTIAL_STAGE_RECOVERY_20261102',
+      kind: 'opencode_edit', source_sha: source.sourceSha, edit_paths: ['README.md'],
+      host: hostname().toUpperCase() };
+    const comments = [{ id: 1, body: JOB_MARKER + JSON.stringify(job),
+      user: { login: 'dispatcher' } }];
+    let nextCommentId = 2;
+    let prepareCalls = 0;
+    let taskStarts = 0;
+    let modelCalls = 0;
+    const config = { repo: REPO, project_id: PROJECT, host: hostname().toUpperCase(), issue: 101,
+      workspace: source.workspace, state_dir: f.resultsDir, dispatchers: ['dispatcher'],
+      allowed_models: { 'opencode/spark': ['high'] }, enable_v2_model_runs: true,
+      executor: { ...f.descriptor, source_bundle_per_attempt: true } };
+    const executorDependencies = { currentSid: f.currentSid,
+      readTaskXml: f.readTaskXml, readTaskState: f.readTaskState,
+      filesystemPath: localPathMap(f) };
+    const adapters = {
+      apiRead(uri) {
+        if (uri === 'user') return { login: 'native-worker' };
+        if (uri.endsWith('/issues/101'))
+          return { title: '[PTYSD-NATIVE] OpenCode dispatch and receipts', state: 'open' };
+        if (uri.includes('/git/ref/heads/main')) return { object: { sha: source.sourceSha } };
+        const comment = uri.match(/\/issues\/comments\/(\d+)$/);
+        if (comment) return comments.find(item => item.id === Number(comment[1]));
+        if (uri.includes('/contents/')) return { encoding: 'base64',
+          content: Buffer.from(spec, 'utf8').toString('base64') };
+        throw new Error(`UNEXPECTED_API_READ_${uri}`);
+      },
+      commentsRead: () => comments,
+      goalCommentsRead: () => [],
+      assertExecutorTaskReady: () => ({ ready: true }),
+      readExecutorWorkspace: () => source.workspace,
+      createExecutorSourceBundle: options => createExecutorSourceBundle({
+        ...options, filesystemPath: localPathMap(f) }),
+      readPendingExecutorAttempt: (...args) => readPendingExecutorAttempt(...args,
+        executorDependencies),
+      prepareExecutorAttempt: (descriptor, manifest) => {
+        prepareCalls++;
+        const options = { ...executorDependencies };
+        if (prepareCalls === 1) options.writeFile = (path, bytes, writeOptions) => {
+          writeFileSync(path, bytes.subarray(0, Math.max(1, Math.floor(bytes.length / 2))), writeOptions);
+          const error = new Error('synthetic interruption before manifest publication');
+          error.code = 'EIO';
+          throw error;
+        };
+        return prepareExecutorAttempt(descriptor, manifest, options);
+      },
+      triggerPendingExecutorAttempt: (descriptor, attemptId, identity) =>
+        triggerPendingExecutorAttempt(descriptor, attemptId, { ...executorDependencies,
+          ...identity, runTask: taskName => {
+            assert.equal(taskName, f.descriptor.task_name);
+            taskStarts++;
+          } }),
+      writeReceipt: (_workerConfig, value, login) => {
+        if (value.state === 'STARTED') {
+          const published = join(f.manifestDir, `${value.attempt_id}.pending.json`);
+          const bytes = readFileSync(published);
+          assert.equal(createHash('sha256').update(bytes).digest('hex'),
+            value.executor_manifest_sha256,
+            'the exact flushed manifest is readable before the STARTED receipt is written');
+          assert.equal(JSON.parse(bytes.toString('utf8')).request_id, job.request_id);
+        }
+        comments.push({ id: nextCommentId++, body: RECEIPT_MARKER + JSON.stringify(value),
+          user: { login } });
+      },
+      runPlan: async () => { modelCalls++; throw new Error('MODEL_MUST_NOT_RUN_IN_WORKER_TEST'); },
+      log: () => {},
+    };
+
+    await assert.rejects(runWorker(config, adapters), error => error.code === 'EIO');
+    const partialStage = readdirSync(f.manifestDir).find(name => name.endsWith('.pending-stage'));
+    assert.ok(partialStage, 'the interrupted bytes remain outside the active mailbox namespace');
+    const interruptedAttemptId = partialStage.match(/^\.([a-f0-9-]{36})\./i)?.[1];
+    assert.ok(interruptedAttemptId);
+    assert.equal(readdirSync(f.manifestDir).some(name => name.endsWith('.pending.json')), false);
+    assert.equal(comments.filter(item => parseReceipt(item.body)?.state === 'STARTED').length, 0,
+      'Worker does not publish STARTED before a complete manifest exists');
+    assert.equal(taskStarts, 0);
+    assert.equal(modelCalls, 0);
+
+    const recovered = await runWorker(config, adapters);
+    assert.equal(recovered.state, 'DISPATCHED');
+    const started = comments.map(item => parseReceipt(item.body)).filter(item => item?.state === 'STARTED');
+    assert.equal(started.length, 1);
+    assert.equal(started[0].request_id, job.request_id,
+      'the same queued request proceeds after process restart');
+    assert.notEqual(started[0].attempt_id, interruptedAttemptId,
+      'the never-started partial write is not replayed as an attempt');
+    assert.match(started[0].executor_manifest_sha256, /^[a-f0-9]{64}$/);
+    const published = join(f.manifestDir, `${started[0].attempt_id}.pending.json`);
+    assert.equal(createHash('sha256').update(readFileSync(published)).digest('hex'),
+      started[0].executor_manifest_sha256);
+    assert.equal(taskStarts, 1);
+    assert.equal(modelCalls, 0);
+    assert.equal(readdirSync(f.manifestDir).filter(name => name.endsWith('.pending.json')).length, 1);
+  } finally { f.dispose(); }
 });
 
 test('source-bundle qualification failure leaves OpenCode unstarted and allows an independent ping', async () => {
@@ -1738,8 +1870,10 @@ test('pending OpenCode recovery triggers only the exact same attempt and refuses
     const originalBytes = Buffer.from(JSON.stringify(manifest));
     writeFileSync(pendingPath, originalBytes, { flag: 'wx' });
     let starts = 0;
-    const dependencies = { expectedJob: job, currentSid: f.currentSid,
-      readTaskXml: f.readTaskXml, filesystemPath,
+    const dependencies = { expectedJob: job, expectedSpec: spec,
+      expectedManifestSha256: createHash('sha256').update(originalBytes).digest('hex'),
+      currentSid: f.currentSid,
+      readTaskXml: f.readTaskXml, readTaskState: f.readTaskState, filesystemPath,
       runTask: taskName => { assert.equal(taskName, f.descriptor.task_name); starts++; } };
 
     const result = triggerPendingExecutorAttempt(f.descriptor, ATTEMPT, dependencies);
@@ -1752,8 +1886,272 @@ test('pending OpenCode recovery triggers only the exact same attempt and refuses
 
     assert.equal(claimPendingManifest(f.manifestDir), join(f.manifestDir, `${ATTEMPT}.running.json`));
     assert.throws(() => triggerPendingExecutorAttempt(f.descriptor, ATTEMPT, dependencies),
-      /EXECUTOR_ATTEMPT_NOT_EXACT_PENDING/);
+      /EXECUTOR_ATTEMPT_ALREADY_RUNNING/);
     assert.equal(starts, 1, 'an attempt already claimed by the executor is never started again');
+  } finally { f.dispose(); }
+});
+
+test('missing pending manifest is a fail-closed no-replay result', () => {
+  const f = fixture();
+  try {
+    const spec = 'Synthetic missing-manifest recovery; never invoke a model.';
+    const job = { ...modelJob(spec), schema: 4, kind: 'opencode_edit',
+      request_id: 'PTYSD_EXECUTOR_MISSING_PENDING_RECOVERY_20261102', edit_paths: ['README.md'] };
+    let starts = 0;
+    assert.throws(() => triggerPendingExecutorAttempt(f.descriptor, ATTEMPT, {
+      expectedJob: job, expectedSpec: spec,
+      expectedManifestSha256: createHash('sha256').update(JSON.stringify(
+        makeExecutorManifest(job, spec, ATTEMPT))).digest('hex'),
+      currentSid: f.currentSid, readTaskXml: f.readTaskXml, readTaskState: f.readTaskState,
+      filesystemPath: localPathMap(f),
+      runTask: () => { starts++; },
+    }), error => error.code === 'EXECUTOR_PENDING_MANIFEST_MISSING');
+    assert.deepEqual(readdirSync(f.manifestDir), [],
+      'recovery never manufactures a replacement manifest for an ambiguous attempt');
+    assert.equal(starts, 0, 'missing durable work identity never starts Task Scheduler');
+  } finally { f.dispose(); }
+});
+
+test('pending recovery rejects a changed spec or manifest fingerprint before task start', () => {
+  const f = fixture();
+  try {
+    const filesystemPath = localPathMap(f);
+    const spec = 'Synthetic exact-spec recovery; no model invocation.';
+    const job = { ...modelJob(spec), schema: 4, kind: 'opencode_edit',
+      request_id: 'PTYSD_EXECUTOR_SPEC_FINGERPRINT_20261102', edit_paths: ['README.md'] };
+    const bytes = Buffer.from(JSON.stringify(makeExecutorManifest(job, spec, ATTEMPT)));
+    writeFileSync(join(f.manifestDir, `${ATTEMPT}.pending.json`), bytes, { flag: 'wx' });
+    let starts = 0;
+    const base = { expectedJob: job, expectedSpec: spec,
+      expectedManifestSha256: createHash('sha256').update(bytes).digest('hex'),
+      currentSid: f.currentSid, readTaskXml: f.readTaskXml, readTaskState: f.readTaskState, filesystemPath,
+      runTask: () => { starts++; } };
+    assert.throws(() => triggerPendingExecutorAttempt(f.descriptor, ATTEMPT,
+      { ...base, expectedSpec: 'changed spec' }), /EXECUTOR_EXPECTED_SPEC_HASH_MISMATCH/);
+    assert.throws(() => triggerPendingExecutorAttempt(f.descriptor, ATTEMPT,
+      { ...base, expectedManifestSha256: 'f'.repeat(64) }), /EXECUTOR_PENDING_MANIFEST_HASH_MISMATCH/);
+    assert.equal(starts, 0, 'identity mismatch never starts Task Scheduler');
+  } finally { f.dispose(); }
+});
+
+test('executor prepares an immutable attempt manifest before Task Scheduler is started', () => {
+  const f = fixture();
+  try {
+    const spec = 'Synthetic write-ahead executor intent; never invoke a model.';
+    const job = { ...modelJob(spec), schema: 4, kind: 'opencode_edit',
+      request_id: 'PTYSD_EXECUTOR_PREPARED_INTENT_20261102', edit_paths: ['README.md'] };
+    let starts = 0;
+    const prepared = prepareExecutorAttempt(f.descriptor, {
+      request_id: job.request_id, attempt_id: ATTEMPT, source_sha: job.source_sha, job, spec,
+    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml, readTaskState: f.readTaskState,
+      filesystemPath: localPathMap(f), runTask: () => { starts++; } });
+    const pendingPath = join(f.manifestDir, `${ATTEMPT}.pending.json`);
+    const bytes = readFileSync(pendingPath);
+    assert.equal(prepared.outcome, 'EXECUTOR_ATTEMPT_PREPARED_NOT_DISPATCHED');
+    assert.equal(prepared.attempt_id, ATTEMPT);
+    assert.equal(prepared.manifest_sha256, createHash('sha256').update(bytes).digest('hex'));
+    assert.deepEqual(JSON.parse(bytes.toString('utf8')),
+      makeExecutorManifest(job, spec, ATTEMPT));
+    assert.equal(starts, 0, 'preparing the write-ahead intent does not run the task');
+  } finally { f.dispose(); }
+});
+
+test('interrupted staging never becomes pending and does not block a later exact attempt', () => {
+  const f = fixture();
+  try {
+    const filesystemPath = localPathMap(f);
+    const firstSpec = 'Synthetic interrupted manifest staging; never invoke a model.';
+    const firstJob = { ...modelJob(firstSpec), schema: 4, kind: 'opencode_edit',
+      request_id: 'PTYSD_EXECUTOR_INTERRUPTED_STAGE_20261102', edit_paths: ['README.md'] };
+    const firstManifest = { request_id: firstJob.request_id, attempt_id: ATTEMPT,
+      source_sha: firstJob.source_sha, job: firstJob, spec: firstSpec };
+    let starts = 0;
+    const interruptedWrite = (path, bytes, options) => {
+      writeFileSync(path, bytes.subarray(0, Math.max(1, Math.floor(bytes.length / 2))), options);
+      const error = new Error('simulated process interruption during manifest write');
+      error.code = 'EIO';
+      throw error;
+    };
+    const common = { currentSid: f.currentSid, readTaskXml: f.readTaskXml,
+      readTaskState: f.readTaskState, filesystemPath, runTask: () => { starts++; } };
+    assert.throws(() => dispatchToExecutor(f.descriptor, firstManifest,
+      { ...common, writeFile: interruptedWrite }), error => error.code === 'EIO');
+    assert.equal(starts, 0, 'a partial staging write never starts the Executor task');
+    const afterInterruption = readdirSync(f.manifestDir);
+    assert.equal(afterInterruption.filter(name => name.endsWith('.pending.json')).length, 0,
+      'an interrupted write never publishes the active mailbox filename');
+    assert.equal(afterInterruption.filter(name => name.endsWith('.pending-stage')).length, 1,
+      'the partial staging file remains available as local failure evidence');
+    assert.equal(readPendingExecutorAttempt(f.descriptor, firstJob, firstSpec, {
+      currentSid: f.currentSid, filesystemPath, readTaskXml: f.readTaskXml,
+      readTaskState: f.readTaskState,
+    }), null, 'the incomplete staging file is not treated as an executor attempt');
+
+    const nextSpec = 'A later independent attempt can use the empty mailbox.';
+    const nextJob = { ...modelJob(nextSpec), schema: 4, kind: 'opencode_edit',
+      request_id: 'PTYSD_EXECUTOR_AFTER_INTERRUPTED_STAGE_20261102', edit_paths: ['README.md'] };
+    const next = dispatchToExecutor(f.descriptor, {
+      request_id: nextJob.request_id, attempt_id: ATTEMPT_EDIT,
+      source_sha: nextJob.source_sha, job: nextJob, spec: nextSpec,
+    }, common);
+    assert.equal(next.attempt_id, ATTEMPT_EDIT);
+    assert.equal(starts, 1, 'only the later complete manifest triggers Task Scheduler');
+    assert.ok(readdirSync(f.manifestDir).includes(`${ATTEMPT_EDIT}.pending.json`));
+    assert.equal(readdirSync(f.manifestDir).filter(name => name.endsWith('.pending.json')).length, 1);
+  } finally { f.dispose(); }
+});
+
+test('pending publication refuses to overwrite a manifest created by a competing writer', () => {
+  const f = fixture();
+  try {
+    const spec = 'Synthetic concurrent manifest publication; never invoke a model.';
+    const job = { ...modelJob(spec), schema: 4, kind: 'opencode_edit',
+      request_id: 'PTYSD_EXECUTOR_CONCURRENT_PUBLICATION_20261102', edit_paths: ['README.md'] };
+    const competingBytes = Buffer.from('preexisting competing manifest');
+    const pendingPath = join(f.manifestDir, `${ATTEMPT}.pending.json`);
+    let starts = 0;
+    const publishCompetingManifestAfterStage = (stagingPath, bytes, options) => {
+      writeFileSync(stagingPath, bytes, options);
+      writeFileSync(pendingPath, competingBytes, { flag: 'wx' });
+    };
+    assert.throws(() => dispatchToExecutor(f.descriptor, {
+      request_id: job.request_id, attempt_id: ATTEMPT, source_sha: job.source_sha, job, spec,
+    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml,
+      readTaskState: f.readTaskState, filesystemPath: localPathMap(f),
+      writeFile: publishCompetingManifestAfterStage, runTask: () => { starts++; } }),
+    error => error.code === 'EXECUTOR_PENDING_MANIFEST_ALREADY_EXISTS');
+    assert.deepEqual(readFileSync(pendingPath), competingBytes,
+      'atomic publication leaves the competing pending manifest byte-for-byte unchanged');
+    assert.equal(starts, 0, 'a failed no-overwrite publication never starts Task Scheduler');
+  } finally { f.dispose(); }
+});
+
+test('pending manifest data is flushed before the atomic mailbox entry is published', () => {
+  const f = fixture();
+  try {
+    const spec = 'Synthetic flush ordering; never invoke a model.';
+    const job = { ...modelJob(spec), schema: 4, kind: 'opencode_edit',
+      request_id: 'PTYSD_EXECUTOR_MANIFEST_FLUSH_ORDER_20261102', edit_paths: ['README.md'] };
+    const order = [];
+    const prepared = prepareExecutorAttempt(f.descriptor, { request_id: job.request_id,
+      attempt_id: ATTEMPT, source_sha: job.source_sha, job, spec }, {
+      currentSid: f.currentSid, readTaskXml: f.readTaskXml, readTaskState: f.readTaskState,
+      filesystemPath: localPathMap(f),
+      flushFile: path => { assert.ok(path.endsWith('.pending-stage')); order.push('flush'); },
+      linkFile: (staging, pending) => {
+        assert.equal(order.at(-1), 'flush', 'staging bytes flush before mailbox publication');
+        order.push('link');
+        linkSync(staging, pending);
+      },
+    });
+    assert.deepEqual(order, ['flush', 'link']);
+    assert.equal(prepared.outcome, 'EXECUTOR_ATTEMPT_PREPARED_NOT_DISPATCHED');
+    assert.ok(existsSync(join(f.manifestDir, `${ATTEMPT}.pending.json`)));
+  } finally { f.dispose(); }
+});
+
+test('unsupported atomic publication fails closed and removes only its staging file', () => {
+  const f = fixture();
+  try {
+    const spec = 'Synthetic unsupported filesystem; never invoke a model.';
+    const job = { ...modelJob(spec), schema: 4, kind: 'opencode_edit',
+      request_id: 'PTYSD_EXECUTOR_MANIFEST_ATOMIC_UNAVAILABLE_20261102', edit_paths: ['README.md'] };
+    let starts = 0;
+    assert.throws(() => dispatchToExecutor(f.descriptor, {
+      request_id: job.request_id, attempt_id: ATTEMPT, source_sha: job.source_sha, job, spec,
+    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml,
+      readTaskState: f.readTaskState, filesystemPath: localPathMap(f),
+      linkFile: () => { const error = new Error('synthetic unsupported hard link');
+        error.code = 'ENOTSUP'; throw error; }, runTask: () => { starts++; } }),
+    error => error.code === 'EXECUTOR_PENDING_MANIFEST_ATOMIC_PUBLISH_UNAVAILABLE');
+    assert.equal(starts, 0, 'unsupported atomic publication never starts Task Scheduler');
+    const names = readdirSync(f.manifestDir);
+    assert.equal(names.some(name => name.endsWith('.pending.json')), false);
+    assert.equal(names.some(name => name.endsWith('.pending-stage')), false,
+      'a definitively unsupported publication does not leave a staged retry behind');
+  } finally { f.dispose(); }
+});
+
+test('atomic publication retains fixed permission and disk errors separately from unsupported filesystems', () => {
+  const f = fixture();
+  try {
+    for (const [index, [systemCode, expected]] of [
+      ['EACCES', 'EXECUTOR_PENDING_MANIFEST_LINK_EACCES'],
+      ['ENOSPC', 'EXECUTOR_PENDING_MANIFEST_LINK_ENOSPC'],
+    ].entries()) {
+      const spec = `Synthetic ${systemCode} link error; never invoke a model.`;
+      const job = { ...modelJob(spec), schema: 4, kind: 'opencode_edit',
+        request_id: `PTYSD_EXECUTOR_MANIFEST_LINK_${systemCode}_20261102`, edit_paths: ['README.md'] };
+      const attemptId = index === 0 ? ATTEMPT : ATTEMPT_EDIT;
+      assert.throws(() => dispatchToExecutor(f.descriptor, {
+        request_id: job.request_id, attempt_id: attemptId, source_sha: job.source_sha, job, spec,
+      }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml,
+        readTaskState: f.readTaskState, filesystemPath: localPathMap(f),
+        linkFile: () => { const error = new Error('synthetic OS link failure');
+          error.code = systemCode; throw error; },
+        runTask: () => assert.fail('a link failure cannot start Task Scheduler') }),
+      error => error.code === expected);
+    }
+    assert.equal(readdirSync(f.manifestDir).some(name => name.endsWith('.pending.json')), false);
+    assert.equal(readdirSync(f.manifestDir).some(name => name.endsWith('.pending-stage')), false);
+  } finally { f.dispose(); }
+});
+
+test('manifest flush failure prevents publication and Task Scheduler start', () => {
+  const f = fixture();
+  try {
+    const spec = 'Synthetic durability barrier failure; never invoke a model.';
+    const job = { ...modelJob(spec), schema: 4, kind: 'opencode_edit',
+      request_id: 'PTYSD_EXECUTOR_MANIFEST_FLUSH_FAILURE_20261102', edit_paths: ['README.md'] };
+    let starts = 0;
+    assert.throws(() => dispatchToExecutor(f.descriptor, {
+      request_id: job.request_id, attempt_id: ATTEMPT, source_sha: job.source_sha, job, spec,
+    }, { currentSid: f.currentSid, readTaskXml: f.readTaskXml,
+      readTaskState: f.readTaskState, filesystemPath: localPathMap(f),
+      flushFile: () => { throw new Error('synthetic fsync failure'); },
+      runTask: () => { starts++; } }),
+    error => error.code === 'EXECUTOR_PENDING_MANIFEST_STAGING_FLUSH_FAILED');
+    assert.equal(starts, 0);
+    assert.equal(readdirSync(f.manifestDir).some(name => name.endsWith('.pending.json')), false);
+    assert.equal(readdirSync(f.manifestDir).filter(name => name.endsWith('.pending-stage')).length, 1,
+      'the staged file remains outside the active mailbox for diagnosis');
+  } finally { f.dispose(); }
+});
+
+test('pending recovery accepts only the exact unchanged manifest and leaves its attempt untouched', () => {
+  const f = fixture();
+  try {
+    const filesystemPath = localPathMap(f);
+    const spec = 'Resume the exact prepared edit attempt; do not create another attempt.';
+    const job = { ...modelJob(spec), schema: 4, kind: 'opencode_edit',
+      request_id: 'PTYSD_EXECUTOR_PENDING_RESTART_20261102', edit_paths: ['README.md'] };
+    const empty = readPendingExecutorAttempt(f.descriptor, job, spec, {
+      currentSid: f.currentSid, filesystemPath, readTaskXml: f.readTaskXml,
+      readTaskState: f.readTaskState,
+    });
+    assert.equal(empty, null);
+
+    const manifest = makeExecutorManifest(job, spec, ATTEMPT);
+    const bytes = Buffer.from(JSON.stringify(manifest));
+    writeFileSync(join(f.manifestDir, `${ATTEMPT}.pending.json`), bytes, { flag: 'wx' });
+    const recovered = readPendingExecutorAttempt(f.descriptor, job, spec, {
+      currentSid: f.currentSid, filesystemPath, readTaskXml: f.readTaskXml,
+      readTaskState: f.readTaskState,
+    });
+    assert.deepEqual(recovered, { attempt_id: ATTEMPT,
+      manifest_sha256: createHash('sha256').update(bytes).digest('hex'),
+      source_bundle_sha256: null });
+    assert.deepEqual(readdirSync(f.manifestDir), [`${ATTEMPT}.pending.json`],
+      'readback does not consume, rewrite, or start the pending attempt');
+    assert.throws(() => readPendingExecutorAttempt(f.descriptor,
+      { ...job, source_sha: 'f'.repeat(40) }, spec, {
+        currentSid: f.currentSid, filesystemPath, readTaskXml: f.readTaskXml,
+        readTaskState: f.readTaskState,
+      }), /EXECUTOR_PENDING_MANIFEST_IDENTITY_MISMATCH/);
+    assert.throws(() => readPendingExecutorAttempt(f.descriptor, job, `${spec} changed`, {
+      currentSid: f.currentSid, filesystemPath, readTaskXml: f.readTaskXml,
+      readTaskState: f.readTaskState,
+    }), /EXECUTOR_EXPECTED_PENDING_ATTEMPT_IDENTITY_INVALID/);
   } finally { f.dispose(); }
 });
 
