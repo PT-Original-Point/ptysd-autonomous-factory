@@ -13,9 +13,9 @@ test('Windows V2 discovery finds and signature-checks the per-user APPDATA Deskt
   const tmp=mkdtempSync(join(tmpdir(),'oc2-appdata-cli-'));
   try {
     const home=join(tmp,'user'), appData=join(tmp,'roaming');
-    const exe=join(appData,'ai.opencode.desktop','cli','2.0.32-x64','opencode-cli.exe');
+    const exe=join(appData,'ai.opencode.desktop','cli','2.2.5-x64','opencode-cli.exe');
     mkdirSync(home);
-    mkdirSync(join(appData,'ai.opencode.desktop','cli','2.0.32-x64'),{recursive:true});
+    mkdirSync(join(appData,'ai.opencode.desktop','cli','2.2.5-x64'),{recursive:true});
     writeFileSync(exe,'synthetic executable');
     const env={PATH:'',USERPROFILE:home,APPDATA:appData};
     assert.deepEqual(discoverV2Executables(env,true),[exe]);
@@ -23,7 +23,7 @@ test('Windows V2 discovery finds and signature-checks the per-user APPDATA Deskt
     const calls=[];
     const result=qualifyOpenCodeV2(env,true,(path,args)=>{
       calls.push(['version',path,args]);
-      return 'opencode v2.0.32';
+      return 'opencode v2.2.5';
     },path=>{
       calls.push(['signature',path]);
       return path===exe;
@@ -58,13 +58,13 @@ test('Windows V2 APPDATA candidates are not version-probed unless Authenticode p
   const tmp=mkdtempSync(join(tmpdir(),'oc2-appdata-signature-'));
   try {
     const home=join(tmp,'user'), appData=join(tmp,'roaming');
-    const exe=join(appData,'ai.opencode.desktop','cli','2.0.32-x64','opencode-cli.exe');
+    const exe=join(appData,'ai.opencode.desktop','cli','2.2.5-x64','opencode-cli.exe');
     mkdirSync(home);
-    mkdirSync(join(appData,'ai.opencode.desktop','cli','2.0.32-x64'),{recursive:true});
+    mkdirSync(join(appData,'ai.opencode.desktop','cli','2.2.5-x64'),{recursive:true});
     writeFileSync(exe,'synthetic executable');
     const calls=[];
     const result=qualifyOpenCodeV2({PATH:'',USERPROFILE:home,APPDATA:appData},true,
-      (path,args)=>{calls.push(['version',path,args]);return 'opencode v2.0.32';},
+      (path,args)=>{calls.push(['version',path,args]);return 'opencode v2.2.5';},
       path=>{calls.push(['signature',path]);return false;});
     assert.equal(result.ready,false);
     assert.deepEqual(calls,[['signature',exe]],
@@ -72,19 +72,19 @@ test('Windows V2 APPDATA candidates are not version-probed unless Authenticode p
   } finally {rmSync(tmp,{recursive:true,force:true});}
 });
 
-test('Windows V2 skips an unsigned newer APPDATA CLI, falls back to an older signed CLI, and does not launch a model', async () => {
+test('Windows V2 skips an unsigned newer APPDATA CLI and rejects an older signed CLI before auth or model use', async () => {
   const tmp=mkdtempSync(join(tmpdir(),'oc2-appdata-signed-fallback-'));
   try {
     const home=join(tmp,'user'), appData=join(tmp,'roaming');
     const workspace=join(tmp,'workspace'), stateDir=join(tmp,'state');
     const cliRoot=join(appData,'ai.opencode.desktop','cli');
-    const newer=join(cliRoot,'2.1.3-x64','opencode-cli.exe');
-    const older=join(cliRoot,'2.1.2-x64','opencode-cli.exe');
+    const newer=join(cliRoot,'2.2.6-x64','opencode-cli.exe');
+    const older=join(cliRoot,'2.2.4-x64','opencode-cli.exe');
     mkdirSync(home);
     mkdirSync(workspace);
     mkdirSync(stateDir);
-    mkdirSync(join(cliRoot,'2.1.3-x64'),{recursive:true});
-    mkdirSync(join(cliRoot,'2.1.2-x64'),{recursive:true});
+    mkdirSync(join(cliRoot,'2.2.6-x64'),{recursive:true});
+    mkdirSync(join(cliRoot,'2.2.4-x64'),{recursive:true});
     writeFileSync(newer,'synthetic untrusted executable');
     writeFileSync(older,'synthetic signed executable');
 
@@ -103,7 +103,7 @@ test('Windows V2 skips an unsigned newer APPDATA CLI, falls back to an older sig
       config,job,'55555555-5555-4555-8555-555555555555',{
         qualifyOpenCodeV2:()=>qualifyOpenCodeV2(env,true,(path,args)=>{
           versionCalls.push([path,args]);
-          return 'opencode v2.1.2';
+          return 'opencode v2.2.4';
         },path=>{
           signatureCalls.push(path);
           return path===older;
@@ -122,11 +122,11 @@ test('Windows V2 skips an unsigned newer APPDATA CLI, falls back to an older sig
       });
 
     assert.deepEqual(signatureCalls,[newer,older],
-      'newest APPDATA candidate is rejected before falling back to the older signed CLI');
+      'newer unsigned candidate is skipped and the older signed candidate is evaluated next');
     assert.deepEqual(versionCalls,[[older,['--version']]],
       'the untrusted newer candidate must never receive a --version call');
-    assert.equal(authCalls,1);
-    assert.equal(result.outcome,'OPENCODE_V2_AUTH_METADATA_UNKNOWN');
+    assert.equal(authCalls,0,'an older signed CLI is rejected before provider metadata access');
+    assert.equal(result.outcome,'OPENCODE_V2_CLI_VERSION_POLICY_REJECTED');
     assert.equal(result.eligibility_state,'WAITING');
     assert.equal(result.model_invoked,false);
     assert.equal(modelLaunches,0,'unknown auth metadata must stop before any model launch');
@@ -193,7 +193,7 @@ test('exact built-in free model with no saved provider record reaches the captur
     let authCalls=0,processCalls=0,capturedArgs=null;
     const result=await runPlan('Synthetic W1 regression; only the injected process boundary may run.',
       config,job,'33333333-3333-4333-8333-333333333333',{
-        qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2',version:'2.0.32'}),
+        qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2',version:'2.2.5'}),
         readV2ProviderAuth:(bin,provider,directory)=>{
           authCalls++;
           assert.equal(bin,'qualified-opencode-v2');
@@ -289,7 +289,7 @@ test('absent provider auth never reaches the process boundary without exact dual
       const authBefore=authCalls;
       const result=await runPlan('Synthetic W1 guard regression; no model process may launch.',
         entry.config,makeJob(),'44444444-4444-4444-8444-444444444444',{
-          qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2',version:'2.0.32'}),
+          qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2',version:'2.2.5'}),
           readV2ProviderAuth:(bin,provider,directory)=>{
             authCalls++;
             return readV2ProviderAuth(bin,provider,directory,(_bin,args)=>{
