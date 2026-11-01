@@ -8,6 +8,8 @@ import { delimiter, join, isAbsolute, normalize, resolve, relative } from 'node:
 import { homedir, platform } from 'node:os';
 
 const SEMVER_V2 = /^(?:opencode(?:2)?\s+)?v?(2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/i;
+// v2.2.5 includes upstream PR #60376's PowerShell method-call policy checks.
+const MINIMUM_STABLE_OPEN_CODE_V2_VERSION = '2.2.5';
 const MODEL_ID = /^[a-z][a-z0-9_-]{1,39}\/[A-Za-z0-9_./:-]{1,150}$/;
 const VARIANT_ID = /^[a-z][a-z0-9_-]{0,39}$/;
 const NEVER = ['edit', 'shell', 'subagent', 'skill', 'question', 'webfetch', 'websearch', 'grep',
@@ -42,6 +44,12 @@ export function parseOpenCodeV2Version(output) {
   if (typeof output !== 'string') return null;
   const m = SEMVER_V2.exec(output.trim());
   return m ? m[1] : null;
+}
+function meetsMinimumStableOpenCodeV2Version(version) {
+  const match = /^2\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?$/.exec(version || '');
+  if (!match) return false;
+  const minor = Number(match[1]), patch = Number(match[2]);
+  return minor > 2 || (minor === 2 && patch >= 5);
 }
 function verifyOpenCodeV2Signature(bin, runSignature = execFileSync) {
   if (typeof bin !== 'string' || !isAbsolute(bin)) return false;
@@ -184,6 +192,7 @@ export function discoverV2Executables(env = process.env, win = platform() === 'w
 export function qualifyOpenCodeV2(env = process.env, win = platform() === 'win32',
   runVersion = execFileSync, verifySignature = verifyOpenCodeV2Signature) {
   const candidates = discoverV2Executables(env, win);
+  const rejectedVersions = [];
   for (const bin of candidates) {
     let signatureVerified = !win;
     if (win) {
@@ -194,11 +203,18 @@ export function qualifyOpenCodeV2(env = process.env, win = platform() === 'win32
     try {
       const raw = runVersion(bin, ['--version'], { encoding: 'utf8', timeout: 5000, maxBuffer: 8192, windowsHide: true });
       const version = parseOpenCodeV2Version(raw);
-      if (version) return { ready: true, bin, version, candidates_checked: candidates.length,
-        signature_status: signatureVerified ? 'VALID' : 'NOT_APPLICABLE' };
+      if (version && meetsMinimumStableOpenCodeV2Version(version))
+        return { ready: true, bin, version, candidates_checked: candidates.length,
+          signature_status: signatureVerified ? 'VALID' : 'NOT_APPLICABLE' };
+      if (version) rejectedVersions.push(version);
     } catch { /* An unavailable or untrusted executable is not an accepted V2 CLI. */ }
   }
-  return { ready: false, bin: null, version: null, candidates_checked: candidates.length };
+  return { ready: false, bin: null, version: null, candidates_checked: candidates.length,
+    reason: rejectedVersions.length ? 'OPEN_CODE_V2_VERSION_POLICY_REJECTED' : 'OPEN_CODE_V2_NOT_FOUND',
+    ...(rejectedVersions.length ? {
+      minimum_stable_version: MINIMUM_STABLE_OPEN_CODE_V2_VERSION,
+      rejected_versions: rejectedVersions,
+    } : {}) };
 }
 export function buildV2ReadOnlyConfig() {
   // Last-match rules; the only allowed operations are discovery within the workspace.

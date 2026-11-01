@@ -46,7 +46,7 @@ try {
     experimental: { policies: [{ action: 'provider.use', resource: '*', effect: 'deny' }] },
   }) + '\n');
   const ver = run(control, ['--version']);
-  assert.match(ver, /^(?:opencode\s+)?v?2\.0\.27$/, 'WRONG_V2_VERSION');
+  assert.match(ver, /^(?:opencode\s+)?v?2\.2\.5$/, 'WRONG_V2_VERSION');
   confirmSource(control); confirmSource(blocked);
   const normalCount = modelCount(run(control, ['models']));
   const deniedCount = modelCount(run(blocked, ['models']));

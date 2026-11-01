@@ -297,7 +297,7 @@ test('OpenCode runPlan carries a sanitized free gateway abuse block into local a
       {schema:2,kind:'opencode_plan',request_id:'PTYSD_OPENCODE_PROVIDER_REJECT_20261019',
         model,variant:null},
       '00000000-0000-4000-8000-000000000099',{
-        qualifyOpenCodeV2:()=>({ready:true,bin:'synthetic-opencode-v2',version:'2.0.32'}),
+        qualifyOpenCodeV2:()=>({ready:true,bin:'synthetic-opencode-v2',version:'2.2.5'}),
         readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_RECORD_PRESENT'}),
         runCapturedProcess:async(_bin,_args,options)=>{
           const bytes=Buffer.from(`${JSON.stringify({type:'error',
@@ -329,7 +329,7 @@ test('runPlan does not qualify or launch a model when host-local execution enabl
   try {
     const result=await runPlan('Synthetic no-inference configuration check.',
       {workspace,state_dir},job,'33333333-3333-4333-8333-333333333333',{
-        qualifyOpenCodeV2:()=>{qualifications++;return {ready:true,bin:'must-not-qualify',version:'2.0.32'};},
+        qualifyOpenCodeV2:()=>{qualifications++;return {ready:true,bin:'must-not-qualify',version:'2.2.5'};},
         readV2ProviderAuth:()=>{authReads++;return {status:'AUTH_PROVIDER_RECORD_ABSENT'};},
         runCapturedProcess:async()=>{launches++;throw new Error('MODEL_MUST_NOT_LAUNCH');},
       });
@@ -337,6 +337,31 @@ test('runPlan does not qualify or launch a model when host-local execution enabl
     assert.equal(result.eligibility_state,'WAITING');
     assert.equal(result.model_invoked,false);
     assert.equal(qualifications,0,'missing host consent must stop before CLI qualification');
+    assert.equal(authReads,0);
+    assert.equal(launches,0);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('runPlan reports a version-policy refusal before provider auth or model launch', async () => {
+  const root=mkdtempSync(join(tmpdir(),'oc2-version-policy-block-'));
+  const workspace=join(root,'workspace'),state_dir=join(root,'state');
+  mkdirSync(workspace);mkdirSync(state_dir);
+  const model='opencode/deepseek-v4.1-flash-free';
+  const job={schema:2,kind:'opencode_plan',request_id:'PTYSD_W1_VERSION_POLICY_BLOCK_20261102',
+    model,variant:null};
+  let authReads=0,launches=0;
+  try {
+    const result=await runPlan('Synthetic outdated CLI gate; no provider or model process may run.',
+      {workspace,state_dir,enable_v2_model_runs:true,allowed_models:{[model]:[null]}},
+      job,'33333333-3333-4333-8333-333333333333',{
+        qualifyOpenCodeV2:()=>({ready:false,reason:'OPEN_CODE_V2_VERSION_POLICY_REJECTED',
+          minimum_stable_version:'2.2.5',rejected_versions:['2.1.4']}),
+        readV2ProviderAuth:()=>{authReads++;return {status:'AUTH_PROVIDER_RECORD_PRESENT'};},
+        runCapturedProcess:async()=>{launches++;throw new Error('MODEL_MUST_NOT_LAUNCH');},
+      });
+    assert.equal(result.outcome,'OPENCODE_V2_CLI_VERSION_POLICY_REJECTED');
+    assert.equal(result.eligibility_state,'WAITING');
+    assert.equal(result.model_invoked,false);
     assert.equal(authReads,0);
     assert.equal(launches,0);
   } finally {rmSync(root,{recursive:true,force:true});}
@@ -364,7 +389,7 @@ test('runPlan keeps unknown provider metadata waiting even for an allowlisted fr
     const result=await runPlan(
       'Change only src/answer.mjs so the exported answer is 42.',
       config,job,'11111111-1111-4111-8111-111111111111',{
-        qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2',version:'2.0.32'}),
+        qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2',version:'2.2.5'}),
         readV2ProviderAuth:()=>{authReads++;return {status:'AUTH_PROVIDER_METADATA_UNKNOWN'};},
         runCapturedProcess:async()=>{
           launches++;
@@ -403,7 +428,7 @@ test('runPlan dispatches an explicitly allowlisted no-auth OpenCode edit and kee
     const result=await runPlan(
       'Change only src/answer.mjs so the exported answer is 42.',
       config,job,'11111111-1111-4111-8111-111111111111',{
-        qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2',version:'2.0.32'}),
+        qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2',version:'2.2.5'}),
         readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_RECORD_ABSENT'}),
         runCapturedProcess:async(bin,args,options)=>{
           launches++;
@@ -463,7 +488,7 @@ test('runPlan requires provider authentication unless the exact free-model allow
     try {
       const result=await runPlan('Synthetic read-only qualification; model transport must not launch.',
         config,job,'22222222-2222-4222-8222-222222222222',{
-          qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2',version:'2.0.32'}),
+          qualifyOpenCodeV2:()=>({ready:true,bin:'qualified-opencode-v2',version:'2.2.5'}),
           readV2ProviderAuth:()=>{authReads++;return scenario.auth;},
           runCapturedProcess:async()=>{launches++;throw new Error('MODEL_MUST_NOT_LAUNCH');},
         });
@@ -513,7 +538,7 @@ test('V2 model ID preserves multi-slash provider references and exact variant', 
   for (const m of ['oldv1', 'openrouter/../secret', 'aa/#evil', 'a/x']) assert.equal(validateV2Model(m,'high'), false);
   for (const v of ['bad#escape','../../../secret','HIGH']) assert.equal(validateV2Model('provider/spark-2',v),false);
 });
-test('V2 native executable can be selected only when exact version is 2.x', () => {
+test('V2 native executable requires a stable release at or above 2.2.5', () => {
   const tmp=mkdtempSync(join(tmpdir(),'oc2-'));
   try {
     const home=join(tmp,'user'), bin=join(tmp,'bin'); mkdirSync(home);mkdirSync(bin);
@@ -521,9 +546,20 @@ test('V2 native executable can be selected only when exact version is 2.x', () =
     const env={PATH:bin,HOME:home};
     assert.deepEqual(discoverV2Executables(env,false),[join(bin,'opencode')]);
     let calls=0;
-    assert.equal(qualifyOpenCodeV2(env,false,(_cmd,args)=>{calls++;assert.deepEqual(args,['--version']);return '1.9.0'}).ready,false);
-    assert.equal(qualifyOpenCodeV2(env,false,()=> '2.0.27').version,'2.0.27');
-    assert.equal(calls,1);
+    const qualify=version=>qualifyOpenCodeV2(env,false,(_cmd,args)=>{
+      calls++;assert.deepEqual(args,['--version']);return version;
+    });
+    assert.equal(qualify('1.9.0').ready,false);
+    for (const version of ['2.0.27','2.1.4','2.2.4','2.2.5-beta.1','2.3.0-beta.2']) {
+      const rejected=qualify(version);
+      assert.equal(rejected.ready,false,`${version} must not meet the stable CLI floor`);
+      assert.equal(rejected.reason,'OPEN_CODE_V2_VERSION_POLICY_REJECTED');
+      assert.equal(rejected.minimum_stable_version,'2.2.5');
+      assert.deepEqual(rejected.rejected_versions,[version]);
+    }
+    for (const version of ['2.2.5','opencode v2.2.5+build.1','2.3.0'])
+      assert.equal(qualify(version).ready,true,`${version} meets the stable CLI floor`);
+    assert.equal(calls,9);
   } finally {rmSync(tmp,{recursive:true,force:true});}
 });
 test('V2 executable discovery does not silently omit entries after the first 120 PATH directories', () => {
@@ -551,14 +587,14 @@ test('Windows V2 discovery includes the official OpenCode Desktop bundled CLI an
     const calls=[];
     const result=qualifyOpenCodeV2(env,true,(path,args)=>{
       calls.push(['version',path,args]);
-      return 'opencode v2.0.32';
+      return 'opencode v2.2.5';
     },path=>{
       calls.push(['signature',path]);
       return path===exe;
     });
     assert.equal(result.ready,true);
     assert.equal(result.bin,exe);
-    assert.equal(result.version,'2.0.32');
+    assert.equal(result.version,'2.2.5');
     assert.deepEqual(calls,[['signature',exe],['version',exe,['--version']]],
       'the bundled candidate must pass Authenticode verification before version execution');
   } finally {rmSync(tmp,{recursive:true,force:true});}
@@ -579,11 +615,11 @@ test('Windows V2 discovery prefers the verified Desktop CLI over an older user-l
     const result=qualifyOpenCodeV2(env,true,(path,args)=>{
       assert.equal(path,desktopExe,'the current Desktop CLI is probed before the older user-local V2');
       assert.deepEqual(args,['--version']);
-      return 'opencode v2.0.32';
+      return 'opencode v2.2.5';
     },path=>path===desktopExe);
     assert.equal(result.ready,true);
     assert.equal(result.bin,desktopExe);
-    assert.equal(result.version,'2.0.32');
+    assert.equal(result.version,'2.2.5');
   } finally {rmSync(tmp,{recursive:true,force:true});}
 });
 test('Windows V2 discovery finds managed PTYSDOpenCodeCLI installs newest-first and verifies before probing', () => {
@@ -592,9 +628,9 @@ test('Windows V2 discovery finds managed PTYSDOpenCodeCLI installs newest-first 
     const home=join(tmp,'user'), localAppData=join(tmp,'local');
     const makeExe=(version)=>join(localAppData,`PTYSDOpenCodeCLI-v${version}`,
       'node_modules','@opencode','cli','bin','opencode.exe');
-    const newest=makeExe('2.0.32'), older=makeExe('2.0.27');
+    const newest=makeExe('2.2.5'), older=makeExe('2.2.4');
     mkdirSync(home);
-    for (const version of ['2.0.32','2.0.27']) {
+    for (const version of ['2.2.5','2.2.4']) {
       mkdirSync(join(localAppData,`PTYSDOpenCodeCLI-v${version}`,
         'node_modules','@opencode','cli','bin'),{recursive:true});
     }
@@ -605,12 +641,13 @@ test('Windows V2 discovery finds managed PTYSDOpenCodeCLI installs newest-first 
     assert.deepEqual(discoverV2Executables(env,true),[newest,older]);
     const calls=[];
     const result=qualifyOpenCodeV2(env,true,(path,args)=>{
-      calls.push(['version',path,args]);return 'opencode v2.0.27';
+      calls.push(['version',path,args]);return 'opencode v2.2.4';
     },path=>{
       calls.push(['signature',path]);return path===older;
     });
-    assert.equal(result.ready,true);
-    assert.equal(result.bin,older);
+    assert.equal(result.ready,false,'a signed CLI below the stable security floor is rejected');
+    assert.equal(result.reason,'OPEN_CODE_V2_VERSION_POLICY_REJECTED');
+    assert.deepEqual(result.rejected_versions,['2.2.4']);
     assert.deepEqual(calls,[['signature',newest],['signature',older],
       ['version',older,['--version']]],
     'an unsigned newer install must never be executed; signed fallback remains available');
@@ -625,14 +662,14 @@ test('Windows V2 qualification verifies the signed publisher before executing a 
     writeFileSync(exe,'synthetic executable');
     const env={PTYSD_OPENCODE_V2_EXE:exe,USERPROFILE:home,PATH:''};
     let signatureCalls=0, versionCalls=0;
-    const unsigned=qualifyOpenCodeV2(env,true,()=>{versionCalls++;return 'opencode v2.0.27';},path=>{
+    const unsigned=qualifyOpenCodeV2(env,true,()=>{versionCalls++;return 'opencode v2.2.5';},path=>{
       signatureCalls++;assert.equal(path,exe);return false;
     });
     assert.equal(unsigned.ready,false,'an unsigned V2-shaped binary must never be executed');
     assert.equal(signatureCalls,1);
     assert.equal(versionCalls,0);
 
-    const signed=qualifyOpenCodeV2(env,true,()=>{versionCalls++;return 'opencode v2.0.27';},path=>{
+    const signed=qualifyOpenCodeV2(env,true,()=>{versionCalls++;return 'opencode v2.2.5';},path=>{
       assert.equal(path,exe);return true;
     });
     assert.equal(signed.ready,true);
@@ -650,7 +687,7 @@ test('native Windows Authenticode rejects an unsigned V2-shaped executable befor
     writeFileSync(exe,'not a signed executable');
     let versionCalls=0;
     const result=qualifyOpenCodeV2({PTYSD_OPENCODE_V2_EXE:exe,USERPROFILE:home,PATH:''},true,
-      ()=>{versionCalls++;return 'opencode v2.0.27';});
+      ()=>{versionCalls++;return 'opencode v2.2.5';});
     assert.equal(result.ready,false);
     assert.equal(versionCalls,0,'Authenticode rejection happens before running the candidate binary');
   } finally {rmSync(tmp,{recursive:true,force:true});}

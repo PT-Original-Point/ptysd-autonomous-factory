@@ -13,7 +13,7 @@ const manifestPath = join(prefix, 'node_modules', '@opencode', 'cli', 'package.j
 assert.ok(existsSync(manifestPath), 'V2_MANIFEST_MISSING');
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 assert.equal(manifest.name, '@opencode/cli');
-assert.equal(manifest.version, '2.0.27');
+assert.equal(manifest.version, '2.2.5');
 const exe = join(prefix, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe');
 assert.ok(existsSync(exe), 'V2_NATIVE_EXE_MISSING');
 const run = (args, timeout = 12000) => execFileSync(exe, args, {
@@ -23,7 +23,7 @@ const run = (args, timeout = 12000) => execFileSync(exe, args, {
 const diagnosticCode = error => typeof error?.status === 'number'
   ? String(error.status) : safeErrorCode(error, 'UNKNOWN');
 const version = run(['--version']);
-assert.match(version, /^(?:opencode\s+)?v?2\.0\.27$/);
+assert.match(version, /^(?:opencode\s+)?v?2\.2\.5$/);
 console.log('OPEN_CODE_V2_VERSION_AND_PACKAGE_PASS');
 const probes = [
   ['auth-list-help', ['auth', 'list', '--help']],
