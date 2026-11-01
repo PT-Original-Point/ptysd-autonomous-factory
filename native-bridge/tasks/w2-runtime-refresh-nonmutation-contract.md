@@ -25,7 +25,9 @@ Keep the assertions focused on the runtime refresh contract, not unrelated insta
 
 ## Verification
 
-Run:
+The commands below are for Codex/controller verification after it reviews the candidate diff. The W2 Antigravity session is file-edit-only: do not run or attempt tests, builds, shell commands, or other commands, even when a task spec lists verification commands. Codex owns verification and must report the actual results separately.
+
+Codex performs these checks after the candidate diff is returned:
 
 ```text
 node --test tests/native-worker-opencode-cli-audit.test.mjs

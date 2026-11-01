@@ -4362,6 +4362,8 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
           'prompt must require post-edit readback verification');
         assert.ok(promptContent.includes('Do not run shell commands, access the network, inspect credentials, or edit any other path'),
           'prompt must retain existing non-file-tool restrictions');
+        assert.ok(promptContent.includes('This file-edit-only rule overrides any task-spec verification section: never run tests, builds, or other commands; Codex will run listed verification after this session.'),
+          'W2 must not attempt task-spec verification commands that its CLI policy forbids; Codex runs them after the edit session');
         assert.ok(promptContent.includes('Do not request broader permissions'),
           'prompt must forbid requesting broader permissions');
         assert.ok(promptContent.includes('If a required permission or file is unavailable, report the blocker without requesting broader access'),
