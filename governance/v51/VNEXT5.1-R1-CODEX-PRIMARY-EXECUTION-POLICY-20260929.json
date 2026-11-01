@@ -1,0 +1,67 @@
+{
+  "schema": "CHATGPT_EXECUTION_POLICY_V5_1_R1",
+  "project_id": "CHATGPT_GLOBAL_SKILL_GOVERNANCE",
+  "status": "NONCANONICAL_CANDIDATE",
+  "authorized_by": "HUMAN",
+  "human_directive_date": "2026-09-29",
+  "current_construction_spec": "VNEXT5.1-R1",
+  "routing": {
+    "policy": "CODEX_PRIMARY_FOR_SUBSTANTIAL_OR_LONG_RUNNING_WORK",
+    "revoked": [
+      "LEGACY_CHAT_FIRST_MANDATORY_EXECUTION",
+      "LEGACY_DIRECT_CONNECTOR_PRECEDENCE_AS_EXECUTOR_SELECTOR",
+      "LEGACY_CHAT_CONNECTOR_EXHAUSTION_BEFORE_DELEGATION",
+      "LEGACY_CODEX_TERMINAL_LOCAL_ONLY_ROLE",
+      "LEGACY_PER_SESSION_CODEX_REAUTHORIZATION"
+    ],
+    "codex_primary_when_any": [
+      "multi_step",
+      "long_running",
+      "stateful",
+      "repository_construction",
+      "coding_and_test_repair_loop",
+      "local_filesystem_or_native_shell_heavy",
+      "sustained_research_to_implementation",
+      "chat_session_interruption_risk_material"
+    ],
+    "chatgpt_web_role": [
+      "mission_control",
+      "short_bounded_actions",
+      "fresh_readback",
+      "independent_audit",
+      "exception_handling",
+      "human_interface"
+    ],
+    "chat_direct_execution_allowed": true,
+    "chat_direct_execution_mandatory_when_capable": false,
+    "connector_exhaustion_required_before_codex": false,
+    "codex_mission_sovereignty": false
+  },
+  "coordination": {
+    "one_active_atomic_unit": true,
+    "one_execution_owner_per_atomic_scope": true,
+    "owner_handoff_must_be_explicit": true,
+    "no_concurrent_chat_codex_mutation_same_scope": true,
+    "codex_progress_must_be_provider_or_artifact_addressable": true,
+    "chat_claim_verification_required_for_promotion": true,
+    "cross_session_resume_uses_canonical_backend_not_chat_memory": true
+  },
+  "authorization": {
+    "reversible_preproduction_persistent": true,
+    "routine_per_session_reauthorization": false,
+    "production_final_human_required": true,
+    "new_cost_human_required": true,
+    "legal_contract_signature_identity_human_required": true,
+    "oauth_mfa_human_required": true,
+    "major_irreversible_authority_expansion_human_required": true,
+    "unreconcilable_ambiguous_external_effect_human_required": true
+  },
+  "mutation_safety": {
+    "fresh_prestate": true,
+    "provider_or_backend_permit_at_dispatch": true,
+    "same_source_readback": true,
+    "unknown_effect_readback_first": true,
+    "no_blind_replay": true,
+    "operation_owned_rollback": true
+  }
+}
