@@ -13,13 +13,15 @@ import { parseJob, selectNext, parseReceipt, parseCodexSourceAcceptance, receipt
   captureScopedEditDiff,
   codexTerminalReceipt, selectNextWithCodexClaim, readPinnedCandidateSources, executorForJobKind,
   writePathsOverlap,
-  publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight, derivePollDisposition }
+  publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight, derivePollDisposition,
+  isRecoverableModelPreflightWait }
   from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, OPERATOR_COMMENT_ID, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
 import { makeCodexExecutorRequest, codexScopedActionStatus, codexTaskFingerprint,
   validCodexWritePaths }
   from '../native-bridge/codex-continuation.mjs';
+import { candidateWorkspacePath, executorResultPath } from '../native-bridge/windows-executor.mjs';
 import { ANTIGRAVITY_V2_MODEL, buildAntigravityChildEnvironment, buildNativeChildEnvironment,
   readAntigravityV2RunEvidence }
   from '../native-bridge/v2-readiness.mjs';
@@ -193,7 +195,7 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
   readCommentFailure = null, readCommentsFailure = null, patchCommentFailure = null,
   seededObservation = true, includeDefaultJob = true,
   collectWindowsFailure = null, windowsObservation = null, goalComments = [], taskComments = [], candidatePulls = {},
-  issueCommentsCount = null, configOverrides = {} } = {}) {
+  issueCommentsCount = null, configOverrides = {}, contentFiles = {}, workerOverrides = {} } = {}) {
   const root = mkdtempSync(join(homedir(), '.ptysd-worker-observation-'));
   const workspace = join(root, 'workspace');
   const stateDir = join(root, 'state');
@@ -222,6 +224,13 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
     workspace, state_dir: stateDir, dispatchers: ['t14210184'], ...configOverrides };
   const api = uri => {
     if (uri === 'user') return { login: publisher };
+    const contentsPrefix = `repos/${REPO}/contents/`;
+    if (uri.startsWith(contentsPrefix)) {
+      const [path, ref] = uri.slice(contentsPrefix.length).split('?ref=');
+      if (ref !== commit) throw new Error('MOCK_CONTENT_REF_MISMATCH');
+      if (typeof contentFiles[path] !== 'string') throw new Error('MOCK_CONTENT_MISSING');
+      return { encoding: 'base64', content: Buffer.from(contentFiles[path], 'utf8').toString('base64') };
+    }
     if (uri === `repos/${REPO}/issues/407`)
       return { title: ISSUE_TITLE, state: 'open', comments: issueCommentsCount ?? store.comments.length };
     if (uri === `repos/${REPO}/git/ref/heads/main`)
@@ -280,25 +289,30 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
   const logs = [];
   const modelCalls = { count: 0 };
   const codexDispatchCalls = { count: 0 };
-  const run = () => runWorker({
-    config, api, issueComments: () => store.comments,
-    goalCommentsRead: () => goalComments,
-    observationDependencies,
-    runPlan: async () => {
-      modelCalls.count++;
-      throw new Error('MODEL_EXECUTION_MUST_NOT_RUN_IN_NO_DELTA_FIXTURE');
-    },
-    dispatchCodexJob: () => {
-      codexDispatchCalls.count++;
-      throw new Error('CODEX_EXECUTOR_MUST_NOT_RUN_IN_NO_DELTA_FIXTURE');
-    },
-    writeReceipt: (_config, data, login) => {
-      store.comments.push(com(store.next++, RECEIPT_MARKER + JSON.stringify(data), login));
-      store.posts++;
-      receiptWrites.push(data);
-    },
-    log: value => logs.push(value),
-  });
+  const writeReceipt = (_config, data, login) => {
+    store.comments.push(com(store.next++, RECEIPT_MARKER + JSON.stringify(data), login));
+    store.posts++;
+    receiptWrites.push(data);
+  };
+  const log = value => logs.push(value);
+  const run = () => Object.keys(workerOverrides).length
+    ? runWorkerImplementation(config, { apiRead: api, commentsRead: () => store.comments,
+      goalCommentsRead: () => goalComments, observationDependencies, writeReceipt, log,
+      ...workerOverrides })
+    : runWorker({
+      config, api, issueComments: () => store.comments,
+      goalCommentsRead: () => goalComments,
+      observationDependencies,
+      runPlan: async () => {
+        modelCalls.count++;
+        throw new Error('MODEL_EXECUTION_MUST_NOT_RUN_IN_NO_DELTA_FIXTURE');
+      },
+      dispatchCodexJob: () => {
+        codexDispatchCalls.count++;
+        throw new Error('CODEX_EXECUTOR_MUST_NOT_RUN_IN_NO_DELTA_FIXTURE');
+      },
+      writeReceipt, log,
+    });
   return { root, store, run, logs, receiptWrites, modelCalls, codexDispatchCalls, observationId,
     cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -740,6 +754,186 @@ test('stale W2 candidate source is reported with both SHAs while an independent 
     assert.equal(fixture.modelCalls.count, 0);
     assert.equal(fixture.codexDispatchCalls.count, 0);
   } finally { fixture.cleanup(); }
+});
+
+test('Worker reconciles recoverable quota-window-expired preflight wait, preserves W1 progress, and redispatches W2 with a new attempt', async () => {
+  const host = hostname().toUpperCase();
+  const priorAttemptId = '00000000-0000-4000-8000-000000000021';
+  const spec = 'Recover W2 after a quota-window expiration without replaying its prior attempt.';
+
+  const w2Job = withHumanGoal({
+    schema: 6,
+    project_id: PROJECT,
+    host,
+    request_id: 'PTYSD_W2_QUOTA_WINDOW_RECOVERABLE_20261101',
+    kind: 'antigravity_edit',
+    source_sha: commit,
+    spec_path: 'native-bridge/tasks/w2-quota-canary.md',
+    spec_sha256: h(spec),
+    model: ANTIGRAVITY_V2_MODEL,
+    variant: 'high',
+    edit_paths: ['src/w2-quota-canary.mjs'],
+    source_pr: 461,
+  });
+  const w2Comment = {
+    ...com(6188322051, encoded(w2Job)),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
+  };
+  const sameRepo = { id: 1352411536, full_name: REPO };
+  const pull = {
+    number: 461,
+    state: 'open',
+    base: { ref: 'main', repo: sameRepo },
+    head: { sha: commit, repo: sameRepo },
+  };
+
+  const priorStartedReceipt = receipt(w2Job.request_id, priorAttemptId, 'STARTED', w2Job);
+  const priorStartedComment = com(701, RECEIPT_MARKER + JSON.stringify(priorStartedReceipt), 'trusted-publisher');
+
+  const waitingResult = {
+    outcome: 'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID',
+    exit_code: 48,
+    eligibility_state: 'WAITING',
+    model_invoked: false,
+    evidence_sha256: null,
+    evidence_bytes: 0,
+  };
+  assert.equal(isRecoverableModelPreflightWait(waitingResult, w2Job), true,
+    'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID must be recognized as recoverable preflight wait');
+
+  const waitingTerminal = receipt(w2Job.request_id, priorAttemptId, 'WAITING', w2Job, waitingResult);
+  assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify(waitingTerminal))?.state, 'WAITING',
+    'the persisted WAITING receipt must parse successfully');
+
+  const root = mkdtempSync(join(homedir(), '.ptysd-w2-quota-window-reconcile-'));
+  try {
+    const opencodeResultsDir = join(root, 'opencode-results');
+    const opencodeManifestDir = join(root, 'opencode-manifests');
+    const antigravityResultsDir = join(root, 'antigravity-results');
+    const antigravityManifestDir = join(root, 'antigravity-manifests');
+    mkdirSync(opencodeResultsDir, { recursive: true });
+    mkdirSync(opencodeManifestDir, { recursive: true });
+    mkdirSync(antigravityResultsDir, { recursive: true });
+    mkdirSync(antigravityManifestDir, { recursive: true });
+
+    const dispatchedW2Attempts = [];
+
+    const baseOpencode = executorDescriptorForLane('OpenCode', 1001);
+    const baseAntigravity = executorDescriptorForLane('Antigravity', 1003);
+    const configuredOpencode = {
+      ...baseOpencode,
+      manifest_dir: opencodeManifestDir,
+      results_dir: opencodeResultsDir,
+      config_path: join(root, 'opencode-config.json'),
+      working_directory: join(root, 'opencode-work'),
+    };
+    const configuredAntigravity = {
+      ...baseAntigravity,
+      manifest_dir: antigravityManifestDir,
+      results_dir: antigravityResultsDir,
+      config_path: join(root, 'antigravity-config.json'),
+      working_directory: join(root, 'antigravity-work'),
+    };
+
+    const waitingResultPath = executorResultPath(antigravityResultsDir, w2Job.request_id, priorAttemptId);
+    writeFileSync(waitingResultPath, JSON.stringify({ request_id: w2Job.request_id,
+      attempt_id: priorAttemptId, terminal: waitingTerminal }));
+    const candidateWorkspace = candidateWorkspacePath(antigravityResultsDir, priorAttemptId);
+    mkdirSync(candidateWorkspace, { recursive: true });
+
+    const fixture = makeObservationWorkerFixture({
+      goalComments: [humanGoalComment(), w2Comment],
+      candidatePulls: { 461: pull },
+      taskComments: [priorStartedComment],
+      contentFiles: { [w2Job.spec_path]: spec },
+      configOverrides: {
+        enable_antigravity_model_runs: true,
+        allowed_models: { [ANTIGRAVITY_V2_MODEL]: ['high'] },
+        antigravity_execution_attestation: {
+          model: ANTIGRAVITY_V2_MODEL,
+          entitlement: 'VERIFIED',
+          cost: 'NO_ADDITIONAL_CHARGE',
+          observed_at: new Date().toISOString(),
+        },
+        executors: {
+          opencode: configuredOpencode,
+          antigravity: configuredAntigravity,
+        },
+      },
+      workerOverrides: {
+        assertExecutorTaskReady: () => ({ ready: true }),
+        createExecutorSourceBundle: ({ job, attemptId }) => ({
+          attempt_id: attemptId, source_sha: job.source_sha, sha256: 'd'.repeat(64),
+        }),
+        dispatchToExecutor: (_executor, request) => {
+          dispatchedW2Attempts.push(request);
+          return { outcome: 'EXECUTOR_PENDING_NOT_ACCEPTANCE' };
+        },
+      },
+    });
+
+    try {
+      const pollResult = await fixture.run();
+      assert.equal(pollResult.state, 'FINISHED',
+        'the poll must complete after dispatching the independent READY W1 ping job');
+
+      assert.equal(existsSync(waitingResultPath), true,
+        'the verified terminal result remains as durable reconciliation evidence');
+      assert.equal(existsSync(candidateWorkspace), false,
+        'the candidate workspace must be cleaned up after receipt reconciliation');
+
+      assert.equal(fixture.modelCalls.count, 0, 'assert zero inline model calls');
+      assert.equal(fixture.codexDispatchCalls.count, 0, 'assert zero codex executor calls');
+
+      assert.equal(fixture.receiptWrites.length, 3,
+        'exactly three receipts must be written: 1 reconciled WAITING receipt + 2 W1 ping receipts');
+
+      const reconciledReceipt = fixture.receiptWrites[0];
+      assert.equal(reconciledReceipt.state, 'WAITING');
+      assert.equal(reconciledReceipt.outcome, 'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+      assert.equal(reconciledReceipt.eligibility_state, 'WAITING');
+      assert.equal(reconciledReceipt.model_invoked, false);
+      assert.equal(reconciledReceipt.request_id, w2Job.request_id);
+      assert.equal(reconciledReceipt.attempt_id, priorAttemptId);
+      assert.equal(reconciledReceipt.source_sha, w2Job.source_sha);
+      assert.equal(reconciledReceipt.model, w2Job.model);
+      assert.equal(reconciledReceipt.variant, w2Job.variant);
+      assert.equal(reconciledReceipt.source_pr, w2Job.source_pr);
+      assert.equal(reconciledReceipt.goal_comment_id, w2Job.goal_comment_id);
+      assert.equal(reconciledReceipt.goal_body_sha256, w2Job.goal_body_sha256);
+
+      const w1Started = fixture.receiptWrites[1];
+      const w1Finished = fixture.receiptWrites[2];
+      assert.equal(w1Started.kind, 'ping');
+      assert.equal(w1Started.state, 'STARTED');
+      assert.equal(w1Finished.kind, 'ping');
+      assert.equal(w1Finished.state, 'FINISHED');
+
+      const w2Receipts = fixture.store.comments
+        .map(c => parseReceipt(c.body))
+        .filter(r => r && r.request_id === w2Job.request_id);
+      assert.equal(w2Receipts.length, 2, 'Issue #407 must contain both STARTED and WAITING for the prior attempt');
+      assert.deepEqual(w2Receipts.map(r => r.state), ['STARTED', 'WAITING']);
+      assert.ok(w2Receipts.every(r => r.attempt_id === priorAttemptId));
+
+      fixture.store.now += 60_000;
+      const poll2Result = await fixture.run();
+      assert.equal(poll2Result.state, 'DISPATCHED',
+        `the same W2 request must be eligible after its exact WAITING attempt is reconciled; logs=${JSON.stringify(fixture.logs)}`);
+      assert.equal(dispatchedW2Attempts.length, 1, 'exactly one later W2 executor dispatch occurs');
+      assert.equal(dispatchedW2Attempts[0].request_id, w2Job.request_id);
+      assert.notEqual(dispatchedW2Attempts[0].attempt_id, priorAttemptId,
+        'the recovered W2 request receives a fresh attempt ID');
+      assert.equal(dispatchedW2Attempts[0].source_sha, w2Job.source_sha);
+      assert.ok(fixture.receiptWrites.every((r, index) => index === 0 || r.attempt_id !== priorAttemptId),
+        'no later receipt replays the prior W2 attempt ID');
+      assert.equal(fixture.modelCalls.count, 0, 'the test intercepts Executor dispatch before any model call');
+    } finally {
+      fixture.cleanup();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('operator observation uses the authoritative GitHub issue comment count, not the fetched page length', async () => {
