@@ -97,8 +97,9 @@ test('Antigravity metadata parser recognizes only the pinned model ID, not its d
   assert.equal(JSON.stringify(summary).includes('Flash (High)'),false);
 });
 
-const validAntigravityUsage = 'Gemini Models\tWeekly Limit Remaining\t95%\t2026-10-23T22:50:38Z\n' +
-  'Gemini Models\tFive Hour Limit Remaining\t99%\t2026-10-18T05:46:39Z\n';
+const fixedNow = '2026-11-01T12:00:00Z';
+const validAntigravityUsage = 'Gemini Models\tWeekly Limit Remaining\t95%\t2026-11-08T12:00:00Z\n' +
+  'Gemini Models\tFive Hour Limit Remaining\t99%\t2026-11-01T17:00:00Z\n';
 
 const testProjectId = 'b8fbf647-6c41-4932-9d0a-8a7af257a27a';
 
@@ -299,7 +300,7 @@ test('Antigravity W2 readiness uses documented CLI settings and never probes int
     assert.equal(result.inference_executed, false);
     assert.equal(result.project_flag_supported, true,
       'global CLI help is authoritative even when project-scoped help omits global flags');
-    assert.equal(antigravityV2ReadinessExecutionFailure(result), null);
+    assert.equal(antigravityV2ReadinessExecutionFailure(result, fixedNow), null);
     assert.deepEqual(calls.map(call => call.args), [
       [`--project=${testProjectId}`, '--version'],
       ['--help'],
@@ -367,7 +368,7 @@ test('Antigravity readiness binds the project ID to its registered root while qu
       { USERPROFILE: profile, PATH: 'clean' }, () => true, testProjectId, registeredRoot);
     assert.equal(result.project_scope_evidence, 'PROJECT_WORKSPACE_MATCHED');
     assert.equal(result.status, 'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH');
-    assert.equal(antigravityV2ReadinessExecutionFailure(result), null);
+    assert.equal(antigravityV2ReadinessExecutionFailure(result, fixedNow), null);
     assert.ok(calls.length > 0);
     assert.ok(calls.every(call => call.cwd === candidateRoot),
       'metadata commands keep the exact isolated candidate as cwd after validating the registered project root');
@@ -470,10 +471,10 @@ test('Antigravity metadata readiness requires explicit no-G1 setting and leaves 
     entitlement: 'UNKNOWN', cost: 'UNKNOWN',
     gemini_aggregate_quota: { status: 'GEMINI_AGGREGATE_QUOTA_READ',
       source: 'GEMINI_MODELS_AGGREGATE', weekly_remaining_percent: 95,
-      five_hour_remaining_percent: 99 } };
-  assert.equal(antigravityV2ReadinessExecutionFailure(ready), null);
+      weekly_reset_at: '2026-11-08T12:00:00Z', five_hour_remaining_percent: 99, five_hour_reset_at: '2026-11-01T17:00:00Z' } };
+  assert.equal(antigravityV2ReadinessExecutionFailure(ready, fixedNow), null);
   assert.equal(antigravityV2ReadinessExecutionFailure({...ready,
-    credit_fallback_setting:'CREDIT_FALLBACK_DISABLED_BY_DEFAULT'}),
+    credit_fallback_setting:'CREDIT_FALLBACK_DISABLED_BY_DEFAULT'}, fixedNow),
   null);
   assert.equal(antigravityV2ReadinessExecutionFailure({...ready,
     credit_fallback_setting:'CREDIT_FALLBACK_ENABLED'}),
@@ -511,9 +512,9 @@ test('Antigravity execution failure rejects absent, malformed, mismatched, and f
     entitlement: 'UNKNOWN', cost: 'UNKNOWN',
     gemini_aggregate_quota: { status: 'GEMINI_AGGREGATE_QUOTA_READ',
       source: 'GEMINI_MODELS_AGGREGATE', weekly_remaining_percent: 95,
-      five_hour_remaining_percent: 99 } };
+      weekly_reset_at: '2026-11-08T12:00:00Z', five_hour_remaining_percent: 99, five_hour_reset_at: '2026-11-01T17:00:00Z' } };
 
-  assert.equal(antigravityV2ReadinessExecutionFailure(ready), null);
+  assert.equal(antigravityV2ReadinessExecutionFailure(ready, fixedNow), null);
 
   // 1. Absent model_catalog
   assert.equal(antigravityV2ReadinessExecutionFailure({ ...ready, model_catalog: null }),
@@ -583,7 +584,7 @@ test('Antigravity execution failure requires inference_executed and credential_v
     entitlement: 'UNKNOWN', cost: 'UNKNOWN',
     gemini_aggregate_quota: { status: 'GEMINI_AGGREGATE_QUOTA_READ',
       source: 'GEMINI_MODELS_AGGREGATE', weekly_remaining_percent: 95,
-      five_hour_remaining_percent: 99 } };
+      weekly_reset_at: '2026-11-08T12:00:00Z', five_hour_remaining_percent: 99, five_hour_reset_at: '2026-11-01T17:00:00Z' } };
 
   // Negative cases for inference_executed
   for (const nonFalse of [true, 'false', null, undefined, 0, 1, {}, []]) {
@@ -626,10 +627,10 @@ test('Antigravity preflight keeps entitlement and cost UNKNOWN and leaks no raw 
     entitlement: 'UNKNOWN', cost: 'UNKNOWN',
     gemini_aggregate_quota: { status: 'GEMINI_AGGREGATE_QUOTA_READ',
       source: 'GEMINI_MODELS_AGGREGATE', weekly_remaining_percent: 95,
-      five_hour_remaining_percent: 99 } };
+      weekly_reset_at: '2026-11-08T12:00:00Z', five_hour_remaining_percent: 99, five_hour_reset_at: '2026-11-01T17:00:00Z' } };
 
   // Positive readback passes with no execution failure
-  assert.equal(antigravityV2ReadinessExecutionFailure(ready), null);
+  assert.equal(antigravityV2ReadinessExecutionFailure(ready, fixedNow), null);
   assert.equal(ready.entitlement, 'UNKNOWN');
   assert.equal(ready.cost, 'UNKNOWN');
   assert.equal(ready.inference_executed, false);
@@ -640,6 +641,254 @@ test('Antigravity preflight keeps entitlement and cost UNKNOWN and leaks no raw 
   assert.equal(failureReason, 'ANTIGRAVITY_CLI_NOT_QUALIFIED');
   assert.equal(typeof failureReason, 'string');
   assert.ok(/^[A-Z0-9_]+$/.test(failureReason), 'failure reason must be an existing safe code format');
+});
+
+test('Antigravity execution failure requires fresh, canonical UTC quota reset windows strictly in the future', () => {
+  const ready = { status: 'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH',
+    model: 'gemini-3.8-flash-high', signature_verified: true, issues: [],
+    project_scope_evidence: 'PROJECT_WORKSPACE_MATCHED',
+    effective_config_evidence: 'EFFECTIVE_CONFIG_VERIFIED_NO_MODEL',
+    credit_fallback_setting: 'CREDIT_FALLBACK_DISABLED', authentication_checked: true,
+    authentication_evidence: 'AUTHENTICATED_QUOTA_READ', tool_policy_evidence: 'W2_NONFILE_ACTIONS_DENIED',
+    inference_executed: false, credential_values_collected: false,
+    model_catalog: { status: 'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT', pinned_model_cataloged: true,
+      catalog_count: 2, catalog_sha256: createHash('sha256').update('gemini-3.8-flash-high').digest('hex') },
+    entitlement: 'UNKNOWN', cost: 'UNKNOWN',
+    gemini_aggregate_quota: { status: 'GEMINI_AGGREGATE_QUOTA_READ',
+      source: 'GEMINI_MODELS_AGGREGATE', weekly_remaining_percent: 95,
+      weekly_reset_at: '2026-11-08T12:00:00Z', five_hour_remaining_percent: 99,
+      five_hour_reset_at: '2026-11-01T17:00:00Z' } };
+
+  // 1. Positive coverage: both reset windows strictly in the future under fixedNow
+  assert.equal(antigravityV2ReadinessExecutionFailure(ready, fixedNow), null);
+  assert.equal(ready.entitlement, 'UNKNOWN');
+  assert.equal(ready.cost, 'UNKNOWN');
+
+  // Positive coverage: canonical millisecond timestamps (.000Z and arbitrary ms)
+  const readyMs = {
+    ...ready,
+    gemini_aggregate_quota: {
+      ...ready.gemini_aggregate_quota,
+      weekly_reset_at: '2026-11-08T12:00:00.000Z',
+      five_hour_reset_at: '2026-11-01T17:00:00.123Z',
+    },
+  };
+  assert.equal(antigravityV2ReadinessExecutionFailure(readyMs, fixedNow), null);
+
+  // Positive coverage: supported deterministic clock input forms
+  assert.equal(antigravityV2ReadinessExecutionFailure(ready, new Date(fixedNow)), null);
+  assert.equal(antigravityV2ReadinessExecutionFailure(ready, Date.parse(fixedNow)), null);
+
+  // 2. Negative coverage: weekly reset in the past
+  const pastWeekly = {
+    ...ready,
+    gemini_aggregate_quota: {
+      ...ready.gemini_aggregate_quota,
+      weekly_reset_at: '2026-10-31T12:00:00Z',
+      five_hour_reset_at: '2026-11-01T17:00:00Z',
+    },
+  };
+  assert.equal(antigravityV2ReadinessExecutionFailure(pastWeekly, fixedNow),
+    'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+
+  // 3. Negative coverage: five-hour reset in the past
+  const pastFiveHour = {
+    ...ready,
+    gemini_aggregate_quota: {
+      ...ready.gemini_aggregate_quota,
+      weekly_reset_at: '2026-11-08T12:00:00Z',
+      five_hour_reset_at: '2026-11-01T11:59:59Z',
+    },
+  };
+  assert.equal(antigravityV2ReadinessExecutionFailure(pastFiveHour, fixedNow),
+    'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+
+  // Both resets in the past (reproduced October defect on 2026-11-01)
+  const pastBoth = {
+    ...ready,
+    gemini_aggregate_quota: {
+      ...ready.gemini_aggregate_quota,
+      weekly_reset_at: '2026-10-23T22:50:38Z',
+      five_hour_reset_at: '2026-10-18T05:46:39Z',
+    },
+  };
+  assert.equal(antigravityV2ReadinessExecutionFailure(pastBoth, fixedNow),
+    'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+
+  // 4. Negative coverage: reset exactly equal to now (equality is expired)
+  const equalWeekly = {
+    ...ready,
+    gemini_aggregate_quota: {
+      ...ready.gemini_aggregate_quota,
+      weekly_reset_at: fixedNow,
+      five_hour_reset_at: '2026-11-01T17:00:00Z',
+    },
+  };
+  assert.equal(antigravityV2ReadinessExecutionFailure(equalWeekly, fixedNow),
+    'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+
+  const equalFiveHour = {
+    ...ready,
+    gemini_aggregate_quota: {
+      ...ready.gemini_aggregate_quota,
+      weekly_reset_at: '2026-11-08T12:00:00Z',
+      five_hour_reset_at: fixedNow,
+    },
+  };
+  assert.equal(antigravityV2ReadinessExecutionFailure(equalFiveHour, fixedNow),
+    'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+
+  const equalBoth = {
+    ...ready,
+    gemini_aggregate_quota: {
+      ...ready.gemini_aggregate_quota,
+      weekly_reset_at: fixedNow,
+      five_hour_reset_at: fixedNow,
+    },
+  };
+  assert.equal(antigravityV2ReadinessExecutionFailure(equalBoth, fixedNow),
+    'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+
+  // 5. Negative coverage: missing reset
+  for (const missingWeekly of [null, undefined, '']) {
+    const r = {
+      ...ready,
+      gemini_aggregate_quota: {
+        ...ready.gemini_aggregate_quota,
+        weekly_reset_at: missingWeekly,
+        five_hour_reset_at: '2026-11-01T17:00:00Z',
+      },
+    };
+    assert.equal(antigravityV2ReadinessExecutionFailure(r, fixedNow),
+      'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+  }
+
+  for (const missingFiveHour of [null, undefined, '']) {
+    const r = {
+      ...ready,
+      gemini_aggregate_quota: {
+        ...ready.gemini_aggregate_quota,
+        weekly_reset_at: '2026-11-08T12:00:00Z',
+        five_hour_reset_at: missingFiveHour,
+      },
+    };
+    assert.equal(antigravityV2ReadinessExecutionFailure(r, fixedNow),
+      'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+  }
+
+  const { weekly_reset_at: _w, ...quotaWithoutWeekly } = ready.gemini_aggregate_quota;
+  assert.equal(antigravityV2ReadinessExecutionFailure({
+    ...ready, gemini_aggregate_quota: quotaWithoutWeekly,
+  }, fixedNow), 'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID');
+
+  // 6. Negative coverage: malformed, impossible, or non-canonical timestamps
+  for (const malformed of [
+    '2026-02-30T12:00:00Z',
+    '2026-04-31T12:00:00Z',
+    '2026-13-01T12:00:00Z',
+    '2026-11-01T24:00:00Z',
+    '2026-11-01T12:60:00Z',
+    '2026-11-08T12:00:00+00:00',
+    '2026-11-08T07:00:00-05:00',
+    '2026-11-08t12:00:00z',
+    '2026-11-08T12:00:00z',
+    '2026-11-08T12:00:00.1Z',
+    '2026-11-08T12:00:00.12Z',
+    '2026-11-08T12:00:00.1234Z',
+    '2026/11/08T12:00:00Z',
+    'not-a-timestamp',
+    1762516800000,
+    true,
+    {},
+    [],
+  ]) {
+    const badWeekly = {
+      ...ready,
+      gemini_aggregate_quota: {
+        ...ready.gemini_aggregate_quota,
+        weekly_reset_at: malformed,
+        five_hour_reset_at: '2026-11-01T17:00:00Z',
+      },
+    };
+    assert.equal(antigravityV2ReadinessExecutionFailure(badWeekly, fixedNow),
+      'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID',
+      `malformed weekly timestamp ${JSON.stringify(malformed)} must fail closed`);
+
+    const badFiveHour = {
+      ...ready,
+      gemini_aggregate_quota: {
+        ...ready.gemini_aggregate_quota,
+        weekly_reset_at: '2026-11-08T12:00:00Z',
+        five_hour_reset_at: malformed,
+      },
+    };
+    assert.equal(antigravityV2ReadinessExecutionFailure(badFiveHour, fixedNow),
+      'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID',
+      `malformed five-hour timestamp ${JSON.stringify(malformed)} must fail closed`);
+  }
+
+  // 7. Negative coverage: invalid clock inputs fail closed
+  for (const badClock of [
+    'invalid-clock-string',
+    '2026-13-40T99:99:99Z',
+    '2026-02-30T12:00:00Z',
+    '2026-11-01T12:00:00',
+    '2026-11-01T12:00:00+00:00',
+    '1',
+    null,
+    NaN,
+    0,
+    -1,
+    -1000,
+    Infinity,
+    -Infinity,
+    false,
+    true,
+    {},
+    [],
+    new Date('invalid-date'),
+  ]) {
+    assert.equal(antigravityV2ReadinessExecutionFailure(ready, badClock),
+      'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID',
+      `invalid clock input ${String(badClock)} must fail closed`);
+  }
+
+  // 8. Gate precedence: empty quota and unknown quota take precedence over freshness
+  const emptyWithExpired = {
+    ...ready,
+    gemini_aggregate_quota: {
+      ...ready.gemini_aggregate_quota,
+      weekly_remaining_percent: 0,
+      weekly_reset_at: '2026-10-23T22:50:38Z',
+      five_hour_reset_at: '2026-10-18T05:46:39Z',
+    },
+  };
+  assert.equal(antigravityV2ReadinessExecutionFailure(emptyWithExpired, fixedNow),
+    'ANTIGRAVITY_QUOTA_EMPTY');
+
+  const emptyFiveHourWithExpired = {
+    ...ready,
+    gemini_aggregate_quota: {
+      ...ready.gemini_aggregate_quota,
+      five_hour_remaining_percent: 0,
+      weekly_reset_at: '2026-10-23T22:50:38Z',
+      five_hour_reset_at: '2026-10-18T05:46:39Z',
+    },
+  };
+  assert.equal(antigravityV2ReadinessExecutionFailure(emptyFiveHourWithExpired, fixedNow),
+    'ANTIGRAVITY_QUOTA_EMPTY');
+
+  const unknownQuotaWithExpired = {
+    ...ready,
+    gemini_aggregate_quota: {
+      ...ready.gemini_aggregate_quota,
+      weekly_remaining_percent: null,
+      weekly_reset_at: '2026-10-23T22:50:38Z',
+      five_hour_reset_at: '2026-10-18T05:46:39Z',
+    },
+  };
+  assert.equal(antigravityV2ReadinessExecutionFailure(unknownQuotaWithExpired, fixedNow),
+    'ANTIGRAVITY_AGGREGATE_QUOTA_UNKNOWN');
 });
 
 test('Antigravity readiness fails qualification when pinned model is absent from model catalog', () => {
