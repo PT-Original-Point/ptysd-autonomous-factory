@@ -246,7 +246,41 @@ export function summarizeAntigravityUsage(stdout) {
     five_hour_remaining_percent: fiveHour.percent, five_hour_reset_at: fiveHour.resetAt };
 }
 
-export function antigravityV2ReadinessExecutionFailure(readiness) {
+const CANONICAL_UTC_WHOLE_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const CANONICAL_UTC_MILLISECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+function parseCanonicalUtcTimestamp(timestamp) {
+  if (typeof timestamp !== 'string') return null;
+  const isWholeSeconds = CANONICAL_UTC_WHOLE_SECONDS.test(timestamp);
+  const isMilliseconds = CANONICAL_UTC_MILLISECONDS.test(timestamp);
+  if (!isWholeSeconds && !isMilliseconds) return null;
+  const ms = Date.parse(timestamp);
+  if (!Number.isFinite(ms)) return null;
+  const iso = new Date(ms).toISOString();
+  if (isWholeSeconds && iso.replace('.000Z', 'Z') !== timestamp) return null;
+  if (isMilliseconds && iso !== timestamp) return null;
+  return ms;
+}
+
+function resolveDeterministicClock(now) {
+  if (now === undefined) {
+    const current = Date.now();
+    return Number.isFinite(current) && current > 0 ? current : null;
+  }
+  if (typeof now === 'number') {
+    return Number.isFinite(now) && now > 0 ? now : null;
+  }
+  if (now instanceof Date) {
+    const ms = now.getTime();
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
+  }
+  if (typeof now === 'string') {
+    return parseCanonicalUtcTimestamp(now);
+  }
+  return null;
+}
+
+export function antigravityV2ReadinessExecutionFailure(readiness, now = undefined) {
   if (!readiness || readiness.project_scope_evidence !== 'PROJECT_WORKSPACE_MATCHED')
     return 'ANTIGRAVITY_PROJECT_SCOPE_UNVERIFIED';
   if (!readiness || readiness.status !== 'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH' ||
@@ -289,6 +323,15 @@ export function antigravityV2ReadinessExecutionFailure(readiness) {
     return 'ANTIGRAVITY_AGGREGATE_QUOTA_UNKNOWN';
   if (quota.weekly_remaining_percent <= 0 || quota.five_hour_remaining_percent <= 0)
     return 'ANTIGRAVITY_QUOTA_EMPTY';
+  const currentMs = resolveDeterministicClock(now);
+  if (currentMs === null)
+    return 'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID';
+  const weeklyResetMs = parseCanonicalUtcTimestamp(quota.weekly_reset_at);
+  const fiveHourResetMs = parseCanonicalUtcTimestamp(quota.five_hour_reset_at);
+  if (weeklyResetMs === null || fiveHourResetMs === null)
+    return 'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID';
+  if (weeklyResetMs <= currentMs || fiveHourResetMs <= currentMs)
+    return 'ANTIGRAVITY_QUOTA_WINDOW_EXPIRED_OR_INVALID';
   return null;
 }
 
