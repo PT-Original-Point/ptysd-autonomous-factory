@@ -4,10 +4,11 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, existsSync, lstatSync, mkdirSync,
-  openSync, closeSync, ftruncateSync, readFileSync, readdirSync, renameSync, writeFileSync, fsyncSync, unlinkSync } from 'node:fs';
+  openSync, closeSync, ftruncateSync, readFileSync, readdirSync, renameSync, writeFileSync,
+  writeSync, fsyncSync, unlinkSync, fstatSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { uptime } from 'node:os';
-import { dirname, join, relative, resolve, isAbsolute, sep } from 'node:path';
+import { dirname, join, relative, resolve, isAbsolute, parse, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readWindowsProcessTree, runCapturedProcess, terminateProcessTree }
   from './captured-process.mjs';
@@ -87,66 +88,151 @@ function archiveActiveLock(path) {
   return archived;
 }
 
+function acquireRecoveryGuard(lockDir) {
+  const path = join(lockDir, 'executor.recovery');
+  const lockId = randomUUID();
+  let fd;
+  try {
+    fd = openSync(path, 'wx', 0o600);
+    writeFileSync(fd, JSON.stringify({ schema: 1, lock_id: lockId, pid: process.pid,
+      started_at: new Date().toISOString() }));
+    fsyncSync(fd);
+    closeSync(fd);
+    return { path, lock_id: lockId };
+  } catch (error) {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve the original failure */ } }
+    if (error.code === 'EEXIST') throw new Error('EXECUTOR_LOCK_RECOVERY_RACE');
+    // A partially written guard is retained as a fail-closed recovery barrier.
+    throw error;
+  }
+}
+
+function releaseRecoveryGuard(guard) {
+  let fd;
+  try {
+    fd = openSync(guard.path, 'r');
+    const opened = fstatSync(fd);
+    const named = lstatSync(guard.path);
+    const current = JSON.parse(readFileSync(fd, 'utf8'));
+    if (!named.isFile() || named.isSymbolicLink() || !sameFileIdentity(opened, named) ||
+        current?.schema !== 1 || current.pid !== process.pid || current.lock_id !== guard.lock_id)
+      return false;
+  } catch { return false; }
+  finally { if (fd !== undefined) closeSync(fd); }
+  try { unlinkSync(guard.path); return true; }
+  catch { return false; }
+}
+
+function assertRecoverableActiveLock(lock, currentUptime, deps, activeConflict) {
+  if (lock?.schema !== 1 || !Number.isSafeInteger(lock.pid) ||
+      !Number.isFinite(lock.boot_uptime_seconds) || typeof lock.phase !== 'string')
+    throw activeConflict;
+  if (lock.model_pid !== undefined && lock.model_pid !== null &&
+      (!Number.isSafeInteger(lock.model_pid) || lock.model_pid < 1)) throw activeConflict;
+  if (lock.phase === 'CLI_REFRESH_STATE_UNKNOWN' &&
+      (lock.request_id !== null || lock.attempt_id !== null || lock.model_pid !== null))
+    throw new Error('EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN');
+
+  // A lower OS uptime proves a reboot terminated every prior process. The
+  // durable per-attempt claim remains, so the old request is never replayed.
+  const previousBoot = currentUptime < lock.boot_uptime_seconds;
+  if (!previousBoot) {
+    const alive = (deps.isProcessAlive || isProcessAlive)(lock.pid);
+    if (alive !== false) throw activeConflict;
+    // A refresh may have started an updater child that is not represented by
+    // model_pid. Same-boot parent death alone cannot prove that child ended.
+    if (lock.phase === 'CLI_REFRESH_STATE_UNKNOWN')
+      throw new Error('EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN');
+    if (Number.isSafeInteger(lock.model_pid)) {
+      const readback = (deps.readProcessTree || readWindowsProcessTree)(lock.model_pid);
+      if (readback?.root_pid !== lock.model_pid || readback?.state !== 'DEAD' ||
+          !Array.isArray(readback.process_ids) || readback.process_ids.length !== 0)
+        throw new Error('EXECUTOR_LOCK_MODEL_TREE_UNKNOWN');
+    } else if (!['DISPATCHER', 'CLAIMED_NO_MODEL', 'MODEL_FINISHED', 'RESULT_SAVED'].includes(lock.phase)) {
+      throw new Error('EXECUTOR_LOCK_STALE_MODEL_EFFECTS_UNKNOWN');
+    }
+  }
+}
+
 function acquireActiveLock(spoolDir, deps = {}) {
   const lockDir = join(spoolDir, 'locks');
   mkdirSync(lockDir, { recursive: true });
   const path = join(lockDir, 'executor.active');
+  const lockId = randomUUID();
   const currentUptime = (deps.uptimeSeconds || uptime)();
   for (let retry = 0; retry < 3; retry++) {
     let fd;
     try {
       fd = openSync(path, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify({ schema: 1, pid: process.pid,
+      writeFileSync(fd, JSON.stringify({ schema: 1, lock_id: lockId, pid: process.pid,
         started_at: new Date().toISOString(), boot_uptime_seconds: currentUptime,
         phase: 'DISPATCHER', request_id: null, attempt_id: null, model_pid: null }));
       fsyncSync(fd);
       closeSync(fd);
-      return path;
+      return { path, lock_id: lockId };
     } catch (error) {
       if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve original error */ } }
       if (error.code !== 'EEXIST') throw error;
       let lock;
       try { lock = JSON.parse(readFileSync(path, 'utf8')); }
       catch { throw error; }
-      if (lock?.schema !== 1 || !Number.isSafeInteger(lock.pid) ||
-          !Number.isFinite(lock.boot_uptime_seconds) || typeof lock.phase !== 'string') throw error;
-      if (lock.model_pid !== undefined && lock.model_pid !== null &&
-          (!Number.isSafeInteger(lock.model_pid) || lock.model_pid < 1)) throw error;
-      if (lock.phase === 'CLI_REFRESH_STATE_UNKNOWN' &&
-          (lock.request_id !== null || lock.attempt_id !== null || lock.model_pid !== null))
-        throw new Error('EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN');
-
-      // A lower OS uptime proves a reboot terminated every prior process. The
-      // durable per-attempt claim remains, so the old request is never replayed.
-      const previousBoot = currentUptime < lock.boot_uptime_seconds;
-      if (!previousBoot) {
-        const alive = (deps.isProcessAlive || isProcessAlive)(lock.pid);
-        if (alive !== false) throw error;
-        // A refresh may have started an updater child that is not represented by
-        // model_pid. Same-boot parent death alone cannot prove that child ended.
-        if (lock.phase === 'CLI_REFRESH_STATE_UNKNOWN')
-          throw new Error('EXECUTOR_LOCK_REFRESH_STATE_UNKNOWN');
-        if (Number.isSafeInteger(lock.model_pid)) {
-          const readback = (deps.readProcessTree || readWindowsProcessTree)(lock.model_pid);
-          if (readback?.root_pid !== lock.model_pid || readback?.state !== 'DEAD' ||
-              !Array.isArray(readback.process_ids) || readback.process_ids.length !== 0)
-            throw new Error('EXECUTOR_LOCK_MODEL_TREE_UNKNOWN');
-        } else if (!['DISPATCHER', 'CLAIMED_NO_MODEL', 'MODEL_FINISHED', 'RESULT_SAVED'].includes(lock.phase)) {
-          throw new Error('EXECUTOR_LOCK_STALE_MODEL_EFFECTS_UNKNOWN');
-        }
+      assertRecoverableActiveLock(lock, currentUptime, deps, error);
+      const recoveryGuard = acquireRecoveryGuard(lockDir);
+      try {
+        // The lock may have changed after the first read. Revalidate it while
+        // holding the shared recovery guard so two stale-lock recoverers cannot
+        // archive each other's newly created live lock.
+        let current;
+        try { current = JSON.parse(readFileSync(path, 'utf8')); }
+        catch { throw new Error('EXECUTOR_LOCK_RECOVERY_RACE'); }
+        assertRecoverableActiveLock(current, currentUptime, deps,
+          new Error('EXECUTOR_LOCK_RECOVERY_RACE'));
+        deps.beforeStaleLockArchive?.({ path, lock: current });
+        let latest;
+        try { latest = JSON.parse(readFileSync(path, 'utf8')); }
+        catch { throw new Error('EXECUTOR_LOCK_RECOVERY_RACE'); }
+        assertRecoverableActiveLock(latest, currentUptime, deps,
+          new Error('EXECUTOR_LOCK_RECOVERY_RACE'));
+        archiveActiveLock(path);
+      } finally {
+        if (!releaseRecoveryGuard(recoveryGuard))
+          throw new Error('EXECUTOR_LOCK_RECOVERY_RELEASE_UNKNOWN');
       }
-      try { archiveActiveLock(path); }
-      catch (archiveError) { if (archiveError.code !== 'ENOENT') throw archiveError; }
     }
   }
   throw new Error('EXECUTOR_LOCK_RECOVERY_RACE');
 }
 
-function updateActiveLock(path, phase, request = null, modelPid = undefined) {
-  const fd = openSync(path, 'r+');
+function sameFileIdentity(left, right) {
+  return left?.dev === right?.dev && left?.ino === right?.ino;
+}
+
+function activeLockMatches(activeLock, expected = {}) {
+  let fd;
   try {
-    const current = JSON.parse(readFileSync(path, 'utf8'));
-    if (current?.schema !== 1 || current.pid !== process.pid)
+    fd = openSync(activeLock.path, 'r');
+    const opened = fstatSync(fd);
+    const named = lstatSync(activeLock.path);
+    if (!named.isFile() || named.isSymbolicLink() || !sameFileIdentity(opened, named)) return false;
+    const current = JSON.parse(readFileSync(fd, 'utf8'));
+    return current?.schema === 1 && current.pid === process.pid &&
+      current.lock_id === activeLock.lock_id &&
+      (expected.phase === undefined || current.phase === expected.phase) &&
+      (expected.request_id === undefined || current.request_id === expected.request_id) &&
+      (expected.attempt_id === undefined || current.attempt_id === expected.attempt_id) &&
+      (expected.model_pid === undefined || current.model_pid === expected.model_pid);
+  } catch { return false; }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
+
+function updateActiveLock(activeLock, phase, request = null, modelPid = undefined) {
+  const fd = openSync(activeLock.path, 'r+');
+  try {
+    const opened = fstatSync(fd);
+    const named = lstatSync(activeLock.path);
+    const current = JSON.parse(readFileSync(fd, 'utf8'));
+    if (!named.isFile() || named.isSymbolicLink() || !sameFileIdentity(opened, named) ||
+        current?.schema !== 1 || current.pid !== process.pid || current.lock_id !== activeLock.lock_id)
       throw new Error('EXECUTOR_LOCK_OWNERSHIP_LOST');
     const next = { ...current, phase,
       request_id: request?.request_id ?? current.request_id,
@@ -154,9 +240,44 @@ function updateActiveLock(path, phase, request = null, modelPid = undefined) {
     if (modelPid !== undefined)
       next.model_pid = Number.isSafeInteger(modelPid) && modelPid > 0 ? modelPid : null;
     ftruncateSync(fd, 0);
-    writeFileSync(fd, JSON.stringify(next));
+    writeSync(fd, JSON.stringify(next), 0, 'utf8');
     fsyncSync(fd);
+    if (!activeLockMatches(activeLock, { phase: next.phase, request_id: next.request_id,
+      attempt_id: next.attempt_id, model_pid: next.model_pid }))
+      throw new Error('EXECUTOR_LOCK_OWNERSHIP_LOST');
   } finally { closeSync(fd); }
+}
+
+function noModelRequestClaimMatches(config, picked, request) {
+  const requestId = request?.job?.request_id;
+  const attemptId = request?.attempt_id;
+  const requestPath = join(config.spool_dir, 'requests', `${requestId}-${attemptId}.json`);
+  const claimPath = join(config.spool_dir, 'claims', `${requestId}-${attemptId}.json`);
+  if (picked?.path !== requestPath || picked?.claim_path !== claimPath) return false;
+  const currentRequest = JSON.parse(readFileSync(requestPath, 'utf8'));
+  validateCodexExecutorRequest(currentRequest);
+  if (JSON.stringify(currentRequest) !== JSON.stringify(request)) return false;
+  const expectedClaim = JSON.stringify({ request_id: requestId, attempt_id: attemptId,
+    source_sha: request.source_sha, fingerprint: request.fingerprint });
+  return readFileSync(claimPath, 'utf8') === expectedClaim;
+}
+
+function removeOwnedActiveLock(activeLock, deps = {}) {
+  let recoveryGuard;
+  try {
+    recoveryGuard = acquireRecoveryGuard(dirname(activeLock.path));
+    if (!activeLockMatches(activeLock)) return false;
+    deps.beforeOwnedLockRemove?.(activeLock);
+    // Re-read after the hook and under the same guard used by stale recovery.
+    // The remaining check/unlink window is serialized against every executor
+    // instance that participates in this lock protocol.
+    if (!activeLockMatches(activeLock)) return false;
+    unlinkSync(activeLock.path);
+    return true;
+  } catch { return false; }
+  finally {
+    if (recoveryGuard) releaseRecoveryGuard(recoveryGuard);
+  }
 }
 
 export function takeNextRequest(spoolDir) {
@@ -272,6 +393,7 @@ export async function runCodex(request, config, worktree, evidenceDir, deps = {}
     terminate: deps.terminate || terminateProcessTree,
     platformName: deps.platformName,
     readProcessTree: deps.readProcessTree,
+    beforeSpawn: deps.beforeSpawn,
     onSpawn: deps.onProcessSpawn,
   });
   const evidence = capture.local_evidence;
@@ -443,13 +565,13 @@ async function diffDigest(worktree, paths) {
 }
 
 function writeResult(path, result, { statResultFile = lstatSync,
-  readResultFile = readFileSync } = {}) {
+  readResultFile = readFileSync, beforePublish = () => {} } = {}) {
   mkdirSync(resolve(path, '..'), { recursive: true });
   if (existsSync(path)) throw new Error('EXECUTOR_RESULT_ALREADY_EXISTS_NO_OVERWRITE');
   const serialized = JSON.stringify(result, null, 2);
   const temp = `${path}.${randomUUID()}.tmp`;
   const fd = openSync(temp, 'wx', 0o600);
-  try { writeFileSync(fd, serialized); fsyncSync(fd); }
+  try { writeFileSync(fd, serialized); fsyncSync(fd); beforePublish(); }
   catch (error) { closeSync(fd); try { unlinkSync(temp); } catch {} throw error; }
   closeSync(fd);
   try { renameSync(temp, path); }
@@ -649,25 +771,54 @@ function codexProjectConfigPermissionIssue(worktree) {
   return legacySandbox ? 'CODEX_PROJECT_CONFIG_LEGACY_SANDBOX_SETTING' : null;
 }
 
-function persistNoModelResult(config, picked, request, outcome, reasons, deps = {}) {
+function assertNoSymlinkPath(path) {
+  const absolute = resolve(path);
+  const root = parse(absolute).root;
+  const components = relative(root, absolute).split(sep).filter(Boolean);
+  let current = root;
+  for (let index = 0; index <= components.length; index++) {
+    if (index > 0) current = join(current, components[index - 1]);
+    let info;
+    try { info = lstatSync(current); }
+    catch (error) {
+      if (error.code === 'ENOENT') return;
+      throw error;
+    }
+    if (info.isSymbolicLink()) throw new Error('WORKSPACE_ROOT_SYMLINK_UNSAFE');
+    if (index < components.length && !info.isDirectory()) {
+      // A non-directory ancestor makes the attempt path impossible.
+      return;
+    }
+  }
+}
+
+function attemptWorkspaceAbsent(workspaceRoot, worktree) {
+  assertNoSymlinkPath(workspaceRoot);
+  try { lstatSync(worktree); return false; }
+  catch (error) {
+    if (error.code === 'ENOENT') return true;
+    if (error.code !== 'ENOTDIR') throw error;
+    // A regular file at workspace_root makes any child attempt path impossible.
+    const rootInfo = lstatSync(workspaceRoot);
+    if (rootInfo.isFile() && !rootInfo.isSymbolicLink()) return true;
+    throw error;
+  }
+}
+
+function persistNoModelResult(config, picked, request, outcome, reasons, deps = {},
+  expectedWorktreeState = 'PRESENT', activeLock = null) {
+  if (!['ABSENT', 'PRESENT'].includes(expectedWorktreeState))
+    throw new Error('PREFLIGHT_WORKTREE_STATE_INVALID');
   const requestId = request?.job?.request_id;
   const attemptId = request?.attempt_id;
   const requestPath = join(config.spool_dir, 'requests', `${requestId}-${attemptId}.json`);
   const claimPath = join(config.spool_dir, 'claims', `${requestId}-${attemptId}.json`);
-  const activePath = join(config.spool_dir, 'locks', 'executor.active');
   if (picked?.path !== requestPath || picked?.claim_path !== claimPath) return null;
 
-  const active = JSON.parse(readFileSync(activePath, 'utf8'));
-  if (active?.schema !== 1 || active.pid !== process.pid || active.phase !== 'CLAIMED_NO_MODEL' ||
-      active.request_id !== requestId || active.attempt_id !== attemptId || active.model_pid !== null)
+  if (!activeLock || !activeLockMatches(activeLock, { phase: 'CLAIMED_NO_MODEL',
+    request_id: requestId, attempt_id: attemptId, model_pid: null }))
     return null;
-
-  const currentRequest = JSON.parse(readFileSync(requestPath, 'utf8'));
-  validateCodexExecutorRequest(currentRequest);
-  if (JSON.stringify(currentRequest) !== JSON.stringify(request)) return null;
-  const expectedClaim = JSON.stringify({ request_id: requestId, attempt_id: attemptId,
-    source_sha: request.source_sha, fingerprint: request.fingerprint });
-  if (readFileSync(claimPath, 'utf8') !== expectedClaim) return null;
+  if (!noModelRequestClaimMatches(config, picked, request)) return null;
 
   const resultPath = executorResultPath(config.spool_dir, requestId, attemptId);
   if (existsSync(resultPath)) return null;
@@ -675,10 +826,14 @@ function persistNoModelResult(config, picked, request, outcome, reasons, deps = 
   const worktree = resolve(workspaceRoot, attemptId);
   const rel = relative(workspaceRoot, worktree);
   if (rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) return null;
-  let worktreeInfo;
-  try { worktreeInfo = lstatSync(worktree); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  if (!worktreeInfo.isDirectory() || worktreeInfo.isSymbolicLink()) return null;
+  let worktreeInfo = null;
+  if (expectedWorktreeState === 'ABSENT') {
+    if (!attemptWorkspaceAbsent(workspaceRoot, worktree)) return null;
+  } else {
+    try { worktreeInfo = lstatSync(worktree); }
+    catch { return null; }
+    if (!worktreeInfo?.isDirectory() || worktreeInfo.isSymbolicLink()) return null;
+  }
 
   const emptyOutputHash = createHash('sha256').update('').digest('hex');
   writeResult(resultPath, {
@@ -697,14 +852,44 @@ function persistNoModelResult(config, picked, request, outcome, reasons, deps = 
     termination_state: 'NOT_STARTED', termination_error: null,
     tests: 'NOT_RUN', pr_url: null, observed_at: new Date().toISOString(),
   }, { statResultFile: deps.statResultFile || lstatSync,
-    readResultFile: deps.readResultFile || readFileSync });
+    readResultFile: deps.readResultFile || readFileSync,
+    beforePublish: () => {
+      deps.beforeNoModelResultPublish?.({ workspaceRoot, worktree, activeLock });
+      if (!noModelRequestClaimMatches(config, picked, request))
+        throw new Error('PREFLIGHT_REQUEST_CLAIM_CHANGED');
+      if (!activeLockMatches(activeLock, { phase: 'CLAIMED_NO_MODEL', request_id: requestId,
+        attempt_id: attemptId, model_pid: null }))
+        throw new Error('PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED');
+      if (expectedWorktreeState === 'ABSENT' &&
+          !attemptWorkspaceAbsent(workspaceRoot, worktree))
+        throw new Error('PREFLIGHT_WORKSPACE_STATE_CHANGED');
+    } });
   return resultPath;
 }
 
-function persistPreModelBlockResult(config, picked, request, reasons, releaseReason, deps = {}) {
+function persistPreModelBlockResult(config, picked, request, reasons, releaseReason, deps = {},
+  activeLock = null) {
   if (releaseReason !== 'PREFLIGHT_WORKTREE_EFFECT_UNKNOWN') return null;
   return persistNoModelResult(config, picked, request, 'PREFLIGHT_EFFECT_UNKNOWN_NO_REPLAY',
-    [...reasons, releaseReason], deps);
+    [...reasons, releaseReason], deps, 'PRESENT', activeLock);
+}
+
+function persistNoModelPreflightFailure(config, picked, request, activeLock, outcome, reason, deps) {
+  let resultPath = null;
+  try {
+    resultPath = persistNoModelResult(config, picked, request, outcome, [reason], deps,
+      'ABSENT', activeLock);
+  } catch (error) {
+    return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+      attempt_id: request.attempt_id,
+      reasons: [reason, safeErrorCode(error, 'PREFLIGHT_RESULT_WRITE_FAILED')] };
+  }
+  if (!resultPath)
+    return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+      attempt_id: request.attempt_id, reasons: [reason, 'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED'] };
+  updateActiveLock(activeLock, 'RESULT_SAVED', request);
+  return { state: 'RESULT_SAVED', model_invoked: false, request_id: request.job.request_id,
+    attempt_id: request.attempt_id, outcome, result_path: resultPath };
 }
 
 export async function runExecutorOnce(config, deps = {}) {
@@ -722,13 +907,14 @@ export async function runExecutorOnce(config, deps = {}) {
     const waitForEligibility = reasons => {
       let releaseReason = null;
       let resultPath = null;
-      try { releasePreModelAttempt(config, picked, request); }
+      try { releasePreModelAttempt(config, picked, request, activeLock, deps); }
       catch (error) {
         releaseReason = safeErrorCode(error, 'PREFLIGHT_EFFECT_READBACK_UNKNOWN');
       }
       const blockReasons = releaseReason ? [...reasons, releaseReason] : reasons;
       if (releaseReason === 'PREFLIGHT_WORKTREE_EFFECT_UNKNOWN') {
-        try { resultPath = persistPreModelBlockResult(config, picked, request, reasons, releaseReason, deps); }
+        try { resultPath = persistPreModelBlockResult(config, picked, request, reasons,
+          releaseReason, deps, activeLock); }
         catch (error) { blockReasons.push(safeErrorCode(error, 'PREFLIGHT_RESULT_WRITE_FAILED')); }
         if (!resultPath) blockReasons.push('PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED');
       }
@@ -763,54 +949,92 @@ export async function runExecutorOnce(config, deps = {}) {
     }
     const bundleRoot = resolve(config.spool_dir, 'bundles');
     const bundlePath = resolve(request.bundle_path);
-    const bundleRel = relative(bundleRoot, bundlePath);
-    if (bundleRel.startsWith(`..${sep}`) || bundleRel === '..' || isAbsolute(bundleRel))
-      throw new Error('EXECUTOR_BUNDLE_PATH_ESCAPE');
-    const bundleInfo = lstatSync(bundlePath);
-    if (!bundleInfo.isFile() || bundleInfo.isSymbolicLink()) throw new Error('EXECUTOR_BUNDLE_NOT_REGULAR_FILE');
-    const bundleSha = await digestFile(bundlePath);
-    if (bundleSha !== request.bundle_sha256) throw new Error('EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH');
+    let bundleSha;
+    try {
+      const bundleRel = relative(bundleRoot, bundlePath);
+      if (bundleRel.startsWith(`..${sep}`) || bundleRel === '..' || isAbsolute(bundleRel))
+        throw new Error('EXECUTOR_BUNDLE_PATH_ESCAPE');
+      const bundleInfo = lstatSync(bundlePath);
+      if (!bundleInfo.isFile() || bundleInfo.isSymbolicLink())
+        throw new Error('EXECUTOR_BUNDLE_NOT_REGULAR_FILE');
+      bundleSha = await digestFile(bundlePath);
+      if (bundleSha !== request.bundle_sha256)
+        throw new Error('EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH');
+    } catch (error) {
+      // Bundle identity is checked before workspace creation and model launch.
+      // Persist a terminal no-model result only while the exact claim and lock
+      // still prove ownership; otherwise preserve the claim as a no-replay stop.
+      const reason = safeErrorCode(error, 'EXECUTOR_SOURCE_BUNDLE_PREFLIGHT_FAILED');
+      return persistNoModelPreflightFailure(config, picked, request, activeLock,
+        'SOURCE_BUNDLE_PREFLIGHT_FAILED_NO_MODEL', reason, deps);
+    }
     const root = resolve(config.workspace_root);
     const worktree = resolve(root, request.attempt_id);
-    const rel = relative(root, worktree);
-    if (rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) throw new Error('WORKTREE_PATH_ESCAPE');
-    mkdirSync(root, { recursive: true });
-    if (existsSync(worktree)) throw new Error('WORKTREE_ALREADY_EXISTS_NO_REUSE');
-    execFileSync('git', ['clone', '--quiet', '--no-hardlinks', request.bundle_path, worktree], {
-      encoding: 'utf8', windowsHide: true, shell: false, timeout: 120000, maxBuffer: 1024 * 1024,
-    });
-    execFileSync('git', ['-C', worktree, 'checkout', '--quiet', '--detach', verified.job.source_sha], {
-      encoding: 'utf8', windowsHide: true, shell: false, timeout: 60000, maxBuffer: 1024 * 1024,
-    });
-    const actualHead = execFileSync('git', ['-C', worktree, 'rev-parse', 'HEAD'], {
-      encoding: 'utf8', windowsHide: true, shell: false, timeout: 30000, maxBuffer: 32768,
-    }).trim();
-    if (actualHead !== verified.job.source_sha) throw new Error('WORKTREE_SOURCE_SHA_MISMATCH');
-    const permissionIssue = codexProjectConfigPermissionIssue(worktree);
-    if (permissionIssue) {
-      const outcome = permissionIssue === 'CODEX_PROJECT_CONFIG_LEGACY_SANDBOX_SETTING' ?
-        'CODEX_PROJECT_CONFIG_INCOMPATIBLE_NO_MODEL' : 'CODEX_PROJECT_CONFIG_READBACK_UNKNOWN_NO_MODEL';
-      let blockedResultPath = null;
-      try { blockedResultPath = persistNoModelResult(config, picked, request, outcome, [permissionIssue], deps); }
-      catch (error) {
-        return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
-          attempt_id: request.attempt_id,
-          reasons: [permissionIssue, safeErrorCode(error, 'PREFLIGHT_RESULT_WRITE_FAILED')] };
-      }
-      if (!blockedResultPath)
-        return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
-          attempt_id: request.attempt_id, reasons: [permissionIssue, 'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED'] };
-      updateActiveLock(activeLock, 'RESULT_SAVED', request);
-      return { state: 'RESULT_SAVED', model_invoked: false, request_id: request.job.request_id,
-        attempt_id: request.attempt_id, outcome, result_path: blockedResultPath };
-    }
     const evidenceDir = join(config.spool_dir, 'evidence');
-    mkdirSync(evidenceDir, { recursive: true });
+    try {
+      const rel = relative(root, worktree);
+      if (rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) throw new Error('WORKTREE_PATH_ESCAPE');
+      assertNoSymlinkPath(root);
+      mkdirSync(root, { recursive: true });
+      assertNoSymlinkPath(root);
+      if (existsSync(worktree)) throw new Error('WORKTREE_ALREADY_EXISTS_NO_REUSE');
+      assertNoSymlinkPath(root);
+      execFileSync('git', ['clone', '--quiet', '--no-hardlinks', request.bundle_path, worktree], {
+        encoding: 'utf8', windowsHide: true, shell: false, timeout: 120000, maxBuffer: 1024 * 1024,
+      });
+      execFileSync('git', ['-C', worktree, 'checkout', '--quiet', '--detach', verified.job.source_sha], {
+        encoding: 'utf8', windowsHide: true, shell: false, timeout: 60000, maxBuffer: 1024 * 1024,
+      });
+      const actualHead = execFileSync('git', ['-C', worktree, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8', windowsHide: true, shell: false, timeout: 30000, maxBuffer: 32768,
+      }).trim();
+      if (actualHead !== verified.job.source_sha) throw new Error('WORKTREE_SOURCE_SHA_MISMATCH');
+      const permissionIssue = codexProjectConfigPermissionIssue(worktree);
+      if (permissionIssue) {
+        const outcome = permissionIssue === 'CODEX_PROJECT_CONFIG_LEGACY_SANDBOX_SETTING' ?
+          'CODEX_PROJECT_CONFIG_INCOMPATIBLE_NO_MODEL' : 'CODEX_PROJECT_CONFIG_READBACK_UNKNOWN_NO_MODEL';
+        let blockedResultPath = null;
+        try { blockedResultPath = persistNoModelResult(config, picked, request, outcome,
+          [permissionIssue], deps, 'PRESENT', activeLock); }
+        catch (error) {
+          return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+            attempt_id: request.attempt_id,
+            reasons: [permissionIssue, safeErrorCode(error, 'PREFLIGHT_RESULT_WRITE_FAILED')] };
+        }
+        if (!blockedResultPath)
+          return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+            attempt_id: request.attempt_id, reasons: [permissionIssue, 'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED'] };
+        updateActiveLock(activeLock, 'RESULT_SAVED', request);
+        return { state: 'RESULT_SAVED', model_invoked: false, request_id: request.job.request_id,
+          attempt_id: request.attempt_id, outcome, result_path: blockedResultPath };
+      }
+      mkdirSync(evidenceDir, { recursive: true });
+    } catch (error) {
+      // Workspace setup is still pre-model. Only persist a terminal no-model
+      // result when the exact attempt directory is proven absent; partial
+      // clones and pre-existing workspaces remain a no-replay blocker.
+      const reason = safeErrorCode(error, 'EXECUTOR_WORKSPACE_PREFLIGHT_FAILED');
+      return persistNoModelPreflightFailure(config, picked, request, activeLock,
+        'CODEX_WORKSPACE_PREFLIGHT_FAILED_NO_MODEL', reason, deps);
+    }
     updateActiveLock(activeLock, 'MODEL_RUNNING', request);
     preserveActiveLock = true;
-    const execution = await (deps.runCodex || runCodex)(request, config, worktree, evidenceDir, {
-      onProcessSpawn: modelPid => updateActiveLock(activeLock, 'MODEL_RUNNING', request, modelPid),
-    });
+    let execution;
+    try {
+      execution = await (deps.runCodex || runCodex)(request, config, worktree, evidenceDir, {
+        beforeSpawn: () => {
+          if (!activeLockMatches(activeLock, { phase: 'MODEL_RUNNING',
+            request_id: request.job.request_id, attempt_id: request.attempt_id, model_pid: null }))
+            throw Object.assign(new Error('EXECUTOR_LOCK_OWNERSHIP_LOST'),
+              { code: 'EXECUTOR_LOCK_OWNERSHIP_LOST' });
+        },
+        onProcessSpawn: modelPid => updateActiveLock(activeLock, 'MODEL_RUNNING', request, modelPid),
+      });
+    } catch (error) {
+      if (safeErrorCode(error, '') !== 'EXECUTOR_LOCK_OWNERSHIP_LOST') throw error;
+      return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+        attempt_id: request.attempt_id, reasons: ['EXECUTOR_LOCK_OWNERSHIP_LOST'] };
+    }
     const terminationUnknown = ['ORPHAN_POSSIBLE', 'TERMINATION_REQUESTED', 'TERMINATION_UNCONFIRMED']
       .includes(execution.termination_state);
     if (terminationUnknown) {
@@ -867,7 +1091,7 @@ export async function runExecutorOnce(config, deps = {}) {
     // or its descendants cannot be confirmed dead, the lock remains a conflict
     // stop signal until an explicit OS readback can establish safe recovery.
     if (!preserveActiveLock) {
-      try { (deps.removeFile || unlinkSync)(activeLock); }
+      try { removeOwnedActiveLock(activeLock, deps); }
       catch { /* keep any uncertain lock for explicit operator readback */ }
     }
   }
@@ -877,7 +1101,7 @@ export async function runExecutorOnce(config, deps = {}) {
 // allows a later native poll to reevaluate the same immutable request after a
 // recoverable login miss. Any ambiguous artifact retains the claim as a
 // no-replay barrier.
-function releasePreModelAttempt(config, picked, request) {
+function releasePreModelAttempt(config, picked, request, activeLock, deps = {}) {
   const requestId = request?.job?.request_id;
   const attemptId = request?.attempt_id;
   const expectedClaimPath = join(config.spool_dir, 'claims', `${requestId}-${attemptId}.json`);
@@ -886,10 +1110,8 @@ function releasePreModelAttempt(config, picked, request) {
       picked?.path !== join(config.spool_dir, 'requests', `${requestId}-${attemptId}.json`))
     throw new Error('PREFLIGHT_CLAIM_IDENTITY_UNKNOWN');
 
-  const activePath = join(config.spool_dir, 'locks', 'executor.active');
-  const active = JSON.parse(readFileSync(activePath, 'utf8'));
-  if (active?.schema !== 1 || active.pid !== process.pid || active.phase !== 'CLAIMED_NO_MODEL' ||
-      active.request_id !== requestId || active.attempt_id !== attemptId || active.model_pid !== null)
+  if (!activeLockMatches(activeLock, { phase: 'CLAIMED_NO_MODEL', request_id: requestId,
+    attempt_id: attemptId, model_pid: null }))
     throw new Error('PREFLIGHT_EXECUTOR_OWNERSHIP_UNKNOWN');
 
   if (existsSync(executorResultPath(config.spool_dir, requestId, attemptId)))
@@ -922,6 +1144,12 @@ function releasePreModelAttempt(config, picked, request) {
       throw new Error('PREFLIGHT_RETRY_MARKER_IDENTITY_MISMATCH');
     unlinkSync(retryPath);
   }
+  deps.beforePreModelClaimRelease?.({ activeLock, request, picked });
+  if (!activeLockMatches(activeLock, { phase: 'CLAIMED_NO_MODEL', request_id: requestId,
+    attempt_id: attemptId, model_pid: null }))
+    throw new Error('PREFLIGHT_EXECUTOR_OWNERSHIP_UNKNOWN');
+  if (!noModelRequestClaimMatches(config, picked, request))
+    throw new Error('PREFLIGHT_REQUEST_CLAIM_CHANGED');
   unlinkSync(expectedClaimPath);
 }
 

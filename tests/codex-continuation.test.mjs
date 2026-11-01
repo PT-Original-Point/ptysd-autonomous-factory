@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync,
+  writeFileSync } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
@@ -1375,6 +1376,593 @@ test('executor terminal receipt keeps model_invoked false when CLI spawn produce
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('executor records and recovers a terminal result for a rejected source bundle without replay', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-source-bundle-rejected-'));
+  const spool = join(dir, 'spool');
+  const bundles = join(spool, 'bundles');
+  mkdirSync(bundles, { recursive: true });
+  try {
+    const bundlePath = join(bundles, 'rejected.bundle');
+    writeFileSync(bundlePath, 'bundle bytes whose digest does not match the request');
+    const spec = '# Invalid source bundle must be a terminal no-model result.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_BUNDLE_REJECTED_20261102',
+      spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-4000-8000-000000000184';
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath, '0'.repeat(64));
+    publishCodexExecutorRequest(spool, request);
+
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: join(dir, 'workspaces'),
+      codex_executable: join(dir, 'codex.exe') });
+    let modelRuns = 0;
+    const execution = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid,
+      environment: {},
+      qualifyCodex: async () => {},
+      runCodex: async () => { modelRuns++; throw new Error('MODEL_MUST_NOT_START'); },
+    });
+
+    assert.equal(execution.state, 'RESULT_SAVED', JSON.stringify(execution));
+    assert.equal(execution.model_invoked, false);
+    assert.equal(execution.outcome, 'SOURCE_BUNDLE_PREFLIGHT_FAILED_NO_MODEL');
+    assert.equal(modelRuns, 0);
+    assert.equal(existsSync(join(config.workspace_root, attemptId)), false,
+      'bundle rejection happens before workspace creation');
+
+    const resultPath = executorResultPath(spool, picked.request_id, attemptId);
+    const saved = JSON.parse(readFileSync(resultPath, 'utf8'));
+    validateCodexExecutorResult(saved, { request_id: picked.request_id,
+      attempt_id: attemptId, source_sha: picked.source_sha, task_fingerprint: request.fingerprint });
+    assert.equal(saved.model_invoked, false);
+    assert.equal(saved.session_id, null);
+    assert.equal(saved.termination_state, 'NOT_STARTED');
+    assert.deepEqual(saved.preflight_block_reasons, ['EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH']);
+    assert.equal(terminalStateForResult(saved), 'BLOCKED');
+
+    const started = { schema: 1, project_id: picked.project_id, host: picked.host,
+      request_id: picked.request_id, attempt_id: attemptId, state: 'STARTED', kind: 'codex_plan',
+      source_sha: picked.source_sha, model: picked.model, reasoning_effort: picked.reasoning_effort,
+      task_fingerprint: request.fingerprint };
+    const receipts = [];
+    const recovered = await reconcileCodexExecutorResult(started, { codex_spool: spool }, worker,
+      new Set(), { writeReceiptOnce: async (_config, receipt) => receipts.push(receipt) });
+    assert.deepEqual(recovered, { status: 'RECOVERED' });
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0].state, 'BLOCKED');
+    assert.equal(receipts[0].outcome, 'SOURCE_BUNDLE_PREFLIGHT_FAILED_NO_MODEL');
+    assert.equal(receipts[0].model_invoked, false);
+
+    const poll = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid,
+      environment: {},
+      qualifyCodex: async () => {},
+      runCodex: async () => { modelRuns++; throw new Error('REPLAY_FORBIDDEN'); },
+    });
+    assert.deepEqual(poll, { state: 'IDLE', model_invoked: false });
+    assert.equal(modelRuns, 0, 'a saved terminal result prevents replay of this attempt');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor saves a no-model terminal result when workspace-root preparation fails before any worktree exists', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-workspace-root-preflight-'));
+  const source = join(dir, 'source');
+  const git = (...args) => execFileSync('git', ['-C', source, ...args], {
+    encoding: 'utf8', windowsHide: true, shell: false,
+  }).trim();
+  mkdirSync(source);
+  try {
+    git('init', '-q');
+    git('config', 'user.name', 'PTYSD test');
+    git('config', 'user.email', 'ptysd-test@example.invalid');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(source, 'sample.mjs'), 'export const baseline = true;\n');
+    git('add', 'sample.mjs');
+    git('commit', '-q', '-m', 'workspace preflight source');
+    const sourceSha = git('rev-parse', 'HEAD');
+
+    const spool = join(dir, 'spool');
+    const bundles = join(spool, 'bundles');
+    mkdirSync(bundles, { recursive: true });
+    const bundlePath = join(bundles, 'workspace-preflight.bundle');
+    git('bundle', 'create', bundlePath, 'HEAD');
+    const spec = '# Workspace setup failure must not leave a claimed attempt without a result.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_WORKSPACE_ROOT_PREFLIGHT_20261102',
+      source_sha: sourceSha, spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-4000-8000-000000000188';
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath,
+      createHash('sha256').update(readFileSync(bundlePath)).digest('hex'));
+    publishCodexExecutorRequest(spool, request);
+
+    const workspaceRoot = join(dir, 'workspace-root-is-a-file');
+    writeFileSync(workspaceRoot, 'preserve this unrelated file');
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: workspaceRoot,
+      codex_executable: join(dir, 'codex.exe') });
+    let modelRuns = 0;
+    const execution = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid,
+      environment: {},
+      qualifyCodex: async () => {},
+      runCodex: async () => { modelRuns++; throw new Error('MODEL_MUST_NOT_START'); },
+    });
+
+    assert.equal(execution.state, 'RESULT_SAVED', JSON.stringify(execution));
+    assert.equal(execution.model_invoked, false);
+    assert.equal(execution.outcome, 'CODEX_WORKSPACE_PREFLIGHT_FAILED_NO_MODEL');
+    assert.equal(modelRuns, 0);
+    assert.equal(existsSync(join(workspaceRoot, attemptId)), false,
+      'a regular file at workspace_root makes the attempt directory impossible');
+    const resultPath = executorResultPath(spool, picked.request_id, attemptId);
+    const saved = JSON.parse(readFileSync(resultPath, 'utf8'));
+    validateCodexExecutorResult(saved, { request_id: picked.request_id,
+      attempt_id: attemptId, source_sha: sourceSha, task_fingerprint: request.fingerprint });
+    assert.equal(saved.model_invoked, false);
+    assert.equal(saved.session_id, null);
+    assert.equal(saved.termination_state, 'NOT_STARTED');
+    assert.deepEqual(saved.preflight_block_reasons, ['EEXIST']);
+    assert.equal(terminalStateForResult(saved), 'BLOCKED');
+    assert.equal(readFileSync(workspaceRoot, 'utf8'), 'preserve this unrelated file');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor refuses a no-model result when workspace root resolves through a symlink', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-workspace-root-symlink-'));
+  const spool = join(dir, 'spool');
+  const bundles = join(spool, 'bundles');
+  const realWorkspaceRoot = join(dir, 'real-workspaces');
+  const linkedWorkspaceRoot = join(dir, 'linked-workspaces');
+  mkdirSync(bundles, { recursive: true });
+  mkdirSync(realWorkspaceRoot);
+  try {
+    try {
+      symlinkSync(realWorkspaceRoot, linkedWorkspaceRoot,
+        process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (error) {
+      t.skip(`platform cannot create a test directory link: ${error.code || error.message}`);
+      return;
+    }
+    const spec = '# A symlinked workspace root is not an absence proof.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_WORKSPACE_ROOT_LINK_20261102',
+      spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-4000-8000-000000000190';
+    const bundlePath = join(bundles, 'bad.bundle');
+    writeFileSync(bundlePath, 'bundle bytes do not match');
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath, '0'.repeat(64));
+    publishCodexExecutorRequest(spool, request);
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: linkedWorkspaceRoot,
+      codex_executable: join(dir, 'codex.exe') });
+    let modelRuns = 0;
+    const result = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid, environment: {},
+      qualifyCodex: async () => {},
+      runCodex: async () => { modelRuns++; throw new Error('MODEL_MUST_NOT_START'); },
+    });
+
+    assert.equal(result.state, 'BLOCKED');
+    assert.deepEqual(result.reasons, ['EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH',
+      'WORKSPACE_ROOT_SYMLINK_UNSAFE']);
+    assert.equal(modelRuns, 0);
+    assert.equal(existsSync(executorResultPath(spool, picked.request_id, attemptId)), false,
+      'a symlinked root cannot produce a false no-effect terminal result');
+    assert.equal(existsSync(join(spool, 'claims', `${picked.request_id}-${attemptId}.json`)), true,
+      'the uncertain attempt remains a no-replay barrier');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor refuses a workspace-root junction before clone or model launch', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-workspace-root-link-clone-'));
+  const source = join(dir, 'source');
+  const git = (...args) => execFileSync('git', ['-C', source, ...args], {
+    encoding: 'utf8', windowsHide: true, shell: false,
+  }).trim();
+  mkdirSync(source);
+  try {
+    git('init', '-q');
+    git('config', 'user.name', 'PTYSD test');
+    git('config', 'user.email', 'ptysd-test@example.invalid');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(source, 'sample.mjs'), 'export const baseline = true;\n');
+    git('add', 'sample.mjs');
+    git('commit', '-q', '-m', 'workspace root link source');
+    const sourceSha = git('rev-parse', 'HEAD');
+
+    const spool = join(dir, 'spool');
+    const bundles = join(spool, 'bundles');
+    const realWorkspaceRoot = join(dir, 'real-workspaces');
+    const linkedWorkspaceRoot = join(dir, 'linked-workspaces');
+    mkdirSync(bundles, { recursive: true });
+    mkdirSync(realWorkspaceRoot);
+    const bundlePath = join(bundles, 'valid.bundle');
+    git('bundle', 'create', bundlePath, 'HEAD');
+    try {
+      symlinkSync(realWorkspaceRoot, linkedWorkspaceRoot,
+        process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (error) {
+      t.skip(`platform cannot create a test directory link: ${error.code || error.message}`);
+      return;
+    }
+
+    const spec = '# A workspace junction must be rejected before any clone or model launch.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_WORKSPACE_ROOT_LINK_CLONE_20261102',
+      source_sha: sourceSha, spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-4000-8000-000000000194';
+    const bundleSha = createHash('sha256').update(readFileSync(bundlePath)).digest('hex');
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath, bundleSha);
+    publishCodexExecutorRequest(spool, request);
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: linkedWorkspaceRoot,
+      codex_executable: join(dir, 'codex.exe') });
+    let modelRuns = 0;
+    const result = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid, environment: {},
+      qualifyCodex: async () => {},
+      runCodex: async () => { modelRuns++; throw new Error('MODEL_MUST_NOT_START'); },
+    });
+
+    assert.equal(result.state, 'BLOCKED');
+    assert.equal(result.model_invoked, false);
+    assert.ok(result.reasons.includes('WORKSPACE_ROOT_SYMLINK_UNSAFE'), JSON.stringify(result));
+    assert.equal(modelRuns, 0);
+    assert.equal(existsSync(join(realWorkspaceRoot, attemptId)), false,
+      'a linked root must not receive a clone before rejection');
+    assert.equal(existsSync(executorResultPath(spool, picked.request_id, attemptId)), false,
+      'the linked root cannot prove a safe no-effect terminal result');
+    assert.equal(existsSync(join(spool, 'claims', `${picked.request_id}-${attemptId}.json`)), true,
+      'the unresolved claim remains a no-replay barrier');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor rechecks workspace-root identity immediately before publishing a no-model result', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-workspace-root-link-race-'));
+  const spool = join(dir, 'spool');
+  const bundles = join(spool, 'bundles');
+  const workspaceRoot = join(dir, 'workspaces');
+  const redirectedRoot = join(dir, 'redirected-workspaces');
+  mkdirSync(bundles, { recursive: true });
+  mkdirSync(workspaceRoot);
+  mkdirSync(redirectedRoot);
+  try {
+    const linkProbe = join(dir, 'junction-probe');
+    try { symlinkSync(redirectedRoot, linkProbe, process.platform === 'win32' ? 'junction' : 'dir'); }
+    catch (error) {
+      t.skip(`platform cannot create a test directory link: ${error.code || error.message}`);
+      return;
+    }
+    rmSync(linkProbe, { recursive: true, force: true });
+    const spec = '# Reparse replacement during publication must not claim no effect.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_WORKSPACE_ROOT_RACE_20261102',
+      spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-4000-8000-000000000192';
+    const bundlePath = join(bundles, 'bad.bundle');
+    writeFileSync(bundlePath, 'bundle bytes do not match');
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath, '0'.repeat(64));
+    publishCodexExecutorRequest(spool, request);
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: workspaceRoot,
+      codex_executable: join(dir, 'codex.exe') });
+    const result = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid, environment: {},
+      qualifyCodex: async () => {},
+      beforeNoModelResultPublish: () => {
+        rmSync(workspaceRoot, { recursive: true, force: true });
+        symlinkSync(redirectedRoot, workspaceRoot,
+          process.platform === 'win32' ? 'junction' : 'dir');
+      },
+    });
+
+    assert.equal(result.state, 'BLOCKED');
+    assert.deepEqual(result.reasons, ['EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH',
+      'WORKSPACE_ROOT_SYMLINK_UNSAFE']);
+    assert.equal(existsSync(executorResultPath(spool, picked.request_id, attemptId)), false,
+      'the attempt remains unresolved when the root changes before result publication');
+    assert.equal(existsSync(join(spool, 'claims', `${picked.request_id}-${attemptId}.json`)), true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor rechecks request and claim identity before publishing a no-model result', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-no-model-input-race-'));
+  try {
+    for (const [index, mutation] of ['request', 'claim'].entries()) {
+      const caseDir = join(dir, mutation);
+      const source = join(caseDir, 'source');
+      const git = (...args) => execFileSync('git', ['-C', source, ...args], {
+        encoding: 'utf8', windowsHide: true, shell: false,
+      }).trim();
+      mkdirSync(source, { recursive: true });
+      git('init', '-q');
+      git('config', 'user.name', 'PTYSD test');
+      git('config', 'user.email', 'ptysd-test@example.invalid');
+      git('config', 'commit.gpgsign', 'false');
+      writeFileSync(join(source, 'sample.mjs'), 'export const baseline = true;\n');
+      git('add', 'sample.mjs');
+      git('commit', '-q', '-m', `no-model ${mutation} identity source`);
+      const sourceSha = git('rev-parse', 'HEAD');
+
+      const spool = join(caseDir, 'spool');
+      const bundles = join(spool, 'bundles');
+      const workspaceRoot = join(caseDir, 'workspaces');
+      mkdirSync(bundles, { recursive: true });
+      mkdirSync(workspaceRoot);
+      const bundlePath = join(bundles, 'bad.bundle');
+      writeFileSync(bundlePath, 'bundle bytes do not match');
+      const spec = `# Mutated ${mutation} identity cannot be accepted.\n`;
+      const picked = job({ request_id: `PTYSD_CODEX_NO_MODEL_${mutation.toUpperCase()}_20261102`,
+        source_sha: sourceSha, spec_sha256: createHash('sha256').update(spec).digest('hex') });
+      const attemptId = `00000000-0000-4000-8000-${String(196 + index).padStart(12, '0')}`;
+      const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath, '0'.repeat(64));
+      publishCodexExecutorRequest(spool, request);
+      const requestPath = join(spool, 'requests', `${picked.request_id}-${attemptId}.json`);
+      const claimPath = join(spool, 'claims', `${picked.request_id}-${attemptId}.json`);
+      const config = readyConfig();
+      Object.assign(config, { spool_dir: spool, workspace_root: workspaceRoot,
+        codex_executable: join(caseDir, 'codex.exe') });
+      let modelRuns = 0;
+      const result = await runExecutorOnce(config, {
+        currentSid: config.executor_identity_sid, environment: {},
+        qualifyCodex: async () => {},
+        beforeNoModelResultPublish: () => {
+          if (mutation === 'request') {
+            unlinkSync(requestPath);
+            assert.equal(existsSync(requestPath), false, 'request mutation must affect the claimed source path');
+          }
+          else writeFileSync(claimPath, 'replacement claim');
+        },
+        runCodex: async () => { modelRuns++; throw new Error('MODEL_MUST_NOT_START'); },
+      });
+
+      assert.equal(result.state, 'BLOCKED', `${mutation}: ${JSON.stringify(result)}`);
+      assert.equal(result.model_invoked, false);
+      assert.equal(modelRuns, 0);
+      assert.equal(existsSync(executorResultPath(spool, picked.request_id, attemptId)), false,
+        `${mutation} identity changes must not publish a terminal receipt`);
+      assert.equal(existsSync(claimPath), true, 'the attempt remains a no-replay barrier');
+      if (mutation === 'request') assert.equal(existsSync(requestPath), false);
+      else assert.equal(readFileSync(claimPath, 'utf8'), 'replacement claim');
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor preserves a replacement active lock when its own preflight ownership is lost', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-active-lock-replaced-'));
+  const spool = join(dir, 'spool');
+  const bundles = join(spool, 'bundles');
+  mkdirSync(bundles, { recursive: true });
+  try {
+    const spec = '# A foreign active lock must survive a failed preflight.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_FOREIGN_ACTIVE_LOCK_20261102',
+      spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-4000-8000-000000000191';
+    const bundlePath = join(bundles, 'bad.bundle');
+    writeFileSync(bundlePath, 'bundle bytes do not match');
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath, '0'.repeat(64));
+    publishCodexExecutorRequest(spool, request);
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: join(dir, 'workspaces'),
+      codex_executable: join(dir, 'codex.exe') });
+    const activePath = join(spool, 'locks', 'executor.active');
+    const foreignLock = { schema: 1, lock_id: 'foreign-owner-lock-id', pid: process.pid,
+      started_at: new Date().toISOString(), boot_uptime_seconds: 0,
+      phase: 'CLAIMED_NO_MODEL', request_id: picked.request_id,
+      attempt_id: attemptId, model_pid: null };
+    let modelRuns = 0;
+    const result = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid, environment: {},
+      qualifyCodex: async () => { writeFileSync(activePath, JSON.stringify(foreignLock)); },
+      runCodex: async () => { modelRuns++; throw new Error('MODEL_MUST_NOT_START'); },
+    });
+
+    assert.equal(result.state, 'BLOCKED');
+    assert.deepEqual(result.reasons, ['EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH',
+      'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED']);
+    assert.equal(modelRuns, 0);
+    assert.deepEqual(JSON.parse(readFileSync(activePath, 'utf8')), foreignLock,
+      'finally may remove only the active lock created by this invocation');
+    assert.equal(existsSync(executorResultPath(spool, picked.request_id, attemptId)), false,
+      'an owner-mismatched lock prevents terminal result publication');
+    assert.equal(existsSync(join(spool, 'claims', `${picked.request_id}-${attemptId}.json`)), true,
+      'the claim stays durable while lock ownership is unknown');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor keeps a pre-model claim when a same-process replacement lock has a different lock id', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-pre-model-lock-id-'));
+  const spool = join(dir, 'spool');
+  const bundles = join(spool, 'bundles');
+  mkdirSync(bundles, { recursive: true });
+  try {
+    const spec = '# A replaced lock cannot authorize releasing a pre-model claim.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_PREMODEL_LOCK_ID_20261102',
+      spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-4000-8000-000000000195';
+    const bundlePath = join(bundles, 'not-read-after-qualification-fails.bundle');
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath, '0'.repeat(64));
+    publishCodexExecutorRequest(spool, request);
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: join(dir, 'workspaces'),
+      codex_executable: join(dir, 'codex.exe') });
+    const activePath = join(spool, 'locks', 'executor.active');
+    let foreignLock;
+    let modelRuns = 0;
+    const result = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid, environment: {},
+      qualifyCodex: async () => {
+        const original = JSON.parse(readFileSync(activePath, 'utf8'));
+        foreignLock = { ...original, lock_id: 'foreign-same-pid-lock-id' };
+        writeFileSync(activePath, JSON.stringify(foreignLock));
+        throw Object.assign(new Error('qualification unavailable'), { code: 'CODEX_LOGIN_UNAVAILABLE' });
+      },
+      runCodex: async () => { modelRuns++; throw new Error('MODEL_MUST_NOT_START'); },
+    });
+
+    assert.equal(result.state, 'BLOCKED');
+    assert.equal(result.model_invoked, false);
+    assert.ok(result.reasons.includes('PREFLIGHT_EXECUTOR_OWNERSHIP_UNKNOWN'), JSON.stringify(result));
+    assert.equal(modelRuns, 0);
+    assert.deepEqual(JSON.parse(readFileSync(activePath, 'utf8')), foreignLock);
+    assert.equal(existsSync(join(spool, 'claims', `${picked.request_id}-${attemptId}.json`)), true,
+      'the claim remains a no-replay barrier when lock_id differs');
+    assert.equal(existsSync(executorResultPath(spool, picked.request_id, attemptId)), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor refuses model dispatch when the active lock is replaced immediately before spawn', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-active-lock-pre-spawn-'));
+  const source = join(dir, 'source');
+  const git = (...args) => execFileSync('git', ['-C', source, ...args], {
+    encoding: 'utf8', windowsHide: true, shell: false,
+  }).trim();
+  mkdirSync(source);
+  try {
+    git('init', '-q');
+    git('config', 'user.name', 'PTYSD test');
+    git('config', 'user.email', 'ptysd-test@example.invalid');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(source, 'sample.mjs'), 'export const baseline = true;\n');
+    git('add', 'sample.mjs');
+    git('commit', '-q', '-m', 'pre-spawn lock source');
+    const sourceSha = git('rev-parse', 'HEAD');
+    const spool = join(dir, 'spool');
+    const bundles = join(spool, 'bundles');
+    mkdirSync(bundles, { recursive: true });
+    const bundlePath = join(bundles, 'pre-spawn.bundle');
+    git('bundle', 'create', bundlePath, 'HEAD');
+    const spec = '# A replacement executor lock prevents model dispatch.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_LOCK_PRESPAWN_20261102', source_sha: sourceSha,
+      spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-4000-8000-000000000193';
+    const bundleSha = createHash('sha256').update(readFileSync(bundlePath)).digest('hex');
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath, bundleSha);
+    publishCodexExecutorRequest(spool, request);
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: join(dir, 'workspaces'),
+      codex_executable: join(dir, 'codex.exe') });
+    const activePath = join(spool, 'locks', 'executor.active');
+    const foreignLock = { schema: 1, lock_id: 'foreign-pre-spawn-owner', pid: process.pid,
+      started_at: new Date().toISOString(), boot_uptime_seconds: 0,
+      phase: 'MODEL_RUNNING', request_id: picked.request_id,
+      attempt_id: attemptId, model_pid: null };
+    let modelDispatches = 0;
+    const result = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid, environment: {},
+      qualifyCodex: async () => {},
+      runCodex: async (_request, _config, _worktree, _evidenceDir, hooks) => {
+        writeFileSync(activePath, JSON.stringify(foreignLock));
+        hooks.beforeSpawn();
+        modelDispatches++;
+        throw new Error('MODEL_MUST_NOT_START');
+      },
+    });
+
+    assert.equal(result.state, 'BLOCKED');
+    assert.deepEqual(result.reasons, ['EXECUTOR_LOCK_OWNERSHIP_LOST']);
+    assert.equal(modelDispatches, 0);
+    assert.deepEqual(JSON.parse(readFileSync(activePath, 'utf8')), foreignLock);
+    assert.equal(existsSync(executorResultPath(spool, picked.request_id, attemptId)), false,
+      'no terminal result is written over the foreign owner state');
+    assert.equal(existsSync(join(spool, 'claims', `${picked.request_id}-${attemptId}.json`)), true,
+      'the attempt remains claimed and cannot be replayed');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor keeps a bundle rejection unresolved when the attempt workspace already exists', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-bundle-workspace-unknown-'));
+  const spool = join(dir, 'spool');
+  const bundles = join(spool, 'bundles');
+  const workspaceRoot = join(dir, 'workspaces');
+  mkdirSync(bundles, { recursive: true });
+  try {
+    const spec = '# Existing workspace prevents a false no-effect result.\n';
+    const picked = job({ request_id: 'PTYSD_CODEX_BUNDLE_WORKSPACE_20261102',
+      spec_sha256: createHash('sha256').update(spec).digest('hex') });
+    const attemptId = '00000000-0000-4000-8000-000000000185';
+    const bundlePath = join(bundles, 'workspace-unknown.bundle');
+    writeFileSync(bundlePath, 'bundle bytes whose digest does not match the request');
+    const request = makeCodexExecutorRequest(picked, attemptId, spec, bundlePath, '1'.repeat(64));
+    publishCodexExecutorRequest(spool, request);
+    mkdirSync(join(workspaceRoot, attemptId), { recursive: true });
+
+    const config = readyConfig();
+    Object.assign(config, { spool_dir: spool, workspace_root: workspaceRoot,
+      codex_executable: join(dir, 'codex.exe') });
+    let modelRuns = 0;
+    const execution = await runExecutorOnce(config, {
+      currentSid: config.executor_identity_sid,
+      environment: {},
+      qualifyCodex: async () => {},
+      runCodex: async () => { modelRuns++; throw new Error('MODEL_MUST_NOT_START'); },
+    });
+
+    assert.equal(execution.state, 'BLOCKED');
+    assert.deepEqual(execution.reasons, ['EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH',
+      'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED']);
+    assert.equal(modelRuns, 0);
+    assert.equal(existsSync(executorResultPath(spool, picked.request_id, attemptId)), false,
+      'existing worktree contents are not mislabeled as a no-effect terminal result');
+    assert.equal(existsSync(join(spool, 'claims', `${picked.request_id}-${attemptId}.json`)), true,
+      'the exact claim remains a no-replay barrier when workspace effects are unknown');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor records no-model terminal results for escaped and non-regular source bundles', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-bundle-shape-rejected-'));
+  const spool = join(dir, 'spool');
+  const bundles = join(spool, 'bundles');
+  const workspaceRoot = join(dir, 'workspaces');
+  mkdirSync(bundles, { recursive: true });
+  try {
+    const escapedBundle = join(spool, 'escaped.bundle');
+    writeFileSync(escapedBundle, 'valid bytes at a forbidden bundle path');
+    const directoryBundle = join(bundles, 'directory.bundle');
+    mkdirSync(directoryBundle);
+    const scenarios = [
+      { name: 'path escape', requestId: 'PTYSD_CODEX_BUNDLE_ESCAPE_20261102',
+        attemptId: '00000000-0000-4000-8000-000000000186', bundlePath: escapedBundle,
+        bundleSha256: createHash('sha256').update(readFileSync(escapedBundle)).digest('hex'),
+        reason: 'EXECUTOR_BUNDLE_PATH_ESCAPE' },
+      { name: 'non-regular file', requestId: 'PTYSD_CODEX_BUNDLE_DIRECTORY_20261102',
+        attemptId: '00000000-0000-4000-8000-000000000187', bundlePath: directoryBundle,
+        bundleSha256: '0'.repeat(64), reason: 'EXECUTOR_BUNDLE_NOT_REGULAR_FILE' },
+    ];
+    let modelRuns = 0;
+    for (const scenario of scenarios) {
+      const spec = `# ${scenario.name} must end before model execution.\n`;
+      const picked = job({ request_id: scenario.requestId,
+        spec_sha256: createHash('sha256').update(spec).digest('hex') });
+      const request = makeCodexExecutorRequest(picked, scenario.attemptId, spec,
+        scenario.bundlePath, scenario.bundleSha256);
+      publishCodexExecutorRequest(spool, request);
+
+      const config = readyConfig();
+      Object.assign(config, { spool_dir: spool, workspace_root: workspaceRoot,
+        codex_executable: join(dir, 'codex.exe') });
+      const execution = await runExecutorOnce(config, {
+        currentSid: config.executor_identity_sid,
+        environment: {},
+        qualifyCodex: async () => {},
+        runCodex: async () => { modelRuns++; throw new Error('MODEL_MUST_NOT_START'); },
+      });
+
+      assert.equal(execution.state, 'RESULT_SAVED', `${scenario.name}: ${JSON.stringify(execution)}`);
+      assert.equal(execution.model_invoked, false, scenario.name);
+      assert.equal(execution.outcome, 'SOURCE_BUNDLE_PREFLIGHT_FAILED_NO_MODEL', scenario.name);
+      assert.equal(existsSync(join(workspaceRoot, scenario.attemptId)), false,
+        `${scenario.name} is rejected before workspace creation`);
+      const saved = JSON.parse(readFileSync(
+        executorResultPath(spool, scenario.requestId, scenario.attemptId), 'utf8'));
+      validateCodexExecutorResult(saved, { request_id: scenario.requestId,
+        attempt_id: scenario.attemptId, source_sha: picked.source_sha,
+        task_fingerprint: request.fingerprint });
+      assert.equal(saved.model_invoked, false, scenario.name);
+      assert.equal(saved.session_id, null, scenario.name);
+      assert.equal(saved.termination_state, 'NOT_STARTED', scenario.name);
+      assert.deepEqual(saved.preflight_block_reasons, [scenario.reason], scenario.name);
+      assert.equal(terminalStateForResult(saved), 'BLOCKED', scenario.name);
+    }
+    assert.equal(modelRuns, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('executor persists the scalar process-tree readback from its real capture pipeline', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pty-codex-process-tree-result-'));
   try {
@@ -1849,6 +2437,24 @@ test('captured process terminates on a missing output pipe and finishes remainin
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('captured process checks its pre-spawn guard before creating a child process', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-captured-process-pre-spawn-'));
+  let spawned = false;
+  try {
+    await assert.rejects(runCapturedProcess('node.exe', ['worker.mjs'], {
+      cwd: dir, env: {}, stdoutPath: join(dir, 'stdout.jsonl'),
+      stderrPath: join(dir, 'stderr.txt'), beforeSpawn: () => {
+        throw Object.assign(new Error('EXECUTOR_LOCK_OWNERSHIP_LOST'),
+          { code: 'EXECUTOR_LOCK_OWNERSHIP_LOST' });
+      },
+      spawnProcess: () => { spawned = true; throw new Error('SPAWN_MUST_NOT_RUN'); },
+    }), /EXECUTOR_LOCK_OWNERSHIP_LOST/);
+    assert.equal(spawned, false);
+    assert.equal(existsSync(join(dir, 'stdout.jsonl')), false);
+    assert.equal(existsSync(join(dir, 'stderr.txt')), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('executor queue keeps publisher requests immutable and durable claims expose the next request once', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pty-codex-queue-'));
   try {
@@ -2138,6 +2744,32 @@ test('executor recovers an uncertain same-boot lock only after process-tree read
     assert.equal(recovered.state, 'IDLE');
     assert.equal(existsSync(activePath), false, 'only a negative process-tree readback releases the lock');
     assert.ok(readdirSync(locks).some(name => name.startsWith('executor.stale-')));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('executor serializes competing stale-lock recovery before archiving a live replacement', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pty-codex-lock-recovery-race-'));
+  const locks = join(dir, 'locks');
+  mkdirSync(locks);
+  try {
+    writeFileSync(join(locks, 'executor.active'), JSON.stringify({ schema: 1,
+      lock_id: 'stale-executor-lock', pid: 5007, started_at: new Date().toISOString(),
+      boot_uptime_seconds: Number.MAX_SAFE_INTEGER, phase: 'DISPATCHER',
+      request_id: null, attempt_id: null, model_pid: null }));
+    let competingStart;
+    const recovered = await runExecutorOnce({ spool_dir: dir }, {
+      beforeStaleLockArchive: () => {
+        competingStart = runExecutorOnce({ spool_dir: dir });
+      },
+    });
+    assert.deepEqual(recovered, { state: 'IDLE', model_invoked: false });
+    const competing = await competingStart.then(value => ({ value }), error => ({ error }));
+    assert.match(competing.error?.message || '', /EXECUTOR_LOCK_RECOVERY_RACE/);
+    assert.ok(readdirSync(locks).some(name => name.startsWith('executor.stale-')),
+      'the original stale lock is retained as recovery evidence');
+    assert.equal(existsSync(join(locks, 'executor.active')), false);
+    assert.equal(existsSync(join(locks, 'executor.recovery')), false,
+      'the recovery guard is released after the serialized transition');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
