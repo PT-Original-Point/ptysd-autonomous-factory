@@ -681,8 +681,17 @@ function persistNoModelResult(config, picked, request, outcome, reasons, deps = 
   let worktreeInfo = null;
   try { worktreeInfo = lstatSync(worktree); }
   catch (error) {
-    if (error.code !== 'ENOENT') throw error;
     if (expectedWorktreeState !== 'ABSENT') return null;
+    if (error.code === 'ENOENT') {
+      // The attempt directory is absent.
+    } else if (error.code === 'ENOTDIR') {
+      // A regular file at workspace_root makes any child attempt path
+      // impossible. Refuse symlinked roots and unreadable ancestors.
+      let rootInfo;
+      try { rootInfo = lstatSync(workspaceRoot); }
+      catch { throw error; }
+      if (!rootInfo.isFile() || rootInfo.isSymbolicLink()) throw error;
+    } else throw error;
   }
   if (expectedWorktreeState === 'ABSENT') {
     if (worktreeInfo) return null;
@@ -713,6 +722,23 @@ function persistPreModelBlockResult(config, picked, request, reasons, releaseRea
   if (releaseReason !== 'PREFLIGHT_WORKTREE_EFFECT_UNKNOWN') return null;
   return persistNoModelResult(config, picked, request, 'PREFLIGHT_EFFECT_UNKNOWN_NO_REPLAY',
     [...reasons, releaseReason], deps);
+}
+
+function persistNoModelPreflightFailure(config, picked, request, activeLock, outcome, reason, deps) {
+  let resultPath = null;
+  try {
+    resultPath = persistNoModelResult(config, picked, request, outcome, [reason], deps, 'ABSENT');
+  } catch (error) {
+    return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+      attempt_id: request.attempt_id,
+      reasons: [reason, safeErrorCode(error, 'PREFLIGHT_RESULT_WRITE_FAILED')] };
+  }
+  if (!resultPath)
+    return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+      attempt_id: request.attempt_id, reasons: [reason, 'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED'] };
+  updateActiveLock(activeLock, 'RESULT_SAVED', request);
+  return { state: 'RESULT_SAVED', model_invoked: false, request_id: request.job.request_id,
+    attempt_id: request.attempt_id, outcome, result_path: resultPath };
 }
 
 export async function runExecutorOnce(config, deps = {}) {
@@ -787,58 +813,54 @@ export async function runExecutorOnce(config, deps = {}) {
       // Persist a terminal no-model result only while the exact claim and lock
       // still prove ownership; otherwise preserve the claim as a no-replay stop.
       const reason = safeErrorCode(error, 'EXECUTOR_SOURCE_BUNDLE_PREFLIGHT_FAILED');
-      const outcome = 'SOURCE_BUNDLE_PREFLIGHT_FAILED_NO_MODEL';
-      let failedResultPath = null;
-      try { failedResultPath = persistNoModelResult(config, picked, request, outcome, [reason], deps,
-        'ABSENT'); }
-      catch (persistError) {
-        return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
-          attempt_id: request.attempt_id,
-          reasons: [reason, safeErrorCode(persistError, 'PREFLIGHT_RESULT_WRITE_FAILED')] };
-      }
-      if (!failedResultPath)
-        return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
-          attempt_id: request.attempt_id, reasons: [reason, 'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED'] };
-      updateActiveLock(activeLock, 'RESULT_SAVED', request);
-      return { state: 'RESULT_SAVED', model_invoked: false, request_id: request.job.request_id,
-        attempt_id: request.attempt_id, outcome, result_path: failedResultPath };
+      return persistNoModelPreflightFailure(config, picked, request, activeLock,
+        'SOURCE_BUNDLE_PREFLIGHT_FAILED_NO_MODEL', reason, deps);
     }
     const root = resolve(config.workspace_root);
     const worktree = resolve(root, request.attempt_id);
-    const rel = relative(root, worktree);
-    if (rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) throw new Error('WORKTREE_PATH_ESCAPE');
-    mkdirSync(root, { recursive: true });
-    if (existsSync(worktree)) throw new Error('WORKTREE_ALREADY_EXISTS_NO_REUSE');
-    execFileSync('git', ['clone', '--quiet', '--no-hardlinks', request.bundle_path, worktree], {
-      encoding: 'utf8', windowsHide: true, shell: false, timeout: 120000, maxBuffer: 1024 * 1024,
-    });
-    execFileSync('git', ['-C', worktree, 'checkout', '--quiet', '--detach', verified.job.source_sha], {
-      encoding: 'utf8', windowsHide: true, shell: false, timeout: 60000, maxBuffer: 1024 * 1024,
-    });
-    const actualHead = execFileSync('git', ['-C', worktree, 'rev-parse', 'HEAD'], {
-      encoding: 'utf8', windowsHide: true, shell: false, timeout: 30000, maxBuffer: 32768,
-    }).trim();
-    if (actualHead !== verified.job.source_sha) throw new Error('WORKTREE_SOURCE_SHA_MISMATCH');
-    const permissionIssue = codexProjectConfigPermissionIssue(worktree);
-    if (permissionIssue) {
-      const outcome = permissionIssue === 'CODEX_PROJECT_CONFIG_LEGACY_SANDBOX_SETTING' ?
-        'CODEX_PROJECT_CONFIG_INCOMPATIBLE_NO_MODEL' : 'CODEX_PROJECT_CONFIG_READBACK_UNKNOWN_NO_MODEL';
-      let blockedResultPath = null;
-      try { blockedResultPath = persistNoModelResult(config, picked, request, outcome, [permissionIssue], deps); }
-      catch (error) {
-        return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
-          attempt_id: request.attempt_id,
-          reasons: [permissionIssue, safeErrorCode(error, 'PREFLIGHT_RESULT_WRITE_FAILED')] };
-      }
-      if (!blockedResultPath)
-        return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
-          attempt_id: request.attempt_id, reasons: [permissionIssue, 'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED'] };
-      updateActiveLock(activeLock, 'RESULT_SAVED', request);
-      return { state: 'RESULT_SAVED', model_invoked: false, request_id: request.job.request_id,
-        attempt_id: request.attempt_id, outcome, result_path: blockedResultPath };
-    }
     const evidenceDir = join(config.spool_dir, 'evidence');
-    mkdirSync(evidenceDir, { recursive: true });
+    try {
+      const rel = relative(root, worktree);
+      if (rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) throw new Error('WORKTREE_PATH_ESCAPE');
+      mkdirSync(root, { recursive: true });
+      if (existsSync(worktree)) throw new Error('WORKTREE_ALREADY_EXISTS_NO_REUSE');
+      execFileSync('git', ['clone', '--quiet', '--no-hardlinks', request.bundle_path, worktree], {
+        encoding: 'utf8', windowsHide: true, shell: false, timeout: 120000, maxBuffer: 1024 * 1024,
+      });
+      execFileSync('git', ['-C', worktree, 'checkout', '--quiet', '--detach', verified.job.source_sha], {
+        encoding: 'utf8', windowsHide: true, shell: false, timeout: 60000, maxBuffer: 1024 * 1024,
+      });
+      const actualHead = execFileSync('git', ['-C', worktree, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8', windowsHide: true, shell: false, timeout: 30000, maxBuffer: 32768,
+      }).trim();
+      if (actualHead !== verified.job.source_sha) throw new Error('WORKTREE_SOURCE_SHA_MISMATCH');
+      const permissionIssue = codexProjectConfigPermissionIssue(worktree);
+      if (permissionIssue) {
+        const outcome = permissionIssue === 'CODEX_PROJECT_CONFIG_LEGACY_SANDBOX_SETTING' ?
+          'CODEX_PROJECT_CONFIG_INCOMPATIBLE_NO_MODEL' : 'CODEX_PROJECT_CONFIG_READBACK_UNKNOWN_NO_MODEL';
+        let blockedResultPath = null;
+        try { blockedResultPath = persistNoModelResult(config, picked, request, outcome, [permissionIssue], deps); }
+        catch (error) {
+          return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+            attempt_id: request.attempt_id,
+            reasons: [permissionIssue, safeErrorCode(error, 'PREFLIGHT_RESULT_WRITE_FAILED')] };
+        }
+        if (!blockedResultPath)
+          return { state: 'BLOCKED', model_invoked: false, request_id: request.job.request_id,
+            attempt_id: request.attempt_id, reasons: [permissionIssue, 'PREFLIGHT_RESULT_OWNERSHIP_UNVERIFIED'] };
+        updateActiveLock(activeLock, 'RESULT_SAVED', request);
+        return { state: 'RESULT_SAVED', model_invoked: false, request_id: request.job.request_id,
+          attempt_id: request.attempt_id, outcome, result_path: blockedResultPath };
+      }
+      mkdirSync(evidenceDir, { recursive: true });
+    } catch (error) {
+      // Workspace setup is still pre-model. Only persist a terminal no-model
+      // result when the exact attempt directory is proven absent; partial
+      // clones and pre-existing workspaces remain a no-replay blocker.
+      const reason = safeErrorCode(error, 'EXECUTOR_WORKSPACE_PREFLIGHT_FAILED');
+      return persistNoModelPreflightFailure(config, picked, request, activeLock,
+        'CODEX_WORKSPACE_PREFLIGHT_FAILED_NO_MODEL', reason, deps);
+    }
     updateActiveLock(activeLock, 'MODEL_RUNNING', request);
     preserveActiveLock = true;
     const execution = await (deps.runCodex || runCodex)(request, config, worktree, evidenceDir, {
