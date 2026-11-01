@@ -1875,6 +1875,232 @@ test('receipt write reconciles POST-success/readback-failure without posting a d
   assert.equal(conflictPosts, 0);
 });
 
+// This joins the two previously separate cases: the focused writeReceipt
+// POST-success/readback-failure test and the Worker tests that begin from an
+// already-persisted STARTED receipt. A fresh Worker invocation must recover the
+// ambiguous STARTED write on the exact original request and attempt, never
+// creating a second STARTED receipt or a new attempt ID. This is a synthetic
+// adapter-level regression only; it does not claim a live reboot, model
+// recovery, or any task acceptance. external_effects and task_acceptance stay
+// UNKNOWN throughout.
+test('a fresh Worker invocation recovers an ambiguous STARTED write on the exact original attempt', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-ambiguous-started-recovery-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const stateDir = join(root, 'state');
+    const resultsDir = join(root, 'results');
+    mkdirSync(workspace);
+    mkdirSync(join(workspace, 'native-bridge'), { recursive: true });
+    writeFileSync(join(workspace, 'native-bridge', 'worker.mjs'), 'export const fixture = true;\n');
+    mkdirSync(stateDir);
+    mkdirSync(resultsDir);
+    const host = hostname().toUpperCase();
+    const spec = 'Synthetic W1 recovery task; dispatch only, never invoke a model.';
+    const job = withHumanGoal({
+      schema: 6, project_id: PROJECT, host,
+      request_id: 'PTYSD_W1_AMBIGUOUS_STARTED_RECOVERY_20261101',
+      kind: 'opencode_edit', source_sha: commit,
+      spec_path: 'native-bridge/tasks/w1-ambiguous-started-recovery.md',
+      spec_sha256: h(spec),
+      model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+      edit_paths: ['native-bridge/worker.mjs'], source_pr: 437,
+    });
+    const goalComment = humanGoalComment();
+    const jobComment = { ...com(704, encoded(job), 't14210184'),
+      issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+    const pull = { number: 437, state: 'open',
+      base: { ref: 'main', repo: { id: 1352411536, full_name: REPO } },
+      head: { sha: commit, repo: { id: 1352411536, full_name: REPO } } };
+    // One durable mock GitHub comment store shared by both Worker invocations.
+    const remote = { comments: [], next: 710, posts: 0 };
+    const executor = executorDescriptorForLane('OpenCode', 1001);
+    const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
+      workspace, state_dir: stateDir, dispatchers: ['t14210184'],
+      executors: { opencode: executor }, enable_v2_model_runs: true,
+      allowed_models: { 'opencode/deepseek-v4.1-flash-free': ['free'] } };
+    const makeApiRead = () => uri => {
+      if (uri === 'user') return { login: 'worker' };
+      if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
+      if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: commit } };
+      if (uri === `repos/${REPO}/issues/comments/6188322050`) return structuredClone(goalComment);
+      if (uri === `repos/${REPO}/pulls/437`) return structuredClone(pull);
+      if (uri === `repos/${REPO}/issues/comments/704`) return structuredClone(jobComment);
+      if (uri.startsWith(`repos/${REPO}/contents/`))
+        return { encoding: 'base64', content: Buffer.from(spec).toString('base64') };
+      throw new Error(`UNEXPECTED_AMBIGUOUS_STARTED_API_${uri}`);
+    };
+
+    const firstLogs = [];
+    let firstAttemptId = null;
+    let firstBundleCalls = 0;
+    let firstDispatchCalls = 0;
+    let firstModelCalls = 0;
+    let firstTriggerCalls = 0;
+    let readbackFailures = 1;
+    let posted = false;
+    const firstReceiptDependencies = {
+      readComments: () => {
+        if (posted && readbackFailures > 0) {
+          readbackFailures--;
+          throw new Error('MOCK_RECEIPT_READBACK_UNAVAILABLE_AFTER_POST');
+        }
+        return structuredClone(remote.comments);
+      },
+      postComment: body => {
+        remote.comments.push(com(remote.next++, body, 'worker'));
+        remote.posts++;
+        posted = true;
+      },
+    };
+    const first = await executeWorker(config, {
+      goalCommentsRead: () => [goalComment, jobComment],
+      readExecutorWorkspace: descriptor => {
+        assert.equal(descriptor, executor);
+        return workspace;
+      },
+      apiRead: makeApiRead(),
+      commentsRead: () => structuredClone(remote.comments),
+      executorResultsDir: () => resultsDir,
+      assertExecutorTaskReady: descriptor => {
+        assert.equal(descriptor, executor);
+        return { ready: true };
+      },
+      createExecutorSourceBundle: ({ descriptor, job: sourceJob, attemptId }) => {
+        assert.equal(descriptor, executor);
+        assert.equal(sourceJob.request_id, job.request_id);
+        firstBundleCalls++;
+        firstAttemptId = attemptId;
+        return { attempt_id: attemptId, source_sha: sourceJob.source_sha, sha256: 'c'.repeat(64) };
+      },
+      dispatchToExecutor: () => {
+        firstDispatchCalls++;
+        throw new Error('AMBIGUOUS_STARTED_MUST_NOT_DISPATCH');
+      },
+      triggerPendingExecutorAttempt: () => {
+        firstTriggerCalls++;
+        throw new Error('AMBIGUOUS_STARTED_MUST_NOT_TRIGGER');
+      },
+      writeReceipt: (receiptConfig, data, login) =>
+        writeReceipt(receiptConfig, data, login, firstReceiptDependencies),
+      runPlan: () => {
+        firstModelCalls++;
+        throw new Error('AMBIGUOUS_STARTED_MUST_NOT_INVOKE_A_MODEL');
+      },
+      observationDependencies: { collectWindowsObservation: () => ({ status: 'UNKNOWN' }) },
+      log: value => firstLogs.push(value),
+    }).catch(error => error);
+    assert.match(first.message, /RECEIPT_WRITE_AMBIGUOUS_NO_EXECUTION/,
+      'the first invocation stops on the ambiguous STARTED write');
+    assert.equal(firstDispatchCalls, 0, 'no executor dispatch follows an ambiguous STARTED write');
+    assert.equal(firstTriggerCalls, 0, 'no pending handoff retry happens in the same invocation');
+    assert.equal(firstModelCalls, 0, 'the Worker never invokes a model directly');
+    assert.equal(firstBundleCalls, 1, 'the source bundle is prepared before the STARTED receipt');
+    assert.ok(firstAttemptId, 'the prepared attempt ID is bound to the persisted STARTED receipt');
+    assert.equal(remote.posts, 1, 'the STARTED POST persisted exactly once to the mock remote store');
+    assert.equal(readbackFailures, 0, 'the immediate post-write readback failed exactly once');
+    assert.ok(!firstLogs.some(value => value.startsWith('DISPATCHED_')),
+      'the ambiguous write never logs a dispatch');
+
+    const persisted = remote.comments
+      .map(comment => parseReceipt(comment.body))
+      .filter(receiptValue => receiptValue?.request_id === job.request_id);
+    assert.equal(persisted.length, 1);
+    assert.equal(persisted[0].state, 'STARTED');
+    assert.equal(persisted[0].attempt_id, firstAttemptId);
+    assert.equal(persisted[0].source_sha, commit);
+    assert.equal(persisted[0].source_pr, 437);
+    assert.equal(persisted[0].goal_comment_id, job.goal_comment_id);
+    assert.equal(persisted[0].goal_body_sha256, job.goal_body_sha256);
+    assert.equal(persisted[0].edit_paths_sha256, h(JSON.stringify(job.edit_paths)));
+    assert.equal(persisted[0].model_invoked, null,
+      'a dispatch acknowledgement is not evidence that the model started');
+    assert.equal(persisted[0].outcome, 'DISPATCH_ACK_NOT_ACCEPTANCE');
+    assert.equal(persisted[0].task_acceptance, 'UNKNOWN');
+    assert.equal(persisted[0].external_effects, 'UNKNOWN');
+    assert.equal(persisted[0].source_diff_evidence, 'NOT_INSPECTED');
+
+    // A fresh Worker/config/dependency context reads the same persisted mock
+    // comments and the same local state directory.
+    const secondLogs = [];
+    let secondBundleCalls = 0;
+    let secondDispatchCalls = 0;
+    let secondModelCalls = 0;
+    let secondTriggerCalls = 0;
+    let secondTriggerDescriptor = null;
+    let secondTriggerAttemptId = null;
+    let secondTriggerJob = null;
+    const secondReceiptDependencies = {
+      readComments: () => structuredClone(remote.comments),
+      postComment: body => {
+        remote.comments.push(com(remote.next++, body, 'worker'));
+        remote.posts++;
+      },
+    };
+    const second = await executeWorker({ ...config }, {
+      goalCommentsRead: () => [goalComment, jobComment],
+      readExecutorWorkspace: descriptor => {
+        assert.equal(descriptor, executor);
+        return workspace;
+      },
+      apiRead: makeApiRead(),
+      commentsRead: () => structuredClone(remote.comments),
+      executorResultsDir: () => resultsDir,
+      assertExecutorTaskReady: descriptor => {
+        assert.equal(descriptor, executor);
+        return { ready: true };
+      },
+      createExecutorSourceBundle: () => {
+        secondBundleCalls++;
+        throw new Error('RECOVERY_MUST_NOT_CREATE_A_NEW_ATTEMPT_BUNDLE');
+      },
+      dispatchToExecutor: () => {
+        secondDispatchCalls++;
+        throw new Error('RECOVERY_MUST_NOT_DISPATCH_A_NEW_ATTEMPT');
+      },
+      triggerPendingExecutorAttempt: (descriptor, attemptId, { expectedJob }) => {
+        secondTriggerCalls++;
+        secondTriggerDescriptor = descriptor;
+        secondTriggerAttemptId = attemptId;
+        secondTriggerJob = expectedJob;
+        return { outcome: 'EXECUTOR_PENDING_ATTEMPT_TRIGGERED_NOT_ACCEPTANCE',
+          exit_code: 0, attempt_id: attemptId };
+      },
+      writeReceipt: (receiptConfig, data, login) =>
+        writeReceipt(receiptConfig, data, login, secondReceiptDependencies),
+      runPlan: () => {
+        secondModelCalls++;
+        throw new Error('RECOVERY_MUST_NOT_INVOKE_A_MODEL');
+      },
+      observationDependencies: { collectWindowsObservation: () => ({ status: 'UNKNOWN' }) },
+      log: value => secondLogs.push(value),
+    });
+
+    assert.notEqual(second.state, 'DISPATCHED',
+      'the recovery tick does not claim a new dispatch');
+    assert.equal(secondTriggerCalls, 1, 'the pending executor handoff is retried exactly once');
+    assert.equal(secondTriggerDescriptor, executor);
+    assert.equal(secondTriggerAttemptId, firstAttemptId,
+      'recovery is bound to the exact original attempt ID');
+    assert.deepEqual(secondTriggerJob, job, 'recovery is bound to the exact original request');
+    assert.equal(secondBundleCalls, 0, 'recovery never prepares a second attempt');
+    assert.equal(secondDispatchCalls, 0, 'recovery never dispatches a new executor attempt');
+    assert.equal(secondModelCalls, 0, 'recovery never invokes a model directly');
+    assert.equal(remote.posts, 1, 'recovery does not post a second STARTED receipt');
+    const recovered = remote.comments
+      .map(comment => parseReceipt(comment.body))
+      .filter(receiptValue => receiptValue?.request_id === job.request_id);
+    assert.equal(recovered.length, 1, 'exactly the original STARTED receipt remains');
+    assert.equal(recovered[0].attempt_id, firstAttemptId, 'no new attempt ID is created');
+    assert.equal(recovered[0].task_acceptance, 'UNKNOWN');
+    assert.equal(recovered[0].external_effects, 'UNKNOWN');
+    assert.ok(secondLogs.includes(
+      `PENDING_EXECUTOR_RETRIGGERED_${job.request_id}_${firstAttemptId}_NO_NEW_RECEIPT`),
+    secondLogs.join('\n'));
+    assert.ok(!secondLogs.some(value => value.startsWith('DISPATCHED_')),
+      'recovery never logs a new dispatch');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('strict exact job contract rejects injection, cross-project, unknown keys and paths', () => {
   assert.deepEqual(parseJob(encoded(mkjob())), mkjob());
   assert.equal(parseJob(encoded(mkjob({ project_id: 'HANYAO' }))), null);
