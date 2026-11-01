@@ -403,7 +403,8 @@ function hasCompletedScopedEditDiff(receipt, job) {
   // task acceptance remains a separate review.
   return receipt?.state === 'FINISHED' && hasRequestBoundScopedEditDiff(receipt, job);
 }
-function unresolvedEditAttempt(job, entries, { allowIsolatedW2ScopedDiff = false, workerLogin } = {}) {
+function unresolvedEditAttempt(job, entries, { allowIsolatedW2ScopedDiff = false, workerLogin,
+  verifiedNoWriteAttemptKeys = new Set() } = {}) {
   if (!validEditPaths(job?.edit_paths)) return true;
   const requestLane = entries.filter(entry => entry.receipt.host.toUpperCase() === job.host.toUpperCase() &&
     entry.receipt.kind === job.kind);
@@ -420,6 +421,16 @@ function unresolvedEditAttempt(job, entries, { allowIsolatedW2ScopedDiff = false
     attemptEntries.sort((a, b) => a.id - b.id);
     const lastEntry = attemptEntries.at(-1);
     const last = lastEntry?.receipt;
+    const noWriteLeaseResolved = verifiedNoWriteAttemptKeys.has(
+      `${job.request_id}\0${last?.attempt_id}`) &&
+      last?.state === 'BLOCKED' && last.outcome === 'V2_EDIT_NO_DIFF' &&
+      last.external_effects === 'UNKNOWN' && last.task_acceptance === 'UNKNOWN' &&
+      last.model_invoked === true && last.coding_state === 'NO_DIFF' &&
+      last.source_diff_evidence === 'CAPTURED' && last.scope_valid === true &&
+      last.diff_bytes === 0 && last.changed_files_count === 0 &&
+      last.file_change_tool_completed_count === 0 &&
+      last.file_change_tool_failed_count === 0 && last.file_change_tool_incomplete_count === 0;
+    if (noWriteLeaseResolved) continue;
     const completedScopedDiff = hasCompletedScopedEditDiff(last, job);
     const isolatedW2ScopedDiff = allowIsolatedW2ScopedDiff &&
       hasIsolatedW2ScopedEditDiff(last, job);
@@ -937,7 +948,7 @@ export async function readPinnedCandidateSources(comments, dispatchers, workerLo
   return sourceShas;
 }
 export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha = null,
-  blockedKinds = [], candidateSourceShas = new Map()) {
+  blockedKinds = [], candidateSourceShas = new Map(), verifiedNoWriteAttemptKeys = new Set()) {
   const jobs = new Map();
   const receipts = new Map();
   for (const c of comments) {
@@ -1025,8 +1036,9 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
        writePathsOverlap(candidateWritePaths, ownerWritePaths) &&
        unresolvedWriteAttempt(owner.job, receipts.get(owner.job.request_id) || [], {
          workerLogin,
-        allowIsolatedW2ScopedDiff: isEditExecutionKind(v.job.kind) &&
-          owner.job.kind === 'antigravity_edit',
+          verifiedNoWriteAttemptKeys,
+          allowIsolatedW2ScopedDiff: isEditExecutionKind(v.job.kind) &&
+            owner.job.kind === 'antigravity_edit',
        });
     })) continue;
     return { job: v.job, id: v.id, originalBody: v.content };
@@ -1034,15 +1046,16 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
   return null;
 }
 export function selectNextWithCodexClaim(comments, dispatchers, workerLogin, host,
-  liveMainSha, stateDir, blockedKinds = [], candidateSourceShas = new Map()) {
+  liveMainSha, stateDir, blockedKinds = [], candidateSourceShas = new Map(),
+  verifiedNoWriteAttemptKeys = new Set()) {
   const next = selectNext(comments, dispatchers, workerLogin, host, liveMainSha,
-    blockedKinds, candidateSourceShas);
+    blockedKinds, candidateSourceShas, verifiedNoWriteAttemptKeys);
   if (next?.job.kind !== 'codex_plan' ||
       !existsSync(join(stateDir, `codex-claim-${next.job.request_id}.json`)))
     return { next, unresolvedRequestId: null };
   const blocked = [...new Set([...blockedKinds, 'codex_plan'])];
   return { next: selectNext(comments, dispatchers, workerLogin, host, liveMainSha,
-    blocked, candidateSourceShas),
+    blocked, candidateSourceShas, verifiedNoWriteAttemptKeys),
     unresolvedRequestId: next.job.request_id };
 }
 function gh(args, options = {}) {
@@ -2870,6 +2883,180 @@ function executorProcessTerminationUnconfirmed(result) {
   return ['ORPHAN_POSSIBLE', 'TERMINATION_UNCONFIRMED', 'TERMINATION_REQUESTED']
     .includes(result?.local_evidence?.termination_state);
 }
+function noWriteAttemptKey(requestId, attemptId) {
+  return `${requestId}\0${attemptId}`;
+}
+export function hasVerifiedReadOnlyNoDiffAttempt(job, officialReceipt, result, stdoutBytes) {
+  try {
+    const terminal = result?.terminal;
+    const local = result?.local_evidence;
+    if (job?.schema !== 6 || job.kind !== 'opencode_edit' ||
+        !validEditPaths(job.edit_paths) || !Buffer.isBuffer(stdoutBytes) ||
+        stdoutBytes.length > 16 * 1024 * 1024 || !terminal || !local ||
+        result.request_id !== job.request_id || result.attempt_id !== officialReceipt?.attempt_id ||
+        terminal.request_id !== job.request_id || terminal.attempt_id !== officialReceipt?.attempt_id ||
+        terminal.project_id !== PROJECT || terminal.host.toUpperCase() !== job.host.toUpperCase() ||
+        terminal.kind !== job.kind || terminal.source_sha !== job.source_sha ||
+        terminal.source_pr !== job.source_pr || terminal.goal_comment_id !== job.goal_comment_id ||
+        terminal.goal_body_sha256 !== job.goal_body_sha256 || terminal.model !== job.model ||
+        terminal.variant !== job.variant || terminal.edit_paths_sha256 !==
+          digest(Buffer.from(JSON.stringify(job.edit_paths), 'utf8')) ||
+        parseReceipt(RECEIPT_MARKER + JSON.stringify(terminal)) === null) return false;
+    const exactReceiptFields = [
+      'schema', 'project_id', 'host', 'request_id', 'attempt_id', 'state', 'kind', 'source_sha',
+      'outcome', 'exit_code', 'evidence_sha256', 'evidence_bytes', 'source_pr',
+      'goal_comment_id', 'goal_body_sha256', 'edit_paths_sha256', 'diff_sha256', 'diff_bytes',
+      'changed_files_sha256', 'changed_files_count', 'coding_state', 'scope_valid', 'cli_exit_code',
+      'model', 'variant', 'session_id', 'session_started', 'model_invoked', 'external_effects',
+      'source_diff_evidence', 'task_acceptance', 'provider_usage_evidence', 'model_activity_evidence',
+      'tool_execution_evidence', 'tool_execution_count', 'file_change_tool_evidence',
+      'file_change_tool_completed_count', 'file_change_tool_failed_count',
+      'file_change_tool_incomplete_count', 'stdout_sha256', 'stderr_sha256',
+    ];
+    if (exactReceiptFields.some(key => !Object.hasOwn(terminal, key) ||
+        !Object.hasOwn(officialReceipt, key) || terminal[key] !== officialReceipt[key])) return false;
+    const emptySha = digest(Buffer.alloc(0));
+    const emptyChangedFilesSha = digest(Buffer.from('[]', 'utf8'));
+    if (terminal.state !== 'BLOCKED' || terminal.outcome !== 'V2_EDIT_NO_DIFF' ||
+        terminal.exit_code !== 47 || terminal.model_invoked !== true ||
+        terminal.session_started !== true || !/^ses_[A-Za-z0-9_-]{8,100}$/.test(terminal.session_id || '') ||
+        terminal.external_effects !== 'UNKNOWN' || terminal.task_acceptance !== 'UNKNOWN' ||
+        terminal.coding_state !== 'NO_DIFF' || terminal.source_diff_evidence !== 'CAPTURED' ||
+        terminal.scope_valid !== true || terminal.diff_bytes !== 0 || terminal.diff_sha256 !== emptySha ||
+        terminal.changed_files_count !== 0 || terminal.changed_files_sha256 !== emptyChangedFilesSha ||
+        terminal.file_change_tool_completed_count !== 0 || terminal.file_change_tool_failed_count !== 0 ||
+        terminal.file_change_tool_incomplete_count !== 0 || terminal.tool_execution_evidence !== 'OBSERVED' ||
+        !Number.isSafeInteger(terminal.tool_execution_count) || terminal.tool_execution_count < 1 ||
+        terminal.provider_usage_evidence !== 'CONFIRMED' || terminal.model_activity_evidence !== 'CONFIRMED' ||
+        local.process_tree_state !== 'DEAD' ||
+        local.provider_authorization !== 'EXPLICIT_LOCAL_UNAUTHENTICATED_FREE_MODEL_ALLOWLIST' ||
+        local.opencode_run?.valid !== true || !Number.isSafeInteger(local.opencode_run.event_count) ||
+        local.opencode_run.event_count < 1 || local.executor_workspace_guard?.readback !== 'COMPLETE')
+      return false;
+    const guard = local.executor_workspace_guard;
+    for (const key of ['registered_root_identity_sha256', 'registered_root_state_sha256',
+      'candidate_root_identity_sha256', 'candidate_root_state_sha256',
+      'registered_root_after_sha256', 'candidate_root_after_sha256']) {
+      if (!HASH.test(guard[key] || '')) return false;
+    }
+    if (guard.registered_root_state_sha256 !== guard.registered_root_after_sha256 ||
+        guard.candidate_root_state_sha256 !== guard.candidate_root_after_sha256 ||
+        guard.registered_root_changed_paths !== 0 || guard.candidate_root_changed_paths !== 0)
+      return false;
+    const diff = local.edit_diff;
+    if (!diff || diff.bytes !== 0 || diff.sha256 !== emptySha ||
+        !Array.isArray(diff.changed_files) || diff.changed_files.length !== 0 ||
+        JSON.stringify(diff.allowed_paths) !== JSON.stringify(job.edit_paths) || diff.scope_valid !== true)
+      return false;
+    if (local.stdout_bytes !== stdoutBytes.length || local.stdout_sha256 !== digest(stdoutBytes) ||
+        terminal.stdout_sha256 !== local.stdout_sha256 || local.stderr_bytes !== 0 ||
+        local.stderr_sha256 !== emptySha || terminal.stderr_sha256 !== emptySha) return false;
+    const separator = Buffer.from('\n--- STDERR ---\n', 'utf8');
+    if (terminal.evidence_sha256 !== digest(Buffer.concat([stdoutBytes, separator])) ||
+        terminal.evidence_bytes !== stdoutBytes.length + separator.length) return false;
+    const text = stdoutBytes.toString('utf8');
+    if (!Buffer.from(text, 'utf8').equals(stdoutBytes)) return false;
+    const lines = text.split(/\r?\n/);
+    if (lines.at(-1) === '') lines.pop();
+    if (lines.length !== local.opencode_run.event_count || lines.some(line => !line.trim())) return false;
+    const eventTypes = new Set(['step_start', 'step_finish', 'text', 'tool_use', 'error']);
+    const readOnlyTools = new Set(['read', 'glob']);
+    let toolCount = 0;
+    for (const line of lines) {
+      let event;
+      try { event = JSON.parse(line); } catch { return false; }
+      if (!event || typeof event !== 'object' || Array.isArray(event) ||
+          !eventTypes.has(event.type) || event.sessionID !== terminal.session_id) return false;
+      if (event.type === 'tool_use') {
+        const part = event.part;
+        if (part?.type !== 'tool' || !readOnlyTools.has(part.tool) ||
+            !['completed', 'error'].includes(part.state?.status) ||
+            (part.sessionID !== undefined && part.sessionID !== terminal.session_id)) return false;
+        toolCount++;
+      } else if (event.part?.type === 'tool') return false;
+    }
+    return toolCount === terminal.tool_execution_count;
+  } catch {
+    return false;
+  }
+}
+async function findVerifiedNoWriteAttemptLeases(comments, config, workerLogin,
+  resolveResultsDir, resolveResultPath, log) {
+  const jobs = new Map();
+  const receipts = new Map();
+  for (const comment of comments) {
+    const login = comment.user?.login;
+    const job = config.dispatchers.includes(login) ? parseJob(comment.body) : null;
+    if (job?.schema === 6 && job.kind === 'opencode_edit' &&
+        job.host.toUpperCase() === config.host.toUpperCase()) {
+      const prior = jobs.get(job.request_id);
+      if (!prior) jobs.set(job.request_id, { job, body: comment.body, duplicate: false });
+      else if (prior.body !== comment.body) prior.duplicate = true;
+    }
+    if (!receiptMayBlockReplay(login, workerLogin, config.dispatchers)) continue;
+    const receiptValue = parseReceipt(comment.body);
+    if (!receiptValue) continue;
+    if (!receipts.has(receiptValue.request_id)) receipts.set(receiptValue.request_id, []);
+    receipts.get(receiptValue.request_id).push({ id: comment.id, login, receipt: receiptValue });
+  }
+  const verified = new Set();
+  for (const { job, duplicate } of jobs.values()) {
+    if (duplicate) continue;
+    const matching = (receipts.get(job.request_id) || []).filter(entry =>
+      entry.receipt.host.toUpperCase() === job.host.toUpperCase() &&
+      entry.receipt.kind === job.kind && entry.receipt.source_sha === job.source_sha);
+    const attempts = new Map();
+    for (const entry of matching) {
+      const attemptId = entry.receipt.attempt_id;
+      if (!attempts.has(attemptId)) attempts.set(attemptId, []);
+      attempts.get(attemptId).push(entry);
+    }
+    for (const [attemptId, attemptEntries] of attempts) {
+      attemptEntries.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+      const last = attemptEntries.at(-1);
+      const receiptValue = last?.receipt;
+      if (receiptValue?.state !== 'BLOCKED' || receiptValue.outcome !== 'V2_EDIT_NO_DIFF' ||
+          receiptValue.external_effects !== 'UNKNOWN' || !Number.isSafeInteger(last.id) || last.id < 1)
+        continue;
+      try {
+        const executor = executorForJobKind(config, job.kind);
+        if (!executor) continue;
+        const resultDir = resolveResultsDir(executor);
+        const resultPath = resolveResultPath(resultDir, job.request_id, attemptId);
+        const resultInfo = lstatSync(resultPath);
+        if (!resultInfo.isFile() || resultInfo.isSymbolicLink())
+          throw new Error('NO_WRITE_RESULT_NOT_REGULAR_FILE');
+        const result = JSON.parse(readFileSync(resultPath, 'utf8'));
+        if (result.request_id !== job.request_id || result.attempt_id !== attemptId ||
+            result.terminal?.source_sha !== job.source_sha || result.terminal?.kind !== job.kind ||
+            !parseReceipt(RECEIPT_MARKER + JSON.stringify(result.terminal)))
+          throw new Error('NO_WRITE_RESULT_IDENTITY_MISMATCH');
+        await verifyCapturedEvidence(resultDir, result);
+        if (result.local_evidence?.process_tree_state !== 'DEAD' ||
+            executorProcessTerminationUnconfirmed(result))
+          throw new Error('NO_WRITE_PROCESS_TERMINATION_UNCONFIRMED');
+        const stdoutName = result.local_evidence?.stdout_file;
+        if (typeof stdoutName !== 'string' || basename(stdoutName) !== stdoutName ||
+            !/^[A-Za-z0-9._-]{1,180}$/.test(stdoutName))
+          throw new Error('NO_WRITE_STDOUT_PATH_INVALID');
+        const stdoutPath = join(resultDir, stdoutName);
+        const stdoutInfo = lstatSync(stdoutPath);
+        if (!stdoutInfo.isFile() || stdoutInfo.isSymbolicLink() || stdoutInfo.size > 16 * 1024 * 1024)
+          throw new Error('NO_WRITE_STDOUT_NOT_REGULAR_FILE');
+        const stdoutBytes = readFileSync(stdoutPath);
+        if (hasVerifiedReadOnlyNoDiffAttempt(job, receiptValue, result, stdoutBytes)) {
+          verified.add(noWriteAttemptKey(job.request_id, attemptId));
+          log(`NO_FILE_WRITE_EFFECTS_VERIFIED_${job.request_id}_${attemptId}_` +
+            'PATH_LEASE_RELEASE_ONLY_EXTERNAL_EFFECTS_UNKNOWN_RETAINED');
+        }
+      } catch (error) {
+        log(`NO_WRITE_ATTEMPT_EFFECT_READBACK_UNVERIFIED_${job.request_id}_` +
+          `${safeErrorCode(error, 'NO_WRITE_EFFECT_EVIDENCE_UNKNOWN')}_NO_LEASE_RELEASE`);
+      }
+    }
+  }
+  return verified;
+}
 export async function runWorker(configInput, adapters = {}) {
   const config = guardConfig(configInput);
   const apiRead = adapters.apiRead ?? api;
@@ -3072,6 +3259,8 @@ export async function runWorker(configInput, adapters = {}) {
     }
     log(`AMBIGUOUS_STARTED_${s.request_id}: NO_REEXECUTION`);
   }
+  const verifiedNoWriteAttemptKeys = await findVerifiedNoWriteAttemptLeases(comments, config, me,
+    resolveExecutorResultsDir, resolveExecutorResultPath, log);
   const head = apiRead(`repos/${REPO}/git/ref/heads/main`).object?.sha;
   if (!SHA.test(head || '')) throw new Error('MAIN_HEAD_UNREADABLE');
   let humanGoalTask = null;
@@ -3143,7 +3332,7 @@ export async function runWorker(configInput, adapters = {}) {
     const job = parseJob(comment.body);
     return !job || !skippedRequestIds.has(job.request_id);
   }), config.dispatchers, me, config.host, head, config.state_dir,
-  [...blockedKinds], candidateSourceShas);
+  [...blockedKinds], candidateSourceShas, verifiedNoWriteAttemptKeys);
   let selected = selectNextCandidate();
   let next = selected.next;
   if (selected.unresolvedRequestId)
