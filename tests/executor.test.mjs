@@ -1066,7 +1066,12 @@ test('executor reconciles tracked and untracked candidate changes against the ca
     });
     const saved = JSON.parse(readFileSync(executorResultPath(f.resultsDir,
       job.request_id, ATTEMPT_EDIT), 'utf8'));
-    assert.equal(result.terminal_state, 'FINISHED');
+    assert.equal(result.terminal_state, 'FINISHED',
+      `executor reconciliation evidence: ${JSON.stringify({
+        outcome: result.outcome,
+        terminal: saved.terminal,
+        local_evidence: saved.local_evidence,
+      })}`);
     assert.equal(captured.scope_valid, true);
     assert.equal(saved.terminal.scope_valid, true);
     assert.equal(saved.terminal.diff_sha256, captured.sha256);
