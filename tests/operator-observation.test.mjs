@@ -565,6 +565,51 @@ test('primary task history failure preserves the exact task state with null run 
     'task discovery/collection errors still fail closed');
 });
 
+test('future Task Scheduler run times are not attached to an earlier observation', () => {
+  const observedAt = new Date(now).toISOString();
+  const futureRun = new Date(now + 1000).toISOString();
+  const task = { registered: true, enabled: true, state: 'READY',
+    last_run: futureRun, last_result: '0x00000000' };
+  const raw = {
+    observed_at: observedAt,
+    legacy_monitor_registered: false,
+    listener_2667: false,
+    opencode_process_count: 0,
+    runner_service_count: 0,
+    runner_service_running: 0,
+    native_task: { ...task },
+    executor_tasks: {
+      opencode: { ...task },
+      antigravity: { ...task },
+      codex: { ...task },
+    },
+  };
+  const collect = payload => collectWindowsObservation({
+    platformName: 'win32',
+    execute: () => JSON.stringify(payload),
+    now: () => observedAt,
+  });
+
+  const future = collect(raw);
+  assert.equal(future.status, 'FRESH');
+  assert.equal(future.native_task.last_run, null);
+  assert.equal(future.native_task.last_result, null);
+  for (const name of ['opencode', 'antigravity', 'codex']) {
+    assert.equal(future.executor_tasks[name].last_run, null);
+    assert.equal(future.executor_tasks[name].last_result, null);
+  }
+
+  const boundaryTime = collect({
+    ...raw,
+    native_task: { ...task, last_run: observedAt },
+    executor_tasks: Object.fromEntries(['opencode', 'antigravity', 'codex'].map(name =>
+      [name, { ...task, last_run: observedAt }])),
+  });
+  assert.equal(boundaryTime.native_task.last_run, observedAt);
+  for (const name of ['opencode', 'antigravity', 'codex'])
+    assert.equal(boundaryTime.executor_tasks[name].last_run, observedAt);
+});
+
 test('failed Windows collection exposes a bounded error code, not command output', () => {
   const result = collectWindowsObservation({
     platformName: 'win32',
