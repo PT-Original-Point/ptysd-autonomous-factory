@@ -4,6 +4,7 @@ on:
     paths:
       - 'native-bridge/**'
       - 'tests/native-bridge.test.mjs'
+      - 'tests/executor.test.mjs'
       - 'tests/native-worker-install-bundle.test.mjs'
       - 'tests/native-worker-runtime-refresh.test.ps1'
       - 'tests/opencode-v2.test.mjs'
