@@ -21,7 +21,8 @@ import { OPERATOR_MARKER, OPERATOR_COMMENT_ID, encodeOperatorObservation, parseO
 import { makeCodexExecutorRequest, codexScopedActionStatus, codexTaskFingerprint,
   validCodexWritePaths }
   from '../native-bridge/codex-continuation.mjs';
-import { candidateWorkspacePath, executorResultPath } from '../native-bridge/windows-executor.mjs';
+import { candidateWorkspacePath, executorResultPath, makeExecutorManifest }
+  from '../native-bridge/windows-executor.mjs';
 import { ANTIGRAVITY_V2_MODEL, buildAntigravityChildEnvironment, buildNativeChildEnvironment,
   readAntigravityV2RunEvidence }
   from '../native-bridge/v2-readiness.mjs';
@@ -88,8 +89,34 @@ test('Antigravity stream evidence binds the exact candidate cwd and reports mism
     assert.equal(missing.workspace_cwd_evidence.observed_path_sha256,null);
   } finally { rmSync(root,{recursive:true,force:true}); }
 });
-const executeWorker = (config, adapters = {}) => runWorkerImplementation(config,
-  { goalCommentsRead: () => [], ...adapters });
+const executeWorker = (config, adapters = {}) => runWorkerImplementation(config, {
+  goalCommentsRead: () => [],
+  readPendingExecutorAttempt: () => null,
+  prepareExecutorAttempt: (_descriptor, manifest) => {
+    const payload = makeExecutorManifest(manifest.job, manifest.spec, manifest.attempt_id,
+      manifest.source_bundle_sha256 ?? null);
+    return { outcome: 'EXECUTOR_ATTEMPT_PREPARED_NOT_DISPATCHED',
+      attempt_id: manifest.attempt_id,
+      manifest_sha256: h(JSON.stringify(payload)),
+      source_bundle_sha256: payload.source_bundle_sha256 ?? null };
+  },
+  triggerPendingExecutorAttempt: (descriptor, attemptId, identity) => {
+    if (identity.newAttempt !== true)
+      return { outcome: 'EXECUTOR_ATTEMPT_NOT_EXACT_PENDING', attempt_id: attemptId };
+    if (typeof adapters.dispatchToExecutor === 'function') {
+      return adapters.dispatchToExecutor(descriptor, {
+        request_id: identity.expectedJob.request_id, attempt_id: attemptId,
+        source_sha: identity.expectedJob.source_sha, job: identity.expectedJob,
+        spec: identity.expectedSpec,
+        ...(identity.source_bundle_sha256 ?
+          { source_bundle_sha256: identity.source_bundle_sha256 } : {}),
+      });
+    }
+    return { outcome: 'EXECUTOR_PENDING_ATTEMPT_TRIGGERED_NOT_ACCEPTANCE',
+      exit_code: 0, attempt_id: attemptId };
+  },
+  ...adapters,
+});
 function seededOperatorObservation(commentId, sequence, mainSha, at = Date.now()) {
   const timestamp = new Date(at).toISOString();
   return {
@@ -296,7 +323,7 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
   };
   const log = value => logs.push(value);
   const run = () => Object.keys(workerOverrides).length
-    ? runWorkerImplementation(config, { apiRead: api, commentsRead: () => store.comments,
+    ? executeWorker(config, { apiRead: api, commentsRead: () => store.comments,
       goalCommentsRead: () => goalComments, observationDependencies, writeReceipt, log,
       ...workerOverrides })
     : runWorker({
@@ -2256,7 +2283,7 @@ test('a later W1 poll starts and dispatches the next distinct edit after the pri
       log: value => logs.push(value),
     };
 
-    const result = await runWorkerImplementation(config, adapters);
+    const result = await executeWorker(config, adapters);
     assert.equal(result.state, 'DISPATCHED', JSON.stringify({ result, logs }));
     assert.equal(result.request_id, nextJob.request_id);
     assert.equal(bundles, 1);
@@ -2356,15 +2383,13 @@ test('receipt write reconciles POST-success/readback-failure without posting a d
   assert.equal(conflictPosts, 0);
 });
 
-// This joins the two previously separate cases: the focused writeReceipt
-// POST-success/readback-failure test and the Worker tests that begin from an
-// already-persisted STARTED receipt. A fresh Worker invocation must recover the
-// ambiguous STARTED write on the exact original request and attempt, never
-// creating a second STARTED receipt or a new attempt ID. This is a synthetic
-// adapter-level regression only; it does not claim a live reboot, model
-// recovery, or any task acceptance. external_effects and task_acceptance stay
-// UNKNOWN throughout.
-test('a fresh Worker invocation recovers an ambiguous STARTED write on the exact original attempt', async () => {
+// A POST-success/readback-failure can leave a durable STARTED receipt before
+// the executor manifest exists. A later Worker invocation must preserve that
+// unresolved attempt and refuse to synthesize a manifest or claim recovery.
+// This is a synthetic adapter-level regression only; it does not claim a live
+// reboot, model recovery, or any task acceptance. external_effects and
+// task_acceptance stay UNKNOWN throughout.
+test('a fresh Worker invocation preserves ambiguous STARTED when its pending manifest is missing', async () => {
   const root = mkdtempSync(join(homedir(), '.ptysd-ambiguous-started-recovery-'));
   try {
     const workspace = join(root, 'workspace');
@@ -2492,6 +2517,9 @@ test('a fresh Worker invocation recovers an ambiguous STARTED write on the exact
     assert.equal(persisted[0].source_pr, 437);
     assert.equal(persisted[0].goal_comment_id, job.goal_comment_id);
     assert.equal(persisted[0].goal_body_sha256, job.goal_body_sha256);
+    assert.equal(persisted[0].spec_path, job.spec_path);
+    assert.equal(persisted[0].spec_sha256, job.spec_sha256);
+    assert.match(persisted[0].executor_manifest_sha256, /^[a-f0-9]{64}$/);
     assert.equal(persisted[0].edit_paths_sha256, h(JSON.stringify(job.edit_paths)));
     assert.equal(persisted[0].model_invoked, null,
       'a dispatch acknowledgement is not evidence that the model started');
@@ -2538,13 +2566,17 @@ test('a fresh Worker invocation recovers an ambiguous STARTED write on the exact
         secondDispatchCalls++;
         throw new Error('RECOVERY_MUST_NOT_DISPATCH_A_NEW_ATTEMPT');
       },
-      triggerPendingExecutorAttempt: (descriptor, attemptId, { expectedJob }) => {
+      triggerPendingExecutorAttempt: (descriptor, attemptId,
+        { expectedJob, expectedSpec, expectedManifestSha256 }) => {
         secondTriggerCalls++;
         secondTriggerDescriptor = descriptor;
         secondTriggerAttemptId = attemptId;
         secondTriggerJob = expectedJob;
-        return { outcome: 'EXECUTOR_PENDING_ATTEMPT_TRIGGERED_NOT_ACCEPTANCE',
-          exit_code: 0, attempt_id: attemptId };
+        assert.equal(expectedSpec, spec);
+        assert.equal(expectedManifestSha256, persisted[0].executor_manifest_sha256);
+        const error = new Error('EXECUTOR_PENDING_MANIFEST_MISSING');
+        error.code = 'EXECUTOR_PENDING_MANIFEST_MISSING';
+        throw error;
       },
       writeReceipt: (receiptConfig, data, login) =>
         writeReceipt(receiptConfig, data, login, secondReceiptDependencies),
@@ -2557,8 +2589,8 @@ test('a fresh Worker invocation recovers an ambiguous STARTED write on the exact
     });
 
     assert.notEqual(second.state, 'DISPATCHED',
-      'the recovery tick does not claim a new dispatch');
-    assert.equal(secondTriggerCalls, 1, 'the pending executor handoff is retried exactly once');
+      'the recovery tick does not claim that an attempt without a manifest was dispatched');
+    assert.equal(secondTriggerCalls, 1, 'the exact missing-manifest state is checked once');
     assert.equal(secondTriggerDescriptor, executor);
     assert.equal(secondTriggerAttemptId, firstAttemptId,
       'recovery is bound to the exact original attempt ID');
@@ -2567,18 +2599,110 @@ test('a fresh Worker invocation recovers an ambiguous STARTED write on the exact
     assert.equal(secondDispatchCalls, 0, 'recovery never dispatches a new executor attempt');
     assert.equal(secondModelCalls, 0, 'recovery never invokes a model directly');
     assert.equal(remote.posts, 1, 'recovery does not post a second STARTED receipt');
-    const recovered = remote.comments
+    const unresolved = remote.comments
       .map(comment => parseReceipt(comment.body))
       .filter(receiptValue => receiptValue?.request_id === job.request_id);
-    assert.equal(recovered.length, 1, 'exactly the original STARTED receipt remains');
-    assert.equal(recovered[0].attempt_id, firstAttemptId, 'no new attempt ID is created');
-    assert.equal(recovered[0].task_acceptance, 'UNKNOWN');
-    assert.equal(recovered[0].external_effects, 'UNKNOWN');
-    assert.ok(secondLogs.includes(
-      `PENDING_EXECUTOR_RETRIGGERED_${job.request_id}_${firstAttemptId}_NO_NEW_RECEIPT`),
+    assert.equal(unresolved.length, 1, 'exactly the original STARTED receipt remains');
+    assert.equal(unresolved[0].attempt_id, firstAttemptId, 'no new attempt ID is created');
+    assert.equal(unresolved[0].task_acceptance, 'UNKNOWN');
+    assert.equal(unresolved[0].external_effects, 'UNKNOWN');
+    assert.ok(secondLogs.includes(`PENDING_EXECUTOR_RETRIGGER_NOT_CONFIRMED_${job.request_id}_` +
+      'EXECUTOR_PENDING_MANIFEST_MISSING_NO_REPLAY'),
     secondLogs.join('\n'));
     assert.ok(!secondLogs.some(value => value.startsWith('DISPATCHED_')),
       'recovery never logs a new dispatch');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Worker adopts an exact pre-STARTED manifest after restart without creating a new attempt', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-prestarted-manifest-recovery-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const stateDir = join(root, 'state');
+    mkdirSync(join(workspace, 'native-bridge'), { recursive: true });
+    mkdirSync(stateDir);
+    const host = hostname().toUpperCase();
+    const spec = 'Resume the exact pending W1 attempt after a Worker restart; never create another.';
+    const job = withHumanGoal({ schema: 6, project_id: PROJECT, host,
+      request_id: 'PTYSD_W1_PRESTARTED_MANIFEST_RECOVERY_20261102',
+      kind: 'opencode_edit', source_sha: commit,
+      spec_path: 'native-bridge/tasks/prestarted-manifest-recovery.md',
+      spec_sha256: h(spec), model: 'opencode/deepseek-v4.1-flash-free', variant: 'free',
+      edit_paths: ['native-bridge/worker.mjs'], source_pr: 437 });
+    const goal = humanGoalComment();
+    const source = { ...com(904, encoded(job)),
+      issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+    const executor = executorDescriptorForLane('OpenCode', 1001);
+    const config = { repo: REPO, project_id: PROJECT, host, issue: 407, workspace, state_dir: stateDir,
+      dispatchers: ['t14210184'], executors: { opencode: executor }, enable_v2_model_runs: true,
+      allowed_models: { 'opencode/deepseek-v4.1-flash-free': ['free'] } };
+    const attemptId = '88888888-8888-4888-8888-888888888888';
+    const manifestSha256 = 'd'.repeat(64);
+    const bundleSha256 = 'c'.repeat(64);
+    const posted = [];
+    const logs = [];
+    let preparedBundles = 0;
+    let preparedManifests = 0;
+    let triggers = 0;
+    let inlineModels = 0;
+    const result = await executeWorker(config, {
+      goalCommentsRead: () => [goal, source],
+      commentsRead: () => [],
+      readExecutorWorkspace: descriptor => { assert.equal(descriptor, executor); return workspace; },
+      apiRead(uri) {
+        if (uri === 'user') return { login: 'worker' };
+        if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
+        if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: commit } };
+        if (uri === `repos/${REPO}/issues/comments/${goal.id}`) return goal;
+        if (uri === `repos/${REPO}/issues/comments/${source.id}`) return source;
+        if (uri === `repos/${REPO}/pulls/437`) return { number: 437, state: 'open',
+          base: { ref: 'main', repo: { id: 1352411536, full_name: REPO } },
+          head: { sha: commit, repo: { id: 1352411536, full_name: REPO } } };
+        if (uri.startsWith(`repos/${REPO}/contents/`))
+          return { encoding: 'base64', content: Buffer.from(spec).toString('base64') };
+        throw new Error(`UNEXPECTED_PRESTARTED_RECOVERY_API_${uri}`);
+      },
+      assertExecutorTaskReady: () => { throw new Error('PENDING_MANIFEST_MUST_BYPASS_EMPTY_MAILBOX_CHECK'); },
+      readPendingExecutorAttempt(descriptor, expectedJob, expectedSpec) {
+        assert.equal(descriptor, executor);
+        assert.deepEqual(expectedJob, job);
+        assert.equal(expectedSpec, spec);
+        return { attempt_id: attemptId, manifest_sha256: manifestSha256,
+          source_bundle_sha256: bundleSha256 };
+      },
+      createExecutorSourceBundle: () => { preparedBundles++; throw new Error('NO_NEW_BUNDLE'); },
+      prepareExecutorAttempt: () => { preparedManifests++; throw new Error('NO_NEW_MANIFEST'); },
+      triggerPendingExecutorAttempt(descriptor, actualAttemptId, identity) {
+        triggers++;
+        assert.equal(descriptor, executor);
+        assert.equal(actualAttemptId, attemptId);
+        assert.deepEqual(identity.expectedJob, job);
+        assert.equal(identity.expectedSpec, spec);
+        assert.equal(identity.expectedManifestSha256, manifestSha256);
+        assert.equal(identity.source_bundle_sha256, bundleSha256);
+        assert.equal(identity.newAttempt, true);
+        return { outcome: 'EXECUTOR_PENDING_ATTEMPT_TRIGGERED_NOT_ACCEPTANCE',
+          exit_code: 0, attempt_id: actualAttemptId };
+      },
+      writeReceipt(_config, data) { posted.push(data); },
+      runPlan: () => { inlineModels++; throw new Error('MODEL_MUST_RUN_ONLY_IN_EXECUTOR'); },
+      observationDependencies: { collectWindowsObservation: () => ({ status: 'UNKNOWN' }) },
+      log: value => logs.push(value),
+    });
+    assert.equal(result.state, 'DISPATCHED');
+    assert.equal(result.request_id, job.request_id);
+    assert.equal(result.attempt_id, attemptId);
+    assert.equal(preparedBundles, 0);
+    assert.equal(preparedManifests, 0);
+    assert.equal(triggers, 1);
+    assert.equal(inlineModels, 0);
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].state, 'STARTED');
+    assert.equal(posted[0].attempt_id, attemptId);
+    assert.equal(posted[0].executor_manifest_sha256, manifestSha256);
+    assert.equal(posted[0].task_acceptance, 'UNKNOWN');
+    assert.equal(posted[0].external_effects, 'UNKNOWN');
+    assert.ok(!logs.some(value => value.startsWith('FINISHED_')));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -2597,6 +2721,18 @@ test('strict exact job contract rejects injection, cross-project, unknown keys a
     edit_paths:['src/worker.mjs','tests/worker.test.mjs'] };
   assert.deepEqual(parseJob(encoded(editJob)), editJob,
     'the trusted task schema carries the exact writable file set');
+  const editStarted = receipt(editJob.request_id, '11111111-1111-4111-8111-111111111111',
+    'STARTED', editJob, null, { manifest_sha256: 'e'.repeat(64) });
+  assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify(editStarted))?.executor_manifest_sha256,
+    'e'.repeat(64), 'edit STARTED receipts bind the exact prepared manifest');
+  const codexStarted = receipt(codexPlan(['native-bridge/worker.mjs']).request_id,
+    '22222222-2222-4222-8222-222222222222', 'STARTED',
+    codexPlan(['native-bridge/worker.mjs']));
+  assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(codexStarted)),
+    'Codex task spec fields remain valid without an Executor manifest');
+  assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify({ ...codexStarted,
+    executor_manifest_sha256: 'e'.repeat(64) })), null,
+  'Codex receipts cannot claim a native Executor manifest');
   assert.equal(parseJob(encoded({ ...editJob, edit_paths:['governance./policy.json'] })), null,
     'a Win32 trailing-dot alias cannot bypass the protected governance directory');
   assert.equal(parseJob(encoded({ ...editJob, edit_paths:['runs ./worker.json'] })), null,
@@ -3553,11 +3689,11 @@ test('a disabled W2 lane does not starve a new W1 edit after a prior terminal W1
     assert.equal(result.state,'DISPATCHED',JSON.stringify({result,logs}));
     assert.equal(result.request_id,w1Job.request_id);
     assert.equal(bundles,1);
-    assert.equal(dispatches,1,'the W1 request is dispatched exactly once through the OpenCode Executor');
+    assert.equal(dispatches,0,'new edit intents use the exact pending-manifest trigger');
     assert.equal(inlineModels,0,'the Worker never invokes an inline model');
     assert.equal(antigravityReadiness,0,'a disabled W2 lane cannot trigger Antigravity readiness');
     assert.equal(w2Readiness,0,'the W2 Task Scheduler identity is never probed');
-    assert.equal(pendingTriggers,0);
+    assert.equal(pendingTriggers,1,'the W1 request is triggered once after STARTED is read back');
     assert.ok(logs.includes('ANTIGRAVITY_LANE_WAITING_ELIGIBILITY_ANTIGRAVITY_MODEL_RUNS_NOT_ENABLED'),
       'the W2 gate was evaluated before continuing to W1');
     assert.ok(!logs.some(value=>value.startsWith('OPENCODE_LANE_WAITING_ELIGIBILITY_')),
@@ -6452,15 +6588,17 @@ test('STARTED OpenCode edit retries only its exact pending attempt and continues
       for (const path of [workspace, stateDir, manifestDir, resultsDir]) mkdirSync(path);
       const host = hostname().toUpperCase();
       const requestId = `PTYSD_OPENCODE_PENDING_RETRY_${scenario.label}_20261017`;
+      const expectedSpec = 'Pinned OpenCode recovery task specification.';
       const attemptId = sourceChanged
         ? '33333333-3333-4333-8333-333333333333'
         : '44444444-4444-4444-8444-444444444444';
       const editJob = { schema: 4, project_id: PROJECT, host, request_id: requestId,
         kind: 'opencode_edit', source_sha: commit,
-        spec_path: 'native-bridge/tasks/pending-retry.md', spec_sha256: hash,
+        spec_path: 'native-bridge/tasks/pending-retry.md', spec_sha256: h(expectedSpec),
         model: 'opencode/spark', variant: 'high', edit_paths: ['src/worker.mjs'] };
       const sourceComment = com(9911, encoded(editJob));
-      const started = receipt(requestId, attemptId, 'STARTED', editJob);
+      const started = receipt(requestId, attemptId, 'STARTED', editJob, null,
+        { manifest_sha256: 'd'.repeat(64) });
       const pingJob = mkjob({ host,
         request_id: `PTYSD_PING_AFTER_PENDING_RETRY_${sourceChanged ? 'CHANGED' : 'EXACT'}_20261017` });
       const comments = [sourceComment,
@@ -6474,7 +6612,8 @@ test('STARTED OpenCode edit retries only its exact pending attempt and continues
         config_path: 'C:\\PTYSD\\executor.json', manifest_dir: manifestDir,
         results_dir: resultsDir, working_directory: workspace, source_bundle_per_attempt: true };
       const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
-        workspace, state_dir: stateDir, dispatchers: ['t14210184'], executor };
+        workspace, state_dir: stateDir, dispatchers: ['t14210184'], executor,
+        enable_v2_model_runs: true, allowed_models: { 'opencode/spark': ['high'] } };
       const writes = [], logs = [];
       let triggerCalls = 0, nextId = 9920, modelCalls = 0;
       const result = await executeWorker(config, {
@@ -6482,6 +6621,8 @@ test('STARTED OpenCode edit retries only its exact pending attempt and continues
           if (uri === 'user') return { login: 'worker' };
           if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
           if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: commit } };
+          if (uri.startsWith(`repos/${REPO}/contents/`))
+            return { encoding: 'base64', content: Buffer.from(expectedSpec).toString('base64') };
           const match = uri.match(/\/issues\/comments\/(\d+)$/);
           if (match) {
             const comment = comments.find(item => item.id === Number(match[1]));
@@ -6492,11 +6633,14 @@ test('STARTED OpenCode edit retries only its exact pending attempt and continues
           throw new Error(`UNEXPECTED_MOCK_API_ROUTE:${uri}`);
         },
         commentsRead: () => comments,
-        triggerPendingExecutorAttempt(descriptor, actualAttemptId, { expectedJob }) {
+        triggerPendingExecutorAttempt(descriptor, actualAttemptId,
+          { expectedJob, expectedSpec: actualSpec, expectedManifestSha256 }) {
           triggerCalls++;
           assert.equal(descriptor, executor);
           assert.equal(actualAttemptId, attemptId);
           assert.deepEqual(expectedJob, editJob);
+          assert.equal(actualSpec, expectedSpec);
+          assert.equal(expectedManifestSha256, 'd'.repeat(64));
           if (scenario.triggerError) {
             const error = new Error(scenario.triggerError);
             error.code = scenario.triggerCode;

@@ -3266,9 +3266,32 @@ test('runWorker dispatches the exact schema-6 W1 lane once while the schema-4 Co
         bundleCalls.push(bundleJob.request_id);
         return { attempt_id: fixedAttemptId, source_sha: bundleJob.source_sha, sha256: bundleSha };
       },
-      dispatchToExecutor: (usedDescriptor, request) => {
+      readPendingExecutorAttempt: (usedDescriptor, expectedJob, expectedSpec) => {
         assert.equal(usedDescriptor, descriptor);
-        executorDispatches.push(request);
+        assert.deepEqual(expectedJob, w1Job);
+        assert.equal(expectedSpec, specText);
+        return null;
+      },
+      prepareExecutorAttempt: (usedDescriptor, manifest) => {
+        assert.equal(usedDescriptor, descriptor);
+        assert.equal(manifest.attempt_id, fixedAttemptId);
+        assert.deepEqual(manifest.job, w1Job);
+        assert.equal(manifest.spec, specText);
+        assert.equal(manifest.source_bundle_sha256, bundleSha);
+        events.push('executor:manifest-prepared');
+        return { outcome: 'EXECUTOR_ATTEMPT_PREPARED_NOT_DISPATCHED',
+          attempt_id: fixedAttemptId, manifest_sha256: 'e'.repeat(64) };
+      },
+      triggerPendingExecutorAttempt: (usedDescriptor, attemptId, identity) => {
+        assert.equal(usedDescriptor, descriptor);
+        assert.equal(attemptId, fixedAttemptId);
+        assert.equal(identity.newAttempt, true);
+        assert.deepEqual(identity.expectedJob, w1Job);
+        assert.equal(identity.expectedSpec, specText);
+        assert.equal(identity.expectedManifestSha256, 'e'.repeat(64));
+        executorDispatches.push({ request_id: w1Job.request_id, attempt_id: attemptId,
+          source_sha: w1Job.source_sha, job: identity.expectedJob, spec: identity.expectedSpec,
+          source_bundle_sha256: identity.source_bundle_sha256 });
         events.push('executor:dispatch');
         return { outcome: 'EXECUTOR_REQUESTED_NOT_ACCEPTANCE' };
       },
@@ -3277,9 +3300,6 @@ test('runWorker dispatches the exact schema-6 W1 lane once while the schema-4 Co
         events.push('codex:dispatch');
         throw new Error('CODEX_MUST_NOT_DISPATCH');
       },
-      triggerPendingExecutorAttempt: () => {
-        throw new Error('PENDING_TRIGGER_MUST_NOT_RUN');
-      },
       observationDependencies,
       log: message => logs.push(message),
     });
@@ -3287,8 +3307,9 @@ test('runWorker dispatches the exact schema-6 W1 lane once while the schema-4 Co
     assert.deepEqual(result, { state: 'DISPATCHED',
       request_id: w1Job.request_id, attempt_id: fixedAttemptId,
       outcome: 'EXECUTOR_REQUESTED_NOT_ACCEPTANCE' });
-    assert.deepEqual(events, ['observation', 'receipt:STARTED', 'executor:dispatch'],
-      'the same poll observes, records STARTED, then dispatches exactly once');
+    assert.deepEqual(events, ['observation', 'executor:manifest-prepared',
+      'receipt:STARTED', 'executor:dispatch'],
+      'the same poll observes, persists exact intent, records STARTED, then dispatches once');
     assert.equal(codexDispatches.length, 0,
       'the schema-4 Codex lane must not build or dispatch a request');
     assert.equal(executorDispatches.length, 1, 'the W1 lane is dispatched exactly once');
@@ -3324,6 +3345,9 @@ test('runWorker dispatches the exact schema-6 W1 lane once while the schema-4 Co
     assert.equal(started.state, 'STARTED');
     assert.equal(started.kind, 'opencode_edit');
     assert.equal(started.source_sha, candidateHeadSha);
+    assert.equal(started.spec_path, w1Job.spec_path);
+    assert.equal(started.spec_sha256, w1Job.spec_sha256);
+    assert.equal(started.executor_manifest_sha256, 'e'.repeat(64));
     assert.equal(started.source_pr, sourcePr);
     assert.equal(started.goal_comment_id, currentGoalCommentId);
     assert.equal(started.goal_body_sha256, currentGoalSha);

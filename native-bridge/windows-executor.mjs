@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, rmSync, realpathSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync, renameSync, rmSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, posix, resolve, win32 } from 'node:path';
 
 const SID = /^S-1-(?:\d+-)+\d+$/i;
@@ -276,7 +276,7 @@ function readNativeTaskState(taskName, {
     'if ($null -eq $task) { throw \'Task Scheduler returned no task\' }',
     '$sid = [string]$task.Principal.UserId',
     "if ($sid -notmatch '^S-1-') { $sid = ([System.Security.Principal.NTAccount]::new($sid)).Translate([System.Security.Principal.SecurityIdentifier]).Value }",
-    '[pscustomobject]@{ task_name=[string]$task.TaskName; task_path=[string]$task.TaskPath; user_sid=$sid; logon_type=[string]$task.Principal.LogonType; run_level=[string]$task.Principal.RunLevel; enabled=[bool]$task.Settings.Enabled } | ConvertTo-Json -Compress -Depth 3',
+    '[pscustomobject]@{ task_name=[string]$task.TaskName; task_path=[string]$task.TaskPath; user_sid=$sid; logon_type=[string]$task.Principal.LogonType; run_level=[string]$task.Principal.RunLevel; enabled=[bool]$task.Settings.Enabled; state=[string]$task.State } | ConvertTo-Json -Compress -Depth 3',
   ].join('; ');
   let output;
   try {
@@ -313,7 +313,9 @@ function verifiedNativeTaskState(readback, descriptor) {
   else if (readback.run_level === 'Highest' || readback.run_level === 'HighestAvailable') runLevel = 'HighestAvailable';
   else fail('EXECUTOR_TASK_RUNLEVEL_READBACK_AMBIGUOUS');
   if (typeof readback.enabled !== 'boolean') fail('EXECUTOR_TASK_ENABLED_READBACK_AMBIGUOUS');
-  return { run_level: runLevel, enabled: readback.enabled };
+  if (!['Ready', 'Running', 'Disabled', 'Queued', 'Unknown'].includes(readback.state))
+    fail('EXECUTOR_TASK_STATE_READBACK_AMBIGUOUS');
+  return { run_level: runLevel, enabled: readback.enabled, state: readback.state };
 }
 
 function validateExecutorTaskReadback(xml, descriptor, readTaskState) {
@@ -377,6 +379,17 @@ function executorMailboxState(manifestDir) {
   const active = readdirSync(manifestDir).filter(name =>
     /^[a-f0-9-]{36}\.(?:pending|running)\.json$/i.test(name));
   return { active: active.sort(), empty: active.length === 0 };
+}
+
+function flushExecutorManifestFile(path) {
+  let fd;
+  try {
+    // Open writable because Windows FlushFileBuffers requires a write-capable handle.
+    fd = openSync(path, 'r+');
+    fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 export function candidateBundlePath(manifestDir, attemptId) {
@@ -557,10 +570,14 @@ export function assertExecutorTaskReady(descriptor, {
   assertPhysicalDirectory(filesystemPath(descriptor.manifest_dir), 'EXECUTOR_MANIFEST_DIRECTORY_UNAVAILABLE');
   assertPhysicalDirectory(filesystemPath(descriptor.results_dir), 'EXECUTOR_RESULT_DIRECTORY_UNAVAILABLE');
   const xml = readTaskXml(descriptor.task_name);
-  const task = validateExecutorTaskReadback(xml, descriptor, readTaskState);
+  const nativeReadback = readTaskState(descriptor.task_name);
+  const nativeState = verifiedNativeTaskState(nativeReadback, descriptor);
+  if (nativeState.state !== 'Ready')
+    fail(`EXECUTOR_TASK_STATE_${nativeState.state.toUpperCase()}_NOT_READY`);
+  const task = validateExecutorTaskReadback(xml, descriptor, () => nativeReadback);
   const mailbox = executorMailboxState(filesystemPath(descriptor.manifest_dir));
   if (!mailbox.empty) fail('EXECUTOR_ATTEMPT_UNRESOLVED');
-  return { ...task, publisher_sid: actualPublisherSid, mailbox: 'EMPTY' };
+  return { ...task, state: nativeState.state, publisher_sid: actualPublisherSid, mailbox: 'EMPTY' };
 }
 
 export function makeExecutorManifest(job, spec, attemptId, sourceBundleSha256 = null) {
@@ -577,21 +594,102 @@ export function makeExecutorManifest(job, spec, attemptId, sourceBundleSha256 = 
     ...(sourceBundleSha256 === null ? {} : { source_bundle_sha256: sourceBundleSha256.toLowerCase() }) };
 }
 
-export function dispatchToExecutor(descriptor, manifest, {
+// A pending manifest can survive a Worker restart that happened after the
+// intent was prepared but before its STARTED receipt was confirmed. Reuse it
+// only when it is the sole pending mailbox entry and every byte is bound to
+// the exact current job and spec. Running, foreign, or result-bearing attempts
+// remain unresolved and are never reconstructed here.
+export function readPendingExecutorAttempt(descriptor, expectedJob, expectedSpec, {
+  currentSid = getCurrentWindowsSid, filesystemPath = value => value,
+  readTaskXml = taskName => execFileSync('schtasks.exe', ['/Query', '/TN', taskName, '/XML'], {
+    encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
+  }),
+  readTaskState = taskName => readNativeTaskState(taskName),
+} = {}) {
+  validateExecutorDescriptor(descriptor);
+  if (!expectedJob || typeof expectedJob !== 'object' || Array.isArray(expectedJob) ||
+      !['opencode_edit', 'antigravity_edit'].includes(expectedJob.kind) ||
+      !REQUEST.test(expectedJob.request_id || '') || typeof expectedSpec !== 'string' ||
+      !HASH.test(expectedJob.spec_sha256 || '') ||
+      createHash('sha256').update(expectedSpec, 'utf8').digest('hex') !== expectedJob.spec_sha256)
+    fail('EXECUTOR_EXPECTED_PENDING_ATTEMPT_IDENTITY_INVALID');
+  if (currentSid().toUpperCase() !== descriptor.publisher_sid.toUpperCase())
+    fail('PUBLISHER_IDENTITY_READBACK_MISMATCH');
+
+  const manifestDir = filesystemPath(descriptor.manifest_dir);
+  const resultsDir = filesystemPath(descriptor.results_dir);
+  assertPhysicalDirectory(manifestDir, 'EXECUTOR_MANIFEST_DIRECTORY_UNAVAILABLE');
+  assertPhysicalDirectory(resultsDir, 'EXECUTOR_RESULT_DIRECTORY_UNAVAILABLE');
+  const mailbox = executorMailboxState(manifestDir);
+  if (mailbox.empty) return null;
+  if (mailbox.active.length !== 1 || !/^[a-f0-9-]{36}\.pending\.json$/i.test(mailbox.active[0]))
+    fail('EXECUTOR_ATTEMPT_NOT_EXACT_PENDING');
+
+  const nativeReadback = readTaskState(descriptor.task_name);
+  const nativeState = verifiedNativeTaskState(nativeReadback, descriptor);
+  if (nativeState.state !== 'Ready')
+    fail(`EXECUTOR_TASK_STATE_${nativeState.state.toUpperCase()}_NOT_READY`);
+  validateExecutorTaskReadback(readTaskXml(descriptor.task_name), descriptor, () => nativeReadback);
+
+  const attemptId = mailbox.active[0].slice(0, -'.pending.json'.length);
+  const manifestPath = join(manifestDir, mailbox.active[0]);
+  let originalBytes;
+  let manifest;
+  try {
+    const stat = lstatSync(manifestPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) fail('EXECUTOR_PENDING_MANIFEST_NOT_REGULAR');
+    originalBytes = readFileSync(manifestPath);
+    manifest = JSON.parse(originalBytes.toString('utf8'));
+  } catch (error) {
+    if (/^EXECUTOR_/.test(error?.code || '')) throw error;
+    fail('EXECUTOR_PENDING_MANIFEST_INVALID');
+  }
+  if (manifest.attempt_id !== attemptId ||
+      JSON.stringify(manifest.job) !== JSON.stringify(expectedJob) ||
+      (manifest.source_bundle_sha256 !== undefined && !HASH.test(manifest.source_bundle_sha256 || '')))
+    fail('EXECUTOR_PENDING_MANIFEST_IDENTITY_MISMATCH');
+  if (manifest.spec !== expectedSpec) fail('EXECUTOR_PENDING_MANIFEST_SPEC_MISMATCH');
+  const payload = makeExecutorManifest(expectedJob, expectedSpec, attemptId,
+    manifest.source_bundle_sha256 ?? null);
+  if (!Buffer.from(JSON.stringify(payload)).equals(originalBytes))
+    fail('EXECUTOR_PENDING_MANIFEST_BYTES_MISMATCH');
+  if (descriptor.source_bundle_per_attempt === true && !payload.source_bundle_sha256)
+    fail('EXECUTOR_SOURCE_BUNDLE_HASH_MISSING');
+  if (payload.source_bundle_sha256) {
+    const bundlePath = candidateBundlePath(manifestDir, attemptId);
+    let bundleStat;
+    try { bundleStat = lstatSync(bundlePath); } catch { fail('EXECUTOR_SOURCE_BUNDLE_UNAVAILABLE'); }
+    if (!bundleStat.isFile() || bundleStat.isSymbolicLink() ||
+        createHash('sha256').update(readFileSync(bundlePath)).digest('hex') !== payload.source_bundle_sha256)
+      fail('EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH');
+  }
+  const resultPath = executorResultPath(resultsDir, expectedJob.request_id, attemptId);
+  if (existsSync(resultPath)) fail('EXECUTOR_PENDING_ATTEMPT_ALREADY_HAS_RESULT');
+  const finalMailbox = executorMailboxState(manifestDir);
+  if (finalMailbox.active.length !== 1 || finalMailbox.active[0] !== mailbox.active[0] ||
+      !readFileSync(manifestPath).equals(originalBytes) || existsSync(resultPath))
+    fail('EXECUTOR_PENDING_ATTEMPT_CHANGED_DURING_RECOVERY');
+  return { attempt_id: attemptId,
+    manifest_sha256: createHash('sha256').update(originalBytes).digest('hex'),
+    source_bundle_sha256: payload.source_bundle_sha256 ?? null };
+}
+
+export function prepareExecutorAttempt(descriptor, manifest, {
   currentSid,
   filesystemPath = value => value,
   writeFile = writeFileSync,
+  flushFile = flushExecutorManifestFile,
+  linkFile = linkSync,
   readTaskXml,
   readTaskState,
-  runTask = taskName => execFileSync('schtasks.exe', ['/Run', '/TN', taskName], {
-    encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
-  }),
 } = {}) {
   assertExecutorTaskReady(descriptor, { currentSid, filesystemPath, readTaskXml, readTaskState });
   const payload = makeExecutorManifest(manifest.job, manifest.spec, manifest.attempt_id,
     manifest.source_bundle_sha256 ?? null);
   if (payload.request_id !== manifest.request_id || payload.source_sha !== manifest.source_sha)
     fail('EXECUTOR_MANIFEST_IDENTITY_MISMATCH');
+  if (createHash('sha256').update(payload.spec, 'utf8').digest('hex') !== payload.spec_sha256)
+    fail('EXECUTOR_MANIFEST_SPEC_HASH_MISMATCH');
   if (payload.source_bundle_sha256) {
     const bundle = candidateBundlePath(filesystemPath(descriptor.manifest_dir), payload.attempt_id);
     let stat;
@@ -600,8 +698,56 @@ export function dispatchToExecutor(descriptor, manifest, {
         createHash('sha256').update(readFileSync(bundle)).digest('hex') !== payload.source_bundle_sha256)
       fail('EXECUTOR_SOURCE_BUNDLE_HASH_MISMATCH');
   }
-  const pending = join(filesystemPath(descriptor.manifest_dir), `${payload.attempt_id}.pending.json`);
-  writeFile(pending, JSON.stringify(payload), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  const manifestDir = filesystemPath(descriptor.manifest_dir);
+  const pending = join(manifestDir, `${payload.attempt_id}.pending.json`);
+  const staging = join(manifestDir, `.${payload.attempt_id}.${randomUUID()}.pending-stage`);
+  const bytes = Buffer.from(JSON.stringify(payload), 'utf8');
+  // Never expose a partially written file under the Executor's active mailbox
+  // name. Flush its data before publication, then atomically link the same-file
+  // entry into the mailbox without overwriting a competing writer. This does
+  // not assert parent-directory metadata durability across sudden power loss;
+  // restart recovery here covers process interruption, not that stronger case.
+  writeFile(staging, bytes, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  try { flushFile(staging); }
+  catch { fail('EXECUTOR_PENDING_MANIFEST_STAGING_FLUSH_FAILED'); }
+  let stagingStat;
+  try { stagingStat = lstatSync(staging); } catch { fail('EXECUTOR_PENDING_MANIFEST_STAGING_READBACK_UNKNOWN'); }
+  if (!stagingStat.isFile() || stagingStat.isSymbolicLink() ||
+      !readFileSync(staging).equals(bytes))
+    fail('EXECUTOR_PENDING_MANIFEST_STAGING_READBACK_MISMATCH');
+  try {
+    linkFile(staging, pending);
+  } catch (error) {
+    // A failed link is definitive: retain any competing pending entry unchanged,
+    // remove only this unique staging file, and fail closed on unsupported filesystems.
+    try { rmSync(staging, { force: true }); } catch { /* orphan staging is not an active mailbox entry */ }
+    if (error?.code === 'EEXIST') fail('EXECUTOR_PENDING_MANIFEST_ALREADY_EXISTS');
+    if (['ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV'].includes(error?.code))
+      fail('EXECUTOR_PENDING_MANIFEST_ATOMIC_PUBLISH_UNAVAILABLE');
+    if (['EACCES', 'EPERM', 'EBUSY', 'EIO', 'ENOSPC', 'EINVAL', 'ENOENT', 'ENOTDIR']
+      .includes(error?.code))
+      fail(`EXECUTOR_PENDING_MANIFEST_LINK_${error.code}`);
+    fail('EXECUTOR_PENDING_MANIFEST_ATOMIC_PUBLISH_FAILED');
+  }
+  // A process crash before cleanup leaves only a harmless staging hard link;
+  // the mailbox scans exact .pending.json/.running.json names.
+  try { rmSync(staging, { force: true }); } catch { /* the pending link is already published */ }
+  let pendingStat;
+  try { pendingStat = lstatSync(pending); } catch { fail('EXECUTOR_PENDING_MANIFEST_READBACK_UNKNOWN'); }
+  if (!pendingStat.isFile() || pendingStat.isSymbolicLink() ||
+      !readFileSync(pending).equals(bytes))
+    fail('EXECUTOR_PENDING_MANIFEST_READBACK_MISMATCH');
+  return { outcome: 'EXECUTOR_ATTEMPT_PREPARED_NOT_DISPATCHED', attempt_id: payload.attempt_id,
+    manifest_sha256: createHash('sha256').update(bytes).digest('hex') };
+}
+
+export function dispatchToExecutor(descriptor, manifest, {
+  runTask = taskName => execFileSync('schtasks.exe', ['/Run', '/TN', taskName], {
+    encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
+  }),
+  ...prepareOptions
+} = {}) {
+  const prepared = prepareExecutorAttempt(descriptor, manifest, prepareOptions);
   try {
     runTask(descriptor.task_name);
   } catch {
@@ -612,11 +758,13 @@ export function dispatchToExecutor(descriptor, manifest, {
     throw error;
   }
   return { outcome: 'EXECUTOR_TASK_DISPATCHED_NOT_ACCEPTANCE', exit_code: 0,
-    evidence_sha256: null, evidence_bytes: 0, attempt_id: payload.attempt_id };
+    evidence_sha256: null, evidence_bytes: 0, attempt_id: prepared.attempt_id,
+    manifest_sha256: prepared.manifest_sha256 };
 }
 
 export function triggerPendingExecutorAttempt(descriptor, attemptId, {
-  expectedJob, currentSid = getCurrentWindowsSid, filesystemPath = value => value,
+  expectedJob, expectedSpec, expectedManifestSha256,
+  currentSid = getCurrentWindowsSid, filesystemPath = value => value,
   readTaskXml = taskName => execFileSync('schtasks.exe', ['/Query', '/TN', taskName, '/XML'], {
     encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
   }),
@@ -627,8 +775,11 @@ export function triggerPendingExecutorAttempt(descriptor, attemptId, {
 } = {}) {
   validateExecutorDescriptor(descriptor);
   if (!ATTEMPT.test(attemptId || '') || !expectedJob || typeof expectedJob !== 'object' ||
-      Array.isArray(expectedJob) || !['opencode_edit', 'antigravity_edit'].includes(expectedJob.kind))
+      Array.isArray(expectedJob) || !['opencode_edit', 'antigravity_edit'].includes(expectedJob.kind) ||
+      typeof expectedSpec !== 'string' || !HASH.test(expectedManifestSha256 || ''))
     fail('EXECUTOR_EXPECTED_PENDING_ATTEMPT_IDENTITY_INVALID');
+  if (createHash('sha256').update(expectedSpec, 'utf8').digest('hex') !== expectedJob.spec_sha256)
+    fail('EXECUTOR_EXPECTED_SPEC_HASH_MISMATCH');
   const actualPublisherSid = currentSid().toUpperCase();
   if (actualPublisherSid !== descriptor.publisher_sid.toUpperCase())
     fail('PUBLISHER_IDENTITY_READBACK_MISMATCH');
@@ -637,10 +788,17 @@ export function triggerPendingExecutorAttempt(descriptor, attemptId, {
   assertPhysicalDirectory(manifestDir, 'EXECUTOR_MANIFEST_DIRECTORY_UNAVAILABLE');
   assertPhysicalDirectory(resultsDir, 'EXECUTOR_RESULT_DIRECTORY_UNAVAILABLE');
   validateExecutorTaskReadback(readTaskXml(descriptor.task_name), descriptor, readTaskState);
+  const nativeState = verifiedNativeTaskState(readTaskState(descriptor.task_name), descriptor);
+  if (nativeState.state !== 'Ready')
+    fail(`EXECUTOR_TASK_STATE_${nativeState.state.toUpperCase()}_NOT_READY`);
 
   const name = `${attemptId}.pending.json`;
   const manifestPath = join(manifestDir, name);
   const mailbox = executorMailboxState(manifestDir);
+  if (mailbox.active.length === 0)
+    fail('EXECUTOR_PENDING_MANIFEST_MISSING');
+  if (mailbox.active.includes(`${attemptId}.running.json`))
+    fail('EXECUTOR_ATTEMPT_ALREADY_RUNNING');
   if (mailbox.active.length !== 1 || mailbox.active[0] !== name)
     fail('EXECUTOR_ATTEMPT_NOT_EXACT_PENDING');
   let originalBytes;
@@ -658,10 +816,13 @@ export function triggerPendingExecutorAttempt(descriptor, attemptId, {
       JSON.stringify(manifest.job) !== JSON.stringify(expectedJob) ||
       !HASH.test(manifest.source_bundle_sha256 || '') && manifest.source_bundle_sha256 !== undefined)
     fail('EXECUTOR_PENDING_MANIFEST_IDENTITY_MISMATCH');
-  const payload = makeExecutorManifest(manifest.job, manifest.spec, attemptId,
+  if (manifest.spec !== expectedSpec) fail('EXECUTOR_PENDING_MANIFEST_SPEC_MISMATCH');
+  const payload = makeExecutorManifest(expectedJob, expectedSpec, attemptId,
     manifest.source_bundle_sha256 ?? null);
   if (!Buffer.from(JSON.stringify(payload)).equals(originalBytes))
     fail('EXECUTOR_PENDING_MANIFEST_BYTES_MISMATCH');
+  if (createHash('sha256').update(originalBytes).digest('hex') !== expectedManifestSha256)
+    fail('EXECUTOR_PENDING_MANIFEST_HASH_MISMATCH');
   if (payload.source_bundle_sha256) {
     const bundlePath = candidateBundlePath(manifestDir, attemptId);
     let bundleStat;

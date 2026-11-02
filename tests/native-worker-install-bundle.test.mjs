@@ -173,7 +173,7 @@ test('Windows executor accepts omitted default RunLevel only with exact native L
   const exportedXml = xml.replace('<RunLevel>LeastPrivilege</RunLevel>', '')
     .replace('<Enabled>true</Enabled>', '');
   const nativeTask = { task_name: 'PTYSD-Antigravity-Executor', task_path: '\\', user_sid: sid,
-    logon_type: 'Interactive', run_level: 'Limited', enabled: true };
+    logon_type: 'Interactive', run_level: 'Limited', enabled: true, state: 'Ready' };
   const ready = readTaskState => assertExecutorTaskReady(descriptor, {
     currentSid: () => sid, filesystemPath, readTaskXml: () => exportedXml, readTaskState,
   });
@@ -189,13 +189,15 @@ test('Windows executor accepts omitted default RunLevel only with exact native L
       { code: 'EXECUTOR_TASK_DISABLED' });
     assert.throws(() => ready(() => ({ ...nativeTask, user_sid: 'S-1-5-21-999-999-999-1001' })),
       { code: 'EXECUTOR_TASK_NATIVE_IDENTITY_MISMATCH' });
+    assert.throws(() => ready(() => ({ ...nativeTask, state: 'Running' })),
+      { code: 'EXECUTOR_TASK_STATE_RUNNING_NOT_READY' });
 
     let nativeReads = 0;
     assert.equal(assertExecutorTaskReady(descriptor, {
       currentSid: () => sid, filesystemPath, readTaskXml: () => xml,
       readTaskState: () => { nativeReads++; return nativeTask; },
     }).run_level, 'LeastPrivilege');
-    assert.equal(nativeReads, 0, 'explicit XML RunLevel remains sufficient without a fallback read');
+    assert.equal(nativeReads, 1, 'native Task Scheduler state is required even when XML has RunLevel');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

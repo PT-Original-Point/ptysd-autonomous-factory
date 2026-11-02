@@ -30,7 +30,8 @@ import {
 import { runCapturedProcess, terminateProcessTree } from './captured-process.mjs';
 import { safeErrorCode } from './safe-error-code.mjs';
 import { assertExecutorTaskReady, cleanupExecutorAttempt, createExecutorSourceBundle,
-  createPinnedSourceBundle, dispatchToExecutor, executorResultPath, triggerPendingExecutorAttempt,
+  createPinnedSourceBundle, dispatchToExecutor, executorResultPath, prepareExecutorAttempt,
+  readPendingExecutorAttempt, triggerPendingExecutorAttempt,
   readExecutorWorkspace, validateExecutorRoutingMap, validateExecutorDescriptor } from './windows-executor.mjs';
 
 export const PROJECT = 'CHATGPT_GLOBAL_SKILL_GOVERNANCE';
@@ -219,8 +220,16 @@ export function parseReceipt(body) {
   try {
     const o = JSON.parse(body.slice(RECEIPT_MARKER.length));
     const codexScopeJob = codexJobFromReceipt(o);
-    const hasCodexTaskScope = ['job_schema', 'spec_path', 'spec_sha256', 'write_paths']
+    const hasExecutorManifestIdentity = o?.kind !== 'codex_plan' &&
+      ['spec_path', 'spec_sha256', 'executor_manifest_sha256']
+        .some(key => Object.hasOwn(o || {}, key));
+    const hasForeignExecutorManifestIdentity = o?.kind === 'codex_plan' &&
+      Object.hasOwn(o || {}, 'executor_manifest_sha256');
+    const hasCodexTaskScope = o?.kind === 'codex_plan' &&
+      ['job_schema', 'spec_path', 'spec_sha256', 'write_paths']
       .some(key => Object.hasOwn(o || {}, key));
+    const hasForeignCodexTaskScope = o?.kind !== 'codex_plan' &&
+      ['job_schema', 'write_paths'].some(key => Object.hasOwn(o || {}, key));
     if (o?.schema !== 1 || o.project_id !== PROJECT ||
         typeof o.host !== 'string' || !/^[A-Z0-9-]{3,64}$/.test(o.host) ||
         !SHA.test(o.source_sha) || typeof o.kind !== 'string' ||
@@ -263,6 +272,15 @@ export function parseReceipt(body) {
         (o.state === 'WAITING' && (!MODEL_EXECUTION_KINDS.has(o.kind) ||
           o.eligibility_state !== 'WAITING' || o.model_invoked !== false ||
           !RECOVERABLE_MODEL_PREFLIGHT_OUTCOMES.has(o.outcome))) ||
+        hasExecutorManifestIdentity && (!isEditExecutionKind(o.kind) || o.state !== 'STARTED' ||
+          !/^[a-f0-9]{64}$/.test(o.executor_manifest_sha256 || '') ||
+          typeof o.spec_path !== 'string' ||
+          !/^native-bridge\/tasks\/[a-z0-9-]{1,70}\.md$/.test(o.spec_path) ||
+          !HASH.test(o.spec_sha256 || '') ||
+          o.source_pr !== undefined && (!Number.isSafeInteger(o.source_pr) || o.source_pr < 1) ||
+          o.goal_comment_id !== undefined && (!Number.isSafeInteger(o.goal_comment_id) || o.goal_comment_id < 1) ||
+          o.goal_body_sha256 !== undefined && !HASH.test(o.goal_body_sha256 || '') ||
+          (o.goal_comment_id === undefined) !== (o.goal_body_sha256 === undefined)) ||
         typeof o.request_id !== 'string' || !REQUEST.test(o.request_id) ||
          o.source_pr !== undefined && (!Number.isSafeInteger(o.source_pr) || o.source_pr < 1) ||
         o.changed_file_tree_sha256 !== undefined &&
@@ -276,7 +294,8 @@ export function parseReceipt(body) {
         o.goal_marker !== undefined && o.goal_author === undefined ||
          o.task_fingerprint !== undefined && (o.kind !== 'codex_plan' ||
            o.task_fingerprint !== null && !HASH.test(o.task_fingerprint)) ||
-         hasCodexTaskScope && !codexScopeJob ||
+         hasCodexTaskScope && !codexScopeJob || hasForeignCodexTaskScope ||
+         hasForeignExecutorManifestIdentity ||
         !RECEIPT_STATES.has(o.state) || typeof o.attempt_id !== 'string' ||
         !/^[a-f0-9-]{36}$/.test(o.attempt_id)) return null;
     return o;
@@ -3021,7 +3040,7 @@ function readSpec(job, apiRead = api) {
   if (digest(bytes) !== job.spec_sha256) throw new Error('SPEC_HASH_MISMATCH');
   return bytes.toString('utf8');
 }
-export function receipt(requestId, attemptId, state, job, result = null) {
+export function receipt(requestId, attemptId, state, job, result = null, dispatchIdentity = null) {
   return { schema: 1, project_id: PROJECT, host: job.host, request_id: requestId,
     attempt_id: attemptId, state, kind: job.kind, source_sha: job.source_sha,
     outcome: result?.outcome ?? (state === 'STARTED' ? 'DISPATCH_ACK_NOT_ACCEPTANCE' : 'UNKNOWN'),
@@ -3029,6 +3048,11 @@ export function receipt(requestId, attemptId, state, job, result = null) {
     evidence_sha256: result?.evidence_sha256 ?? null,
     evidence_bytes: result?.evidence_bytes ?? null,
     ...(state === 'WAITING' ? { eligibility_state: 'WAITING', model_invoked: false } : {}),
+    ...(state === 'STARTED' && isEditExecutionKind(job.kind) &&
+      HASH.test(dispatchIdentity?.manifest_sha256 || '') ? {
+        spec_path: job.spec_path, spec_sha256: job.spec_sha256,
+        executor_manifest_sha256: dispatchIdentity.manifest_sha256,
+      } : {}),
     ...(job.kind === 'codex_plan' ? { ...([3, 4].includes(job.schema) &&
       typeof job.spec_path === 'string' && HASH.test(job.spec_sha256 || '') &&
       validCodexWritePaths(job.write_paths) ? { job_schema: job.schema, spec_path: job.spec_path,
@@ -3583,6 +3607,8 @@ export async function runWorker(configInput, adapters = {}) {
   const verifyExecutor = adapters.assertExecutorTaskReady ?? assertExecutorTaskReady;
   const createSourceBundle = adapters.createExecutorSourceBundle ?? createExecutorSourceBundle;
   const dispatchExecutor = adapters.dispatchToExecutor ?? dispatchToExecutor;
+  const prepareExecutor = adapters.prepareExecutorAttempt ?? prepareExecutorAttempt;
+  const readPendingExecutor = adapters.readPendingExecutorAttempt ?? readPendingExecutorAttempt;
   const triggerPendingExecutor = adapters.triggerPendingExecutorAttempt ?? triggerPendingExecutorAttempt;
   const resolveExecutorResultsDir = adapters.executorResultsDir ?? (descriptor => descriptor.results_dir);
   const resolveExecutorResultPath = adapters.executorResultPath ?? executorResultPath;
@@ -3736,16 +3762,30 @@ export async function runWorker(configInput, adapters = {}) {
           continue;
         }
         const { comment: sourceComment, job: expectedJob } = sources[0];
+        if (!HASH.test(s.executor_manifest_sha256 || '') ||
+            s.spec_path !== expectedJob.spec_path || s.spec_sha256 !== expectedJob.spec_sha256) {
+          log(`PENDING_EXECUTOR_START_RECEIPT_MANIFEST_IDENTITY_MISSING_${s.request_id}_NO_REPLAY`);
+          continue;
+        }
         const editPathsHash = Array.isArray(expectedJob.edit_paths)
           ? digest(Buffer.from(JSON.stringify(expectedJob.edit_paths), 'utf8')) : null;
         const receiptMatches = expectedJob.source_sha === s.source_sha &&
           expectedJob.model === s.model && expectedJob.variant === s.variant &&
+          expectedJob.spec_path === s.spec_path && expectedJob.spec_sha256 === s.spec_sha256 &&
+          HASH.test(s.executor_manifest_sha256 || '') &&
           editPathsHash !== null && editPathsHash === s.edit_paths_sha256 &&
           (expectedJob.source_pr ?? null) === (s.source_pr ?? null) &&
           (expectedJob.goal_comment_id ?? null) === (s.goal_comment_id ?? null) &&
           (expectedJob.goal_body_sha256 ?? null) === (s.goal_body_sha256 ?? null);
         if (!receiptMatches) {
           log(`PENDING_EXECUTOR_RECEIPT_SOURCE_MISMATCH_${s.request_id}_NO_REPLAY`);
+          continue;
+        }
+        let expectedSpec;
+        try { expectedSpec = readSpec(expectedJob, apiRead); }
+        catch (error) {
+          log(`PENDING_EXECUTOR_SPEC_READBACK_UNKNOWN_${s.request_id}_` +
+            `${safeErrorCode(error)}_NO_REPLAY`);
           continue;
         }
         let latestSource;
@@ -3759,8 +3799,54 @@ export async function runWorker(configInput, adapters = {}) {
           log(`PENDING_EXECUTOR_SOURCE_CHANGED_${s.request_id}_NO_REPLAY`);
           continue;
         }
+        if (!checkModelAuthorization(expectedJob, config)) {
+          log(`PENDING_EXECUTOR_MODEL_AUTHORIZATION_NOT_CURRENT_${s.request_id}_NO_REPLAY`);
+          continue;
+        }
+        if (expectedJob.kind === 'antigravity_edit') {
+          const authorization = antigravityExecutionAuthorization(expectedJob, config);
+          if (authorization) {
+            log(`PENDING_EXECUTOR_MODEL_AUTHORIZATION_${authorization}_${s.request_id}_NO_REPLAY`);
+            continue;
+          }
+        } else if (config.enable_v2_model_runs !== true || opencodeExecutorIsolationFailure(executor)) {
+          log(`PENDING_EXECUTOR_MODEL_LANE_NOT_CURRENT_${s.request_id}_NO_REPLAY`);
+          continue;
+        }
+        if (expectedJob.source_pr !== undefined) {
+          let currentPull;
+          try { currentPull = await apiRead(`repos/${REPO}/pulls/${expectedJob.source_pr}`); }
+          catch {
+            log(`PENDING_EXECUTOR_CANDIDATE_SOURCE_READBACK_UNKNOWN_${s.request_id}_NO_REPLAY`);
+            continue;
+          }
+          if (candidatePullRequestHeadSha(expectedJob, currentPull)?.toLowerCase() !==
+              expectedJob.source_sha.toLowerCase()) {
+            log(`PENDING_EXECUTOR_CANDIDATE_SOURCE_CHANGED_${s.request_id}_NO_REPLAY`);
+            continue;
+          }
+        }
+        if (expectedJob.schema === 6) {
+          let latestGoal;
+          let currentGoal;
+          try {
+            latestGoal = latestTrustedHumanGoal(goalCommentsRead(), config.dispatchers);
+            currentGoal = await apiRead(`repos/${REPO}/issues/comments/${expectedJob.goal_comment_id}`);
+          } catch {
+            log(`PENDING_EXECUTOR_HUMAN_GOAL_READBACK_UNKNOWN_${s.request_id}_NO_REPLAY`);
+            continue;
+          }
+          if (!latestGoal || latestGoal.id !== expectedJob.goal_comment_id ||
+              !candidateGoalCommentMatches(expectedJob, currentGoal, config.dispatchers)) {
+            log(`PENDING_EXECUTOR_HUMAN_GOAL_NOT_CURRENT_${s.request_id}_NO_REPLAY`);
+            continue;
+          }
+        }
         try {
-          const triggered = triggerPendingExecutor(executor, s.attempt_id, { expectedJob });
+          const triggered = triggerPendingExecutor(executor, s.attempt_id, {
+            expectedJob, expectedSpec,
+            expectedManifestSha256: s.executor_manifest_sha256,
+          });
           if (triggered?.outcome === 'EXECUTOR_PENDING_ATTEMPT_TRIGGERED_NOT_ACCEPTANCE')
             log(`PENDING_EXECUTOR_RETRIGGERED_${s.request_id}_${s.attempt_id}_NO_NEW_RECEIPT`);
           else log(`PENDING_EXECUTOR_RETRIGGER_NOT_CONFIRMED_${s.request_id}_NO_REPLAY`);
@@ -3859,12 +3945,14 @@ export async function runWorker(configInput, adapters = {}) {
   let waitingEligibility = null;
   let selectedSpec = null;
   let preparedSourceBundle = null;
+  let preparedExecutorManifest = null;
   let preparedExecutor = null;
   let preparedWorkspace = null;
   const preflightBlockers = new Map();
   while (next) {
     selectedSpec = null;
     preparedSourceBundle = null;
+    preparedExecutorManifest = null;
     preparedExecutor = null;
     preparedWorkspace = null;
     if (next.job.kind === 'codex_plan') {
@@ -3908,16 +3996,6 @@ export async function runWorker(configInput, adapters = {}) {
       if (!reason && !preparedExecutor) reason = executorRouteFailure(config, next.job.kind);
       if (!reason && next.job.kind === 'opencode_edit')
         reason = opencodeExecutorIsolationFailure(preparedExecutor);
-      if (!reason) {
-        try {
-          // The OpenCode verifier's contract is throw-on-failure and return the
-          // validated Task Scheduler readback on success; unlike the Codex
-          // verifier, it does not expose a `ready` boolean.
-          verifyExecutor(preparedExecutor);
-        } catch (error) {
-          reason = `EXECUTOR_TASK_${safeErrorCode(error)}`;
-        }
-      }
       if (!reason && next.job.kind === 'opencode_edit') {
         try {
           preparedWorkspace = (adapters.readExecutorWorkspace ?? readExecutorWorkspace)(
@@ -3941,9 +4019,33 @@ export async function runWorker(configInput, adapters = {}) {
         }
       }
       if (!reason && isEditExecutionKind(next.job.kind) &&
+          preparedExecutor.source_bundle_per_attempt === true) {
+        try {
+          const pendingAttempt = readPendingExecutor(preparedExecutor, next.job, selectedSpec);
+          if (pendingAttempt) {
+            preparedExecutorManifest = { outcome: 'EXECUTOR_ATTEMPT_PREPARED_NOT_DISPATCHED',
+              ...pendingAttempt };
+            preparedSourceBundle = { attempt_id: preparedExecutorManifest.attempt_id,
+              sha256: preparedExecutorManifest.source_bundle_sha256, recovered_manifest: true };
+          }
+        } catch (error) {
+          reason = `EXECUTOR_PENDING_${safeErrorCode(error)}`;
+        }
+      }
+      if (!reason && !preparedExecutorManifest) {
+        try {
+          // The OpenCode verifier's contract is throw-on-failure and return the
+          // validated Task Scheduler readback on success; unlike the Codex
+          // verifier, it does not expose a `ready` boolean.
+          verifyExecutor(preparedExecutor);
+        } catch (error) {
+          reason = `EXECUTOR_TASK_${safeErrorCode(error)}`;
+        }
+      }
+      if (!reason && isEditExecutionKind(next.job.kind) &&
           preparedExecutor.source_bundle_per_attempt !== true)
         reason = 'EXECUTOR_SOURCE_BUNDLE_PER_ATTEMPT_REQUIRED';
-      if (!reason && preparedExecutor.source_bundle_per_attempt === true) {
+      if (!reason && preparedExecutor.source_bundle_per_attempt === true && !preparedSourceBundle) {
         try {
           const bundle = createSourceBundle({ workspace: preparedWorkspace ?? config.workspace,
             descriptor: preparedExecutor, job: next.job, attemptId: randomUUID() });
@@ -4021,7 +4123,7 @@ export async function runWorker(configInput, adapters = {}) {
   }
   const job = next.job;
   const discardPreparedSourceBundle = () => {
-    if (!preparedSourceBundle) return;
+    if (!preparedSourceBundle || preparedSourceBundle.recovered_manifest) return;
     try { cleanupExecutorAttempt(preparedExecutor, preparedSourceBundle.attempt_id); }
     catch { log(`EXECUTOR_SOURCE_BUNDLE_CLEANUP_UNKNOWN_${job.request_id}`); }
   };
@@ -4131,13 +4233,32 @@ export async function runWorker(configInput, adapters = {}) {
     return { state: dispatched.state, request_id: job.request_id, attempt_id: attemptId,
       outcome: dispatched.reason ?? 'CODEX_EXECUTOR_DISPATCH_ACK_NOT_ACCEPTANCE' };
   }
-  const start = receipt(job.request_id, attemptId, 'STARTED', job);
+  if (executorDispatch && isEditExecutionKind(job.kind) && !preparedExecutorManifest) {
+    preparedExecutorManifest = prepareExecutor(preparedExecutor, {
+      request_id: job.request_id, attempt_id: attemptId, source_sha: job.source_sha, job, spec,
+      ...(preparedSourceBundle?.sha256 ? { source_bundle_sha256: preparedSourceBundle.sha256 } : {}),
+    });
+  }
+  if (executorDispatch && isEditExecutionKind(job.kind) &&
+      (preparedExecutorManifest?.outcome !== 'EXECUTOR_ATTEMPT_PREPARED_NOT_DISPATCHED' ||
+        preparedExecutorManifest.attempt_id !== attemptId ||
+        !HASH.test(preparedExecutorManifest.manifest_sha256 || ''))) {
+    throw new Error('EXECUTOR_PREPARED_ATTEMPT_IDENTITY_INVALID');
+  }
+  const start = receipt(job.request_id, attemptId, 'STARTED', job, null,
+    executorDispatch && isEditExecutionKind(job.kind) ? preparedExecutorManifest : null);
   postReceipt(config, start, me);
   if (executorDispatch) {
-    const dispatched = dispatchExecutor(preparedExecutor, {
-      request_id: job.request_id, attempt_id: attemptId, source_sha: job.source_sha, job, spec,
-      ...(preparedSourceBundle ? { source_bundle_sha256: preparedSourceBundle.sha256 } : {}),
-    });
+    const dispatched = isEditExecutionKind(job.kind)
+      ? triggerPendingExecutor(preparedExecutor, attemptId, {
+        expectedJob: job, expectedSpec: spec,
+        expectedManifestSha256: preparedExecutorManifest.manifest_sha256,
+        source_bundle_sha256: preparedSourceBundle?.sha256 ?? null,
+        newAttempt: true,
+      })
+      : dispatchExecutor(preparedExecutor, {
+        request_id: job.request_id, attempt_id: attemptId, source_sha: job.source_sha, job, spec,
+      });
     log(`DISPATCHED_${job.request_id}_${dispatched.outcome}`);
     return { state: 'DISPATCHED', request_id: job.request_id, attempt_id: attemptId,
       outcome: dispatched.outcome };
