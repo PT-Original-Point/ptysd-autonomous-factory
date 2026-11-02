@@ -40,6 +40,16 @@ test('error labels never expose arbitrary messages or untrusted code fields', ()
     'SCOPED_EDIT_PARENT_PATH_MISSING');
   assert.equal(safeErrorCode(new Error('EDIT_GIT_HEAD_FAILED')),
     'EDIT_GIT_HEAD_FAILED');
+  assert.equal(safeErrorCode(new Error('EDIT_GIT_AFTER-HEAD_PROCESS_FAILED')),
+    'EDIT_GIT_AFTER_HEAD_PROCESS_FAILED',
+    'known hyphenated Git capture stages survive the safe error-code boundary');
+  assert.equal(safeErrorCode(new Error('EDIT_GIT_CHANGED-FILE-BLOB-2_PROCESS_FAILED')),
+    'EDIT_GIT_CHANGED_FILE_BLOB_2_PROCESS_FAILED',
+    'bounded changed-file blob indexes preserve useful capture diagnostics');
+  assert.equal(safeErrorCode(new Error('EDIT_GIT_USER-PROFILE-PRIVATE_PROCESS_FAILED')),
+    'UNKNOWN', 'unknown Git labels remain redacted');
+  assert.equal(safeErrorCode(new Error('EDIT_GIT_AFTER-HEAD_PRIVATE_DETAIL')),
+    'UNKNOWN', 'unrecognized Git failure details remain redacted');
   for (const code of ['PROCESS_TREE_IDENTITY_MISMATCH', 'PROCESS_TREE_IDENTITY_UNPROVEN'])
     assert.equal(safeErrorCode(new Error(code)), code,
       'bounded process identity outcomes must survive executor evidence sanitization');
