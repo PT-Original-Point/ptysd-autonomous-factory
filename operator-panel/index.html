@@ -3653,8 +3653,9 @@
       return 'Win11 現場觀測：UNKNOWN · 時間未確認';
     const observedAt = result.snapshot.windows?.observed_at;
     const timestampFreshness = fieldFreshness(observedAt, MAX_LIVE_AGE_MS, now);
-    const freshness = snapshotFreshness === 'STALE' || timestampFreshness === 'STALE' ? 'STALE'
-      : snapshotFreshness === 'FRESH' && timestampFreshness === 'FRESH' ? 'FRESH' : 'UNKNOWN';
+    const freshness = timestampFreshness === 'UNKNOWN' ? 'UNKNOWN'
+      : snapshotFreshness === 'STALE' || timestampFreshness === 'STALE' ? 'STALE'
+        : snapshotFreshness === 'FRESH' && timestampFreshness === 'FRESH' ? 'FRESH' : 'UNKNOWN';
     const time = timestampFreshness === 'UNKNOWN' ? '時間未確認' : readTime(observedAt);
     return `Win11 現場觀測：${freshness} · ${time}`;
   }

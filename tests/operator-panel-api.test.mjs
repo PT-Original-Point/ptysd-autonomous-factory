@@ -1633,10 +1633,12 @@ test('W1 and W2 show native observation freshness separately from their last tas
     /Win11 現場觀測：STALE/);
 
   for (const observedAt of [undefined,'not-a-time',new Date(now+1000).toISOString()]) {
-    const label=panel.workerObservationLabel(
-      {status:'FRESH',snapshot:{windows:{observed_at:observedAt}}},'FRESH',now);
-    assert.match(label,/Win11 現場觀測：UNKNOWN · 時間未確認/);
-    assert.doesNotMatch(label,/2027|2026/);
+    for (const snapshotFreshness of ['FRESH','STALE']) {
+      const label=panel.workerObservationLabel(
+        {status:'FRESH',snapshot:{windows:{observed_at:observedAt}}},snapshotFreshness,now);
+      assert.match(label,/Win11 現場觀測：UNKNOWN · 時間未確認/);
+      assert.doesNotMatch(label,/\d{4}/);
+    }
   }
   assert.match(panel.workerObservationLabel(null,'UNKNOWN',now),
     /Win11 現場觀測：UNKNOWN · 時間未確認/);
