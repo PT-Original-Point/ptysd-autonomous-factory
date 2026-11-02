@@ -565,7 +565,7 @@ function boundEditTaskScopeKey(job) {
     job.goal_body_sha256, job.edit_paths,
   ]);
 }
-const SOURCE_ACCEPTANCE_WORKFLOWS = Object.freeze({
+export const SOURCE_ACCEPTANCE_WORKFLOWS = Object.freeze({
   'check-native-only': Object.freeze({
     path: '.github/workflows/v53-r4-main-source-retirement.yml', event: 'pull_request',
   }),
@@ -577,6 +577,128 @@ const SOURCE_ACCEPTANCE_WORKFLOWS = Object.freeze({
   }),
 });
 const REQUIRED_SOURCE_ACCEPTANCE_CHECKS = Object.freeze(Object.keys(SOURCE_ACCEPTANCE_WORKFLOWS));
+const SOURCE_ACCEPTANCE_PATH_FILTERED_MARKER = 'NOT_APPLICABLE_PATH_FILTERED';
+
+function validWorkflowPathPattern(value) {
+  if (typeof value !== 'string' || !value || value.startsWith('/') ||
+      value.includes('\\') || value.split('/').some(part => !part || part === '.' || part === '..'))
+    return false;
+  const recursive = value.endsWith('/**');
+  const literal = recursive ? value.slice(0, -3) : value;
+  return literal.length > 0 && !/[*!?{}\[\],#]/.test(literal);
+}
+
+/**
+ * Parse only the block-list subset used by the trusted source-acceptance workflows.
+ * A null result means the YAML/filter syntax is unknown and must fail closed.
+ */
+export function parseWorkflowPathFilters(workflowText, eventName) {
+  if (typeof workflowText !== 'string' || workflowText.length > 256_000 ||
+      !['pull_request', 'pull_request_target'].includes(eventName) ||
+      workflowText.includes('\0') || workflowText.includes('\t')) return null;
+  const lines = workflowText.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').split('\n');
+  const topOn = [];
+  for (let index = 0; index < lines.length; index++) {
+    if (/^(?:on|['"]on['"]):\s*$/.test(lines[index])) topOn.push(index);
+    else if (/^(?:on|['"]on['"]):/.test(lines[index])) return null;
+  }
+  if (topOn.length !== 1) return null;
+  const onStart = topOn[0];
+  let onEnd = lines.length;
+  for (let index = onStart + 1; index < lines.length; index++) {
+    if (/^(?:[A-Za-z_][A-Za-z0-9_-]*|['"][^'"]+['"]):\s*/.test(lines[index])) {
+      onEnd = index;
+      break;
+    }
+  }
+  const eventHeader = `  ${eventName}:`;
+  const eventStarts = [];
+  for (let index = onStart + 1; index < onEnd; index++)
+    if (lines[index] === eventHeader) eventStarts.push(index);
+  if (eventStarts.length !== 1) return null;
+  const eventStart = eventStarts[0];
+  let eventEnd = onEnd;
+  for (let index = eventStart + 1; index < onEnd; index++) {
+    const line = lines[index];
+    if (line.trim() && !line.trimStart().startsWith('#') &&
+        (line.match(/^ */)?.[0].length ?? 0) <= 2) {
+      eventEnd = index;
+      break;
+    }
+  }
+
+  const fields = new Map();
+  for (let index = eventStart + 1; index < eventEnd; index++) {
+    const match = /^ {4}(paths|paths-ignore|branches|branches-ignore):(?:\s*(.*))?$/.exec(lines[index]);
+    if (!match) continue;
+    if (fields.has(match[1])) return null;
+    if (['paths-ignore', 'branches-ignore'].includes(match[1]) ||
+        (match[2] || '').trim()) return null;
+    const values = [];
+    let ended = false;
+    for (let itemIndex = index + 1; itemIndex < eventEnd; itemIndex++) {
+      const line = lines[itemIndex];
+      if (!line.trim() || line.trimStart().startsWith('#')) continue;
+      const indent = line.match(/^ */)?.[0].length ?? 0;
+      if (indent <= 4) { ended = true; break; }
+      const item = match[1] === 'branches'
+        ? /^      - ([A-Za-z0-9][A-Za-z0-9._/-]{0,254})$/.exec(line)
+        : /^      - '([^']+)'$/.exec(line);
+      if (!item) return null;
+      const value = item[1];
+      if (match[1] === 'paths' ? !validWorkflowPathPattern(value) :
+          !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/.test(value) ||
+            value.split('/').some(part => !part || part === '.' || part === '..')) return null;
+      if (values.includes(value)) return null;
+      values.push(value);
+    }
+    if (!ended && index + 1 < eventEnd && lines.slice(index + 1, eventEnd).some(line => line.trim())) {
+      // The sequence reached the event boundary; that is valid only when at least one item was parsed.
+      if (!values.length) return null;
+    }
+    if (!values.length) return null;
+    fields.set(match[1], values);
+  }
+  return {
+    paths: fields.get('paths') ?? null,
+    branches: fields.get('branches') ?? null,
+  };
+}
+
+function workflowPathMatches(pattern, path) {
+  if (pattern.endsWith('/**')) return path.startsWith(pattern.slice(0, -3) + '/');
+  return path === pattern;
+}
+
+async function readWorkflowPathFilters(name, definition, baseSha, baseTree, apiRead, caches) {
+  const key = baseSha + ':' + name;
+  let filters = caches.workflowFilters.get(key);
+  if (filters !== undefined) return filters;
+  try {
+    const workflowBlob = baseTree.get(definition.path);
+    if (!workflowBlob || workflowBlob.type !== 'blob' ||
+        !/^(100644|100755)$/.test(workflowBlob.mode || '') || !SHA.test(workflowBlob.sha || ''))
+      throw new Error('SOURCE_ACCEPTANCE_BASE_WORKFLOW_BLOB_MISSING');
+    const response = await apiRead(`repos/${REPO}/contents/${definition.path}?ref=${baseSha}`);
+    if (response?.path !== definition.path || response.encoding !== 'base64' ||
+        !SHA.test(response.sha || '') || response.sha.toLowerCase() !== workflowBlob.sha.toLowerCase() ||
+        typeof response.content !== 'string' ||
+        response.content.length > 400_000) {
+      filters = null;
+    } else {
+      const encoded = response.content.replace(/\s/g, '');
+      const bytes = Buffer.from(encoded, 'base64');
+      if (!encoded || bytes.toString('base64') !== encoded) filters = null;
+      else {
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        filters = parseWorkflowPathFilters(text, definition.event);
+      }
+    }
+  } catch { filters = null; }
+  caches.workflowFilters.set(key, filters);
+  return filters;
+}
+
 export function parseCodexSourceAcceptance(comment, dispatchers) {
   const body = comment?.body;
   if (comment?.issue_url !== `https://api.github.com/repos/${REPO}/issues/${OPERATOR_ISSUE}` ||
@@ -646,10 +768,15 @@ export function parseCodexSourceAcceptance(comment, dispatchers) {
   const trustedChecks = Object.create(null);
   for (const value of (checks || '').split(/[;,]/)) {
     if (!value.trim()) continue;
-    const match = /^(check-native-only|csg-trusted-verifier-hosted|v2-native-windows)[:=]([A-Z_]+)(?::run-([1-9][0-9]*)-attempt-([1-9][0-9]*))?$/.exec(value.trim());
+    const match = /^(check-native-only|csg-trusted-verifier-hosted|v2-native-windows)[:=](SUCCESS|NOT_APPLICABLE_PATH_FILTERED)(?::run-([1-9][0-9]*)-attempt-([1-9][0-9]*))?$/.exec(value.trim());
     if (!match) return null;
     const [, name, conclusion, runIdText, runAttemptText] = match;
-    if (Object.hasOwn(trustedChecks, name) || conclusion !== 'SUCCESS') return null;
+    if (Object.hasOwn(trustedChecks, name)) return null;
+    if (conclusion === SOURCE_ACCEPTANCE_PATH_FILTERED_MARKER) {
+      if (runIdText !== undefined || runAttemptText !== undefined) return null;
+      trustedChecks[name] = { conclusion, run_id: null, run_attempt: null };
+      continue;
+    }
     if (runIdText === undefined || runAttemptText === undefined) return null;
     const runId = Number(runIdText);
     const runAttempt = Number(runAttemptText);
@@ -659,7 +786,8 @@ export function parseCodexSourceAcceptance(comment, dispatchers) {
   }
   if (Object.keys(trustedChecks).length !== REQUIRED_SOURCE_ACCEPTANCE_CHECKS.length ||
       !REQUIRED_SOURCE_ACCEPTANCE_CHECKS.every(name =>
-        trustedChecks[name]?.conclusion === 'SUCCESS')) return null;
+        ['SUCCESS', SOURCE_ACCEPTANCE_PATH_FILTERED_MARKER].includes(
+          trustedChecks[name]?.conclusion))) return null;
   return {
     request_id: fields.request_id,
     attempt_id: fields.attempt_id,
@@ -691,7 +819,8 @@ function sourceAcceptanceEvidenceKey(acceptance) {
     acceptance.result_merge_commit,
     REQUIRED_SOURCE_ACCEPTANCE_CHECKS.map(name => {
       const check = acceptance.trusted_checks?.[name];
-      return [name, check?.run_id ?? null, check?.run_attempt ?? null];
+      return [name, check?.conclusion ?? null, check?.run_id ?? null,
+        check?.run_attempt ?? null];
     }),
   ]);
 }
@@ -892,8 +1021,27 @@ async function verifyLiveCodexSourceAcceptance(acceptance, job, receiptValue,
     const claim = acceptance.trusted_checks[name];
     const expectedWorkflow = workflows.get(name);
     if (!claim || !expectedWorkflow) return logFailure('SOURCE_ACCEPTANCE_CHECK_BINDING_MISSING');
-    const matching = checkRuns.filter(check => check?.name === name &&
-      check?.head_sha?.toLowerCase() === head);
+    const pathFilters = await readWorkflowPathFilters(name, expectedWorkflow,
+      pull.base.sha.toLowerCase(), baseTree, apiRead, caches);
+    if (!pathFilters) return logFailure('SOURCE_ACCEPTANCE_WORKFLOW_PATH_FILTERS_UNKNOWN');
+    if (pathFilters.branches && !pathFilters.branches.includes(pull.base.ref))
+      return logFailure('SOURCE_ACCEPTANCE_WORKFLOW_BASE_BRANCH_FILTER_MISMATCH');
+    const pathFilterApplies = pathFilters.paths === null || resultFilePaths.some(path =>
+      pathFilters.paths.some(pattern => workflowPathMatches(pattern, path)));
+    const namedChecks = checkRuns.filter(check => check?.name === name);
+    const matching = namedChecks.filter(check => typeof check?.head_sha === 'string' &&
+      check.head_sha.toLowerCase() === head);
+    if (claim.conclusion === SOURCE_ACCEPTANCE_PATH_FILTERED_MARKER) {
+      if (pathFilters.paths === null || pathFilterApplies)
+        return logFailure('SOURCE_ACCEPTANCE_PATH_FILTERED_NA_CONTRADICTS_WORKFLOW');
+      if (namedChecks.some(check => !SHA.test(check?.head_sha || '')))
+        return logFailure('SOURCE_ACCEPTANCE_PATH_FILTERED_CHECK_HEAD_UNKNOWN');
+      if (matching.length)
+        return logFailure('SOURCE_ACCEPTANCE_PATH_FILTERED_NA_HAS_EXACT_HEAD_CHECK');
+      continue;
+    }
+    if (claim.conclusion !== 'SUCCESS')
+      return logFailure('SOURCE_ACCEPTANCE_CHECK_STATUS_UNKNOWN');
     matching.sort((left, right) => {
       const leftTime = Date.parse(left.started_at || left.created_at || '');
       const rightTime = Date.parse(right.started_at || right.created_at || '');
@@ -1025,7 +1173,7 @@ export async function readVerifiedCodexSourceAcceptances(comments, dispatchers, 
     }
   }
   const verified = new Set();
-  const caches = { workflows: undefined, pulls: new Map(), pullFiles: new Map(),
+  const caches = { workflows: undefined, workflowFilters: new Map(), pulls: new Map(), pullFiles: new Map(),
     pullsByHead: new Map(), commits: new Map(), trees: new Map(),
     checkRuns: new Map(), runs: new Map(), jobs: new Map() };
   for (const [key, candidate] of candidates) {
