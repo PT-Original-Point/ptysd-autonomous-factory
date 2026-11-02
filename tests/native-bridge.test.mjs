@@ -14,7 +14,8 @@ import { parseJob, selectNext, parseReceipt, parseCodexSourceAcceptance, receipt
   codexTerminalReceipt, selectNextWithCodexClaim, readPinnedCandidateSources, executorForJobKind,
   writePathsOverlap,
   publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight, derivePollDisposition,
-  isRecoverableModelPreflightWait, readVerifiedCodexSourceAcceptances }
+  isRecoverableModelPreflightWait, readVerifiedCodexSourceAcceptances,
+  parseWorkflowPathFilters, SOURCE_ACCEPTANCE_WORKFLOWS }
   from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, OPERATOR_COMMENT_ID, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
@@ -1715,7 +1716,10 @@ test('a foreign dispatcher terminal edit keeps its lease only when the exact sco
   'a foreign terminal lacking a complete bound diff keeps overlapping work blocked');
 });
 
-const sourceAcceptanceComment = (job, completedReceipt) =>
+const sourceAcceptanceComment = (job, completedReceipt, checks =
+  'check-native-only=SUCCESS:run-1001-attempt-1;' +
+  'csg-trusted-verifier-hosted=SUCCESS:run-1002-attempt-1;' +
+  'v2-native-windows=SUCCESS:run-1003-attempt-1') =>
   `PTYSD_V53R4_R2_EVIDENCE_RECONCILIATION_V1\n` +
   `record_type=ADDITIVE_CODEX_SOURCE_AND_DIFF_RECONCILIATION_NOT_NATIVE_WORKER_RECEIPT\n` +
   `repo=${REPO}\nproject_id=${PROJECT}\nhuman_goal_comment_id=${job.goal_comment_id}\n` +
@@ -1730,8 +1734,46 @@ const sourceAcceptanceComment = (job, completedReceipt) =>
   `codex_review=PASS_EXACT_DIFF_AND_SCOPE\nintegration=PR_665_MERGED\n` +
   `integration_commit=660e592b2cd691494f1297c47dd307a275bd52f1\n` +
   `pr_665_head=450d483e7258c62772a8fd5a620aacf9b8dde3aa\n` +
-  `pr_665_checks=check-native-only=SUCCESS:run-1001-attempt-1;csg-trusted-verifier-hosted=SUCCESS:run-1002-attempt-1;v2-native-windows=SUCCESS:run-1003-attempt-1\n` +
+  `pr_665_checks=${checks}\n` +
   `source_acceptance=ACCEPTED_FOR_EXACT_WORKER_DIFF_AND_MERGED_PR_665`;
+
+test('source-acceptance check path metadata is parsed from the checked-in workflow YAML', () => {
+  const readWorkflow = name => {
+    const definition = SOURCE_ACCEPTANCE_WORKFLOWS[name];
+    assert.ok(definition, `workflow metadata exists for ${name}`);
+    const text = readFileSync(new URL('../' + definition.path, import.meta.url), 'utf8');
+    const filters = parseWorkflowPathFilters(text, definition.event);
+    assert.ok(filters, `${name} uses supported fail-closed workflow filter syntax`);
+    return filters;
+  };
+  assert.deepEqual(readWorkflow('check-native-only'), {
+    paths: ['src/**', 'host/v45/**', 'scripts/**', 'tests/**', 'package.json',
+      '.github/workflows/v53-r4-main-source-retirement.yml'],
+    branches: null,
+  });
+  assert.deepEqual(readWorkflow('csg-trusted-verifier-hosted'), {
+    paths: null, branches: ['main', 'v45/factory-control'],
+  });
+  const v2Filters = readWorkflow('v2-native-windows').paths;
+  const panel = readFileSync(new URL('../operator-panel/index.html', import.meta.url), 'utf8');
+  const panelBlock = panel.match(/const V2_NATIVE_WORKFLOW_PATH_FILTERS = \[([\s\S]*?)\];/);
+  assert.ok(panelBlock, 'the existing panel declares the V2 path-filter set');
+  const panelFilters = [...panelBlock[1].matchAll(/'([^']+)'/g)].map(match => match[1]);
+  assert.deepEqual(v2Filters, panelFilters,
+    'Worker reads the actual V2 YAML filters and remains aligned with the existing panel');
+  assert.equal(parseWorkflowPathFilters(
+    "on:\n  pull_request:\n    paths: ['src/**']\n", 'pull_request'), null,
+  'inline filter syntax is unsupported and fails closed');
+  assert.equal(parseWorkflowPathFilters(
+    "on:\n  pull_request:\n    paths-ignore:\n      - 'src/**'\n", 'pull_request'), null,
+  'negative path-filter forms are unsupported and fail closed');
+  assert.equal(parseWorkflowPathFilters(
+    "on:\n  pull_request:\n    branches-ignore:\n      - release\n", 'pull_request'), null,
+  'negative branch-filter forms are unsupported and fail closed');
+  assert.equal(parseWorkflowPathFilters(
+    "on:\n  pull_request:\n    paths:\n      - '!src/private/**'\n", 'pull_request'), null,
+  'negated filter patterns are unsupported and fail closed');
+});
 
 test('a completed scoped edit suppresses only an exact duplicate after live result PR and CI readback', async () => {
   const host = 'DESKTOP-1B6PD2P';
@@ -1762,6 +1804,12 @@ test('a completed scoped edit suppresses only an exact duplicate after live resu
   const baseTreeSha = 'a'.repeat(40);
   const headTreeSha = 'b'.repeat(40);
   const mergeTreeSha = 'c'.repeat(40);
+  const workflowBaseEntries = Object.values(SOURCE_ACCEPTANCE_WORKFLOWS).map(definition => {
+    const bytes = readFileSync(new URL('../' + definition.path, import.meta.url));
+    const blobHeader = Buffer.from(`blob ${bytes.length}\0`, 'utf8');
+    return { path: definition.path, mode: '100644', type: 'blob',
+      sha: createHash('sha1').update(blobHeader).update(bytes).digest('hex'), bytes };
+  });
   const baseTreeEntries = [
     { path: 'native-bridge/operator-observation.mjs', mode: '100644', type: 'blob', sha: '1'.repeat(40) },
     { path: 'tests/operator-observation.test.mjs', mode: '100644', type: 'blob', sha: '2'.repeat(40) },
@@ -1833,6 +1881,14 @@ test('a completed scoped edit suppresses only an exact duplicate after live resu
       const workflows = overrides.workflows || workflowRows;
       return { total_count: workflows.length, workflows };
     }
+    for (const definition of Object.values(SOURCE_ACCEPTANCE_WORKFLOWS)) {
+      if (path === `repos/${REPO}/contents/${definition.path}?ref=${baseSha}`) {
+        const workflow = workflowBaseEntries.find(value => value.path === definition.path);
+        const bytes = workflow.bytes;
+        return { path: definition.path, sha: workflow.sha, encoding: 'base64',
+          content: bytes.toString('base64') };
+      }
+    }
     if (path === 'repos/' + REPO + '/pulls/665')
       return { ...validPull, ...(overrides.pull || {}) };
     if (path === prByHeadPath) return overrides.prsByHead || [validPull];
@@ -1850,7 +1906,8 @@ test('a completed scoped edit suppresses only an exact duplicate after live resu
     const treeMatch = /^repos\/[^/]+\/[^/]+\/git\/trees\/([a-f0-9]{40})\?recursive=1$/.exec(path);
     if (treeMatch) {
       const treeBySha = new Map([
-        [baseTreeSha, overrides.baseTreeEntries || baseTreeEntries],
+        [baseTreeSha, [...(overrides.baseTreeEntries || baseTreeEntries),
+          ...workflowBaseEntries.map(({ bytes, ...entry }) => entry)]],
         [headTreeSha, overrides.headTreeEntries || headTreeEntries],
         [mergeTreeSha, overrides.mergeTreeEntries || headTreeEntries],
       ]);
@@ -1924,7 +1981,13 @@ test('a completed scoped edit suppresses only an exact duplicate after live resu
       `worker_changed_file_tree_sha256=${'f'.repeat(64)}`),
     sourceAcceptanceComment(completed, finished).replace('v2-native-windows=SUCCESS',
       'v2-native-windows=FAILURE'),
+    sourceAcceptanceComment(completed, finished).replace('v2-native-windows=SUCCESS',
+      'v2-native-windows=UNKNOWN_STATUS'),
+    sourceAcceptanceComment(completed, finished).replace('v2-native-windows=SUCCESS',
+      'v2-native-windows=NOT_APPLICABLE_PATH_FILTERED:run-1003-attempt-1'),
     sourceAcceptanceComment(completed, finished) + ';check-native-only=SUCCESS',
+    sourceAcceptanceComment(completed, finished) +
+      ';unrecognized-check=SUCCESS:run-1004-attempt-1',
   ].entries()) {
     const withoutValidAcceptance = comments.filter(comment => comment.id !== 905)
       .concat({ ...com(905, rejected, 't14210184'),
@@ -2009,6 +2072,99 @@ test('a completed scoped edit suppresses only an exact duplicate after live resu
     comments, ['t14210184'], 'worker', host, apiFor({ workflowPullRequestsEmpty: true }));
   assert.equal(mergedRunAcceptance.size, 1,
     'a merged run with an empty pull_requests field remains bound through its unique exact head-branch PR readback');
+
+  const runPathAcceptanceScenario = async ({ path, checks, checkIndexes, checkRuns: pathCheckRuns, accepted }) => {
+    const pathJob = { ...completed,
+      request_id: `W1_PATH_FILTER_${path.includes('src/') ? 'SRC' : 'NATIVE'}_20261102`,
+      edit_paths: [path] };
+    const pathDuplicate = { ...pathJob,
+      request_id: pathJob.request_id + '_DUP' };
+    const beforeSha = '7'.repeat(40);
+    const afterSha = '8'.repeat(40);
+    const pathTreeSha = h(JSON.stringify([
+      [path, '100644', beforeSha, '100644', afterSha],
+    ]));
+    const pathFinished = receipt(pathJob.request_id,
+      path.includes('src/') ? 'd0843fa2-c33e-4628-8c4b-22fbc233e085' :
+        'eb177b35-8597-46b4-b5ad-2301058d92e4', 'FINISHED', pathJob, {
+        outcome: 'V2_EDIT_DIFF_CAPTURED_UNVERIFIED', exit_code: 0,
+        model_invoked: true, session_id: 'ses_path_filter_fixture',
+        external_effects: 'UNKNOWN', source_diff_evidence: 'CAPTURED',
+        task_acceptance: 'UNKNOWN', coding_state: 'DIFF_CAPTURED_UNVERIFIED',
+        scope_valid: true, diff_sha256: '9'.repeat(64), diff_bytes: 128,
+        changed_files: [path], changed_file_tree_sha256: pathTreeSha,
+      });
+    const pathComments = [
+      { ...com(1101, encoded(pathDuplicate)),
+        issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+      { ...com(1102, encoded(pathJob)),
+        issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+      com(1103, RECEIPT_MARKER + JSON.stringify(pathFinished), 'worker'),
+      { ...com(1104, sourceAcceptanceComment(pathJob, pathFinished, checks), 't14210184'),
+        issue_url: `https://api.github.com/repos/${REPO}/issues/407` },
+      { ...com(1105, encoded(independent)),
+        issue_url: `https://api.github.com/repos/${REPO}/issues/310` },
+    ];
+    const pathTreeEntries = [{ path, mode: '100644', type: 'blob', sha: afterSha }];
+    const pathApi = apiFor({
+      resultFiles: [{ filename: path, status: 'modified' }],
+      checkRuns: pathCheckRuns || checkIndexes.map(index => checkRuns[index]),
+      baseTreeEntries: [{ path, mode: '100644', type: 'blob', sha: beforeSha }],
+      headTreeEntries: pathTreeEntries,
+      mergeTreeEntries: pathTreeEntries,
+    });
+    const failures = [];
+    const verified = await readVerifiedCodexSourceAcceptances(
+      pathComments, ['t14210184'], 'worker', host, pathApi,
+      code => failures.push(code));
+    assert.equal(verified.size, accepted ? 1 : 0,
+      `${path} acceptance outcome is determined from exact files and live checks`);
+    assert.equal(pathFinished.task_acceptance, 'UNKNOWN');
+    assert.equal(pathFinished.external_effects, 'UNKNOWN');
+    const next = selectNext(pathComments, ['t14210184'], 'worker', host, sourceSha, [],
+      new Map([[sourcePr, sourceSha]]), new Set(), verified);
+    assert.equal(next?.id, accepted ? 1105 : 1101,
+      'only verified exact-source acceptance suppresses the duplicate');
+    if (!accepted) assert.ok(failures.length > 0, 'rejected evidence retains a diagnostic');
+  };
+
+  await runPathAcceptanceScenario({
+    path: 'src/worker.mjs',
+    checks: 'check-native-only=SUCCESS:run-1001-attempt-1;' +
+      'csg-trusted-verifier-hosted=SUCCESS:run-1002-attempt-1;' +
+      'v2-native-windows=NOT_APPLICABLE_PATH_FILTERED',
+    checkIndexes: [0, 1], accepted: true,
+  });
+  await runPathAcceptanceScenario({
+    path: 'src/worker.mjs',
+    checks: 'check-native-only=SUCCESS:run-1001-attempt-1;' +
+      'csg-trusted-verifier-hosted=SUCCESS:run-1002-attempt-1;' +
+      'v2-native-windows=NOT_APPLICABLE_PATH_FILTERED',
+    checkIndexes: [0, 1, 2], accepted: false,
+  });
+  await runPathAcceptanceScenario({
+    path: 'native-bridge/worker.mjs',
+    checks: 'check-native-only=NOT_APPLICABLE_PATH_FILTERED;' +
+      'csg-trusted-verifier-hosted=SUCCESS:run-1002-attempt-1;' +
+      'v2-native-windows=NOT_APPLICABLE_PATH_FILTERED',
+    checkIndexes: [1], accepted: false,
+  });
+  await runPathAcceptanceScenario({
+    path: 'src/worker.mjs',
+    checks: 'check-native-only=SUCCESS:run-1001-attempt-1;' +
+      'csg-trusted-verifier-hosted=SUCCESS:run-1002-attempt-1;' +
+      'v2-native-windows=NOT_APPLICABLE_PATH_FILTERED',
+    checkIndexes: [0, 1],
+    checkRuns: [checkRuns[0], checkRuns[1], { ...checkRuns[2], head_sha: undefined }],
+    accepted: false,
+  });
+  await runPathAcceptanceScenario({
+    path: 'native-bridge/worker.mjs',
+    checks: 'check-native-only=NOT_APPLICABLE_PATH_FILTERED;' +
+      'csg-trusted-verifier-hosted=SUCCESS:run-1002-attempt-1;' +
+      'v2-native-windows=SUCCESS:run-1003-attempt-1',
+    checkIndexes: [1], accepted: false,
+  });
 });
 
 test('an equivalent schema-6 edit does not replay a model-executed attempt with unknown effects', () => {
