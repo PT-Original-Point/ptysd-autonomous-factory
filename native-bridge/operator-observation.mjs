@@ -539,6 +539,9 @@ export function collectWindowsObservation({
         !(raw.runner_service_running === null ||
           (Number.isSafeInteger(raw.runner_service_running) && raw.runner_service_running >= 0)) ||
         !object(raw.native_task)) throw new Error('WINDOWS_READBACK_INVALID');
+    const observedAtMs = Date.parse(raw.observed_at);
+    const runTimeAtOrBeforeObservation = value =>
+      validTime(value) && Date.parse(value) <= observedAtMs ? value : null;
     const t = raw.native_task;
     if (Object.hasOwn(t, 'start_when_available') && t.start_when_available !== null &&
         typeof t.start_when_available !== 'boolean') throw new Error('WINDOWS_READBACK_INVALID');
@@ -547,8 +550,9 @@ export function collectWindowsObservation({
       enabled: t.enabled === true ? true : t.enabled === false ? false : null,
       state: ['READY', 'RUNNING', 'DISABLED', 'QUEUED', 'UNKNOWN'].includes(String(t.state).toUpperCase())
         ? String(t.state).toUpperCase() : 'UNKNOWN',
-      last_run: validTime(t.last_run) ? t.last_run : null,
-      last_result: /^0x[0-9a-f]{8}$/i.test(t.last_result || '') ? t.last_result.toUpperCase() : null,
+      last_run: runTimeAtOrBeforeObservation(t.last_run),
+      last_result: runTimeAtOrBeforeObservation(t.last_run) &&
+        /^0x[0-9a-f]{8}$/i.test(t.last_result || '') ? t.last_result.toUpperCase() : null,
       action_kind: ['NODE_DIRECT', 'WINDOWLESS_LAUNCHER', 'OTHER', 'UNKNOWN'].includes(t.action_kind)
         ? t.action_kind : 'UNKNOWN',
       identity_class: ['INTERACTIVE_LIMITED', 'INTERACTIVE_HIGHEST', 'UNKNOWN'].includes(t.identity_class)
@@ -582,8 +586,9 @@ export function collectWindowsObservation({
           registered: value.registered,
           enabled: value.enabled,
           state: String(value.state).toUpperCase(),
-          last_run: validTime(value.last_run) ? value.last_run : null,
-          last_result: /^0x[0-9a-f]{8}$/i.test(value.last_result || '')
+          last_run: runTimeAtOrBeforeObservation(value.last_run),
+          last_result: runTimeAtOrBeforeObservation(value.last_run) &&
+            /^0x[0-9a-f]{8}$/i.test(value.last_result || '')
             ? value.last_result.toUpperCase() : null,
         };
       }
