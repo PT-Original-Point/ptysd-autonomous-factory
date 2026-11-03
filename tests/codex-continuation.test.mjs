@@ -46,6 +46,64 @@ const RECEIPT_MARKER = 'PTYSD_NATIVE_RECEIPT_V1\n';
 const worker = 'ptyworker';
 const author = 't14210184';
 
+const R4_GOAL_MARKER = 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015';
+const R4_AUTONOMOUS_GOAL_BODY = [
+  `<!-- ${R4_GOAL_MARKER} -->`,
+  '這是 Human 授權 Codex 在既有合法可逆 pre-Production 工作範圍內連續施工的總目標',
+  '6.6 自動模型工作結束後，原生排程下一次讀回 terminal＋CI／新 READY 就再接單，不要求 Human 重貼「繼續」。重啟／斷網／CLI 過期時使用 native evidence 確認上一筆是否已執行，UNKNOWN 不重跑該 attempt；其他 work 不陪停。',
+  '9.3 Human Gate 只處理真實 Platform 身分/OAuth/MFA、Production、重大新憑證／權限擴大、新費用、不可逆跨外部權威操作及無法消除的重大未解外部效果。現有已獲授權的可逆 pre-production 施工不因「到了下一 Session」重新請同一批准。',
+  '10.2 在目前 Codex 連續可執行回合裡，對每個 READY 工作進行設計→分配 W1/W2→回收 diff→測試→修復→PR→CI→同源讀回→下一項 READY；同一批合理關聯問題一次解決。',
+].join('\n');
+
+test('R4 autonomous continuation fallback requires its exact marker and all authority clauses', () => {
+  const result = codexScopedActionStatus(R4_AUTONOMOUS_GOAL_BODY);
+  assert.equal(result.ready, true);
+  assert.match(result.action, /V5\.3-R4/);
+  assert.match(result.action, /exact write_paths/);
+  assert.match(result.action, /never replay UNKNOWN attempts/);
+
+  const rejectedBodies = [
+    R4_AUTONOMOUS_GOAL_BODY.replace(R4_GOAL_MARKER, 'PTYSD_V53R4_OTHER_GOAL_20261015'),
+    R4_AUTONOMOUS_GOAL_BODY.replace('不要求 Human 重貼「繼續」', '等待 Human 確認'),
+    R4_AUTONOMOUS_GOAL_BODY.replace('新費用、不可逆跨外部權威操作', '一般工作'),
+    R4_AUTONOMOUS_GOAL_BODY.replace('現有已獲授權的可逆 pre-production 施工', '未授權施工'),
+    R4_AUTONOMOUS_GOAL_BODY.replace('下一項 READY', '工作結束'),
+    `${R4_AUTONOMOUS_GOAL_BODY}\n<!-- ${R4_GOAL_MARKER} -->`,
+    `${R4_AUTONOMOUS_GOAL_BODY}\n<!-- PTYSD_V53R4_P0_OTHER_AUTHORITY_20261015 -->`,
+    `${R4_AUTONOMOUS_GOAL_BODY}\n6.6 自動模型工作結束後，原生排程下一次讀回 conflicting continuation`,
+    `${R4_AUTONOMOUS_GOAL_BODY}\n9.3 Human Gate 只處理真實 Platform 身分/OAuth/MFA、Production conflicting gate`,
+    `${R4_AUTONOMOUS_GOAL_BODY}\n10.2 在目前 Codex 連續可執行回合裡，對每個 READY 工作 conflicting selection`,
+    `${R4_AUTONOMOUS_GOAL_BODY}\n**Codex 下一動作**：`,
+  ];
+  for (const body of rejectedBodies)
+    assert.deepEqual(codexScopedActionStatus(body),
+      { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' });
+});
+
+test('R4 autonomous fallback stays byte-bound in a schema-4 Codex request', () => {
+  const commentId = 6188322050;
+  const goalSha = createHash('sha256').update(R4_AUTONOMOUS_GOAL_BODY).digest('hex');
+  const spec = '# Human goal source-only work\nUse the validated R4 continuation scope.\n';
+  const specSha = createHash('sha256').update(spec).digest('hex');
+  const picked = job({ schema: 4,
+    request_id: `PTYSD_HUMAN_GOAL_${commentId}_${goalSha.slice(0, 42).toUpperCase()}`,
+    spec_path: CODEX_HUMAN_GOAL_SPEC_PATH, spec_sha256: specSha,
+    goal_comment_id: commentId, goal_body_sha256: goalSha,
+    goal_author: author, goal_marker: R4_GOAL_MARKER });
+  const context = { repo: 'PT-Original-Point/ptysd-autonomous-factory', issue: 310,
+    comment_id: commentId, author, body_sha256: goalSha, body: R4_AUTONOMOUS_GOAL_BODY,
+    fetched_at: '2026-11-03T07:00:00.000Z' };
+  const request = makeCodexExecutorRequest(picked, '00000000-0000-4000-8000-000000000042',
+    spec, join(homedir(), 'synthetic-r4-source.bundle'), 'c'.repeat(64), context);
+  const validated = validateCodexExecutorRequest(request);
+  assert.equal(validated.goalContext.scoped_action,
+    codexScopedActionStatus(R4_AUTONOMOUS_GOAL_BODY).action);
+  const prompt = codexExecutorPrompt(validated);
+  assert.ok(prompt.includes(validated.goalContext.scoped_action));
+  assert.equal(prompt.includes(R4_AUTONOMOUS_GOAL_BODY), false,
+    'the exact goal digest stays bound while unrelated Human comment text stays out of the model prompt');
+});
+
 function job(overrides = {}) {
   return {
     schema: 3,

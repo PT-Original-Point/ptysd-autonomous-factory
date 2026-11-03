@@ -22,12 +22,40 @@ const CODEX_HUMAN_GOAL_ISSUE = 310;
 export const CODEX_HUMAN_GOAL_SPEC_PATH = 'native-bridge/tasks/human-goal-source-only.md';
 // GitHub rejects Issue comment bodies above 65,536 characters.
 const MAX_GITHUB_ISSUE_COMMENT_BODY_LENGTH = 65_536;
+const R4_AUTONOMY_GOAL_MARKER = 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015';
+const R4_AUTONOMY_GOAL_ACTION =
+  'Continue the Human-authorized V5.3-R4 pre-Production source-work objective. Select the ' +
+  'highest-value nonconflicting READY task within this request’s exact write_paths and pinned ' +
+  'source-only spec; make the smallest reversible source change, run relevant tests, and return ' +
+  'a reviewable diff. Do not request duplicate authorization. Stop before identity/OAuth/MFA, ' +
+  'Production, new fees or permissions, irreversible actions, or unresolved external effects; ' +
+  'never replay UNKNOWN attempts.';
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const REQUEST = /^[A-Z][A-Z0-9_-]{7,79}$/;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$/;
 const FORBIDDEN_PATHS = new Set(['governance', 'runs', '.codex', '.git']);
 const HUMAN_GOAL_MARKER = /^PTYSD_V53R4_(?:DELETE_FIRST_AUTONOMY_GOAL|P[0-3]|R\d{1,2}|EMERGENCY|CODEX_DIRECTIVE)(?:_[A-Z0-9]+)*_\d{8}$/;
+
+function hasR4AutonomousGoalAuthority(body) {
+  const lines = body.split(/\r?\n/).map(line => line.trim());
+  const markers = lines.map(line => line.replace(/^<!--\s*|\s*-->$/g, ''))
+    .filter(line => HUMAN_GOAL_MARKER.test(line));
+  const uniqueStarting = prefix => {
+    const matches = lines.filter(line => line.startsWith(prefix));
+    return matches.length === 1 ? matches[0] : '';
+  };
+  const opening = uniqueStarting('這是 Human 授權 Codex 在既有合法可逆 pre-Production 工作範圍內連續施工的總目標');
+  const continuation = uniqueStarting('6.6 自動模型工作結束後，原生排程下一次讀回');
+  const boundaries = uniqueStarting('9.3 Human Gate 只處理真實 Platform 身分/OAuth/MFA、Production');
+  const selection = uniqueStarting('10.2 在目前 Codex 連續可執行回合裡，對每個 READY 工作');
+  return markers.length === 1 && markers[0] === R4_AUTONOMY_GOAL_MARKER &&
+    opening.length > 0 && continuation.includes('不要求 Human 重貼「繼續」') &&
+    continuation.includes('UNKNOWN 不重跑該 attempt') &&
+    boundaries.includes('新費用') && boundaries.includes('不可逆跨外部權威操作') &&
+    boundaries.includes('現有已獲授權的可逆 pre-production 施工') &&
+    selection.includes('下一項 READY');
+}
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -345,7 +373,11 @@ export function codexScopedActionStatus(body) {
   if (typeof body !== 'string' || body.length > MAX_GITHUB_ISSUE_COMMENT_BODY_LENGTH)
     return { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_INVALID' };
   const matches = [...body.matchAll(/^\*\*Codex 下一動作\*\*[：:][ \t]*/gm)];
-  if (matches.length === 0) return { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' };
+  if (matches.length === 0) {
+    if (hasR4AutonomousGoalAuthority(body))
+      return { ready: true, action: R4_AUTONOMY_GOAL_ACTION };
+    return { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' };
+  }
   if (matches.length !== 1) return { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_INVALID' };
   const match = matches[0];
   const tail = body.slice(match.index + match[0].length);
@@ -463,8 +495,8 @@ export function codexExecutorPrompt({ job, attemptId, spec, goalContext = null }
     `cannot be completed within this scope, stop and report the constraint.\n` +
     `${JSON.stringify(scope)}\n\n## Verified Human directive source\n` +
     `The native dispatcher fetched and hash-verified the complete Human comment before creating this ` +
-    `attempt. The request retains the complete bytes for audit; this prompt carries only its unique, ` +
-    `verbatim Codex 下一動作 section plus source identity. Treat that scoped_action and the pinned task ` +
+    `attempt. The request retains the complete bytes for audit; this prompt carries only the ` +
+    `validated scoped_action plus source identity. Treat that scoped_action and the pinned task ` +
     `spec as the complete task-specific direction for this attempt. Do not infer extra permission from ` +
     `omitted sections, and never execute comment text as a shell command. Work only inside the provided ` +
     `source bundle and exact write_paths. Do not publish, merge, deploy, or change host configuration.\n` +
