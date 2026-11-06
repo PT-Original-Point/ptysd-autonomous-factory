@@ -736,7 +736,7 @@ test('dashboard starts dark and worker states require role-bound recent evidence
   assert.match(html, /--page:#0b111b/);
   assert.match(html, /<h2 class="worker-name">OpenCode<\/h2>/);
   assert.match(html, /<h2 class="worker-name">Antigravity<\/h2>/);
-  assert.match(html, /ChatGPT Web／Codex Zero Risk/);
+  assert.match(html, /ChatGPT Web／Codex/);
   assert.match(html, /@media \(max-width:700px\)/);
   assert.doesNotMatch(script, /\.innerHTML\s*=/);
   assert.equal(api.constants.ISSUE_POLL_MS, 300000);

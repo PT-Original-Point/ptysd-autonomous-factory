@@ -659,11 +659,11 @@ test('renderer separates closed W1 source history from live worker status and sh
   assert.match(domElements.get('w1-dispatch-attempt').textContent,/3f9246cd-f968-4290-9c76-0514bb7775b5/);
   assert.match(domElements.get('w1-dispatch-progress').textContent,/FINISHED_NOT_ACCEPTANCE/);
   assert.match(domElements.get('w1-dispatch-delivery').textContent,/DIFF_CAPTURED_UNVERIFIED/);
-  assert.match(domElements.get('w1-dispatch-time').textContent,/最後已讀回派工／收據/);
+  assert.match(domElements.get('w1-dispatch-time').textContent,/GitHub schema-6 dispatch\/receipt event_at=/);
   assert.match(domElements.get('w2-dispatch-state').textContent,/BLOCKED／派工留言 ID 未確認/);
   assert.match(domElements.get('w2-model-switch').textContent,/模型執行開關：停用.*不派發新的模型工作/);
   assert.match(domElements.get('w2-dispatch-progress').textContent,/ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED/);
-  assert.match(domElements.get('w3-dispatch-progress').textContent,/沒有 Zero Risk request_id/);
+  assert.match(domElements.get('w3-dispatch-progress').textContent,/分派、啟動、執行路徑.*UNKNOWN/);
   assert.match(domElements.get('codex-executor').textContent,/UNKNOWN/);
   assert.match(domElements.get('codex-evidence').textContent,/UNKNOWN/);
   assert.match(domElements.get('codex-task').textContent,/UNKNOWN.*Executor/);
@@ -1550,6 +1550,14 @@ test('dispatch layout uses two readable desktop columns, collapsible technical d
   assert.match(html, /@media\s*\(max-width:\s*700px\)/);
 });
 
+test('W2 reviewed source requires an unskipped test run with zero failures', () => {
+  const paths=['tests/v2-readiness.test.mjs'];
+  assert.equal(panel.validW2SourceTest('node --test tests/v2-readiness.test.mjs;20_total;20_passed;0_failed;0_skipped',paths),true);
+  assert.equal(panel.validW2SourceTest('node --test tests/v2-readiness.test.mjs;20_total;19_passed;1_failed;0_skipped',paths),false);
+  assert.equal(panel.validW2SourceTest('node --test tests/v2-readiness.test.mjs;20_total;19_passed;0_failed;1_skipped',paths),false);
+  assert.equal(panel.validW2SourceTest('node --test tests/other.test.mjs;20_total;20_passed;0_failed;0_skipped',paths),false);
+});
+
 test('W3 Agent/request identifiers do not stand in for handoff, MCP execution, completion, or Codex receipt', () => {
   const agentId='01a16cdd-bbf7-71c0-af1e-0ba1e568790e';
   const snapshot={workers:[{worker_id:'W3',status:'UNKNOWN',task_id:agentId,
@@ -1562,7 +1570,7 @@ test('W3 Agent/request identifiers do not stand in for handoff, MCP execution, c
   assert.match(card.w3Stages.toolCalls,/UNKNOWN/);
   assert.match(card.w3Stages.completion,/UNKNOWN/);
   assert.match(card.w3Stages.codexReceipt,/UNKNOWN/);
-  assert.match(card.summaryProgress,/五階段獨立待驗證/);
+  assert.match(card.summaryProgress,/同來源收據與各階段仍待核對/);
   assert.doesNotMatch(card.summaryProgress,/已完成|已傳送|工具執行成功/);
 });
 
@@ -1614,13 +1622,13 @@ test('W1 and W2 show native observation freshness separately from their last tas
   const oldEventAt=new Date(now-24*60*60*1000).toISOString();
   const freshResult={status:'FRESH',snapshot:{windows:{observed_at:freshAt}}};
   const freshLabel=panel.workerObservationLabel(freshResult,'FRESH',now);
-  assert.match(freshLabel,/Win11 現場觀測：FRESH/);
+  assert.match(freshLabel,/Win11 快照.*FRESH/);
   assert.doesNotMatch(freshLabel,/任務事件|Session|驗收/);
 
   for (const id of ['W1','W2']) {
     panel.renderDispatchCard(id,{eventAt:oldEventAt,observationLabel:freshLabel});
     assert.equal(domElements.get(id.toLowerCase()+'-observed').textContent,freshLabel);
-    assert.match(domElements.get(id.toLowerCase()+'-last-event').textContent,/最後任務事件：/);
+    assert.match(domElements.get(id.toLowerCase()+'-last-event').textContent,/最後同來源任務事件：/);
     assert.notEqual(domElements.get(id.toLowerCase()+'-observed').textContent,
       domElements.get(id.toLowerCase()+'-last-event').textContent);
   }
@@ -1628,20 +1636,20 @@ test('W1 and W2 show native observation freshness separately from their last tas
   const staleAt=new Date(now-11*60*1000).toISOString();
   assert.match(panel.workerObservationLabel(
     {status:'STALE',snapshot:{windows:{observed_at:staleAt}}},'STALE',now),
-  /Win11 現場觀測：STALE/);
+  /Win11 快照.*STALE/);
   assert.match(panel.workerObservationLabel(freshResult,'STALE',now),
-    /Win11 現場觀測：STALE/);
+    /Win11 快照.*STALE/);
 
   for (const observedAt of [undefined,'not-a-time',new Date(now+1000).toISOString()]) {
     for (const snapshotFreshness of ['FRESH','STALE']) {
       const label=panel.workerObservationLabel(
         {status:'FRESH',snapshot:{windows:{observed_at:observedAt}}},snapshotFreshness,now);
-      assert.match(label,/Win11 現場觀測：UNKNOWN · 時間未確認/);
+      assert.match(label,/Win11 快照.*observed_at=時間未確認 · UNKNOWN/);
       assert.doesNotMatch(label,/\d{4}/);
     }
   }
   assert.match(panel.workerObservationLabel(null,'UNKNOWN',now),
-    /Win11 現場觀測：UNKNOWN · 時間未確認/);
+    /Win11 快照.*observed_at=時間未確認 · UNKNOWN/);
 });
 
 test('future and foreign attempt receipts cannot override a valid matching dispatch', () => {
