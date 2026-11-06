@@ -5,10 +5,10 @@ import { createHash } from 'node:crypto';
 import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync,
   writeFileSync } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JOB_MARKER, PROJECT, RECEIPT_MARKER, REPO, parseReceipt, receipt, runWorker,
-  captureScopedEditDiff, verifyCapturedEvidence } from '../native-bridge/worker.mjs';
+  captureScopedEditDiff, verifyCapturedEvidence, runPlan } from '../native-bridge/worker.mjs';
 import { executePendingManifest } from '../native-bridge/executor.mjs';
 import { buildCodexChildEnvironment } from '../native-bridge/codex-executor.mjs';
 import { safeErrorCode } from '../native-bridge/safe-error-code.mjs';
@@ -1025,6 +1025,149 @@ test('executor blocks a dirty registered-root path before starting a scoped atte
     assert.equal(readFileSync(join(source.workspace, 'README.md'), 'utf8'),
       'preserved pre-existing W2 work\n');
   } finally { f.dispose(); }
+});
+
+test('executor persists actual Worker diff failure through guard and does not replay attempt', async t => {
+  if (process.platform !== 'win32') return t.skip('executor workspace guard is Windows-only');
+  const f = fixture();
+  try {
+    // Build a complete, independent synthetic root history; no checkout or remote is needed.
+    const workspace = join(f.root, 'source');
+    mkdirSync(workspace);
+    const git = (args, input) => execFileSync('git', ['-C', workspace, ...args],
+      { encoding:'utf8', windowsHide:true, input, stdio:['pipe','pipe','pipe'] }).trim();
+    git(['init','--quiet']);
+    const blob = git(['hash-object','-w','--stdin'], 'synthetic source\n');
+    const tree = git(['mktree'], `100644 blob ${blob}\tREADME.md\n`);
+    const sourceSha = git(['hash-object','-t','commit','-w','--stdin'],
+      `tree ${tree}\nauthor Test <test@example.invalid> 0 +0000\n` +
+      'committer Test <test@example.invalid> 0 +0000\n\nSynthetic root\n');
+    git(['update-ref','HEAD',sourceSha]);
+    git(['reset','--hard','--quiet',sourceSha]);
+    assert.equal(git(['rev-parse','--is-shallow-repository']),'false');
+    const spec = 'Synthetic Worker diff failure; no model or provider call.';
+    const job = { ...modelJob(spec), schema:4, kind:'opencode_edit',
+      request_id:'PTYSD_WORKER_DIFF_GUARD_NO_REPLAY', source_sha:sourceSha,
+      edit_paths:['README.md'] };
+    const bundle = createExecutorSourceBundle({ workspace, descriptor:f.descriptor, job,
+      attemptId:ATTEMPT_EDIT, filesystemPath:localPathMap(f) });
+    const pending = join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`);
+    writeFileSync(pending, JSON.stringify(makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)),
+      {flag:'wx'});
+    const config = { project_id:PROJECT, repo:REPO, host:hostname().toUpperCase(),
+      executor_runtime:{user_sid:EXECUTOR_SID, publisher_sid:PUBLISHER_SID,
+        manifest_dir:f.manifestDir, results_dir:f.resultsDir}, workspace, state_dir:f.resultsDir,
+      enable_v2_model_runs:true, allowed_models:{'opencode/spark':['high']} };
+    let executeCalls = 0, syntheticCalls = 0, captureCalls = 0, workerResult;
+    const first = await executePendingManifest({manifestDir:f.manifestDir, currentSid:()=>EXECUTOR_SID,
+      config, execute:async (receivedSpec, executionConfig, receivedJob, attemptId) => {
+        executeCalls++;
+        workerResult = await runPlan(receivedSpec, executionConfig, receivedJob, attemptId, {
+          qualifyOpenCodeV2:()=>({ready:true,bin:'synthetic-never-executed',version:'2.2.5'}),
+          readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_RECORD_PRESENT'}), gitPlatform:'win32',
+          readGitProcessTree:pid=>({state:'DEAD',root_pid:pid,process_ids:[],census_complete:true,
+            observed_at:new Date().toISOString(),error:null}),
+          runCapturedProcess:async (_bin, _args, options) => {
+            syntheticCalls++;
+            writeFileSync(join(executionConfig.workspace,'README.md'), 'synthetic candidate edit\n');
+            const output = Buffer.alloc(0), separator = Buffer.from('\n--- STDERR ---\n');
+            writeFileSync(options.stdoutPath,output); writeFileSync(options.stderrPath,output);
+            const emptyHash = createHash('sha256').update(output).digest('hex');
+            return {outcome:'SYNTHETIC_PROCESS_EXITED',exit_code:0,
+              evidence_sha256:createHash('sha256').update(separator).digest('hex'),
+              evidence_bytes:separator.length,local_evidence:{stdout_file:basename(options.stdoutPath),
+                stdout_sha256:emptyHash,stdout_bytes:0,stderr_file:basename(options.stderrPath),
+                stderr_sha256:emptyHash,stderr_bytes:0,termination_state:'NOT_REQUESTED'}};
+          },
+          captureScopedEditDiff:async input => {
+            captureCalls++;
+            assert.equal(input.workspace, executionConfig.workspace);
+            throw Object.assign(new Error('PRIVATE_SYNTHETIC_DETAIL'), {code:'EIO'});
+          },
+        });
+        return workerResult;
+      }});
+    assert.equal(executeCalls,1); assert.equal(syntheticCalls,1); assert.equal(captureCalls,1);
+    assert.equal(workerResult.outcome,'V2_EDIT_DIFF_CAPTURE_FAILED_EIO');
+    assert.equal(workerResult.exit_code,-1);
+    assert.equal(workerResult.source_diff_evidence,'UNKNOWN');
+    assert.equal(workerResult.local_evidence.edit_diff_error,'CAPTURE_FAILED');
+    assert.equal(workerResult.local_evidence.edit_diff_error_code,'EIO');
+    assert.equal(first.terminal_state,'BLOCKED');
+    const resultPath = executorResultPath(f.resultsDir, job.request_id, ATTEMPT_EDIT);
+    const before = readFileSync(resultPath);
+    const saved = JSON.parse(before);
+    assert.equal(saved.request_id,job.request_id); assert.equal(saved.attempt_id,ATTEMPT_EDIT);
+    assert.equal(saved.terminal.state,'BLOCKED');
+    assert.equal(saved.terminal.outcome,'EXECUTOR_EDIT_CANDIDATE_DIFF_UNRECONCILED');
+    assert.equal(saved.terminal.external_effects,'UNKNOWN');
+    assert.equal(saved.terminal.scope_valid,false);
+    assert.equal(saved.local_evidence.edit_diff_error,'CAPTURE_FAILED');
+    assert.equal(saved.local_evidence.edit_diff_error_code,'EIO');
+    assert.equal(saved.local_evidence.executor_workspace_guard.candidate_root_changed_paths,1);
+    assert.ok(parseReceipt(RECEIPT_MARKER + JSON.stringify(saved.terminal)));
+    assert.doesNotMatch(before.toString(),/PRIVATE_SYNTHETIC_DETAIL/);
+    assert.equal(existsSync(pending),false);
+    assert.equal(existsSync(join(f.manifestDir,`${ATTEMPT_EDIT}.running.json`)),true);
+    await assert.rejects(executePendingManifest({manifestDir:f.manifestDir,currentSid:()=>EXECUTOR_SID,
+      config,execute:async()=>{executeCalls++; throw new Error('unexpected replay');}}),
+    error=>error.code==='EXECUTOR_ATTEMPT_ALREADY_RUNNING');
+    assert.equal(executeCalls,1); assert.equal(syntheticCalls,1); assert.equal(captureCalls,1);
+    assert.deepEqual(readFileSync(resultPath),before);
+  } finally { f.dispose(); }
+});
+
+test('executor preserves a sanitized execution error when changed candidate reconciliation fails', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
+  for (const [errorCode, expectedCode, returned] of [['EIO', 'EIO', false],
+    ['EDIT_PRIVATE_DIAGNOSTIC', 'UNKNOWN', false], ['EIO', 'EIO', true]]) {
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root, 'candidate-execution-error');
+    const sourceSha = source.git(['rev-parse', 'HEAD']).trim();
+    const spec = 'Synthetic failure; provider and model are not invoked.';
+    const job = { ...modelJob(spec), schema: 6, project_id: PROJECT,
+      host: hostname().toUpperCase(), kind: 'antigravity_edit',
+      request_id: 'PTYSD_ANTIGRAVITY_SYNTHETIC_EXECUTION_ERROR', source_sha: sourceSha,
+      spec_path: 'native-bridge/tasks/w2-review.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gemini-3.8-flash-high', variant: 'high', edit_paths: ['package.json'],
+      source_pr: 461, goal_comment_id: 6188322050, goal_body_sha256: 'c'.repeat(64) };
+    const bundle = createExecutorSourceBundle({ workspace: source.workspace,
+      descriptor: f.descriptor, job, attemptId: ATTEMPT_EDIT, filesystemPath: localPathMap(f) });
+    writeFileSync(join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`), JSON.stringify(
+      makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)), { flag: 'wx' });
+    const config = { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
+        executor_runtime: { user_sid: EXECUTOR_SID, publisher_sid: PUBLISHER_SID,
+          manifest_dir: f.manifestDir, results_dir: f.resultsDir },
+        workspace: source.workspace, state_dir: f.resultsDir, enable_antigravity_model_runs: true };
+    const result = await executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID, config,
+      execute: async (_spec, executionConfig) => {
+        writeFileSync(join(executionConfig.workspace, 'package.json'), '{"name":"edited"}\n');
+        if (returned) return { outcome: 'ANTIGRAVITY_EDIT_DIFF_CAPTURE_FAILED_EIO', exit_code: -1,
+          local_evidence: { edit_diff_error: 'CAPTURE_FAILED', edit_diff_error_code: 'EIO' } };
+        const error = new Error('EDIT_PRIVATE_DIAGNOSTIC');
+        error.code = errorCode;
+        throw error;
+      },
+    });
+    const saved = JSON.parse(readFileSync(executorResultPath(f.resultsDir,
+      job.request_id, ATTEMPT_EDIT), 'utf8'));
+    assert.equal(result.terminal_state, 'BLOCKED');
+    assert.equal(saved.terminal.outcome, 'EXECUTOR_EDIT_CANDIDATE_DIFF_UNRECONCILED');
+    assert.equal(saved.terminal.external_effects, 'UNKNOWN');
+    assert.equal(returned ? saved.local_evidence.edit_diff_error_code :
+      saved.local_evidence.execution_error_code, expectedCode);
+    assert.equal(saved.local_evidence.executor_workspace_guard.candidate_root_changed_paths, 1);
+    assert.doesNotMatch(JSON.stringify(saved.local_evidence), /EDIT_PRIVATE_DIAGNOSTIC/);
+    let replayed = false;
+    await assert.rejects(executePendingManifest({ manifestDir: f.manifestDir, currentSid: () => EXECUTOR_SID,
+      config, execute: async () => { replayed = true; throw new Error('unexpected replay'); } }),
+    error => error.code === 'EXECUTOR_ATTEMPT_ALREADY_RUNNING');
+    assert.equal(replayed, false, 'a persisted attempt must not execute again');
+  } finally { f.dispose(); }
+  }
 });
 
 test('executor reconciles tracked and untracked candidate changes against the captured diff', async t => {
