@@ -3488,9 +3488,63 @@ async function hashEvidenceFile(path) {
 async function updateCombinedHash(hash, path) {
   for await (const chunk of createReadStream(path)) hash.update(chunk);
 }
+function verifiedNoModelPolicyBlockedResult(result, terminal, local) {
+  const guard = local?.executor_workspace_guard;
+  const guardHashes = ['registered_root_identity_sha256', 'registered_root_state_sha256',
+    'candidate_root_identity_sha256', 'candidate_root_state_sha256',
+    'registered_root_after_sha256', 'candidate_root_after_sha256'];
+  return result && typeof result === 'object' && !Array.isArray(result) &&
+    Object.keys(result).length === 4 &&
+    ['request_id', 'attempt_id', 'terminal', 'local_evidence']
+      .every(key => Object.hasOwn(result, key)) &&
+    result.request_id === terminal?.request_id && result.attempt_id === terminal?.attempt_id &&
+    terminal?.schema === 1 && terminal.project_id === PROJECT &&
+    terminal.kind === 'opencode_edit' && terminal.state === 'BLOCKED' &&
+    terminal.outcome === 'OPENCODE_V2_CLI_VERSION_POLICY_REJECTED' &&
+    terminal.exit_code === 43 && terminal.cli_exit_code === 43 &&
+    parseReceipt(RECEIPT_MARKER + JSON.stringify(terminal)) !== null &&
+    Number.isSafeInteger(terminal.source_pr) && terminal.source_pr > 0 &&
+    Number.isSafeInteger(terminal.goal_comment_id) && terminal.goal_comment_id > 0 &&
+    HASH.test(terminal.goal_body_sha256 || '') && HASH.test(terminal.edit_paths_sha256 || '') &&
+    typeof terminal.model === 'string' && terminal.model.length > 0 &&
+    (terminal.variant === null || typeof terminal.variant === 'string' && terminal.variant.length > 0) &&
+    terminal.model_invoked === false && terminal.session_id === null &&
+    terminal.session_started === null && terminal.evidence_sha256 === null &&
+    terminal.evidence_bytes === 0 && terminal.stdout_sha256 === null &&
+    terminal.stderr_sha256 === null && terminal.diff_sha256 === null &&
+    terminal.diff_bytes === null && terminal.changed_files_sha256 === null &&
+    terminal.changed_files_count === null &&
+    !Object.hasOwn(terminal, 'changed_file_tree_sha256') &&
+    terminal.scope_valid === null && terminal.coding_state === 'UNVERIFIED' &&
+    terminal.external_effects === 'UNKNOWN' && terminal.task_acceptance === 'UNKNOWN' &&
+    terminal.source_diff_evidence === 'NOT_INSPECTED' &&
+    terminal.provider_usage_evidence === 'UNKNOWN' &&
+    terminal.model_activity_evidence === 'UNKNOWN' && terminal.token_usage === null &&
+    terminal.tool_execution_evidence === 'UNKNOWN' && terminal.tool_execution_count === 0 &&
+    terminal.file_change_tool_evidence === 'UNKNOWN' &&
+    terminal.file_change_tool_completed_count === 0 &&
+    terminal.file_change_tool_failed_count === 0 &&
+    terminal.file_change_tool_incomplete_count === 0 &&
+    local && typeof local === 'object' && !Array.isArray(local) &&
+    Object.keys(local).length === 1 && Object.hasOwn(local, 'executor_workspace_guard') &&
+    guard && typeof guard === 'object' && !Array.isArray(guard) &&
+    Object.keys(guard).length === 9 && guard.readback === 'COMPLETE' &&
+    guardHashes.every(key => HASH.test(guard[key] || '')) &&
+    guard.registered_root_state_sha256 === guard.registered_root_after_sha256 &&
+    guard.candidate_root_state_sha256 === guard.candidate_root_after_sha256 &&
+    guard.registered_root_changed_paths === 0 && guard.candidate_root_changed_paths === 0;
+}
 export async function verifyCapturedEvidence(resultDir, result) {
   const local = result?.local_evidence;
   const terminal = result?.terminal ?? result;
+  // This exact CLI policy rejection happens before model launch and before any
+  // stdout/stderr files exist. Only the complete, unchanged two-root workspace
+  // guard can justify publishing its already-persisted BLOCKED terminal.
+  if (terminal?.kind === 'opencode_edit' && terminal?.state === 'BLOCKED' &&
+      terminal?.outcome === 'OPENCODE_V2_CLI_VERSION_POLICY_REJECTED') {
+    if (verifiedNoModelPolicyBlockedResult(result, terminal, local)) return true;
+    throw new Error('CAPTURED_EVIDENCE_PATH_INVALID');
+  }
   const waitingReceipt = terminal?.state === 'WAITING' &&
     terminal.model_invoked === false && terminal.session_id === null &&
     terminal.session_started === null && terminal.evidence_sha256 === null &&
@@ -3506,7 +3560,8 @@ export async function verifyCapturedEvidence(resultDir, result) {
   // add its completed workspace guard to local_evidence, which must not turn
   // that valid no-model record into a missing-capture failure.
   if (waitingReceipt && waitingLocalEvidence) return true;
-  if (!local && terminal?.evidence_sha256 == null && terminal?.evidence_bytes === 0) return true;
+  if (!local && terminal?.evidence_sha256 == null && terminal?.evidence_bytes === 0 &&
+      !(terminal?.kind === 'opencode_edit' && terminal?.state === 'BLOCKED')) return true;
   const outputCaptureFailed = Boolean(local &&
     (local.storage_error || local.capture_error || local.spawn_error || local.process_error || local.stdin_error) &&
     terminal?.state === 'BLOCKED' && /(?:FAILED|ERROR)/.test(terminal?.outcome || ''));
@@ -3871,6 +3926,15 @@ export async function runWorker(configInput, adapters = {}) {
         if (result.request_id !== s.request_id || result.attempt_id !== s.attempt_id ||
             result.terminal?.source_sha !== s.source_sha || result.terminal?.kind !== s.kind ||
             !parseReceipt(RECEIPT_MARKER + JSON.stringify(result.terminal)))
+          throw new Error('LOCAL_RECEIPT_IDENTITY_MISMATCH');
+        if (result.terminal.kind === 'opencode_edit' && result.terminal.state === 'BLOCKED' &&
+            result.terminal.outcome === 'OPENCODE_V2_CLI_VERSION_POLICY_REJECTED' &&
+            (result.terminal.project_id !== s.project_id || result.terminal.host !== s.host ||
+              result.terminal.model !== s.model || result.terminal.variant !== s.variant ||
+              result.terminal.source_pr !== s.source_pr ||
+              result.terminal.goal_comment_id !== s.goal_comment_id ||
+              result.terminal.goal_body_sha256 !== s.goal_body_sha256 ||
+              result.terminal.edit_paths_sha256 !== s.edit_paths_sha256))
           throw new Error('LOCAL_RECEIPT_IDENTITY_MISMATCH');
         if (isModelExecutionKind(s.kind)) await verifyCapturedEvidence(resultDir, result);
       } catch (error) {

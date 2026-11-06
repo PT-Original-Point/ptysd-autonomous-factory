@@ -6136,6 +6136,165 @@ test('publisher records executor WAITING, continues a ping, then re-dispatches t
       ['WAITING', 'STARTED']);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+function versionPolicyBlockedFixture(host = hostname().toUpperCase()) {
+  // Synthetic bytes with the request/attempt identifiers of the reproduced W1 failure.
+  const requestId = 'W1_OPENCODE_SIGNER_IDENTITY_20261106_23F1C07B';
+  const attemptId = 'e60dc6b2-ca94-4127-b08f-cc4a1a4660ac';
+  const job = withHumanGoal({ schema: 6, project_id: PROJECT, host,
+    request_id: requestId, kind: 'opencode_edit', source_sha: commit,
+    spec_path: 'native-bridge/tasks/preflight-version-policy-test.md', spec_sha256: hash,
+    source_pr: 811, model: 'opencode/deepseek-v4.1-flash-free', variant: null,
+    edit_paths: ['src/worker.mjs'] });
+  const terminal = receipt(requestId, attemptId, 'BLOCKED', job, {
+    outcome: 'OPENCODE_V2_CLI_VERSION_POLICY_REJECTED', exit_code: 43,
+    evidence_sha256: null, evidence_bytes: 0, model_invoked: false,
+    session_id: null, session_started: null, diff_sha256: null, diff_bytes: null,
+  });
+  const guard = {
+    registered_root_identity_sha256: 'a'.repeat(64),
+    registered_root_state_sha256: 'b'.repeat(64),
+    candidate_root_identity_sha256: 'c'.repeat(64),
+    candidate_root_state_sha256: 'd'.repeat(64),
+    registered_root_after_sha256: 'b'.repeat(64),
+    candidate_root_after_sha256: 'd'.repeat(64),
+    readback: 'COMPLETE', registered_root_changed_paths: 0,
+    candidate_root_changed_paths: 0,
+  };
+  return { job, requestId, attemptId,
+    result: { request_id: requestId, attempt_id: attemptId, terminal,
+      local_evidence: { executor_workspace_guard: guard } } };
+}
+
+test('W1 version-policy BLOCKED pre-model receipt requires exact identity, zero evidence and unchanged guard', async () => {
+  const { result } = versionPolicyBlockedFixture();
+  assert.equal(parseReceipt(RECEIPT_MARKER + JSON.stringify(result.terminal))?.state, 'BLOCKED');
+  assert.equal(result.terminal.task_acceptance, 'UNKNOWN');
+  assert.equal(result.terminal.external_effects, 'UNKNOWN');
+  assert.equal(result.terminal.changed_files_count, null);
+  assert.equal(await verifyCapturedEvidence('unused-no-capture-dir', result), true);
+  const mutations = [
+    ['unsupported outcome', r => { r.terminal.outcome = 'OPENCODE_V2_CLI_NOT_QUALIFIED'; }],
+    ['unsupported outcome and no guard', r => {
+      r.terminal.outcome = 'OPENCODE_V2_CLI_NOT_QUALIFIED'; r.local_evidence = null;
+    }],
+    ['forged FINISHED', r => { r.terminal.state = 'FINISHED'; }],
+    ['wrong CLI exit', r => { r.terminal.cli_exit_code = 0; }],
+    ['model invoked', r => { r.terminal.model_invoked = true; }],
+    ['session id', r => { r.terminal.session_id = 'ses_forged_session'; }],
+    ['session started', r => { r.terminal.session_started = true; }],
+    ['model activity', r => { r.terminal.model_activity_evidence = 'CONFIRMED'; }],
+    ['provider usage', r => { r.terminal.provider_usage_evidence = 'CONFIRMED'; }],
+    ['tool execution', r => { r.terminal.tool_execution_count = 1; }],
+    ['tool evidence', r => { r.terminal.tool_execution_evidence = 'OBSERVED'; }],
+    ['file change tool', r => { r.terminal.file_change_tool_completed_count = 1; }],
+    ['file change evidence', r => { r.terminal.file_change_tool_evidence = 'COMPLETED'; }],
+    ['diff hash', r => { r.terminal.diff_sha256 = 'f'.repeat(64); }],
+    ['diff bytes', r => { r.terminal.diff_bytes = 0; }],
+    ['changed files', r => { r.terminal.changed_files_count = 0; }],
+    ['changed tree', r => { r.terminal.changed_file_tree_sha256 = 'f'.repeat(64); }],
+    ['scope', r => { r.terminal.scope_valid = true; }],
+    ['captured stdout', r => { r.terminal.stdout_sha256 = 'f'.repeat(64); }],
+    ['captured output', r => { r.terminal.evidence_bytes = 1; }],
+    ['effect promotion', r => { r.terminal.external_effects = 'NONE'; }],
+    ['acceptance promotion', r => { r.terminal.task_acceptance = 'UNVERIFIED'; }],
+    ['source diff promotion', r => { r.terminal.source_diff_evidence = 'CAPTURED'; }],
+    ['unexpected local evidence', r => { r.local_evidence.stdout_file = 'unexpected.txt'; }],
+    ['unexpected guard evidence', r => { r.local_evidence.executor_workspace_guard.extra = true; }],
+    ['missing guard', r => { r.local_evidence = null; }],
+    ['incomplete guard', r => { r.local_evidence.executor_workspace_guard.readback = 'FAILED'; }],
+    ['registered changed', r => { r.local_evidence.executor_workspace_guard.registered_root_changed_paths = 1; }],
+    ['candidate changed', r => { r.local_evidence.executor_workspace_guard.candidate_root_changed_paths = 1; }],
+    ['registered state mismatch', r => { r.local_evidence.executor_workspace_guard.registered_root_after_sha256 = 'e'.repeat(64); }],
+    ['candidate state mismatch', r => { r.local_evidence.executor_workspace_guard.candidate_root_after_sha256 = 'e'.repeat(64); }],
+    ['missing root identity', r => { delete r.local_evidence.executor_workspace_guard.candidate_root_identity_sha256; }],
+    ['outer request spoof', r => { r.request_id = 'W1_FORGED_REQUEST_20261106'; }],
+    ['outer attempt spoof', r => { r.attempt_id = '11111111-1111-4111-8111-111111111111'; }],
+    ['receipt request missing', r => { delete r.terminal.request_id; }],
+    ['receipt source missing', r => { delete r.terminal.source_sha; }],
+    ['source PR missing', r => { delete r.terminal.source_pr; }],
+    ['goal missing', r => { delete r.terminal.goal_comment_id; }],
+    ['goal digest missing', r => { delete r.terminal.goal_body_sha256; }],
+    ['edit paths identity missing', r => { delete r.terminal.edit_paths_sha256; }],
+    ['model identity missing', r => { delete r.terminal.model; }],
+    ['variant identity missing', r => { delete r.terminal.variant; }],
+    ['extra result data', r => { r.model_called = true; }],
+  ];
+  for (const [name, mutate] of mutations) {
+    const altered = structuredClone(result);
+    mutate(altered);
+    await assert.rejects(verifyCapturedEvidence('unused-no-capture-dir', altered),
+      /CAPTURED_EVIDENCE_PATH_INVALID/, name);
+  }
+});
+
+test('W1 pre-model policy BLOCKED reconciles the existing terminal once and never re-dispatches', async () => {
+  for (const forged of [false, true]) {
+    const root = mkdtempSync(join(homedir(), '.ptysd-policy-blocked-reconcile-'));
+    try {
+      const workspace = join(root, 'workspace'), stateDir = join(root, 'state');
+      const resultsDir = join(root, 'results'), manifestDir = join(root, 'manifests');
+      for (const dir of [workspace, stateDir, resultsDir, manifestDir]) mkdirSync(dir);
+      const { job, requestId, attemptId, result } = versionPolicyBlockedFixture();
+      const started = receipt(requestId, attemptId, 'STARTED', job, null,
+        { manifest_sha256: 'd'.repeat(64) });
+      if (forged) result.terminal.model = 'opencode/forged-model';
+      writeFileSync(join(resultsDir, `result-${requestId}-${attemptId}.json`), JSON.stringify(result));
+      const ping = mkjob({ host: job.host, request_id: 'PTYSD_PING_AFTER_POLICY_BLOCK_20261106' });
+      const comments = [com(9601, encoded(job)),
+        com(9602, RECEIPT_MARKER + JSON.stringify(started), 'worker'), com(9603, encoded(ping))];
+      const executor = { task_name: '\\PTYSD\\OpenCodeExecutor',
+        user_sid: 'S-1-5-21-100-200-300-1001', publisher_sid: 'S-1-5-21-100-200-300-1002',
+        wscript_path: 'C:\\Windows\\System32\\wscript.exe',
+        launcher_path: 'C:\\PTYSD\\HiddenCodexExecutor.vbs', node_bin: 'C:\\Node\\node.exe',
+        script_path: 'C:\\PTYSD\\executor.mjs', config_path: 'C:\\PTYSD\\executor.json',
+        manifest_dir: manifestDir, results_dir: resultsDir, working_directory: workspace,
+        source_bundle_per_attempt: true };
+      const writes = [], logs = [];
+      let nextId = 9604, dispatches = 0;
+      const config = { repo: REPO, project_id: PROJECT, host: job.host, issue: 407,
+        workspace, state_dir: stateDir, dispatchers: ['t14210184'], executor };
+      const adapters = {
+        apiRead(uri) {
+          if (uri === 'user') return { login: 'worker' };
+          if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
+          if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: commit } };
+          const match = uri.match(/\/issues\/comments\/(\d+)$/);
+          if (match) return comments.find(comment => comment.id === Number(match[1]));
+          throw new Error(`UNEXPECTED_POLICY_BLOCKED_API:${uri}`);
+        },
+        commentsRead: () => comments,
+        executorResultsDir: () => resultsDir,
+        executorResultPath: () => join(resultsDir, `result-${requestId}-${attemptId}.json`),
+        writeReceipt(_config, data, login) {
+          writes.push(data);
+          comments.push(com(nextId++, RECEIPT_MARKER + JSON.stringify(data), login));
+        },
+        dispatchToExecutor() { dispatches++; throw new Error('MUST_NOT_REPLAY_ATTEMPT'); },
+        triggerPendingExecutorAttempt() { dispatches++; throw new Error('MUST_NOT_RETRIGGER_ATTEMPT'); },
+        runPlan() { dispatches++; throw new Error('MUST_NOT_CALL_MODEL'); },
+        log: value => logs.push(value),
+      };
+      const first = await executeWorker(config, adapters);
+      assert.equal(first.request_id, ping.request_id);
+      assert.equal(dispatches, 0);
+      assert.deepEqual(writes.filter(item => item.request_id === requestId).map(item => item.state),
+        forged ? [] : ['BLOCKED']);
+      if (forged) assert.ok(logs.some(line => line.includes('LOCAL_RECEIPT_IDENTITY_MISMATCH_NO_REPLAY')),
+        logs.join(' | '));
+      else {
+        assert.deepEqual(writes[0], result.terminal);
+        assert.equal(writes[0].task_acceptance, 'UNKNOWN');
+        assert.equal(writes[0].external_effects, 'UNKNOWN');
+        assert.ok(logs.includes(`RECOVERED_EXECUTOR_RESULT_BLOCKED_${requestId}`));
+      }
+      await executeWorker(config, adapters);
+      assert.equal(dispatches, 0);
+      assert.equal(writes.filter(item => item.request_id === requestId).length, forged ? 0 : 1);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
 test('stale unsigned job does not starve newer exact-main job', () => {
   const first=mkjob({request_id:'PTYSD_NATIVE_OLD_20261012',source_sha:'a'.repeat(40)});
   const second=mkjob({request_id:'PTYSD_NATIVE_NEW_20261012',source_sha:'c'.repeat(40)});
