@@ -1029,7 +1029,8 @@ test('executor blocks a dirty registered-root path before starting a scoped atte
 
 test('executor preserves a sanitized execution error when changed candidate reconciliation fails', async t => {
   if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
-  for (const [errorCode, expectedCode] of [['EIO', 'EIO'], ['EDIT_PRIVATE_DIAGNOSTIC', 'UNKNOWN']]) {
+  for (const [errorCode, expectedCode, returned] of [['EIO', 'EIO', false],
+    ['EDIT_PRIVATE_DIAGNOSTIC', 'UNKNOWN', false], ['EIO', 'EIO', true]]) {
   const f = fixture();
   try {
     const source = sourceRepository(f.root, 'candidate-execution-error');
@@ -1046,14 +1047,16 @@ test('executor preserves a sanitized execution error when changed candidate reco
       descriptor: f.descriptor, job, attemptId: ATTEMPT_EDIT, filesystemPath: localPathMap(f) });
     writeFileSync(join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`), JSON.stringify(
       makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)), { flag: 'wx' });
-    const result = await executePendingManifest({ manifestDir: f.manifestDir,
-      currentSid: () => EXECUTOR_SID,
-      config: { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
+    const config = { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
         executor_runtime: { user_sid: EXECUTOR_SID, publisher_sid: PUBLISHER_SID,
           manifest_dir: f.manifestDir, results_dir: f.resultsDir },
-        workspace: source.workspace, state_dir: f.resultsDir, enable_antigravity_model_runs: true },
+        workspace: source.workspace, state_dir: f.resultsDir, enable_antigravity_model_runs: true };
+    const result = await executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID, config,
       execute: async (_spec, executionConfig) => {
         writeFileSync(join(executionConfig.workspace, 'package.json'), '{"name":"edited"}\n');
+        if (returned) return { outcome: 'ANTIGRAVITY_EDIT_DIFF_CAPTURE_FAILED_EIO', exit_code: -1,
+          local_evidence: { edit_diff_error: 'CAPTURE_FAILED', edit_diff_error_code: 'EIO' } };
         const error = new Error('EDIT_PRIVATE_DIAGNOSTIC');
         error.code = errorCode;
         throw error;
@@ -1064,9 +1067,15 @@ test('executor preserves a sanitized execution error when changed candidate reco
     assert.equal(result.terminal_state, 'BLOCKED');
     assert.equal(saved.terminal.outcome, 'EXECUTOR_EDIT_CANDIDATE_DIFF_UNRECONCILED');
     assert.equal(saved.terminal.external_effects, 'UNKNOWN');
-    assert.equal(saved.local_evidence.execution_error_code, expectedCode);
+    assert.equal(returned ? saved.local_evidence.edit_diff_error_code :
+      saved.local_evidence.execution_error_code, expectedCode);
     assert.equal(saved.local_evidence.executor_workspace_guard.candidate_root_changed_paths, 1);
     assert.doesNotMatch(JSON.stringify(saved.local_evidence), /EDIT_PRIVATE_DIAGNOSTIC/);
+    let replayed = false;
+    await assert.rejects(executePendingManifest({ manifestDir: f.manifestDir, currentSid: () => EXECUTOR_SID,
+      config, execute: async () => { replayed = true; throw new Error('unexpected replay'); } }),
+    error => error.code === 'EXECUTOR_ATTEMPT_ALREADY_RUNNING');
+    assert.equal(replayed, false, 'a persisted attempt must not execute again');
   } finally { f.dispose(); }
   }
 });
