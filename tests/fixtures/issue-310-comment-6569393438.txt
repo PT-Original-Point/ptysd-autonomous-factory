@@ -1,0 +1,29 @@
+PTYSD_V53R4_R4_SOURCE_MERGE_RUNTIME_REFRESH_NEXT_ACTION_20261102
+record_type=CODEX_NEXT_ACTION_SOURCE_RUNTIME_DEPLOYMENT_POINTER_NOT_HUMAN_GOAL_NOT_WORKER_RECEIPT
+project_id=CHATGPT_GLOBAL_SKILL_GOVERNANCE
+repo=PT-Original-Point/ptysd-autonomous-factory
+source_merge_pr=702
+source_pr_exact_head=d2c47ebbe4ebc11f81f8487e8ab28f7b9374f757
+source_merge_main=ee2810fa0e0721b4e907895322a011406b2f7336
+merge_tree_verified_equal_to_candidate=true
+source_trusted_hosted_ci=SUCCESS_ON_EXACT_HEAD
+source_native_only_ci=SUCCESS_ON_EXACT_HEAD
+source_windows_v2_ci=SUCCESS_ON_RERUN_EXACT_HEAD
+legacy_runner_ci=CANCELLED_NOT_PASS
+readback_observation_comment=6144415195
+readback_observation_sequence=3116
+readback_at_utc=2026-11-02T04:52:37.576Z
+win11_observed_main_sha=ee2810fa0e0721b4e907895322a011406b2f7336
+win11_installed_source_sha=f201c632bd0c9c466be6687a08cb12302ffb90cb
+win11_native_worker_task_state=RUNNING
+win11_current_task=null
+win11_runtime_deployment=NOT_YET_REFRESHED_TO_NEW_MAIN
+
+NEXT_APPROVED_BOUNDED_CODEX_ACTION:
+1. Treat this source merge as a material delta. Do not mark the entire R4 Goal blocked because legacy self-hosted runner is unregistered; the hosted trusted verifier already passed on exact head.
+2. Only on the existing trusted Win11 Codex/native environment, fresh-read active process, task scheduler, original attempt/manifest, GitHub main, PR #702 and local worktree. Never replay historical UNKNOWN attempts. If any active same-scope writer or an unverified external effect exists, stop only the exact refresh lane.
+3. Reuse the accepted `native-bridge/install.ps1` with `-Mode RefreshRuntimeModules -SourceMainSha ee2810fa0e0721b4e907895322a011406b2f7336 -AcceptedPr 702 -AcceptedPrHead d2c47ebbe4ebc11f81f8487e8ab28f7b9374f757` from an independently verified CLEAN local checkout whose HEAD is exactly ee2810fa0e0721b4e907895322a011406b2f7336; ensure the PR head Git object is locally resolvable for squash-merge ancestry equivalence, and the native PTYSD-Native-OpenCode task is Ready before the invocation. Use the installer's existing atomic backup/rollback, native Task Scheduler, trusted CI identity and exact hash checks. No new installer, service, runner, credential, paid model, or broad access required.
+4. After same-host execution, verify all ten runtime module hashes, manifest source_main_sha=ee2810fa0e0721b4e907895322a011406b2f7336, task enabled/Ready next natural cycle and fresh #407 observation (same source); only then report WIN11_DEPLOYED. Otherwise report exact reject code / UNKNOWN without assuming success.
+5. Independently resume any other authorized nonconflicting Codex source repair (e.g. PR #701, pending regression; no new W1/W2 model call on this source-only step). `HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED` applies to schema-4 Codex policy, not a global schema-6 worker prohibition. Re-evaluate fresh provider quota and true new READY tasks separately.
+STATUS=SOURCE_MERGED_LIVE_RUNTIME_STALE; NEXT_ACTION_OWNER=EXISTING_WIN11_CODEX_CONTROLLER
+This is an additive source/OS observation handoff, not a new Human directive, model dispatch, or assertion that local refresh already ran.

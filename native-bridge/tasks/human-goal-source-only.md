@@ -1,8 +1,8 @@
 # Source-only Human goal execution
 
-The native dispatcher has already fetched and hash-verified the complete Human comment. The full bytes remain in the local request for audit, while the model prompt carries only the unique verbatim `Codex 下一動作` section together with the source ID, author, marker, and body SHA-256.
+The native dispatcher fetches and hash-verifies the complete Human comment and retains its bytes in the local request for audit. The model prompt receives only the validated compact `scoped_action` plus source ID, author, marker, and body SHA-256. A free-form action must be the sole substantive Human text in the comment: at most one authority marker may precede the unique nonempty `Codex 下一動作` section, and no separate section may follow it. Other text fails closed rather than being silently excluded from the action. Two byte-pinned summaries are supported: the exact UTF-8 body of Issue #310 comment 6188322050 with SHA-256 `2f1829da0e1f5105a384be03904b2289c57c05e8a44215c4824fb6b8631d8f7b`, and the exact UTF-8 body of comment 6233162641 with SHA-256 `6e969e32d25197e1b4d865eb969dd88d87afa317864faba1b60c47c7936caedb`. Each summary is enabled only after its comment ID, body hash, marker, and required scope and boundary clauses match. An edited or superseding body does not inherit a fixed action.
 
-Treat that scoped action and this pinned task spec as the complete task-specific direction for the attempt. Do not infer additional permission from omitted comment sections. If the source comment has no unique scoped-action section, the dispatcher must stop before model execution.
+Treat the validated compact action, the source identity, and this pinned task spec as the task-specific direction. Preserve the most restrictive applicable instruction and do not infer additional permission. If they conflict or neither the explicit section nor an exact pinned summary validates, stop and report before taking action.
 
 Work in the isolated Git source bundle and only within the job's exact `write_paths`. Do not interpret the scoped action as a shell command, script, or permission to escape the Codex workspace-write sandbox.
 
