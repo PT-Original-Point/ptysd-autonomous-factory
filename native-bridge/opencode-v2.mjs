@@ -10,6 +10,7 @@ import { homedir, platform } from 'node:os';
 const SEMVER_V2 = /^(?:opencode(?:2)?\s+)?v?(2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/i;
 // v2.2.5 includes upstream PR #60376's PowerShell method-call policy checks.
 const MINIMUM_STABLE_OPEN_CODE_V2_VERSION = '2.2.5';
+const OPEN_CODE_V2_SIGNER_SIMPLE_NAME = 'Anomaly Innovations, Inc https://anoma.ly/';
 const MODEL_ID = /^[a-z][a-z0-9_-]{1,39}\/[A-Za-z0-9_./:-]{1,150}$/;
 const VARIANT_ID = /^[a-z][a-z0-9_-]{0,39}$/;
 const NEVER = ['edit', 'shell', 'subagent', 'skill', 'question', 'webfetch', 'websearch', 'grep',
@@ -51,7 +52,7 @@ function meetsMinimumStableOpenCodeV2Version(version) {
   const minor = Number(match[1]), patch = Number(match[2]);
   return minor > 2 || (minor === 2 && patch >= 5);
 }
-function verifyOpenCodeV2Signature(bin, runSignature = execFileSync) {
+export function verifyOpenCodeV2Signature(bin, runSignature = execFileSync) {
   if (typeof bin !== 'string' || !isAbsolute(bin)) return false;
   const powershell = join(process.env.SystemRoot || 'C:\\Windows', 'System32',
     'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -59,9 +60,12 @@ function verifyOpenCodeV2Signature(bin, runSignature = execFileSync) {
 $securityModule = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
 Import-Module -Name $securityModule -ErrorAction Stop
 $signature = Get-AuthenticodeSignature -LiteralPath $env:PTYSD_OPENCODE_SIGNATURE_PATH
-if ($signature.Status -ne 'Valid' -or
-    $signature.SignerCertificate.Subject -notmatch 'Anomaly Innovations, Inc') { exit 17 }
-[Console]::Out.Write('VALID')`;
+if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { exit 17 }
+$simpleName = $signature.SignerCertificate.GetNameInfo(
+  [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+  $false)
+if ([string]::IsNullOrWhiteSpace($simpleName)) { exit 17 }
+[Console]::Out.Write((@{ Status = [string]$signature.Status; SimpleName = [string]$simpleName } | ConvertTo-Json -Compress -Depth 2))`;
   try {
     const output = runSignature(powershell,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
@@ -69,7 +73,10 @@ if ($signature.Status -ne 'Valid' -or
         shell: false,
         env: { ...process.env, PTYSD_OPENCODE_SIGNATURE_PATH: bin },
       });
-    return typeof output === 'string' && output.trim() === 'VALID';
+    if (typeof output !== 'string') return false;
+    const identity = JSON.parse(output.trim());
+    return identity?.Status === 'Valid' &&
+      identity?.SimpleName === OPEN_CODE_V2_SIGNER_SIMPLE_NAME;
   } catch { return false; }
 }
 function regularFile(p) {
