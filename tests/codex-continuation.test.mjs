@@ -12,7 +12,7 @@ import { runCapturedProcess } from '../native-bridge/captured-process.mjs';
 import {
   CODEX_JOB_KEYS, CODEX_HUMAN_GOAL_JOB_KEYS, CODEX_HUMAN_GOAL_SPEC_PATH,
   NATIVE_JOB_MARKER, parseCodexJob, parseCodexReceipt,
-  codexScopedActionStatus,
+  codexScopedActionStatus, matchesR4AutonomySnapshot,
   codexExecutionGate, codexTaskFingerprint, claimCodexAttempt,
   codexExecutorTaskArguments, validateCodexExecutorTaskXml, assertCodexExecutorTaskReady,
   releaseCodexAttempt,
@@ -55,14 +55,14 @@ const R4_AUTONOMOUS_GOAL_BODY = [
   '10.2 在目前 Codex 連續可執行回合裡，對每個 READY 工作進行設計→分配 W1/W2→回收 diff→測試→修復→PR→CI→同源讀回→下一項 READY；同一批合理關聯問題一次解決。',
 ].join('\n');
 
-test('R4 autonomous continuation fallback requires its exact marker and all authority clauses', () => {
-  const result = codexScopedActionStatus(R4_AUTONOMOUS_GOAL_BODY);
-  assert.equal(result.ready, true);
-  assert.match(result.action, /V5\.3-R4/);
-  assert.match(result.action, /exact write_paths/);
-  assert.match(result.action, /never replay UNKNOWN attempts/);
+test('R4 autonomous continuation fallback requires pinned bytes as well as authority clauses', () => {
+  const fixtureSha = createHash('sha256').update(R4_AUTONOMOUS_GOAL_BODY).digest('hex');
+  assert.equal(matchesR4AutonomySnapshot(R4_AUTONOMOUS_GOAL_BODY, fixtureSha), true);
+  assert.deepEqual(codexScopedActionStatus(R4_AUTONOMOUS_GOAL_BODY),
+    { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' },
+    'copied clauses do not match the production Human goal pin');
 
-  const rejectedBodies = [
+  const rejectedClauses = [
     R4_AUTONOMOUS_GOAL_BODY.replace(R4_GOAL_MARKER, 'PTYSD_V53R4_OTHER_GOAL_20261015'),
     R4_AUTONOMOUS_GOAL_BODY.replace('不要求 Human 重貼「繼續」', '等待 Human 確認'),
     R4_AUTONOMOUS_GOAL_BODY.replace('新費用、不可逆跨外部權威操作', '一般工作'),
@@ -73,35 +73,41 @@ test('R4 autonomous continuation fallback requires its exact marker and all auth
     `${R4_AUTONOMOUS_GOAL_BODY}\n6.6 自動模型工作結束後，原生排程下一次讀回 conflicting continuation`,
     `${R4_AUTONOMOUS_GOAL_BODY}\n9.3 Human Gate 只處理真實 Platform 身分/OAuth/MFA、Production conflicting gate`,
     `${R4_AUTONOMOUS_GOAL_BODY}\n10.2 在目前 Codex 連續可執行回合裡，對每個 READY 工作 conflicting selection`,
-    `${R4_AUTONOMOUS_GOAL_BODY}\n**Codex 下一動作**：`,
   ];
-  for (const body of rejectedBodies)
+  for (const body of rejectedClauses) {
+    assert.equal(matchesR4AutonomySnapshot(body, fixtureSha), false);
+    assert.equal(matchesR4AutonomySnapshot(body, createHash('sha256').update(body).digest('hex')),
+      false, 'a matching digest does not replace the required clauses');
     assert.deepEqual(codexScopedActionStatus(body),
       { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' });
+  }
+  const stopped = `${R4_AUTONOMOUS_GOAL_BODY}\n11.99 現在停止所有自動 Codex 派工，不再執行來源工作。`;
+  assert.equal(matchesR4AutonomySnapshot(stopped, fixtureSha), false);
+  assert.deepEqual(codexScopedActionStatus(stopped),
+    { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' });
+  assert.deepEqual(codexScopedActionStatus(`${R4_AUTONOMOUS_GOAL_BODY}\n**Codex 下一動作**：`),
+    { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' });
 });
 
-test('R4 autonomous fallback stays byte-bound in a schema-4 Codex request', () => {
+test('a self-consistent schema-4 request cannot turn copied or amended R4 clauses into authority', () => {
   const commentId = 6188322050;
-  const goalSha = createHash('sha256').update(R4_AUTONOMOUS_GOAL_BODY).digest('hex');
   const spec = '# Human goal source-only work\nUse the validated R4 continuation scope.\n';
   const specSha = createHash('sha256').update(spec).digest('hex');
-  const picked = job({ schema: 4,
-    request_id: `PTYSD_HUMAN_GOAL_${commentId}_${goalSha.slice(0, 42).toUpperCase()}`,
-    spec_path: CODEX_HUMAN_GOAL_SPEC_PATH, spec_sha256: specSha,
-    goal_comment_id: commentId, goal_body_sha256: goalSha,
-    goal_author: author, goal_marker: R4_GOAL_MARKER });
-  const context = { repo: 'PT-Original-Point/ptysd-autonomous-factory', issue: 310,
-    comment_id: commentId, author, body_sha256: goalSha, body: R4_AUTONOMOUS_GOAL_BODY,
-    fetched_at: '2026-11-03T07:00:00.000Z' };
-  const request = makeCodexExecutorRequest(picked, '00000000-0000-4000-8000-000000000042',
-    spec, join(homedir(), 'synthetic-r4-source.bundle'), 'c'.repeat(64), context);
-  const validated = validateCodexExecutorRequest(request);
-  assert.equal(validated.goalContext.scoped_action,
-    codexScopedActionStatus(R4_AUTONOMOUS_GOAL_BODY).action);
-  const prompt = codexExecutorPrompt(validated);
-  assert.ok(prompt.includes(validated.goalContext.scoped_action));
-  assert.equal(prompt.includes(R4_AUTONOMOUS_GOAL_BODY), false,
-    'the exact goal digest stays bound while unrelated Human comment text stays out of the model prompt');
+  for (const body of [R4_AUTONOMOUS_GOAL_BODY,
+    `${R4_AUTONOMOUS_GOAL_BODY}\n11.99 現在停止所有自動 Codex 派工，不再執行來源工作。`]) {
+    const goalSha = createHash('sha256').update(body).digest('hex');
+    const picked = job({ schema: 4,
+      request_id: `PTYSD_HUMAN_GOAL_${commentId}_${goalSha.slice(0, 42).toUpperCase()}`,
+      spec_path: CODEX_HUMAN_GOAL_SPEC_PATH, spec_sha256: specSha,
+      goal_comment_id: commentId, goal_body_sha256: goalSha,
+      goal_author: author, goal_marker: R4_GOAL_MARKER });
+    const context = { repo: 'PT-Original-Point/ptysd-autonomous-factory', issue: 310,
+      comment_id: commentId, author, body_sha256: goalSha, body,
+      fetched_at: '2026-11-03T07:00:00.000Z' };
+    assert.throws(() => makeCodexExecutorRequest(picked, '00000000-0000-4000-8000-000000000042',
+      spec, join(homedir(), 'synthetic-r4-source.bundle'), 'c'.repeat(64), context),
+    /HUMAN_GOAL_SCOPED_ACTION_MISSING/);
+  }
 });
 
 function job(overrides = {}) {

@@ -23,6 +23,10 @@ export const CODEX_HUMAN_GOAL_SPEC_PATH = 'native-bridge/tasks/human-goal-source
 // GitHub rejects Issue comment bodies above 65,536 characters.
 const MAX_GITHUB_ISSUE_COMMENT_BODY_LENGTH = 65_536;
 const R4_AUTONOMY_GOAL_MARKER = 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015';
+// Issue #310 comment 6188322050, as read from GitHub. A changed comment must
+// not inherit the fixed fallback action merely by retaining selected clauses.
+const R4_AUTONOMY_GOAL_BODY_SHA256 =
+  '2f1829da0e1f5105a384be03904b2289c57c05e8a44215c4824fb6b8631d8f7b';
 const R4_AUTONOMY_GOAL_ACTION =
   'Continue the Human-authorized V5.3-R4 pre-Production source-work objective. Select the ' +
   'highest-value nonconflicting READY task within this request’s exact write_paths and pinned ' +
@@ -37,7 +41,12 @@ const MODEL = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$/;
 const FORBIDDEN_PATHS = new Set(['governance', 'runs', '.codex', '.git']);
 const HUMAN_GOAL_MARKER = /^PTYSD_V53R4_(?:DELETE_FIRST_AUTONOMY_GOAL|P[0-3]|R\d{1,2}|EMERGENCY|CODEX_DIRECTIVE)(?:_[A-Z0-9]+)*_\d{8}$/;
 
-function hasR4AutonomousGoalAuthority(body) {
+// This is a byte-and-clause matcher, not an authority decision: callers must
+// supply a trusted pin. The dispatcher below uses the fixed Human goal pin.
+export function matchesR4AutonomySnapshot(body, expectedBodySha256) {
+  if (typeof body !== 'string' || body.length > MAX_GITHUB_ISSUE_COMMENT_BODY_LENGTH ||
+      typeof expectedBodySha256 !== 'string' || !HASH.test(expectedBodySha256) ||
+      sha256(Buffer.from(body, 'utf8')) !== expectedBodySha256) return false;
   const lines = body.split(/\r?\n/).map(line => line.trim());
   const markers = lines.map(line => line.replace(/^<!--\s*|\s*-->$/g, ''))
     .filter(line => HUMAN_GOAL_MARKER.test(line));
@@ -374,7 +383,7 @@ export function codexScopedActionStatus(body) {
     return { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_INVALID' };
   const matches = [...body.matchAll(/^\*\*Codex 下一動作\*\*[：:][ \t]*/gm)];
   if (matches.length === 0) {
-    if (hasR4AutonomousGoalAuthority(body))
+    if (matchesR4AutonomySnapshot(body, R4_AUTONOMY_GOAL_BODY_SHA256))
       return { ready: true, action: R4_AUTONOMY_GOAL_ACTION };
     return { ready: false, code: 'HUMAN_GOAL_SCOPED_ACTION_MISSING' };
   }
