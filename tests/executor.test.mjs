@@ -1027,6 +1027,50 @@ test('executor blocks a dirty registered-root path before starting a scoped atte
   } finally { f.dispose(); }
 });
 
+test('executor preserves a sanitized execution error when changed candidate reconciliation fails', async t => {
+  if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
+  for (const [errorCode, expectedCode] of [['EIO', 'EIO'], ['EDIT_PRIVATE_DIAGNOSTIC', 'UNKNOWN']]) {
+  const f = fixture();
+  try {
+    const source = sourceRepository(f.root, 'candidate-execution-error');
+    const sourceSha = source.git(['rev-parse', 'HEAD']).trim();
+    const spec = 'Synthetic failure; provider and model are not invoked.';
+    const job = { ...modelJob(spec), schema: 6, project_id: PROJECT,
+      host: hostname().toUpperCase(), kind: 'antigravity_edit',
+      request_id: 'PTYSD_ANTIGRAVITY_SYNTHETIC_EXECUTION_ERROR', source_sha: sourceSha,
+      spec_path: 'native-bridge/tasks/w2-review.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gemini-3.8-flash-high', variant: 'high', edit_paths: ['package.json'],
+      source_pr: 461, goal_comment_id: 6188322050, goal_body_sha256: 'c'.repeat(64) };
+    const bundle = createExecutorSourceBundle({ workspace: source.workspace,
+      descriptor: f.descriptor, job, attemptId: ATTEMPT_EDIT, filesystemPath: localPathMap(f) });
+    writeFileSync(join(f.manifestDir, `${ATTEMPT_EDIT}.pending.json`), JSON.stringify(
+      makeExecutorManifest(job, spec, ATTEMPT_EDIT, bundle.sha256)), { flag: 'wx' });
+    const result = await executePendingManifest({ manifestDir: f.manifestDir,
+      currentSid: () => EXECUTOR_SID,
+      config: { project_id: PROJECT, repo: REPO, host: hostname().toUpperCase(),
+        executor_runtime: { user_sid: EXECUTOR_SID, publisher_sid: PUBLISHER_SID,
+          manifest_dir: f.manifestDir, results_dir: f.resultsDir },
+        workspace: source.workspace, state_dir: f.resultsDir, enable_antigravity_model_runs: true },
+      execute: async (_spec, executionConfig) => {
+        writeFileSync(join(executionConfig.workspace, 'package.json'), '{"name":"edited"}\n');
+        const error = new Error('EDIT_PRIVATE_DIAGNOSTIC');
+        error.code = errorCode;
+        throw error;
+      },
+    });
+    const saved = JSON.parse(readFileSync(executorResultPath(f.resultsDir,
+      job.request_id, ATTEMPT_EDIT), 'utf8'));
+    assert.equal(result.terminal_state, 'BLOCKED');
+    assert.equal(saved.terminal.outcome, 'EXECUTOR_EDIT_CANDIDATE_DIFF_UNRECONCILED');
+    assert.equal(saved.terminal.external_effects, 'UNKNOWN');
+    assert.equal(saved.local_evidence.execution_error_code, expectedCode);
+    assert.equal(saved.local_evidence.executor_workspace_guard.candidate_root_changed_paths, 1);
+    assert.doesNotMatch(JSON.stringify(saved.local_evidence), /EDIT_PRIVATE_DIAGNOSTIC/);
+  } finally { f.dispose(); }
+  }
+});
+
 test('executor reconciles tracked and untracked candidate changes against the captured diff', async t => {
   if (process.platform !== 'win32') return t.skip('Task Scheduler identity execution is Windows-only');
   const f = fixture();
