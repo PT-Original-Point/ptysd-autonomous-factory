@@ -1382,9 +1382,28 @@ function humanDirectiveMarker(body) {
   return null;
 }
 function latestTrustedHumanDirective(comments, dispatchers) {
+  const reference = comments.filter(comment => comment?.id === 6233162641);
+  if (reference.length !== 1 ||
+      reference[0].issue_url !== `https://api.github.com/repos/${REPO}/issues/${V53_GOAL_ISSUE}` ||
+      reference[0].user?.login !== 't14210184' || typeof reference[0].body !== 'string' ||
+      digest(Buffer.from(reference[0].body, 'utf8')) !==
+        '6e969e32d25197e1b4d865eb969dd88d87afa317864faba1b60c47c7936caedb')
+    throw new Error('HUMAN_GOAL_REFERENCE_IDENTITY_UNKNOWN');
+  // This one provider record is a verified non-Human handoff, not a general
+  // rule for trusting or excluding comments that describe themselves as such.
+  for (const comment of comments) {
+    const bodyHash = typeof comment?.body === 'string' ? digest(Buffer.from(comment.body, 'utf8')) : null;
+    if (comment?.id !== 6569393438 && bodyHash !==
+        '45da457d7181d0d29d4649fa4f121f09651a0b5e6746eaa6639b37b55a93b417') continue;
+    if (comment.issue_url !== `https://api.github.com/repos/${REPO}/issues/${V53_GOAL_ISSUE}` ||
+        comment.id !== 6569393438 || comment.user?.login !== 't14210184' || bodyHash !==
+          '45da457d7181d0d29d4649fa4f121f09651a0b5e6746eaa6639b37b55a93b417')
+      throw new Error('HUMAN_GOAL_HANDOFF_IDENTITY_UNKNOWN');
+  }
   return comments.filter(comment => comment?.issue_url ===
       `https://api.github.com/repos/${REPO}/issues/${V53_GOAL_ISSUE}` &&
     Number.isSafeInteger(comment.id) && comment.id > 0 &&
+    comment.id !== 6569393438 &&
     typeof comment.user?.login === 'string' && dispatchers.includes(comment.user.login) &&
     humanDirectiveMarker(comment.body) !== null)
     .sort((a, b) => a.id - b.id).at(-1) ?? null;
@@ -1556,7 +1575,7 @@ export async function readPinnedCandidateSources(comments, dispatchers, workerLo
 }
 export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha = null,
   blockedKinds = [], candidateSourceShas = new Map(), verifiedNoWriteAttemptKeys = new Set(),
-  verifiedSourceAcceptanceKeys = new Set()) {
+  verifiedSourceAcceptanceKeys = new Set(), eligibleRequestIds = null) {
   const jobs = new Map();
   const receipts = new Map();
   for (const c of comments) {
@@ -1607,6 +1626,7 @@ export function selectNext(comments, dispatchers, workerLogin, host, liveMainSha
     }
   }
   for (const [, v] of jobs) {
+    if (eligibleRequestIds && !eligibleRequestIds.has(v.job.request_id)) continue;
     // Schema-2 plans remain parseable for historical receipt recovery, but
     // new read-only model tasks are no longer part of the executable path.
     if (v.job.kind === 'opencode_plan') continue;
@@ -3829,9 +3849,10 @@ export async function runWorker(configInput, adapters = {}) {
   const receiptAndLegacyComments = commentsRead(config);
   let humanGoalComments = null;
   let humanGoalWaitingReason = null;
+  let humanGoalAuthorityBlocker = null;
   try { humanGoalComments = goalCommentsRead(); }
   catch {
-    humanGoalWaitingReason = 'HUMAN_GOAL_SOURCE_READ_UNKNOWN';
+    humanGoalAuthorityBlocker = 'HUMAN_GOAL_SOURCE_READ_UNKNOWN';
     log('HUMAN_GOAL_DISCOVERY_READ_UNKNOWN');
   }
   const humanCandidateJobs = (humanGoalComments || []).filter(comment =>
@@ -4078,61 +4099,98 @@ export async function runWorker(configInput, adapters = {}) {
   const head = apiRead(`repos/${REPO}/git/ref/heads/main`).object?.sha;
   if (!SHA.test(head || '')) throw new Error('MAIN_HEAD_UNREADABLE');
   let humanGoalTask = null;
-  const latestDirective = latestTrustedHumanDirective(humanGoalComments || [], config.dispatchers);
-  if (latestDirective) {
-    const identity = humanDirectiveCodexIdentity(latestDirective);
-    const requestId = identity?.requestId;
-    const priorGoalReceipt = comments.some(comment => comment.user?.login === me &&
-      parseReceipt(comment.body)?.request_id === requestId);
-    const legacyReceiptStatus = humanGoalLegacyReceiptStatus(comments, me, latestDirective.id,
-      identity?.bodySha256, config.host);
-    if (priorGoalReceipt) {
-      log(`HUMAN_GOAL_ALREADY_HAS_RECEIPT_${latestDirective.id}_NO_REPLAY`);
-    } else if (legacyReceiptStatus === 'SAME_BODY') {
-      log(`HUMAN_GOAL_ALREADY_HAS_LEGACY_RECEIPT_${latestDirective.id}_NO_REPLAY`);
-    } else if (legacyReceiptStatus === 'UNKNOWN') {
-      humanGoalWaitingReason ??= 'HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN';
-      log(`HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN_${latestDirective.id}_NO_REPLAY`);
+  let latestDirective = null;
+  const hasCodexPlanJob = comments.some(comment => {
+    const job = parseJob(comment.body);
+    return config.dispatchers.includes(comment.user?.login) && job?.kind === 'codex_plan' &&
+      job.host.toUpperCase() === config.host.toUpperCase();
+  });
+  const hasHumanDirective = (humanGoalComments || []).some(comment =>
+    comment?.id !== 6569393438 && comment?.issue_url ===
+      `https://api.github.com/repos/${REPO}/issues/${V53_GOAL_ISSUE}` &&
+    config.dispatchers.includes(comment.user?.login) && humanDirectiveMarker(comment.body) !== null);
+  if (humanGoalAuthorityBlocker || hasCodexPlanJob || hasHumanDirective) {
+    if (humanGoalAuthorityBlocker) {
+      blockedKinds.add('codex_plan');
+      log(`${humanGoalAuthorityBlocker}_NO_DISPATCH`);
     } else {
-      const scopedAction = codexScopedActionStatus(latestDirective.body);
-      const policyFailure = codexGoalPolicyFailure(config.human_goal_codex_policy);
-      if (!scopedAction.ready) {
-        humanGoalWaitingReason ??= scopedAction.code;
-        log(`${scopedAction.code}_${latestDirective.id}_NO_MODEL`);
-      }
-      if (policyFailure) {
-        humanGoalWaitingReason ??= policyFailure;
-        log(`${policyFailure}_${latestDirective.id}_NO_MODEL`);
-      }
-      if (scopedAction.ready && !policyFailure) {
-        try {
-          const goalSpecBytes = readSpecBytes(CODEX_HUMAN_GOAL_SPEC_PATH, head, apiRead);
-          const goalSpec = goalSpecBytes.toString('utf8');
-          const job = humanDirectiveCodexJob(latestDirective, config.host, head, goalSpec,
-            config.human_goal_codex_policy);
-          if (!job) {
-            humanGoalWaitingReason ??= 'HUMAN_GOAL_CODEX_POLICY_INVALID';
-            log(`HUMAN_GOAL_CODEX_POLICY_INVALID_${latestDirective.id}_NO_MODEL`);
-          } else {
-            humanGoalTask = { comment: latestDirective, spec: goalSpec };
-            comments.push({ id: latestDirective.id, body: JOB_MARKER + JSON.stringify(job),
-              user: latestDirective.user, issue_url: latestDirective.issue_url });
-            comments.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
-          }
-        } catch {
-          humanGoalWaitingReason ??= 'HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN';
-          log(`HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN_${latestDirective.id}_NO_DISPATCH`);
-        }
+      try { latestDirective = latestTrustedHumanDirective(humanGoalComments || [], config.dispatchers); }
+      catch (error) {
+        blockedKinds.add('codex_plan');
+        humanGoalAuthorityBlocker = error?.message === 'HUMAN_GOAL_REFERENCE_IDENTITY_UNKNOWN'
+          ? 'HUMAN_GOAL_REFERENCE_IDENTITY_UNKNOWN' : 'HUMAN_GOAL_HANDOFF_IDENTITY_UNKNOWN';
+        log(`${humanGoalAuthorityBlocker}_NO_DISPATCH`);
       }
     }
-    if (legacyReceiptStatus === 'PRIOR_BODY_TERMINAL')
-      log(`HUMAN_GOAL_PRIOR_BODY_TERMINAL_${latestDirective.id}_NEW_BODY_MAY_PROCEED`);
+  }
+  if (latestDirective) {
+    const scopedAction = codexScopedActionStatus(latestDirective.body, latestDirective.id);
+    if (!scopedAction.ready) {
+      blockedKinds.add('codex_plan');
+      humanGoalAuthorityBlocker = scopedAction.code;
+      log(`${scopedAction.code}_${latestDirective.id}_NO_MODEL`);
+    } else {
+      const identity = humanDirectiveCodexIdentity(latestDirective);
+      const requestId = identity?.requestId;
+      const priorGoalReceipt = comments.some(comment => comment.user?.login === me &&
+        parseReceipt(comment.body)?.request_id === requestId);
+      const legacyReceiptStatus = humanGoalLegacyReceiptStatus(comments, me, latestDirective.id,
+        identity?.bodySha256, config.host);
+      if (priorGoalReceipt) {
+        log(`HUMAN_GOAL_ALREADY_HAS_RECEIPT_${latestDirective.id}_NO_REPLAY`);
+      } else if (legacyReceiptStatus === 'SAME_BODY') {
+        log(`HUMAN_GOAL_ALREADY_HAS_LEGACY_RECEIPT_${latestDirective.id}_NO_REPLAY`);
+      } else if (legacyReceiptStatus === 'UNKNOWN') {
+        humanGoalWaitingReason ??= 'HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN';
+        log(`HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN_${latestDirective.id}_NO_REPLAY`);
+      } else {
+        const policyFailure = codexGoalPolicyFailure(config.human_goal_codex_policy);
+        if (policyFailure) {
+          humanGoalWaitingReason ??= policyFailure;
+          log(`${policyFailure}_${latestDirective.id}_NO_MODEL`);
+        }
+        if (!policyFailure) {
+          try {
+            const goalSpecBytes = readSpecBytes(CODEX_HUMAN_GOAL_SPEC_PATH, head, apiRead);
+            const goalSpec = goalSpecBytes.toString('utf8');
+            const job = humanDirectiveCodexJob(latestDirective, config.host, head, goalSpec,
+              config.human_goal_codex_policy);
+            if (!job) {
+              humanGoalWaitingReason ??= 'HUMAN_GOAL_CODEX_POLICY_INVALID';
+              log(`HUMAN_GOAL_CODEX_POLICY_INVALID_${latestDirective.id}_NO_MODEL`);
+            } else {
+              humanGoalTask = { comment: latestDirective, spec: goalSpec };
+              comments.push({ id: latestDirective.id, body: JOB_MARKER + JSON.stringify(job),
+                user: latestDirective.user, issue_url: latestDirective.issue_url });
+              comments.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+            }
+          } catch {
+            humanGoalWaitingReason ??= 'HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN';
+            log(`HUMAN_GOAL_CODEX_SPEC_READ_UNKNOWN_${latestDirective.id}_NO_DISPATCH`);
+          }
+        }
+      }
+      if (legacyReceiptStatus === 'PRIOR_BODY_TERMINAL')
+        log(`HUMAN_GOAL_PRIOR_BODY_TERMINAL_${latestDirective.id}_NEW_BODY_MAY_PROCEED`);
+    }
   }
   const candidateSourceShas = await readPinnedCandidateSources(comments,
     config.dispatchers, me, config.host, apiRead, log, [...blockedKinds],
     () => humanGoalComments ?? goalCommentsRead());
   const verifiedSourceAcceptanceKeys = await readVerifiedCodexSourceAcceptances(
     comments, config.dispatchers, me, config.host, apiRead, log);
+  if (humanGoalAuthorityBlocker) {
+    const codexRequestIds = new Set(comments.flatMap(comment => {
+      const job = parseJob(comment.body);
+      return config.dispatchers.includes(comment.user?.login) && job?.kind === 'codex_plan' &&
+        job.host.toUpperCase() === config.host.toUpperCase() ? [job.request_id] : [];
+    }));
+    const otherwiseReadyCodex = codexRequestIds.size ? selectNext(comments,
+      config.dispatchers, me, config.host, head,
+      [...blockedKinds].filter(kind => kind !== 'codex_plan'), candidateSourceShas,
+      verifiedNoWriteAttemptKeys, verifiedSourceAcceptanceKeys, codexRequestIds) : null;
+    if (otherwiseReadyCodex) humanGoalWaitingReason ??= humanGoalAuthorityBlocker;
+  }
   const authorizedW1JobExists = comments.some(comment => {
     if (!config.dispatchers.includes(comment.user?.login)) return false;
     const job = parseJob(comment.body);
@@ -4143,6 +4201,24 @@ export async function runWorker(configInput, adapters = {}) {
     config.host, candidateSourceShas)) {
     log(`STALE_CANDIDATE_SOURCE_${stale.request_id}_PR_${stale.source_pr}_` +
       `EXPECTED_SHA_${stale.expected_sha}_OBSERVED_SHA_${stale.observed_sha}_NO_DISPATCH`);
+  }
+  let unboundCodexWaiting = null;
+  for (const comment of comments) {
+    const job = parseJob(comment.body);
+    if (config.dispatchers.includes(comment.user?.login) && job?.kind === 'codex_plan' &&
+        job.schema === 3 && job.host.toUpperCase() === config.host.toUpperCase()) {
+      const otherwiseReady = selectNext(comments, config.dispatchers, me, config.host, head,
+        [...blockedKinds], candidateSourceShas, verifiedNoWriteAttemptKeys,
+        verifiedSourceAcceptanceKeys, new Set([job.request_id]));
+      if (otherwiseReady?.job.request_id === job.request_id) {
+        unboundCodexWaiting = 'CODEX_HUMAN_SCOPE_BINDING_REQUIRED';
+        if (!skippedRequestIds.has(job.request_id))
+          log(`CODEX_HUMAN_SCOPE_BINDING_REQUIRED_${job.request_id}_NO_DISPATCH`);
+      } else if (!skippedRequestIds.has(job.request_id)) {
+        log(`CODEX_SCHEMA3_NOT_CURRENTLY_READY_${job.request_id}_NO_WAIT`);
+      }
+      skippedRequestIds.add(job.request_id);
+    }
   }
   const selectNextCandidate = () => selectNextWithCodexClaim(comments.filter(comment => {
     const job = parseJob(comment.body);
@@ -4287,7 +4363,8 @@ export async function runWorker(configInput, adapters = {}) {
   }
   let observation;
   try {
-    const pollInput = { next, waitingEligibility, humanGoalWaitingReason, preflightBlockers };
+    const pollInput = { next, waitingEligibility: waitingEligibility ?? unboundCodexWaiting,
+      humanGoalWaitingReason, preflightBlockers };
     const pollDisposition = derivePollDisposition(pollInput);
     observation = await publishOperatorObservation(
       config, me, comments, head, adapters.observationDependencies, candidateSourceShas,
@@ -4295,7 +4372,7 @@ export async function runWorker(configInput, adapters = {}) {
       preflightBlockers,
       pollDisposition,
       derivePollWaitCode({ waiting: pollDisposition === 'WAITING_GATE_NO_MODEL_DISPATCH',
-        waitingEligibility, humanGoalWaitingReason, preflightBlockers }),
+        waitingEligibility: waitingEligibility ?? unboundCodexWaiting, humanGoalWaitingReason, preflightBlockers }),
     );
   } catch (error) {
     // Status publishing failure must not block a valid queued task.
@@ -4324,7 +4401,7 @@ export async function runWorker(configInput, adapters = {}) {
     else log(`OPERATOR_OBSERVATION_UPDATE_UNKNOWN_${errorCode || 'OPERATOR_OBSERVATION_UPDATE_UNKNOWN'}`);
   }
   if (!next) {
-    const waitingReason = waitingEligibility ?? humanGoalWaitingReason;
+    const waitingReason = waitingEligibility ?? humanGoalWaitingReason ?? unboundCodexWaiting;
     if (waitingReason) {
       log(`WAITING_ELIGIBILITY_${waitingReason}`);
       return { state: 'WAITING_ELIGIBILITY', reason: waitingReason };
@@ -4407,7 +4484,13 @@ export async function runWorker(configInput, adapters = {}) {
   let humanGoalContext = null;
   if (job.kind === 'codex_plan' && job.schema === 4) {
     let latestCurrentDirective;
-    try { latestCurrentDirective = latestTrustedHumanDirective(goalCommentsRead(), config.dispatchers); }
+    try {
+      const finalComments = goalCommentsRead();
+      if (humanGoalComments?.some(comment => comment?.id === 6569393438) &&
+          !finalComments.some(comment => comment?.id === 6569393438))
+        throw new Error('HUMAN_GOAL_HANDOFF_IDENTITY_UNKNOWN');
+      latestCurrentDirective = latestTrustedHumanDirective(finalComments, config.dispatchers);
+    }
     catch {
       discardPreparedSourceBundle();
       log(`HUMAN_GOAL_LATEST_FINAL_READBACK_UNKNOWN_${job.goal_comment_id}_NO_DISPATCH`);
