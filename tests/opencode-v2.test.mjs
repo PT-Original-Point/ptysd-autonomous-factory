@@ -7,7 +7,7 @@ import { platform, tmpdir } from 'node:os';
 import { basename, delimiter, join } from 'node:path';
 import { discoverV2Executables, qualifyOpenCodeV2, parseOpenCodeV2Version, validateV2Model,
   buildV2ReadOnlyArgs, buildV2ReadOnlyConfig, buildV2ScopedEditConfig, buildV2ScopedEditArgs,
-  readOpenCodeV2RunEvidence } from '../native-bridge/opencode-v2.mjs';
+  readOpenCodeV2RunEvidence, verifyOpenCodeV2Signature } from '../native-bridge/opencode-v2.mjs';
 import { runPlan, terminalStateForResult } from '../native-bridge/worker.mjs';
 
 test('V2 model argument builders use isolated fresh runs without resuming a prior session', () => {
@@ -675,6 +675,48 @@ test('Windows V2 qualification verifies the signed publisher before executing a 
     assert.equal(signed.ready,true);
     assert.equal(signed.signature_status,'VALID');
     assert.equal(versionCalls,1);
+  } finally {rmSync(tmp,{recursive:true,force:true});}
+});
+test('Windows V2 qualification requires the exact structured Authenticode SimpleName', () => {
+  const tmp=mkdtempSync(join(tmpdir(),'oc2-structured-signer-'));
+  try {
+    const home=join(tmp,'user'), exe=join(tmp,'opencode-cli.exe');
+    mkdirSync(home);
+    writeFileSync(exe,'synthetic executable');
+    const env={PTYSD_OPENCODE_V2_EXE:exe,USERPROFILE:home,PATH:''};
+    const official='Anomaly Innovations, Inc https://anoma.ly/';
+    const cases=[
+      ['observed official signer',JSON.stringify({Status:'Valid',SimpleName:official}),true],
+      ['publisher text only in an unrelated Subject field',
+        JSON.stringify({Status:'Valid',SimpleName:'Contoso Software',
+          Subject:'CN=Contoso Software,O=Anomaly Innovations, Inc'}),false],
+      ['publisher text embedded in a longer signer name',
+        JSON.stringify({Status:'Valid',SimpleName:'Contoso Anomaly Innovations, Inc https://anoma.ly/ Holdings'}),false],
+      ['missing structured identity',JSON.stringify({Status:'Valid'}),false],
+      ['malformed structured identity',JSON.stringify({Status:'Valid',SimpleName:42}),false],
+      ['malformed PowerShell JSON','{"Status":"Valid","SimpleName":',false],
+      ['invalid Authenticode status',JSON.stringify({Status:'NotTrusted',SimpleName:official}),false],
+    ];
+    for (const [label,output,expected] of cases) {
+      let signatureCalls=0,versionCalls=0;
+      const runSignature=(_command,args)=>{
+        signatureCalls++;
+        const script=args[args.indexOf('-Command')+1];
+        assert.match(script,/GetNameInfo\([\s\S]*X509NameType\]::SimpleName/);
+        assert.doesNotMatch(script,/SignerCertificate\.Subject/);
+        return output;
+      };
+      const signatureValid=verifyOpenCodeV2Signature(exe,runSignature);
+      assert.equal(signatureValid,expected,label);
+      const result=qualifyOpenCodeV2(env,true,(_path,_args)=>{
+        versionCalls++;
+        return 'opencode v2.2.5';
+      },path=>verifyOpenCodeV2Signature(path,runSignature));
+      assert.equal(result.ready,expected,label);
+      assert.equal(signatureCalls,2,label);
+      assert.equal(versionCalls,expected?1:0,
+        'unrecognized signers must be rejected before the --version executable probe');
+    }
   } finally {rmSync(tmp,{recursive:true,force:true});}
 });
 test('native Windows Authenticode rejects an unsigned V2-shaped executable before version probing', {
