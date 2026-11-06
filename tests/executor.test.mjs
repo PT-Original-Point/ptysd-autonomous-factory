@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync,
   writeFileSync } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JOB_MARKER, PROJECT, RECEIPT_MARKER, REPO, parseReceipt, receipt, runWorker,
   captureScopedEditDiff, verifyCapturedEvidence, runPlan } from '../native-bridge/worker.mjs';
@@ -1031,13 +1031,20 @@ test('executor persists actual Worker diff failure through guard and does not re
   if (process.platform !== 'win32') return t.skip('executor workspace guard is Windows-only');
   const f = fixture();
   try {
-    // Clone the existing pinned commit into a disposable fixture; do not create a commit.
+    // Build a complete, independent synthetic root history; no checkout or remote is needed.
     const workspace = join(f.root, 'source');
-    const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-    execFileSync('git', ['clone', '--quiet', '--no-local', repository, workspace],
-      { windowsHide:true, stdio:['ignore','pipe','pipe'] });
-    const sourceSha = execFileSync('git', ['-C', workspace, 'rev-parse', 'HEAD'],
-      { encoding:'utf8', windowsHide:true }).trim();
+    mkdirSync(workspace);
+    const git = (args, input) => execFileSync('git', ['-C', workspace, ...args],
+      { encoding:'utf8', windowsHide:true, input, stdio:['pipe','pipe','pipe'] }).trim();
+    git(['init','--quiet']);
+    const blob = git(['hash-object','-w','--stdin'], 'synthetic source\n');
+    const tree = git(['mktree'], `100644 blob ${blob}\tREADME.md\n`);
+    const sourceSha = git(['hash-object','-t','commit','-w','--stdin'],
+      `tree ${tree}\nauthor Test <test@example.invalid> 0 +0000\n` +
+      'committer Test <test@example.invalid> 0 +0000\n\nSynthetic root\n');
+    git(['update-ref','HEAD',sourceSha]);
+    git(['reset','--hard','--quiet',sourceSha]);
+    assert.equal(git(['rev-parse','--is-shallow-repository']),'false');
     const spec = 'Synthetic Worker diff failure; no model or provider call.';
     const job = { ...modelJob(spec), schema:4, kind:'opencode_edit',
       request_id:'PTYSD_WORKER_DIFF_GUARD_NO_REPLAY', source_sha:sourceSha,
