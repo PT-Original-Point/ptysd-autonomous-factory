@@ -249,10 +249,10 @@
     </article>
     <article class="panel worker-card">
       <div class="worker-head">
-        <div><div class="worker-title-line"><div><span class="worker-id">W3</span><h2 class="worker-name">ChatGPT Web／Codex Zero Risk</h2></div><span id="w3-task-badge" class="badge neutral">未派工</span></div><span class="worker-harness">需有效 request_id、Human 轉送及真實工具回傳</span><div class="worker-latest"><span id="w3-header-progress">最新任務進度未確認</span><time id="w3-last-event">最後任務事件：未確認</time></div></div>
+        <div><div class="worker-title-line"><div><span class="worker-id">W3</span><h2 class="worker-name">ChatGPT Web／Codex</h2></div><span id="w3-task-badge" class="badge neutral">證據不足</span></div><span class="worker-harness">執行路徑、模型活動與結果須由同一任務收據分別核對</span><div class="worker-latest"><span id="w3-header-progress">最新任務進度未確認</span><time id="w3-last-event">最後任務事件：未確認</time></div></div>
         <div class="worker-live"><span class="worker-live-label">即時施工</span><span id="w3-badge" class="badge neutral">狀態未確認</span></div>
       </div>
-      <p id="w3-empty" class="worker-empty" hidden>目前沒有可核對的 Zero Risk 任務；尚無證據證明已派工或轉送。</p>
+      <p id="w3-empty" class="worker-empty" hidden>證據不足：尚無同來源 W3 派工／執行收據；分派、啟動、執行路徑、模型活動、完成與驗收均 UNKNOWN。</p>
       <div id="w3-worker-details">
       <div class="field"><strong>正式任務</strong><span id="w3-task">未確認</span></div>
       <div class="field"><strong>工作階段／執行者</strong><span id="w3-session">未確認</span></div>
@@ -328,7 +328,7 @@
       </details>
     </article>
     <article class="panel dispatch-card">
-      <div class="dispatch-head"><div><span class="worker-id">W3</span><h3>Codex 派工 · Zero Risk</h3></div><span id="w3-dispatch-state" class="badge neutral">未確認</span></div>
+      <div class="dispatch-head"><div><span class="worker-id">W3</span><h3>W3 執行與收據</h3></div><span id="w3-dispatch-state" class="badge neutral">證據不足</span></div>
       <div class="dispatch-summary">
         <p class="dispatch-summary-line"><strong>任務摘要</strong><span id="w3-dispatch-summary-task">未確認</span></p>
         <p class="dispatch-summary-line"><strong>最新進度</strong><span id="w3-dispatch-summary-progress">未確認</span></p>
@@ -336,16 +336,16 @@
         <p class="dispatch-summary-line"><strong>阻擋／驗收</strong><span id="w3-dispatch-summary-blocker">未確認</span></p>
         <p class="dispatch-summary-line"><strong>下一負責人</strong><span id="w3-dispatch-summary-next">未確認</span></p>
       </div>
-      <details class="dispatch-technical"><summary>技術明細：請求、Human 轉送、MCP 呼叫、回傳與 Codex 收據</summary>
+      <details class="dispatch-technical"><summary>技術明細：任務識別、執行路徑、呼叫、回傳與 Codex 收據</summary>
         <dl class="facts">
           <dt>request_id／派工留言</dt><dd id="w3-dispatch-task">UNKNOWN</dd>
           <dt>attempt_id／最新收據</dt><dd id="w3-dispatch-attempt">UNKNOWN</dd>
           <dt>模型／變體／工具</dt><dd id="w3-dispatch-model">UNKNOWN</dd>
           <dt>來源 PR／精確 SHA</dt><dd id="w3-dispatch-source">UNKNOWN</dd>
           <dt>規格檔／SHA-256</dt><dd id="w3-dispatch-spec">UNKNOWN</dd>
-          <dt>正式 Zero Risk 派工</dt><dd id="w3-dispatch-formal">UNKNOWN</dd>
-          <dt>Human handoff</dt><dd id="w3-dispatch-handoff">UNKNOWN</dd>
-          <dt>實際 Zero Risk MCP 呼叫</dt><dd id="w3-dispatch-tool-calls">UNKNOWN</dd>
+          <dt>同來源任務／啟動收據</dt><dd id="w3-dispatch-formal">UNKNOWN</dd>
+          <dt>Human handoff（若此路徑適用）</dt><dd id="w3-dispatch-handoff">UNKNOWN</dd>
+          <dt>Web／Native2／MCP 呼叫與回傳</dt><dd id="w3-dispatch-tool-calls">UNKNOWN</dd>
           <dt>完整完成回傳</dt><dd id="w3-dispatch-completion">UNKNOWN</dd>
           <dt>Codex 收件確認</dt><dd id="w3-dispatch-codex-receipt">UNKNOWN</dd>
           <dt>目前證據進度</dt><dd id="w3-dispatch-progress">UNKNOWN</dd>
@@ -353,7 +353,7 @@
           <dt>下一負責人</dt><dd id="w3-dispatch-next">UNKNOWN</dd>
           <dt>最後事件時間</dt><dd id="w3-dispatch-time">UNKNOWN</dd>
         </dl>
-        <div class="dispatch-links"><a id="w3-dispatch-job-link" target="_blank" rel="noopener noreferrer" hidden>Codex Zero Risk 請求</a><a id="w3-dispatch-receipt-link" target="_blank" rel="noopener noreferrer" hidden>工具回傳證據</a></div>
+        <div class="dispatch-links"><a id="w3-dispatch-job-link" target="_blank" rel="noopener noreferrer" hidden>W3 任務來源</a><a id="w3-dispatch-receipt-link" target="_blank" rel="noopener noreferrer" hidden>W3 收據</a></div>
       </details>
     </article>
   </section>
@@ -773,12 +773,22 @@
         new RegExp('^' + name + ':SUCCESS(?:\\(run_\\d+\\))?$').test(item));
     });
   }
-  function w2SourceAcceptanceResultPr(issueComments, job, receipt, receiptCommentId,
+  function w2SourceAcceptanceReadback(issueComments, job, receipt, receiptCommentId,
       jobCommentId = null, goalReferenceVerified = false, now = Date.now()) {
     if (!job || !receipt || !Number.isSafeInteger(receiptCommentId)) return null;
     const canonical=codexSourceAcceptanceResultPr(issueComments,'W2',job,
       {id:receiptCommentId,receipt},receiptCommentId,jobCommentId,goalReferenceVerified,now);
-    if (canonical) return canonical;
+    if (canonical) return {resultPr:canonical,workflowRunsRequired:false};
+    const reviewed=[];
+    for (const comment of issueComments || []) {
+      const candidate=codexReviewedBlockedW2SourceAcceptanceStatic(comment,job,
+        {id:receiptCommentId,receipt},receiptCommentId,jobCommentId,issueComments,
+        goalReferenceVerified,now);
+      if (candidate) reviewed.push(candidate);
+    }
+    if (reviewed.length > 1) return null;
+    if (reviewed.length === 1)
+      return {resultPr:reviewed[0].resultPr,workflowRunsRequired:true};
     const candidates=[];
     for (const comment of issueComments || []) {
       const parsed=parseW2SourceAcceptanceFields(comment);
@@ -833,7 +843,13 @@
         candidates.push({id,resultPr});
     }
     candidates.sort((a,b)=>a.id-b.id);
-    return candidates.at(-1)?.resultPr || null;
+    const resultPr=candidates.at(-1)?.resultPr || null;
+    return resultPr ? {resultPr,workflowRunsRequired:false} : null;
+  }
+  function w2SourceAcceptanceResultPr(issueComments, job, receipt, receiptCommentId,
+      jobCommentId = null, goalReferenceVerified = false, now = Date.now()) {
+    return w2SourceAcceptanceReadback(issueComments,job,receipt,receiptCommentId,
+      jobCommentId,goalReferenceVerified,now)?.resultPr || null;
   }
   function w2TrustedResultChecks(checkData, expectedHead) {
     const head=safeSha(expectedHead)?.toLowerCase();
@@ -865,24 +881,34 @@
     for (const line of body.slice(marker.length).split(/\r?\n/)) {
       const value=line.trim();
       if (!value) continue;
-      if (['W1_NATIVE_TASK','W2_NATIVE_TASK','RESULT_PR'].includes(value)) {
+      if (['W1_NATIVE_TASK','W2_NATIVE_TASK','RESULT_PR','CODEX_SOURCE_RESULT',
+        'WIN11_RUNTIME_READBACK'].includes(value)) {
         if (Object.hasOwn(sections,value.toLowerCase())) return null;
         section=value.toLowerCase();
         sections[section]={};
+        continue;
+      }
+      const nextDispatch=value.match(/^W2_NEXT_DISPATCH=([A-Z_]+)$/);
+      if (nextDispatch) {
+        if (Object.hasOwn(sections,'w2_next_dispatch')) return null;
+        section='w2_next_dispatch';
+        sections[section]={state:nextDispatch[1]};
         continue;
       }
       const split=line.indexOf('=');
       if (split < 1) return null;
       const key=line.slice(0,split).trim();
       const fieldValue=line.slice(split+1).trim();
-      if (!/^[a-z][a-z0-9_]*$/.test(key) || !fieldValue ||
+      if ((!/^[a-z][a-z0-9_]*$/.test(key) && key !== 'current_cli_settings_useG1Credits') || !fieldValue ||
           seenKeys.has(key)) return null;
       seenKeys.add(key);
       sections[section][key]=fieldValue;
     }
-    if (!sections.result_pr || (!sections.w1_native_task && !sections.w2_native_task)) return null;
+    const resultSections=['result_pr','codex_source_result'].filter(name=>sections[name]);
+    if (resultSections.length !== 1 || (!sections.w1_native_task && !sections.w2_native_task)) return null;
+    const resultSection=resultSections[0];
     return {id,metadata:sections.metadata,task:sections.w1_native_task || sections.w2_native_task,
-      lane:sections.w1_native_task ? 'W1' : 'W2',result:sections.result_pr};
+      lane:sections.w1_native_task ? 'W1' : 'W2',result:sections[resultSection],resultSection,sections};
   }
   function codexSourceAcceptanceStatic(comment, workerId, job, receiptItem, receiptCommentId,
       jobCommentId, issueComments, goalReferenceVerified = false, now = Date.now()) {
@@ -978,6 +1004,206 @@
       startedCommentId:started[0].id,changedPaths,resultPr,resultHead,resultBaseSha,mergeCommit,
       mainReadback,mergedAcceptance,checksDeclared:checkMap,focusedTest:tests};
   }
+  function validW2SourceTest(sourceTest, changedPaths) {
+    const match=String(sourceTest || '').match(/^node --test\s+([A-Za-z0-9._/-]+);(\d+)_total;(\d+)_passed;(\d+)_failed;(\d+)_skipped$/);
+    const counts=match?.slice(2).map(Number) || [];
+    return Boolean(match) && changedPaths.includes(match[1]) && counts[1] > 0 &&
+      counts[0] === counts[1] + counts[2] + counts[3] && counts[2] === 0;
+  }
+  function codexReviewedBlockedW2SourceAcceptanceStatic(comment, job, receiptItem, receiptCommentId,
+      jobCommentId, issueComments, goalReferenceVerified = false, now = Date.now()) {
+    const parsed=parseCodexSourceAcceptanceFields(comment);
+    const receipt=receiptItem?.receipt || receiptItem;
+    const commentId=Number(parsed?.id);
+    const terminalId=Number(receiptCommentId);
+    const taskCommentId=Number(jobCommentId);
+    if (!parsed || parsed.lane !== 'W2' || parsed.resultSection !== 'codex_source_result' ||
+        !Number.isFinite(Date.parse(comment?.created_at || '')) ||
+        Date.parse(comment.created_at) > now || !Number.isSafeInteger(taskCommentId) || taskCommentId < 1 ||
+        !Number.isSafeInteger(terminalId) || terminalId < 1 || commentId <= terminalId ||
+        Number(receiptItem?.id || terminalId) !== terminalId || !job || !receipt) return null;
+
+    const {metadata,task,result,sections}=parsed;
+    const previousIds=(issueComments || []).map(item=>Number(item?.id))
+      .filter(id=>Number.isSafeInteger(id) && id > 0 && id < commentId);
+    const latestPriorId=previousIds.length ? Math.max(...previousIds) : null;
+    const priorId=/^\d{1,20}$/.test(metadata.prestate_latest_issue407_comment || '')
+      ? Number(metadata.prestate_latest_issue407_comment) : null;
+    const receipts=dispatchReceipt(issueComments,job,receipt.attempt_id,taskCommentId,now);
+    const started=receipts.items.filter(item=>item.receipt.state === 'STARTED');
+    const changedPaths=String(result.changed_paths || '').split(/[;,]\s*/).map(path=>path.trim())
+      .filter(Boolean);
+    const distinctPaths=new Set(changedPaths);
+    const sourceTest=String(result.local_test || '');
+    const validTest=validW2SourceTest(sourceTest,changedPaths);
+    const checksDeclared=new Map();
+    for (const declaration of String(result.trusted_exact_head_checks || '').split(';')
+        .map(item=>item.trim()).filter(Boolean)) {
+      const match=declaration.match(/^([a-z0-9-]+):SUCCESS:run-(\d+)-attempt-(\d+)$/);
+      if (!match || checksDeclared.has(match[1]) || Number(match[2]) < 1 || Number(match[3]) < 1)
+        return null;
+      checksDeclared.set(match[1],{runId:Number(match[2]),attempt:Number(match[3])});
+    }
+    const requiredChecks=['check-native-only','csg-trusted-verifier-hosted'];
+    const v2NativeApplies=changedPaths.some(path=>V2_NATIVE_WORKFLOW_PATH_FILTERS.some(filter=>
+      filter.endsWith('/**') ? path.startsWith(filter.slice(0,-3) + '/') : path === filter));
+    if (v2NativeApplies) requiredChecks.push('v2-native-windows');
+    const nonAcceptanceChecks=new Map();
+    for (const declaration of String(result.nonacceptance_checks || '').split(';')
+        .map(item=>item.trim()).filter(Boolean)) {
+      const match=declaration.match(/^([a-z0-9-]+):(CANCELLED|SKIPPED)$/);
+      if (!match || nonAcceptanceChecks.has(match[1]) || checksDeclared.has(match[1])) return null;
+      nonAcceptanceChecks.set(match[1],match[2]);
+    }
+    const resultPr=/^\d{1,9}$/.test(result.result_pr || '') ? Number(result.result_pr) : null;
+    const resultHead=safeSha(result.result_pr_head)?.toLowerCase() || null;
+    const mergeCommit=safeSha(result.merge_commit)?.toLowerCase() || null;
+    const mainReadback=safeSha(result.current_main_sha)?.toLowerCase() || null;
+    if (!goalReferenceVerified || metadata.record_type !== 'ADDITIVE_CODEX_SOURCE_ACCEPTANCE_NOT_NATIVE_WORKER_RECEIPT' ||
+        metadata.repo !== REPO || metadata.project_id !== PROJECT ||
+        metadata.goal_comment_id !== String(job.goal_comment_id) ||
+        metadata.goal_body_sha256 !== job.goal_body_sha256 || priorId !== latestPriorId ||
+        priorId <= terminalId || commentId <= priorId ||
+        job.kind !== 'antigravity_edit' || job.project_id !== PROJECT ||
+        receipt.project_id !== PROJECT || receipt.host !== 'DESKTOP-1B6PD2P' ||
+        receipt.request_id !== job.request_id || receipt.attempt_id !== task.attempt_id ||
+        receipt.source_sha !== job.source_sha || Number(receipt.source_pr) !== Number(job.source_pr) ||
+        Number(receipt.goal_comment_id) !== Number(job.goal_comment_id) ||
+        receipt.goal_body_sha256 !== job.goal_body_sha256 || receipt.state !== 'BLOCKED' ||
+        receipt.outcome !== 'ANTIGRAVITY_EDIT_TOOL_EXECUTION_FAILED_DIFF_PRESERVED' ||
+        receipt.task_acceptance !== 'UNKNOWN' || receipt.external_effects !== 'UNKNOWN' ||
+        receipt.scope_valid !== true || !Array.isArray(job.edit_paths) ||
+        new Set(job.edit_paths).size !== job.edit_paths.length ||
+        !Number.isSafeInteger(receipt.changed_files_count) || receipt.changed_files_count !== job.edit_paths.length ||
+        receipts.status !== 'MATCHED' || receipts.latest?.id !== terminalId || started.length !== 1 ||
+        Number(task.started_comment_id) !== Number(started[0]?.id) ||
+        task.terminal_comment_id !== String(terminalId) || task.request_id !== job.request_id ||
+        task.attempt_id !== receipt.attempt_id || task.worker_provider !== 'Antigravity CLI via agy.exe; GUI_NOT_USED' ||
+        task.worker_session_id !== receipt.session_id || task.worker_state !== 'BLOCKED' ||
+        task.worker_outcome !== receipt.outcome || task.worker_task_acceptance !== 'UNKNOWN' ||
+        task.worker_external_effects !== 'UNKNOWN' ||
+        !/^[a-f0-9]{64}$/i.test(task.worker_diff_sha256 || '') ||
+        task.worker_diff_sha256.toLowerCase() !== String(receipt.diff_sha256 || '').toLowerCase() ||
+        !/^\d+$/.test(task.worker_diff_bytes || '') || Number(task.worker_diff_bytes) !== Number(receipt.diff_bytes) ||
+        changedPaths.length !== job.edit_paths.length || distinctPaths.size !== changedPaths.length ||
+        changedPaths.some(path=>!validEditPath(path) || !job.edit_paths.includes(path)) ||
+        result.local_git_diff_check !== 'PASS' || !validTest || !resultPr || !resultHead || !mergeCommit ||
+        mergeCommit !== mainReadback || result.source_acceptance !==
+          'ACCEPTED_FOR_CODEX_REVIEWED_PATCH_AND_MERGED_PR' || result.native_worker_acceptance !== 'UNKNOWN' ||
+        sections.win11_runtime_readback?.model_execution_by_refresh !== 'NOT_INVOKED' ||
+        sections.w2_next_dispatch?.state !== 'NOT_STARTED' ||
+        requiredChecks.length !== checksDeclared.size || requiredChecks.some(name=>!checksDeclared.has(name)) ||
+        nonAcceptanceChecks.size === 0) return null;
+    return {parsed,metadata,task,result,receipt,receiptCommentId:terminalId,jobCommentId:taskCommentId,
+      startedCommentId:started[0].id,changedPaths,sourceTest,resultPr,resultHead,mergeCommit,mainReadback,
+      checksDeclared,nonAcceptanceChecks};
+  }
+  function codexReviewedW2PrDescriptionMatches(body, acceptance) {
+    if (typeof body !== 'string') return false;
+    const {task,receipt,receiptCommentId}=acceptance;
+    const diffBytes=Number(receipt.diff_bytes).toLocaleString('en-US');
+    const required=[
+      `Worker source task: PR #${receipt.source_pr} at \`${receipt.source_sha}\`.`,
+      `Native W2 request: \`${task.request_id}\`.`,
+      `Attempt: \`${receipt.attempt_id}\`;`,
+      `Native terminal receipt #407 comment ${receiptCommentId} is \`BLOCKED / ${receipt.outcome}\``,
+      `the captured ${diffBytes}-byte diff was limited to the two authorized files.`,
+      "The attempt's `task_acceptance` and `external_effects` remain UNKNOWN.",
+      'Codex independently reviewed and repaired the captured candidate in this result branch.',
+      'This PR does not change or overwrite the Worker receipt.',
+    ];
+    return required.every(value=>body.includes(value));
+  }
+  function codexReviewedW2CheckRunId(check) {
+    const url=String(check?.details_url || check?.html_url || '');
+    const match=url.match(/\/actions\/runs\/(\d+)\/job\/\d+(?:[/?#]|$)/);
+    return match ? Number(match[1]) : null;
+  }
+  function codexReviewedW2WorkflowRun(check, workflowRunData, expectedHead) {
+    const runId=codexReviewedW2CheckRunId(check);
+    const runs=workflowRunData?.workflow_runs;
+    if (!runId || !Array.isArray(runs)) return null;
+    const matches=runs.filter(run=>Number(run?.id) === runId);
+    if (matches.length !== 1) return null;
+    const run=matches[0];
+    if (safeSha(run.head_sha)?.toLowerCase() !== String(expectedHead).toLowerCase() ||
+        Number(run.check_suite_id) !== Number(check?.check_suite?.id)) return null;
+    return run;
+  }
+  function codexReviewedW2TrustedChecks(checkData, workflowRunData, acceptance) {
+    const head=safeSha(acceptance?.resultHead)?.toLowerCase();
+    if (!head || !Array.isArray(checkData?.check_runs) ||
+        !Array.isArray(workflowRunData?.workflow_runs) || !acceptance?.checksDeclared) return null;
+    const required=[];
+    for (const [name,declaration] of acceptance.checksDeclared) {
+      const runs=checkData.check_runs.filter(run=>run?.name === name &&
+        safeSha(run.head_sha)?.toLowerCase() === head && Number(run?.app?.id) === 15368 &&
+        run?.app?.slug === 'github-actions' && run?.app?.name === 'GitHub Actions')
+        .sort((a,b)=>(Number(a.id)||0)-(Number(b.id)||0));
+      const latest=runs.at(-1);
+      const workflow=latest && codexReviewedW2WorkflowRun(latest,workflowRunData,head);
+      if (!latest || latest.status !== 'completed' || latest.conclusion !== 'success' ||
+          codexReviewedW2CheckRunId(latest) !== declaration.runId || !workflow ||
+          Number(workflow.run_attempt) !== declaration.attempt || workflow.status !== 'completed' ||
+          workflow.conclusion !== 'success') return null;
+      required.push(`${name}:SUCCESS:run-${declaration.runId}-attempt-${declaration.attempt}`);
+    }
+    const nonAcceptance=[];
+    for (const [name,state] of acceptance.nonAcceptanceChecks) {
+      const runs=checkData.check_runs.filter(run=>run?.name === name &&
+        safeSha(run.head_sha)?.toLowerCase() === head && Number(run?.app?.id) === 15368 &&
+        run?.app?.slug === 'github-actions' && run?.app?.name === 'GitHub Actions')
+        .sort((a,b)=>(Number(a.id)||0)-(Number(b.id)||0));
+      const latest=runs.at(-1);
+      const workflow=latest && codexReviewedW2WorkflowRun(latest,workflowRunData,head);
+      const conclusion=state === 'CANCELLED' ? 'cancelled' : 'skipped';
+      if (!latest || latest.status !== 'completed' || latest.conclusion !== conclusion || !workflow ||
+          workflow.status !== 'completed' || !['success','failure','cancelled','skipped'].includes(workflow.conclusion)) return null;
+      nonAcceptance.push(`${name}:${state}:workflow_${workflow.conclusion}`);
+    }
+    return {required:required.join('; '),nonAcceptance:nonAcceptance.join('; ')};
+  }
+  function parseCodexReviewedBlockedW2SourceAcceptance(comment, job, receiptItem, receiptCommentId,
+      jobCommentId, issueComments, resultPull, resultChecks, resultWorkflowRuns,
+      goalReferenceVerified = false, now = Date.now()) {
+    const acceptance=codexReviewedBlockedW2SourceAcceptanceStatic(comment,job,receiptItem,
+      receiptCommentId,jobCommentId,issueComments,goalReferenceVerified,now);
+    const baseSha=safeSha(resultPull?.base?.sha)?.toLowerCase() || null;
+    const pullHead=safeSha(resultPull?.head?.sha)?.toLowerCase() || null;
+    const pullMerge=safeSha(resultPull?.merge_commit_sha)?.toLowerCase() || null;
+    const pullMerged=resultPull?.merged === true || Boolean(resultPull?.merged_at || resultPull?.mergedAt);
+    const pullState=String(resultPull?.state || '').toLowerCase();
+    if (!acceptance || !candidatePullIdentityMatches(resultPull,{number:acceptance.resultPr}) ||
+        String(resultPull?.base?.ref || '').toLowerCase() !== 'main' || !baseSha ||
+        pullHead !== acceptance.resultHead || !pullMerged || pullState !== 'closed' ||
+        pullMerge !== acceptance.mergeCommit || Number(resultPull?.changed_files) !== acceptance.changedPaths.length ||
+        !codexReviewedW2PrDescriptionMatches(resultPull?.body,acceptance)) return null;
+    const verifiedChecks=codexReviewedW2TrustedChecks(resultChecks,resultWorkflowRuns,acceptance);
+    if (!verifiedChecks) return null;
+    return {schema:1,project_id:PROJECT,
+      record_type:'ADDITIVE_CONTROLLER_READBACK_NOT_NATIVE_WORKER_RECEIPT',
+      request_id:job.request_id,attempt_id:acceptance.receipt.attempt_id,
+      source_pr:job.source_pr,source_sha:job.source_sha,
+      codex_source_acceptance:'ACCEPTED',exact_head_ci:'SUCCESS',
+      worker_task_acceptance:'UNKNOWN',external_effects:'UNKNOWN',live_acceptance:'NOT_CLAIMED',
+      sourceAcceptance:{comment_id:acceptance.parsed.id,
+        started_comment_id:acceptance.startedCommentId,
+        worker_terminal_comment_id:acceptance.receiptCommentId,
+        diff_sha256:String(acceptance.receipt.diff_sha256).toLowerCase(),
+        worker_diff_sha256:String(acceptance.receipt.diff_sha256).toLowerCase(),
+        worker_diff_identity:'NOT_CLAIMED',
+        result_pr:acceptance.resultPr,result_head:acceptance.resultHead,
+        result_pr_state:'MERGED',merge_commit:acceptance.mergeCommit,
+        main_readback:acceptance.mainReadback,result_base_sha:baseSha,
+        exact_head_checks:acceptance.result.trusted_exact_head_checks,
+        result_checks:verifiedChecks.required,
+        legacy_check:verifiedChecks.nonAcceptance + ' (not counted as acceptance)',
+        source_test:acceptance.sourceTest,changed_paths:acceptance.changedPaths.join('; '),
+        runtime_deployment:'UNKNOWN',source_acceptance_scope:'CODEX_REVIEWED_PATCH_NOT_WORKER_DIFF'},
+      resultPr:{number:acceptance.resultPr,resultHead:acceptance.resultHead,baseSha,
+        mergeCommit:acceptance.mergeCommit,merged:true,acceptedAsMerged:true,
+        checks:verifiedChecks.required}};
+  }
   function codexSourceAcceptanceResultPr(issueComments, workerId, job, receiptItem,
       receiptCommentId, jobCommentId, goalReferenceVerified = false, now = Date.now()) {
     const matched=[];
@@ -1047,8 +1273,12 @@
         merged:pullMerged,acceptedAsMerged:merged,checks:trustedChecks}};
   }
   function parseW2SourceAcceptance(comment, job, receipt, receiptCommentId, resultPull = null,
-      resultChecks = null, goalReferenceVerified = false, issueComments = [], jobCommentId = null, now = Date.now()) {
+      resultChecks = null, goalReferenceVerified = false, issueComments = [], jobCommentId = null,
+      now = Date.now(), resultWorkflowRuns = null) {
     if (String(comment?.body || '').startsWith(CODEX_SOURCE_ACCEPTANCE_MARKER + '\n')) {
+      const reviewed=parseCodexReviewedBlockedW2SourceAcceptance(comment,job,receipt,receiptCommentId,
+        jobCommentId,issueComments,resultPull,resultChecks,resultWorkflowRuns,goalReferenceVerified,now);
+      if (reviewed) return reviewed;
       return parseCodexSourceAcceptance(comment,'W2',job,receipt,receiptCommentId,
         jobCommentId,issueComments,resultPull,resultChecks,goalReferenceVerified,now);
     }
@@ -1282,12 +1512,10 @@
   }
   function classifyW3(record, sourceFreshness, now) {
     const observed=classifyWorker(record,sourceFreshness,now);
-    // A #407 worker row cannot independently attest the Zero Risk handoff,
-    // native MCP call, completion callback, or Codex receipt. Keep its
-    // claimed activity/idle state as a candidate until those stages match.
-    if (['RUNNING_VERIFIED','PENDING','AWAITING_HUMAN','IDLE'].includes(observed.status))
-      return {status:'UNKNOWN',reason:'W3 #407 觀測欄位尚未核對同 request 的正式派工、Human 轉送、MCP 呼叫、完整回傳與 Codex 收據。'};
-    return observed;
+    // A #407 worker row cannot independently attest same-task assignment,
+    // execution route, model activity, tool calls, completion, or acceptance.
+    if (observed.status === 'STALE') return observed;
+    return {status:'UNKNOWN',reason:'W3 尚未核對同來源任務收據；分派、執行路徑、模型活動、呼叫、完成與驗收均 UNKNOWN。'};
   }
   function classifyW1(oc, nativeWorker, freshness, now, formalTask = null) {
     if (freshness === 'STALE') return { status:'STALE', reason:'W1 的 Win11 快照已過期。' };
@@ -1818,6 +2046,7 @@
       w1ResultChecks:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       w2ResultPr:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       w2ResultChecks:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
+      w2ResultWorkflowRuns:{ data:null, fetchedAt:0, error:null, retryAt:0, inFlight:null, url:'', generation:0 },
       dispatches:Object.create(null), dispatchPulls:Object.create(null), dispatchChecks:Object.create(null),
     };
     const failures=new Map();
@@ -1921,6 +2150,14 @@
       if (resource.url !== url) clearResource(resource,url);
       return url || null;
     }
+    function bindW2ResultWorkflowRuns(head) {
+      const expectedSha=safeSha(head);
+      const url=expectedSha
+        ? API + '/actions/runs?head_sha=' + expectedSha + '&per_page=100' : '';
+      const resource=resources.w2ResultWorkflowRuns;
+      if (resource.url !== url) clearResource(resource,url);
+      return url || null;
+    }
     function bindGoalAuthority(commentId) {
       const id = Number.isSafeInteger(commentId) && commentId > 0 ? commentId : null;
       const url = id ? API + '/issues/comments/' + id : '';
@@ -1999,7 +2236,8 @@
     return { resources, loadResource, bindPullRequest, bindGoalAuthority, bindGoalLatest,
       bindIssueLatest, bindChecksHead, checksSummaryForHead,
       bindDispatchComment, bindDispatchPull, bindDispatchChecks, dispatchChecksSummaryForHead,
-      bindW1ResultPull, bindW1ResultChecks, bindW2ResultPull, bindW2ResultChecks, now };
+      bindW1ResultPull, bindW1ResultChecks, bindW2ResultPull, bindW2ResultChecks,
+      bindW2ResultWorkflowRuns, now };
   }
   function adaptivePollInterval(key, apiClient) {
     const state=apiClient.getRateState?.() || {};
@@ -2270,11 +2508,12 @@
       ? w2EvidenceData(goalComments,issueComments,safeSha(resourceStore.resources.main.data?.sha),
         goalResource.identity || null,true,true)
       : null;
-    const resultPr=w2Evidence?.native?.goalReferenceVerified && w2Evidence?.native?.receipt
-      ? w2SourceAcceptanceResultPr(issueComments,w2Job,w2Evidence.native.receipt,
+    const resultAcceptanceReadback=w2Evidence?.native?.goalReferenceVerified && w2Evidence?.native?.receipt
+      ? w2SourceAcceptanceReadback(issueComments,w2Job,w2Evidence.native.receipt,
         w2Evidence.native.receiptCommentId,w2Latest?.id,
         w2Evidence.native.goalReferenceVerified,resourceStore.now())
       : null;
+    const resultPr=resultAcceptanceReadback?.resultPr || null;
     const resultPrUrl=resourceStore.bindW2ResultPull(resultPr);
     if (!recoveryProbeCompleted && !apiClient.isPaused?.() && resultPrUrl)
       await resourceStore.loadResource('w2ResultPr',resultPrUrl,adaptivePollInterval('pr',apiClient),force);
@@ -2293,6 +2532,11 @@
     if (!recoveryProbeCompleted && !apiClient.isPaused?.() && resultChecksUrl)
       await resourceStore.loadResource('w2ResultChecks',resultChecksUrl,
         adaptivePollInterval('checks',apiClient),force);
+    const resultWorkflowRunsUrl=resourceStore.bindW2ResultWorkflowRuns(
+      resultAcceptanceReadback?.workflowRunsRequired ? resultHead : null);
+    if (!recoveryProbeCompleted && !apiClient.isPaused?.() && resultWorkflowRunsUrl)
+      await resourceStore.loadResource('w2ResultWorkflowRuns',resultWorkflowRunsUrl,
+        adaptivePollInterval('checks',apiClient),force);
     return { head, prPin, pullIdentityMatches, pullLifecycle, recoveryProbeCompleted,
       rateState:apiClient.getRateState?.() || null };
   }
@@ -2301,6 +2545,25 @@
     return Number.isFinite(stamp.valueOf())
       ? stamp.toLocaleString('zh-TW', { timeZone:'Asia/Taipei', year:'numeric', month:'2-digit',
         day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }) : '未確認';
+  }
+  function nativeTaskBadgeDetails(task, osFreshness) {
+    if (osFreshness === 'STALE') return {label:'排程觀測已過期',kind:'warn'};
+    if (osFreshness !== 'FRESH') return {label:'排程讀回未知',kind:'neutral'};
+    if (task?.registered === false) return {label:'PTYSD-Native-OpenCode 未註冊',kind:'warn'};
+    if (task?.enabled === false) return {label:'排程已停用',kind:'warn'};
+    if (task?.enabled !== true) return {label:'排程讀回未知',kind:'neutral'};
+    const state=String(task.state || 'UNKNOWN').toUpperCase();
+    if (state === 'RUNNING') return {label:'已啟用／RUNNING；非終態完成或交付證明',kind:'good'};
+    if (state === 'READY') return {label:'已啟用／Ready；非工作證明',kind:'good'};
+    if (state === 'QUEUED') return {label:'已啟用／Queued；非派工完成證明',kind:'warn'};
+    return {label:'已啟用／Task 狀態未知；非工作證明',kind:'neutral'};
+  }
+  function nativeTaskResultLabel(value) {
+    const result=String(value ?? '').trim();
+    if (!result) return '未確認';
+    if (/^0X0*41301$/i.test(result))
+      return result.toUpperCase() + '（SCHED_S_TASK_RUNNING；排程執行中，非終態）';
+    return result;
   }
   function safeSha(value) { return /^[a-f0-9]{40}$/i.test(value || '') ? value : null; }
   function w2ModelEligibility(record, osFreshness, currentJob = null, goalReferenceVerified = false) {
@@ -2364,12 +2627,12 @@
     const taskText = taskId
       ? String(taskId) + (taskKind ? '／' + String(taskKind) : '') +
         (id === 'W1' && taskState ? '；' + String(taskState) : '') +
-        (id === 'W3' ? '；#407 候選識別字，正式 Zero Risk 派工未核對' : '')
-      : id === 'W3' ? '未從同一來源讀回有效 request_id'
+        (id === 'W3' ? '；#407 候選識別字，尚無同來源 W3 收據' : '')
+      : id === 'W3' ? '同來源 W3 任務識別與收據未核對'
       : '沒有可核對的正式任務';
     const sessionText = id === 'W3'
       ? (record?.attempt_id ? '觀測 attempt 候選 ' + String(record.attempt_id) + '；' : '') +
-        'Zero Risk MCP 執行批次收據 UNKNOWN'
+        '同來源 W3 attempt／執行者收據 UNKNOWN'
       : record?.attempt_id
       ? '執行批次 ' + String(record.attempt_id)
       : id === 'W1'
@@ -2377,13 +2640,13 @@
           '；活動 Session 未確認'
         : '沒有可核對的執行批次';
     const steps = id === 'W3'
-      ? 'UNKNOWN：#407 步驟或 launcher traces 未綁定 Zero Risk MCP 完成收據'
+      ? 'UNKNOWN：#407 步驟或 launcher traces 未綁定同來源 W3 執行收據'
       : Array.isArray(record?.verified_steps)
       ? record.verified_steps.filter(x => typeof x === 'string').slice(0,5).join('、')
       : '沒有可驗證步驟清單';
     const blocker = record?.blocker_code || (classification.status === 'BLOCKED'
       ? classification.reason : id === 'W3'
-        ? '需 Codex 有效 request_id、Human 手動轉送及 Zero Risk 真實工具回傳。'
+        ? '同來源 W3 任務收據缺少；分派、路徑、模型活動與結果未知。'
         : '未回報受信任阻擋代碼。');
     const matchedW1SourceAcceptance=id === 'W1' && sourceAcceptance?.status === 'ACCEPTED' &&
       sourceAcceptance.requestId === taskId && (!record ||
@@ -2391,7 +2654,7 @@
         sourceAcceptance.sourceSha === String(record.task_source_sha || '').toLowerCase())
       ? sourceAcceptance : null;
     const modified = id === 'W3'
-      ? 'UNKNOWN：Zero Risk 真實檔案差異須同 request MCP 完成回傳及 Codex 收件核對；#407 宣稱僅屬候選。'
+      ? 'UNKNOWN：W3 差異、測試與驗收須綁定同來源完整執行回傳；#407 宣稱僅屬候選。'
       : matchedW1SourceAcceptance && !record
         ? 'Codex 已核對 schema-6 W1 成果來源並接受 PR #' +
           matchedW1SourceAcceptance.resultPr + '；目前沒有相符的 Win11 Worker 快照，' +
@@ -2409,7 +2672,7 @@
       prefix, classification,
       modelExecutionSwitch:modelExecutionSwitchLabel(id,record),
       task:taskText, session:sessionText,
-      activity:id === 'W3' ? 'Zero Risk MCP 活動時間 UNKNOWN；#407 候選時間 ' +
+      activity:id === 'W3' ? 'W3 模型／工具活動時間 UNKNOWN；#407 候選時間 ' +
         (activity ? readTime(activity) : '未確認')
         : activity ? readTime(activity) : '沒有可核對的近期活動時間',
       progress:steps,
@@ -2421,15 +2684,15 @@
           String(record?.external_effects || 'UNKNOWN') + '；live_acceptance=NOT_CLAIMED'
         : 'UNKNOWN：沒有與目前 W1 request／attempt／來源 SHA 配對的 Codex source acceptance',
       delivery:id === 'W3'
-        ? 'UNKNOWN：#407 的 Commit／PR／交付狀態是候選；尚無同 request 的 Zero Risk 完成回傳與 Codex 收件驗證。'
+        ? 'UNKNOWN：#407 的 Commit／PR／交付狀態是候選；尚無同 request 的 W3 完成回傳與 Codex 收件驗證。'
         : matchedW1SourceAcceptance
           ? deliveryParts.join('；') + '；Codex source delivery：PR #' + matchedW1SourceAcceptance.resultPr +
             ' SOURCE_ACCEPTED；tested head ' + matchedW1SourceAcceptance.resultHead +
             '；merge commit ' + matchedW1SourceAcceptance.mergeCommit +
             '；精確 HEAD CI 已由 #407 source readback 確認'
           : deliveryParts.join('；'),
-      next:record?.next_owner || (id === 'W3' ? 'Codex 建 request_id；Human 手動轉送' : '未確認'),
-      source:id === 'W3' ? 'Issue #407 workers 候選欄位；Zero Risk MCP 直接證據 UNKNOWN' :
+      next:record?.next_owner || (id === 'W3' ? '同來源 W3 收據與下一負責人未確認' : '未確認'),
+      source:id === 'W3' ? 'Issue #407 workers 候選欄位；同來源 W3 派工／執行收據 UNKNOWN' :
         record ? 'Issue #407 workers 記錄 · ' + classification.status :
         id === 'W1' ? 'Issue #407 opencode_v2／native_worker · ' + classification.status
           : 'Issue #407 未提供此角色的當前證據 · UNKNOWN',
@@ -2792,11 +3055,11 @@
     const resource=resources.dispatches?.[id] || (task?.jobComment ? {data:task.jobComment} : null);
     const fallbackState=classification?.status || 'UNKNOWN';
     const w3Stages={
-      formal:'UNKNOWN：尚無同來源可核對的 Zero Risk 正式派工；request_id／Agent ID 只是識別線索。',
-      handoff:'UNKNOWN：尚無 Human 對該 request_id 的實際轉送證據。',
-      toolCalls:'UNKNOWN：尚無同 request_id 的 Zero Risk MCP 呼叫 ID 與回傳；一般 shell 命令不算 MCP 工具回傳。',
-      completion:'UNKNOWN：尚無同 request_id 的完整完成回傳。',
-      codexReceipt:'UNKNOWN：尚無 Codex 確認收到並核對完成回傳的收據。',
+      formal:'UNKNOWN：尚無同來源 W3 任務／啟動收據；request_id／Agent ID 只是識別線索。',
+      handoff:'UNKNOWN：Human handoff 是否發生或適用，尚未由同來源路徑收據確認。',
+      toolCalls:'UNKNOWN：尚無同 request 的 Web／Native2／MCP 呼叫識別與回傳收據。',
+      completion:'UNKNOWN：尚無同 request 的完整終態／串流結束回傳。',
+      codexReceipt:'UNKNOWN：尚無 Codex 確認收到並核對完整回傳的收據。',
     };
     const base={id, status:fallbackState, label:fallbackState, task:'UNKNOWN', attempt:'UNKNOWN',
       model:'UNKNOWN', source:'UNKNOWN', spec:'UNKNOWN', progress:'UNKNOWN', delivery:'UNKNOWN',
@@ -2804,42 +3067,50 @@
       jobUrl:null, receiptUrl:null, prUrl:null, resultPrUrl:null, reconciliationUrl:null,
       requestId:null, expectedAttemptId:null, receiptAttemptId:null, receiptState:null,
       hasBoundReceipt:false,
-      summaryTask:'沒有有效正式任務',summaryProgress:'目前沒有可核對任務執行證據。',
-      summaryBlocker:'未派工；目前工作狀態 UNKNOWN。',shortStatus:'未派工',hasTask:false,
+      summaryTask:id === 'W3' ? '沒有同來源 W3 任務／執行收據' : '沒有有效正式任務',
+      summaryProgress:'目前沒有可核對任務執行證據。',
+      summaryBlocker:id === 'W3' ? '證據不足：W3 分派、路徑、活動、完成與驗收均 UNKNOWN。'
+        : '未派工；目前工作狀態 UNKNOWN。',
+      shortStatus:id === 'W3' ? '證據不足' : '未派工',hasTask:false,
       receiptProvenance:'UNKNOWN：尚無同一任務已配對收據',codexSourceAcceptance:null,
       goalReferenceVerified:null,w3Stages,record};
     if (!taskId) {
-      return { ...base, label:'UNKNOWN／沒有可核對的正式派工', task:'沒有同來源 request_id；未證實曾派工。',
-        progress:id === 'W3' ? '沒有 Zero Risk request_id／Human 轉送／工具回傳證據。'
+      return { ...base, label:id === 'W3' ? '證據不足／沒有同來源 W3 收據'
+          : 'UNKNOWN／沒有可核對的正式派工',
+        task:id === 'W3' ? '沒有同來源 W3 任務／執行收據；分派狀態 UNKNOWN。'
+          : '沒有同來源 request_id；未證實曾派工。',
+        progress:id === 'W3' ? '分派、啟動、執行路徑、模型活動、呼叫、完成與驗收均 UNKNOWN。'
           : '觀測中沒有此 Worker 的正式任務 ID。',
         delivery:'沒有可綁定至此車道的結果 PR／CI／驗收收據。',
-        summaryTask:'目前沒有可核對的正式派工。',
-        summaryProgress:id === 'W3' ? '沒有 request_id、Human 轉送或工具回傳證據。' : '沒有同來源正式任務 ID。',
-        summaryBlocker:'未派工；現在是否可接單沒有由此資料判定。',
-        next:id === 'W3' ? 'Codex 建立有效請求；Human 手動轉送' : '未確認',
+        summaryTask:id === 'W3' ? '沒有同來源 W3 任務／執行收據' : '目前沒有可核對的正式派工。',
+        summaryProgress:id === 'W3' ? '證據不足；執行模式與各階段狀態未知。'
+          : '沒有同來源正式任務 ID。',
+        summaryBlocker:id === 'W3' ? '同來源 W3 收據缺少；不得推論未派工、RUNNING 或 PASS。'
+          : '未派工；現在是否可接單沒有由此資料判定。',
+        next:id === 'W3' ? 'W3 收據來源與下一負責人 UNKNOWN' : '未確認',
       };
     }
     if (id === 'W3') {
-      // Zero Risk is a human handoff protocol, not the W1/W2 native schema-6
-      // opencode_edit / antigravity_edit runner. Never infer its stages from an
-      // Agent ID, a snapshot task id, or ordinary shell activity.
+      // W3 execution modes do not share the W1/W2 schema-6 runner contract.
+      // Until a same-source W3 receipt schema is available, expose identifiers
+      // only as candidates and keep route, activity, and outcomes unknown.
       const sourceSha=safeSha(task?.task_source_sha || task?.source_sha);
       const sourcePr=Number.isSafeInteger(task?.source_pr) && task.source_pr > 0
         ? 'PR #' + task.source_pr : '來源 PR 未核對';
-      return { ...base,hasTask:true,shortStatus:'請求候選',
+      return { ...base,hasTask:true,shortStatus:'證據不足',
         status:fallbackState === 'STALE' ? 'STALE' : 'UNKNOWN',
-        label:'Zero Risk 五階段證據待核對／' + (fallbackState === 'STALE' ? 'STALE' : 'UNKNOWN'),
+        label:'證據不足／同來源 W3 收據缺少／' + (fallbackState === 'STALE' ? '快照過期' : 'UNKNOWN'),
         task:String(taskId) + (Number.isSafeInteger(commentId)
-          ? '；#310 候選留言 #' + commentId + '（未驗證）' : '；正式派工留言未核對'),
+          ? '；候選留言 #' + commentId + '（未驗證）' : '；正式任務未核對'),
         attempt:task.attempt_id ? String(task.attempt_id) + '（#407 觀測欄位，非 MCP 收據）' :
-          'UNKNOWN：尚無已配對 Zero Risk attempt 收據',
-        model:'UNKNOWN：尚無 Zero Risk MCP 模型／工具身分回傳',
+          'UNKNOWN：尚無已配對 W3 attempt／subagent 收據',
+        model:'UNKNOWN：尚無已配對 W3 執行路徑、模型與工具回傳',
         source:sourcePr + '；來源 SHA ' + (sourceSha || 'UNKNOWN') + '（觀測值，未核對正式派工）',
-        progress:'#407 出現 request_id／Agent ID 候選；Human handoff、實際 MCP 呼叫、完整回傳及 Codex 收據均 UNKNOWN。',
-        delivery:'Zero Risk 輸出差異／測試／驗收無已配對回傳；不可視為完成。',
-        summaryTask:'Zero Risk 請求候選：' + String(taskId),
-        summaryProgress:'僅確認觀測欄位有請求識別字；五階段獨立待驗證。',
-        summaryBlocker:'工具回傳與 Codex 收據尚未由同一來源驗證；不能宣稱 W3 已完成。',
+        progress:'#407 出現 request_id／Agent ID 候選；分派、路徑、模型活動、呼叫、完整回傳及 Codex 收據均 UNKNOWN。',
+        delivery:'W3 差異／測試／驗收無同來源回傳；不可視為完成。',
+        summaryTask:'W3 任務識別候選：' + String(taskId),
+        summaryProgress:'僅確認觀測欄位有識別字；同來源收據與各階段仍待核對。',
+        summaryBlocker:'證據不足：同來源 W3 收據未讀回；不能宣稱未派工、RUNNING 或已完成。',
       };
     }
     base.task=String(taskId) + (task?.kind ? '／' + String(task.kind) : '') +
@@ -2919,8 +3190,12 @@
         : receipts.status === 'MULTIPLE_ATTEMPTS_UNBOUND'
           ? '多個 attempt，無法安全綁定收據'
           : '同 attempt 收據未讀回';
-      const modelText=receipt?.model_invoked === true ? '模型呼叫有收據' :
-        receipt?.model_invoked === false ? '收據證實未呼叫模型' : '模型是否呼叫未知';
+      const modelText=receipt?.state === 'STARTED'
+        ? receipt.model_invoked === true
+          ? 'STARTED；收據另報曾呼叫模型，但目前模型活動未證實'
+          : 'STARTED 僅為啟動回報；模型呼叫與目前活動未知'
+        : receipt?.model_invoked === true ? '收據回報曾呼叫模型；不代表目前活動'
+          : receipt?.model_invoked === false ? '收據證實未呼叫模型' : '模型是否呼叫未知';
       const toolText=Number.isSafeInteger(receipt?.tool_execution_count)
         ? '工具 ' + receipt.tool_execution_count + ' 次' : '工具次數未知';
       base.progress=(fallbackState === 'STALE' ? '歷史快照（已過期）；' : '') +
@@ -2977,7 +3252,7 @@
       base.summaryTask=id === 'W1' ? 'OpenCode 編輯任務；來源 PR #' + job.source_pr +
           (lifecycle?.lifecycle === 'CLOSED_UNMERGED' ? '（已關閉未合併，歷史來源）' : '')
         : id === 'W2' ? 'Antigravity 原生編輯任務；來源 PR #' + job.source_pr :
-          'Zero Risk 正式任務；來源 PR #' + job.source_pr;
+          'W3 任務識別候選；同來源收據尚未核對；來源 PR #' + job.source_pr;
       base.summaryProgress=id === 'W1'
         ? 'Worker ' + base.workerTerminal + '；Codex 差異核對 ' +
           (reconciliation?.diffReconciliation || 'UNKNOWN') +
@@ -3043,7 +3318,9 @@
     text(prefix + 'summary-progress',data?.summaryProgress || data?.progress);
     text(prefix + 'summary-blocker',data?.summaryBlocker || data?.formalAcceptance || '未確認');
     text(prefix + 'summary-next',data?.next);
-    text(prefix + 'summary-time',data?.eventAt ? readTime(data.eventAt) : '沒有可核對的派工／收據事件時間');
+    text(prefix + 'summary-time',data?.eventAt
+      ? (id === 'W3' ? 'W3 source event_at=' : 'GitHub schema-6 event_at=') + readTime(data.eventAt)
+      : '沒有可核對的同來源事件時間');
     text(prefix + 'task',data?.task);
     text(prefix + 'attempt',data?.attempt);
     text(prefix + 'model',data?.model);
@@ -3075,14 +3352,16 @@
     text(prefix + 'acceptance',data?.formalAcceptance || 'UNKNOWN：沒有獨立正式接受證據');
     text(prefix + 'next',data?.next);
     text(prefix + 'time',data?.eventAt
-      ? '最後已讀回派工／收據 ' + readTime(data.eventAt)
-      : '沒有可核對的派工／收據時間');
+      ? (id === 'W3' ? 'W3 source event_at=' : 'GitHub schema-6 dispatch/receipt event_at=') +
+        readTime(data.eventAt)
+      : '沒有可核對的同來源派工／收據時間');
     text(id.toLowerCase() + '-header-progress',data?.progress || '最新任務進度未確認');
     text(id.toLowerCase() + '-last-event',data?.eventAt
-      ? '最後任務事件：' + readTime(data.eventAt)
+      ? '最後同來源任務事件：' + readTime(data.eventAt)
       : '最後任務事件：未確認');
     if (id === 'W1' || id === 'W2')
-      text(id.toLowerCase() + '-observed',data?.observationLabel || 'Win11 現場觀測：UNKNOWN · 時間未確認');
+      text(id.toLowerCase() + '-observed',data?.observationLabel ||
+        'Win11 快照 task.state=UNKNOWN · observed_at=時間未確認 · UNKNOWN');
     for (const [suffix,url,label] of [
       ['job-link',data?.jobUrl,'Issue #310 派工'],
       ['receipt-link',data?.receiptUrl,id === 'W3' ? '工具回傳證據' : 'Issue #407 收據'],
@@ -3204,7 +3483,7 @@
     const status=data.classification.status;
     const statusLabel=STATUS[status]?.[0] || 'UNKNOWN';
     badge(id.toLowerCase() + '-badge',status,statusLabel);
-    const shortStatus=dispatch?.shortStatus || '未派工';
+    const shortStatus=dispatch?.shortStatus || (id === 'W3' ? '證據不足' : '未派工');
     const shortKind=shortStatus === '受阻' ? 'bad'
       : shortStatus === '已完成執行' ? 'good'
         : shortStatus === '等待條件' ? 'warn' : 'neutral';
@@ -3329,7 +3608,8 @@
   }
   function w2EvidenceData(goalComments, issueComments, mainSha, goalIdentity = null,
       goalSourceComplete = true, issueSourceComplete = true, expectedAttemptBinding = null,
-      resultPull = null, resultChecks = null, workerRecord = null, osFreshness = 'UNKNOWN') {
+      resultPull = null, resultChecks = null, workerRecord = null, osFreshness = 'UNKNOWN',
+      resultWorkflowRuns = null) {
     const latest = goalSourceComplete ? latestSchema6Job(goalComments,'antigravity_edit') : null;
     const currentJob = latest?.job || null;
     const goalReferenceVerified = Boolean(currentJob && goalIdentity &&
@@ -3397,7 +3677,7 @@
         if (!c?.body) continue;
         const sourceAcceptance=parseW2SourceAcceptance(c,currentJob,matchedReceipt,
           matchedReceiptCommentId,resultPull,resultChecks,goalReferenceVerified,
-          issueComments,latest?.id,Date.now());
+          issueComments,latest?.id,Date.now(),resultWorkflowRuns);
         if (sourceAcceptance) candidateAcceptances.push({ id:Number(c.id), acc:sourceAcceptance });
         const acc = parseMarkedAfterHeading(c.body, ACCEPTANCE_MARKER);
         if (validW2Acceptance(acc) &&
@@ -3561,8 +3841,11 @@
       const tests = codex ? w2AcceptanceTestSummary(codex.tests) : null;
       const testSummary = tests ? ` · 測試 ${tests.passed}/${tests.total} · 失敗 ${tests.failed} · 略過 ${tests.skipped}` : '';
       const source = codex?.sourceAcceptance;
+      const diffSummary = source?.worker_diff_identity === 'NOT_CLAIMED'
+        ? `Worker 擷取差異 SHA-256=${source.worker_diff_sha256 || source.diff_sha256}；與 Codex reviewed result PR 差異的相同性 NOT_CLAIMED`
+        : `Diff SHA-256=${source?.diff_sha256}`;
       const sourceSummary = source
-        ? ` · Diff SHA-256=${source.diff_sha256} · 結果 PR #${source.result_pr} ${source.result_pr_state} · ` +
+        ? ` · ${diffSummary} · Codex reviewed PR paths ${source.changed_paths || 'UNKNOWN'} · 結果 PR #${source.result_pr} ${source.result_pr_state} · ` +
           `head ${source.result_head} · ${source.merge_commit ? 'merge ' + source.merge_commit + ' · main readback ' + (source.main_readback || 'UNKNOWN') : 'merge ' + (source.runtime_deployment === 'NOT_PERFORMED' ? 'NOT_PERFORMED' : 'UNKNOWN') + ' · runtime ' + (source.runtime_deployment || 'UNKNOWN')} · ` +
           `收據 checks ${source.exact_head_checks} · GitHub 精確 HEAD checks ${source.result_checks} · legacy ${source.legacy_check} · ` +
           `測試 ${source.source_test}`
@@ -3649,16 +3932,18 @@
     if (windows.status !== 'FRESH') return 'UNKNOWN';
     return fieldFreshness(windows.observed_at, MAX_LIVE_AGE_MS, now);
   }
-  function workerObservationLabel(result, snapshotFreshness, now) {
+  function workerObservationLabel(result, snapshotFreshness, now, workerId) {
     if (!result?.snapshot || !['FRESH','STALE'].includes(result.status))
-      return 'Win11 現場觀測：UNKNOWN · 時間未確認';
+      return 'Win11 快照 task.state=UNKNOWN · observed_at=時間未確認 · UNKNOWN';
     const observedAt = result.snapshot.windows?.observed_at;
     const timestampFreshness = fieldFreshness(observedAt, MAX_LIVE_AGE_MS, now);
     const freshness = timestampFreshness === 'UNKNOWN' ? 'UNKNOWN'
       : snapshotFreshness === 'STALE' || timestampFreshness === 'STALE' ? 'STALE'
         : snapshotFreshness === 'FRESH' && timestampFreshness === 'FRESH' ? 'FRESH' : 'UNKNOWN';
     const time = timestampFreshness === 'UNKNOWN' ? '時間未確認' : readTime(observedAt);
-    return `Win11 現場觀測：${freshness} · ${time}`;
+    const task=dispatchTaskSource(result.snapshot,workerId);
+    const taskState=task?.task_state || task?.state || task?.status || 'UNKNOWN';
+    return `Win11 快照 task.state=${String(taskState)} · observed_at=${time} · ${freshness}`;
   }
   function resourceFreshness(resource, now, maxAge = 15 * 60 * 1000) {
     if (!resource?.data || !resource.fetchedAt) return 'UNKNOWN';
@@ -3716,6 +4001,8 @@
       ...(resources.w1ResultChecks?.url ? ['W1 結果 PR checks ' + sourceStatusLabel(resources.w1ResultChecks,now,CHECKS_POLL_MS)] : []),
       ...(resources.w2ResultPr?.url ? ['W2 結果 PR ' + sourceStatusLabel(resources.w2ResultPr,now,PR_POLL_MS)] : []),
       ...(resources.w2ResultChecks?.url ? ['W2 結果 PR checks ' + sourceStatusLabel(resources.w2ResultChecks,now,CHECKS_POLL_MS)] : []),
+      ...(resources.w2ResultWorkflowRuns?.url ? ['W2 結果 workflow runs ' +
+        sourceStatusLabel(resources.w2ResultWorkflowRuns,now,CHECKS_POLL_MS)] : []),
       'checks ' + sourceStatusLabel(resources.checks,now,CHECKS_POLL_MS),
       'main ' + sourceStatusLabel(resources.main,now,MAIN_POLL_MS),
     ].join('；');
@@ -3798,7 +4085,6 @@
         : '顯示目前可讀到的 GitHub PR／CI；沒有新鮮 Win11 觀測時，Worker 狀態為 UNKNOWN。');
     text('metric-observed', observation.snapshot ? readTime(observation.snapshot.windows?.observed_at) +
       (osFreshness === 'STALE' ? '（STALE）' : osFreshness === 'UNKNOWN' ? '（UNKNOWN）' : '') : '未取得有效觀測');
-    const workerObservation = workerObservationLabel(observation, osFreshness, now);
     const successfulTimes = Object.values(resources).map(r => r.fetchedAt || 0).filter(Boolean);
     text('metric-synced', successfulTimes.length ? readTime(Math.max(...successfulTimes)) : '尚未成功讀回');
     const snapshot = observation.snapshot;
@@ -3840,7 +4126,8 @@
       }
       dispatchData[id]=dispatchCardData(id,snapshot,comments,resources,records[id],now,lifecycle,
         goalComments,resources.goal?.identity || null,resources.goal?.latestComplete === true);
-      renderDispatchCard(id,{...dispatchData[id],observationLabel:workerObservation});
+      renderDispatchCard(id,{...dispatchData[id],
+        observationLabel:workerObservationLabel(observation,osFreshness,now,id)});
     }
     const cardData = {};
     for (const id of ['W1','W2','W3'])
@@ -3860,11 +4147,18 @@
       resourceFreshness(w2ResultChecksResource,now,CHECKS_POLL_MS) === 'FRESH' &&
       !w2ResultChecksResource.error
       ? w2ResultChecksResource.data : null;
+    const w2ResultWorkflowRunsResource=resources.w2ResultWorkflowRuns;
+    const w2ResultWorkflowRuns=w2ResultHead && w2ResultWorkflowRunsResource?.url ===
+      API + '/actions/runs?head_sha=' + w2ResultHead + '&per_page=100' &&
+      resourceFreshness(w2ResultWorkflowRunsResource,now,CHECKS_POLL_MS) === 'FRESH' &&
+      !w2ResultWorkflowRunsResource.error
+      ? w2ResultWorkflowRunsResource.data : null;
     const w2Evidence = w2EvidenceData(goalComments, comments, safeSha(main?.sha),
       resources.goal?.identity || null,resources.goal?.latestComplete === true,
       resources.issue?.latestComplete === true,
       dispatchData.W2?.requestId ? {requestId:dispatchData.W2.requestId,
-        attemptId:dispatchData.W2.expectedAttemptId} : null,w2ResultPull,w2ResultChecks,workerRecord(snapshot,'W2'),osFreshness);
+        attemptId:dispatchData.W2.expectedAttemptId} : null,w2ResultPull,w2ResultChecks,
+      workerRecord(snapshot,'W2'),osFreshness,w2ResultWorkflowRuns);
     renderW2Evidence(w2Evidence);
     const workerSourcesComplete=issueReadFreshness === 'FRESH' &&
       resources.issue?.latestComplete === true && resources.goal?.latestComplete === true;
@@ -3873,9 +4167,10 @@
     const blocked = osFreshness === 'FRESH'
       ? Object.values(records).filter(record => record.status === 'BLOCKED').length : null;
     text('metric-blocked', blocked === null ? '未確認' : String(blocked) + ' 個 Worker 明確受阻');
-    text('metric-human',osFreshness !== 'FRESH' ? 'UNKNOWN：Win11 等待人工作業狀態未確認'
-      : records.W3.status === 'AWAITING_HUMAN' ? 'W3 等待 Human 手動轉送'
-        : '沒有明確的待 Human 動作證據');
+    text('metric-human',osFreshness !== 'FRESH' ? 'UNKNOWN：Win11 與 W3 同來源收據未確認 Human 動作'
+      : dispatchData.W3.hasBoundReceipt
+        ? 'W3 Human handoff 狀態依同來源路徑收據判定'
+        : 'W3 同來源收據缺少；Human handoff 是否發生或適用均 UNKNOWN');
     text('metric-main', main?.sha ? safeSha(main.sha) || 'SHA 格式錯誤'
       : mainFresh === 'STALE' ? '上次讀回已過期' : '讀回未知');
     text('metric-ci',currentChecks ? ciLabel(currentChecks)
@@ -3907,15 +4202,11 @@
     }
     text('error-detail',apiErrors.length ? apiErrors.join('；') : '目前沒有新錯誤；資料有效期仍逐欄判定。');
     const task = windows.native_task || {};
-    badge('native-badge',osFreshness,
-      osFreshness === 'FRESH' && task.enabled === true ? '已啟用／Ready；非工作證明' :
-        osFreshness === 'FRESH' && task.enabled === false ? '排程已停用' :
-          osFreshness === 'STALE' ? '排程觀測已過期' : '排程讀回未知',
-      osFreshness === 'FRESH' && task.enabled === true ? 'good' :
-        osFreshness === 'FRESH' && task.enabled === false ? 'warn' :
-          osFreshness === 'STALE' ? 'warn' : 'neutral');
+    const nativeTaskBadge=nativeTaskBadgeDetails(task,osFreshness);
+    badge('native-badge',osFreshness,nativeTaskBadge.label,nativeTaskBadge.kind);
     text('native-detail',osFreshness === 'FRESH'
-      ? '排程只代表輪詢機制；退出碼 0 不代表模型呼叫或程式交付。' : '最近排程資訊不是目前狀態。');
+      ? '顯示當次新鮮觀測中的 Task Scheduler state；最近執行時間另列，排程狀態不代表模型呼叫、終態完成或程式交付。'
+      : '最近排程資訊不是目前狀態。');
     const pollDisposition = POLL_DISPOSITIONS.includes(worker.poll_disposition)
       ? worker.poll_disposition : 'UNKNOWN';
     text('native-l0', osFreshness !== 'FRESH'
@@ -3945,7 +4236,7 @@
       (task.multiple_instances || '未知') + '；週期 ' +
       (task.trigger_interval_minutes ? task.trigger_interval_minutes + ' 分鐘' : '未知') +
       '；重啟恢復 ' + recovery);
-    text('native-last','最近 ' + readTime(task.last_run) + '；結果 ' + (task.last_result || '未確認'));
+    text('native-last','最近 ' + readTime(task.last_run) + '；結果 ' + nativeTaskResultLabel(task.last_result));
     const executorTaskLanes=[['opencode','W1 OpenCode'],['antigravity','W2 Antigravity'],['codex','Codex 主控']];
     const executorTaskSummary=osFreshness !== 'FRESH' || !object(windows.executor_tasks)
       ? 'UNKNOWN：觀測未提供三個 Executor 的 Task Scheduler 狀態'
@@ -3958,7 +4249,7 @@
           : item.registered !== true ? '註冊未知'
             : item.enabled === true ? '啟用' : item.enabled === false ? '停用' : '啟用未知';
         return label + '：' + state + '（' + enabled + '）；最近 ' + readTime(item.last_run) +
-          '；結果 ' + (item.last_result || '未確認');
+          '；結果 ' + nativeTaskResultLabel(item.last_result);
       }).join('；') + '；排程狀態不代表模型工作或成果';
     text('native-executor-tasks',executorTaskSummary);
     text('native-retired','Monitor 排程 ' +
@@ -3969,7 +4260,7 @@
         String(snapshot.comment_author_login || snapshot.publisher_login) + '；需與同一留言讀回核對。'
       : '此快照未記錄發布者與留言作者；身份關係未確認。');
     text('task-detail',(task.action_kind || 'Action 未知') + '；' + (task.identity_class || '執行身分未知') +
-      '；IgnoreNew ' + (task.multiple_instances || '未知') + '；' + (task.last_result || '結果未知'));
+      '；IgnoreNew ' + (task.multiple_instances || '未知') + '；' + nativeTaskResultLabel(task.last_result));
     text('opencode-detail',(oc.installed_version || '版本未確認') + '；程序數 ' +
       (Number.isSafeInteger(oc.process_count) ? oc.process_count : '未知') +
       '；Session ' + (Number.isSafeInteger(oc.active_session_count) ? oc.active_session_count : 'UNKNOWN') +
@@ -4001,9 +4292,7 @@
       w1SourceHarvestLabel(dispatchData.W1),
       dispatchData.W2.externalEffectClass === 'PARTIAL_OR_AMBIGUOUS'
         ? 'W2 回收證據待同一 Host 核對；不得重播' : 'W2 ' + dispatchData.W2.summaryBlocker,
-      dispatchData.W3.hasTask
-        ? 'W3 僅有候選識別字；正式派工／Human 轉送／MCP 呼叫／完成回傳／Codex 收件均 UNKNOWN'
-        : 'W3 未派工',
+      'W3 證據不足：同來源收據缺少；分派／執行路徑／啟動／模型活動／呼叫／完成／驗收均 UNKNOWN',
     ].join('；'));
     text('codex-evidence','UNKNOWN：公開觀測未提供可歸屬主控 Codex 的即時程序、模型推論與工具活動。');
     text('codex-observed',snapshot
@@ -4016,9 +4305,9 @@
     const independentCodexSummary='這只描述正式 Worker 佇列，不代表 Codex GOAL 沒有 READY；Codex 仍可依 #310 授權續做獨立、互不衝突的 pre-Production R4 來源工程。';
     const laneFollowUp=dispatchData.W1.resultPr
       ? (dispatchData.W1.codexSourceAcceptance
-        ? 'W1 source acceptance 已核對；原始 Worker task_acceptance／外部效果仍保持 UNKNOWN；W2 未知效果不得重播，W3 只按既有 Human 轉送流程。'
-        : '後續核對 W1 Codex source acceptance 與 W2 同 Host 回收證據；W2 未知效果不得重播，W3 只按既有 Human 轉送流程。')
-      : '後續核對 W1 diff／CI；W2 保留未知效果、不重播；W3 無有效 request_id 時不派工。';
+        ? 'W1 source acceptance 已核對；原始 Worker task_acceptance／外部效果仍保持 UNKNOWN；W2 未知效果不得重播；W3 待同來源收據與路徑核對。'
+        : '後續核對 W1 Codex source acceptance 與 W2 同 Host 回收證據；W2 未知效果不得重播；W3 待同來源收據與路徑核對。')
+      : '後續核對 W1 diff／CI；W2 保留未知效果、不重播；W3 分派、路徑及結果待同來源收據核對。';
     text('codex-next',workerQueueSummary + independentCodexSummary + laneFollowUp);
     const registration = snapshot?.github?.runner_registration;
     text('runner-registration',osFreshness === 'FRESH' && registration?.status === 'FRESH' &&
@@ -4153,10 +4442,13 @@
     validSchema6DispatchJob, validSchema6DispatchComment, dispatchTaskSource, schema6TaskSource,
     dispatchReceipt,
     parseCodexSourceAcceptanceFields, codexSourceAcceptanceStatic, codexSourceAcceptanceResultPr,
-    parseCodexSourceAcceptance, w1SourceAcceptanceData,
+    parseCodexSourceAcceptance, w1SourceAcceptanceData, validW2SourceTest,
+    codexReviewedBlockedW2SourceAcceptanceStatic, parseCodexReviewedBlockedW2SourceAcceptance,
+    codexReviewedW2TrustedChecks,
     dispatchCardData, renderDispatchCard, w1SourceHarvestLabel, render,
     freshnessOfSnapshot, workerObservationLabel, createApiClient, createResourceStore, renderRateStatus,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
+    nativeTaskBadgeDetails, nativeTaskResultLabel,
     w2EvidenceData, renderW2Evidence, workerMetricSummary, modelExecutionSwitchLabel,
     w2ModelEligibility, w2ModelEligibilityLabel, findLastTerminalReceipt,
     hashHumanGoalComment, validDirectCliDelivery,
