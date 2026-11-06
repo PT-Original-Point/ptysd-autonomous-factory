@@ -6,11 +6,12 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync,
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { parseJob, selectNext, parseReceipt, parseCodexSourceAcceptance, receipt, PROJECT, REPO, JOB_MARKER,
   RECEIPT_MARKER, checkModelAuthorization, terminalStateForResult,
   runWorker as runWorkerImplementation, main as runWorker, writeReceipt, ISSUE_TITLE, guardConfig,
   runPlan as executeOpenCodeTask, verifyCapturedEvidence, antigravityExecutionAuthorization,
-  captureScopedEditDiff,
+  captureScopedEditDiff, captureGitStdout,
   codexTerminalReceipt, selectNextWithCodexClaim, readPinnedCandidateSources, executorForJobKind,
   writePathsOverlap,
   publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight, derivePollDisposition,
@@ -27,6 +28,119 @@ import { candidateWorkspacePath, executorResultPath, makeExecutorManifest }
 import { ANTIGRAVITY_V2_MODEL, buildAntigravityChildEnvironment, buildNativeChildEnvironment,
   readAntigravityV2RunEvidence }
   from '../native-bridge/v2-readiness.mjs';
+import { diffCaptureErrorEvidence } from '../native-bridge/safe-error-code.mjs';
+
+test('Worker diff catches retain safe diagnostics and fail closed with synthetic processes', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-worker-diff-catch-'));
+  try {
+    const source = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const workspace = join(root, 'candidate'), project = join(root, 'project'), state = join(root, 'state');
+    for (const path of [workspace, project]) {
+      const clone = spawnSync('git', ['clone', '--quiet', '--shared', '--no-local', source, path],
+        { encoding: 'utf8', windowsHide: true });
+      assert.equal(clone.status, 0, clone.stderr);
+    }
+    mkdirSync(state);
+    const head = spawnSync('git', ['-C', workspace, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    const now = Date.now(), localAppData = join(root, 'local');
+    const cli = join(localAppData, 'agy', 'bin', 'agy.exe');
+    mkdirSync(dirname(cli), { recursive: true }); writeFileSync(cli, 'synthetic executable, never launched');
+    const readiness = { status:'CLI_AND_PINNED_MODEL_CATALOGED_NOT_EXECUTION_AUTH',
+      signature_verified:true, model:ANTIGRAVITY_V2_MODEL, version:'1.4.2', authentication_checked:true,
+      authentication_evidence:'AUTHENTICATED_QUOTA_READ', project_scope_evidence:'PROJECT_WORKSPACE_MATCHED',
+      effective_config_evidence:'EFFECTIVE_CONFIG_VERIFIED_NO_MODEL', tool_policy_evidence:'W2_NONFILE_ACTIONS_DENIED',
+      inference_executed:false, credential_values_collected:false, credit_fallback_setting:'CREDIT_FALLBACK_DISABLED', issues:[],
+      model_catalog:{ status:'PINNED_MODEL_CATALOGED_NOT_ENTITLEMENT', pinned_model_cataloged:true },
+      gemini_aggregate_quota:{ status:'GEMINI_AGGREGATE_QUOTA_READ', source:'GEMINI_MODELS_AGGREGATE',
+        weekly_remaining_percent:95, five_hour_remaining_percent:99,
+        weekly_reset_at:new Date(now+86400000).toISOString(), five_hour_reset_at:new Date(now+3600000).toISOString() } };
+    const tree = pid => ({ state:'DEAD', root_pid:pid, process_ids:[], census_complete:true,
+      observed_at:new Date().toISOString(), error:null });
+    let syntheticProcesses = 0, captures = 0;
+    const runCapturedProcess = async (_bin, _args, options) => {
+      syntheticProcesses++;
+      const out = Buffer.from(''), err = Buffer.alloc(0);
+      writeFileSync(options.stdoutPath, out); writeFileSync(options.stderrPath, err);
+      return { outcome:'SYNTHETIC_PROCESS_EXITED', exit_code:0, evidence_sha256:h('\n--- STDERR ---\n'),
+        evidence_bytes:16, local_evidence:{ stdout_file:basename(options.stdoutPath), stdout_sha256:h(out),
+          stdout_bytes:0, stderr_file:basename(options.stderrPath), stderr_sha256:h(err), stderr_bytes:0,
+          termination_state:'NOT_REQUESTED' } };
+    };
+    const capture = async input => {
+      captures++; assert.equal(input.workspace, workspace);
+      throw Object.assign(new Error('private detail'), { code:'EACCES' });
+    };
+    const baseJob = { schema:4, project_id:PROJECT, host:hostname().toUpperCase(),
+      request_id:'PTYSD_WORKER_DIFF_CATCH_TEST', source_sha:head, spec_path:'native-bridge/tasks/review.md',
+      spec_sha256:hash, variant:'high', edit_paths:['README.md'] };
+    const open = await executeOpenCodeTask('synthetic', { workspace, state_dir:state,
+      enable_v2_model_runs:true, allowed_models:{'opencode/spark':['high']} },
+      { ...baseJob, kind:'opencode_edit', model:'opencode/spark' }, randomUUID(), {
+        qualifyOpenCodeV2:()=>({ready:true,bin:'synthetic',version:'2.2.5'}),
+        readV2ProviderAuth:()=>({status:'AUTH_PROVIDER_RECORD_PRESENT'}),
+        readGitProcessTree:tree, gitPlatform:'win32', runCapturedProcess, captureScopedEditDiff:capture });
+    assert.equal(open.outcome, 'V2_EDIT_DIFF_CAPTURE_FAILED_EACCES');
+    assert.equal(open.source_diff_evidence, 'UNKNOWN');
+    assert.equal(open.local_evidence.edit_diff_error, 'CAPTURE_FAILED');
+    assert.equal(open.local_evidence.edit_diff_error_code, 'EACCES');
+    assert.equal(open.exit_code, -1); assert.equal(open.coding_state, 'UNKNOWN');
+    assert.equal(terminalStateForResult(open), 'BLOCKED');
+    const config = { workspace, antigravity_project_root:project, state_dir:state,
+      enable_antigravity_model_runs:true, allowed_models:{[ANTIGRAVITY_V2_MODEL]:['high']},
+      antigravity_cli_project_id:'b8fbf647-6c41-4932-9d0a-8a7af257a27a',
+      antigravity_execution_attestation:{model:ANTIGRAVITY_V2_MODEL,entitlement:'VERIFIED',
+        cost:'NO_ADDITIONAL_CHARGE',observed_at:new Date(now).toISOString()} };
+    for (const valid of [true, false]) {
+      const agy = await executeOpenCodeTask('synthetic', config,
+        {...baseJob, schema:6, kind:'antigravity_edit', model:ANTIGRAVITY_V2_MODEL,
+          source_pr:448, goal_comment_id:6188322050, goal_body_sha256:hash}, randomUUID(), {
+          now:()=>now, localAppData, runAntigravityV2Readiness:()=>readiness,
+          readGitProcessTree:tree, runCapturedProcess, captureScopedEditDiff:capture,
+          readAntigravityV2RunEvidence:async()=>({ valid, reason:'SYNTHETIC_INCOMPLETE',
+            workspace_cwd_evidence:{status:'MATCHED'}, model_invoked:null,
+            external_effects:'UNKNOWN', source_diff_evidence:'UNKNOWN', task_acceptance:'UNKNOWN' }) });
+      assert.equal(agy.outcome, valid ? 'ANTIGRAVITY_EDIT_DIFF_CAPTURE_FAILED_EACCES' :
+        'ANTIGRAVITY_STREAM_EVIDENCE_SYNTHETIC_INCOMPLETE_DIFF_CAPTURE_FAILED_EACCES');
+      assert.equal(agy.local_evidence.edit_diff_error, 'CAPTURE_FAILED');
+      assert.equal(agy.local_evidence.edit_diff_error_code, 'EACCES');
+      assert.equal(agy.exit_code,-1); assert.equal(agy.coding_state,'UNKNOWN');
+      assert.equal(agy.external_effects,'UNKNOWN'); assert.equal(terminalStateForResult(agy),'BLOCKED');
+      assert.equal(JSON.stringify(agy).includes('private detail'),false);
+    }
+    assert.equal(captures,3); assert.equal(syntheticProcesses,3);
+  } finally { rmSync(root,{recursive:true,force:true}); }
+});
+
+test('diff capture diagnostic accepts only fixed codes and reads code once', () => {
+  let reads = 0;
+  const evidence = diffCaptureErrorEvidence({ get code() { reads++; return 'EACCES'; },
+    message: 'SECRET_sensitive_message' });
+  assert.equal(reads, 1);
+  assert.deepEqual(evidence, { legacyCode: 'EACCES', diagnostic: 'EACCES' });
+  for (const value of ['EDIT_SECRET_PASSWORD', 'EDIT_GIT_AFTER_SECRET',
+    'EDIT_GIT_CHANGED-FILE-BLOB-1000_EXIT_NONZERO', 'EACCES /private/path',
+    { toString() { throw new Error('must not stringify'); } }, null]) {
+    assert.equal(diffCaptureErrorEvidence({ code: value, message: 'EACCES' }).diagnostic, 'UNKNOWN');
+  }
+  assert.equal(diffCaptureErrorEvidence({ message: 'EACCES' }).diagnostic, 'UNKNOWN');
+  assert.equal(diffCaptureErrorEvidence({ get code() { throw new Error('secret'); } }).diagnostic, 'UNKNOWN');
+  assert.equal(diffCaptureErrorEvidence({ code: 'EDIT_GIT_AFTER-HEAD_EXIT_NONZERO' }).diagnostic,
+    'EDIT_GIT_EXIT_NONZERO');
+});
+
+test('diff capture diagnostic records a real git failure without exposing stderr', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-git-failure-'));
+  try {
+    await assert.rejects(captureGitStdout(root, root, 'SYNTHETIC', 'attempt', 'after-head',
+      ['rev-parse', 'HEAD']), error => {
+      assert.equal(error.code, 'EDIT_GIT_AFTER-HEAD_EXIT_NONZERO');
+      assert.deepEqual(diffCaptureErrorEvidence(error), {
+        legacyCode: 'EDIT_GIT_AFTER_HEAD_EXIT_NONZERO', diagnostic: 'EDIT_GIT_EXIT_NONZERO',
+      });
+      return true;
+    });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 const commit = 'a'.repeat(40); const hash = 'b'.repeat(64);
 const humanGoalBody = `<!-- PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015 -->\nCandidate task linkage fixture; this text is provenance only.`;

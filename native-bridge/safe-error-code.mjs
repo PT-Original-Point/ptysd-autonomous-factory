@@ -55,3 +55,23 @@ export function safeErrorCode(error, fallback = 'UNKNOWN') {
   if (code) return code;
   return safeCode(fallback) || (SAFE_FALLBACK_CODES.has(fallback) ? fallback : 'UNKNOWN');
 }
+
+// The diagnostic is deliberately narrower than the legacy outcome sanitizer.
+// Capture code once, and never use message as diagnostic evidence.
+export function diffCaptureErrorEvidence(error) {
+  let rawCode;
+  try { rawCode = error?.code; } catch { rawCode = undefined; }
+  let legacyCode = safeCode(rawCode);
+  if (!legacyCode) {
+    let message;
+    try { message = error?.message; } catch { message = undefined; }
+    legacyCode = safeCode(message) || 'UNKNOWN';
+  }
+  const gitFailure = typeof rawCode === 'string' &&
+    /^EDIT_GIT_([A-Z][A-Z0-9-]{0,79})_([A-Z][A-Z0-9_]{0,63})$/.exec(rawCode);
+  const knownLabel = gitFailure && (SAFE_EDIT_GIT_CAPTURE_LABELS.has(gitFailure[1]) ||
+    /^CHANGED-FILE-BLOB-(?:0|[1-9][0-9]{0,2})$/.test(gitFailure[1]));
+  const diagnostic = SAFE_SYSTEM_CODES.has(rawCode) ? rawCode : knownLabel &&
+    SAFE_EDIT_GIT_CAPTURE_FAILURES.has(gitFailure[2]) ? `EDIT_GIT_${gitFailure[2]}` : 'UNKNOWN';
+  return { legacyCode, diagnostic: diagnostic || 'UNKNOWN' };
+}

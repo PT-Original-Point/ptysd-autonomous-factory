@@ -28,7 +28,7 @@ import {
   updateExistingOperatorComment,
 } from './operator-observation.mjs';
 import { runCapturedProcess, terminateProcessTree } from './captured-process.mjs';
-import { safeErrorCode } from './safe-error-code.mjs';
+import { safeErrorCode, diffCaptureErrorEvidence } from './safe-error-code.mjs';
 import { assertExecutorTaskReady, cleanupExecutorAttempt, createExecutorSourceBundle,
   createPinnedSourceBundle, dispatchToExecutor, executorResultPath, prepareExecutorAttempt,
   readPendingExecutorAttempt, triggerPendingExecutorAttempt,
@@ -2259,7 +2259,7 @@ export function buildOpenCodeChildEnv(sourceEnv = process.env, hostPlatform = pl
   childEnv.OPENCODE_DISABLE_AUTOUPDATE = 'true';
   return childEnv;
 }
-async function captureGitStdout(workspace, stateDir, requestId, attemptId, label, args,
+export async function captureGitStdout(workspace, stateDir, requestId, attemptId, label, args,
   keepStdout = false, readProcessTree, platformName = platform()) {
   const stem = `edit-git-${label}-${requestId}-${attemptId}`;
   const stdoutPath = join(stateDir, `${stem}.stdout.bin`);
@@ -2286,7 +2286,12 @@ async function captureGitStdout(workspace, stateDir, requestId, attemptId, label
         evidence.process_error ? 'PROCESS_FAILED' :
           evidence.stdin_error ? 'STDIN_FAILED' :
             result.exit_code !== 0 ? 'EXIT_NONZERO' : terminationFailure;
-  if (failure) throw new Error(`EDIT_GIT_${label.toUpperCase()}_${failure}`);
+  if (failure) {
+    const code = `EDIT_GIT_${label.toUpperCase()}_${failure}`;
+    const error = new Error(code);
+    error.code = code;
+    throw error;
+  }
   const output = readFileSync(stdoutPath);
   if (!keepStdout) rmSync(stdoutPath, { force: false });
   rmSync(stderrPath, { force: false });
@@ -2766,11 +2771,11 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     // even when its stream is truncated or malformed. Preserve any real diff,
     // but keep model activity, external effects and task acceptance unknown.
     let diff;
-    try { diff = await captureScopedEditDiff({ workspace: config.workspace,
+    try { diff = await (dependencies.captureScopedEditDiff ?? captureScopedEditDiff)({ workspace: config.workspace,
       state_dir: config.state_dir, job, attempt_id: attemptId,
       readProcessTree: dependencies.readGitProcessTree }); }
     catch (error) {
-      const errorCode = safeErrorCode(error);
+      const { legacyCode: errorCode, diagnostic } = diffCaptureErrorEvidence(error);
       const physicalScopeFailure = errorCode.startsWith('EDIT_PATH_PHYSICAL_');
       return { ...evidencedResult,
         outcome: physicalScopeFailure ? 'ANTIGRAVITY_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN'
@@ -2781,7 +2786,8 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
         local_evidence: { ...evidencedResult.local_evidence,
           ...(physicalScopeFailure ? { antigravity_run: { ...evidencedResult.local_evidence.antigravity_run,
             source_diff_evidence: 'UNKNOWN' } } : {}),
-          edit_diff_error: physicalScopeFailure ? errorCode : 'CAPTURE_FAILED' } };
+          edit_diff_error: physicalScopeFailure ? errorCode : 'CAPTURE_FAILED',
+          edit_diff_error_code: diagnostic } };
     }
     if (diff.diff_capture_status === 'NOT_CAPTURED_PHYSICAL_SCOPE_UNVERIFIED')
       return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN',
@@ -2814,11 +2820,11 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
   }
 
   let diff;
-  try { diff = await captureScopedEditDiff({ workspace: config.workspace,
+  try { diff = await (dependencies.captureScopedEditDiff ?? captureScopedEditDiff)({ workspace: config.workspace,
     state_dir: config.state_dir, job, attempt_id: attemptId,
     readProcessTree: dependencies.readGitProcessTree }); }
   catch (error) {
-    const errorCode = safeErrorCode(error);
+    const { legacyCode: errorCode, diagnostic } = diffCaptureErrorEvidence(error);
     const physicalScopeFailure = errorCode.startsWith('EDIT_PATH_PHYSICAL_');
     return { ...evidencedResult,
       outcome: physicalScopeFailure ? 'ANTIGRAVITY_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN'
@@ -2829,7 +2835,8 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
       local_evidence: { ...evidencedResult.local_evidence,
         ...(physicalScopeFailure ? { antigravity_run: { ...evidencedResult.local_evidence.antigravity_run,
           source_diff_evidence: 'UNKNOWN' } } : {}),
-        edit_diff_error: physicalScopeFailure ? errorCode : 'CAPTURE_FAILED' } };
+        edit_diff_error: physicalScopeFailure ? errorCode : 'CAPTURE_FAILED',
+        edit_diff_error_code: diagnostic } };
   }
   if (diff.diff_capture_status === 'NOT_CAPTURED_PHYSICAL_SCOPE_UNVERIFIED')
     return { ...evidencedResult, outcome: 'ANTIGRAVITY_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN',
@@ -3123,12 +3130,12 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
     else if (!hadExistingPolicy) rmSync(configFile, { force: false });
   } catch { policyChanged = true; }
   let diff;
-  try { diff = await captureScopedEditDiff({ workspace: config.workspace,
+  try { diff = await (dependencies.captureScopedEditDiff ?? captureScopedEditDiff)({ workspace: config.workspace,
     state_dir: config.state_dir, job, attempt_id: attemptId,
     readProcessTree: dependencies.readGitProcessTree,
     platformName: dependencies.gitPlatform ?? platform() }); }
   catch (error) {
-    const errorCode = safeErrorCode(error);
+    const { legacyCode: errorCode, diagnostic } = diffCaptureErrorEvidence(error);
     return { ...evidencedResult,
       outcome: errorCode.startsWith('EDIT_PATH_PHYSICAL_')
         ? 'V2_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN' : `V2_EDIT_DIFF_CAPTURE_FAILED_${errorCode}`,
@@ -3136,7 +3143,8 @@ export async function runPlan(spec, config, job, attemptId, dependencies = {}) {
       exit_code: -1, coding_state: 'UNKNOWN',
       ...(errorCode.startsWith('EDIT_PATH_PHYSICAL_') ? { scope_valid: false, external_effects: 'UNKNOWN' } : {}),
       local_evidence: { ...evidencedResult.local_evidence,
-        edit_diff_error: errorCode.startsWith('EDIT_PATH_PHYSICAL_') ? errorCode : 'CAPTURE_FAILED' } };
+        edit_diff_error: errorCode.startsWith('EDIT_PATH_PHYSICAL_') ? errorCode : 'CAPTURE_FAILED',
+        edit_diff_error_code: diagnostic } };
   }
   if (diff.diff_capture_status === 'NOT_CAPTURED_PHYSICAL_SCOPE_UNVERIFIED')
     return { ...evidencedResult, outcome: 'V2_EDIT_PHYSICAL_PATH_SCOPE_UNKNOWN',

@@ -13,6 +13,11 @@ import { assertPhysicalDirectory, candidateBundlePath, candidateWorkspacePath,
   claimPendingManifest, executorResultPath, getCurrentWindowsSid } from './windows-executor.mjs';
 
 const SID = /^S-1-(?:\d+-)+\d+$/i;
+const SAFE_EXECUTION_SYSTEM_ERRORS = new Set([
+  'EACCES', 'EBUSY', 'EEXIST', 'EINTR', 'EINVAL', 'EIO', 'EISDIR', 'EMFILE',
+  'ENAMETOOLONG', 'ENFILE', 'ENOENT', 'ENOMEM', 'ENOTDIR', 'ENOTEMPTY',
+  'ENOTSUP', 'EPERM', 'EPIPE', 'ETIMEDOUT', 'EXDEV',
+]);
 const RESERVED_SIDS = new Set(['S-1-5-18', 'S-1-5-32-544']);
 const HASH = /^[a-f0-9]{64}$/i;
 function digest(value) { return createHash('sha256').update(value).digest('hex'); }
@@ -504,8 +509,12 @@ export async function executePendingManifest({ config, manifestDir, currentSid =
   if (!result) {
     try { result = await execute(manifest.spec, executionConfig, parsedJob, manifest.attempt_id); }
     catch (error) {
-      result = { outcome: `EXECUTION_ERROR_${safeErrorCode(error)}`,
-        exit_code: -1, evidence_sha256: null, evidence_bytes: 0 };
+      const executionErrorCode = safeErrorCode(error);
+      const rawSystemCode = error?.code;
+      result = { outcome: `EXECUTION_ERROR_${executionErrorCode}`,
+        exit_code: -1, evidence_sha256: null, evidence_bytes: 0,
+        local_evidence: { execution_error_code: SAFE_EXECUTION_SYSTEM_ERRORS.has(rawSystemCode)
+          ? rawSystemCode : 'UNKNOWN' } };
     }
     if (workspaceGuard) result = await reconcileEditWorkspace(result, parsedJob, workspaceGuard);
   }
