@@ -59,6 +59,7 @@ test('explicit Human action cannot hide separate instructions before or after it
 
 const sha = 'a'.repeat(40);
 const taskHash = 'b'.repeat(64);
+const readTextFixture = name => readFileSync(new URL(name, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const RECEIPT_MARKER = 'PTYSD_NATIVE_RECEIPT_V1\n';
 const worker = 'ptyworker';
 const author = 't14210184';
@@ -109,7 +110,7 @@ test('R4 autonomous continuation fallback requires pinned bytes as well as autho
 
 test('the exact token-first Human supplement maps to a compact source-bound action', () => {
   const commentId = 6233162641;
-  const body = readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8');
+  const body = readTextFixture('./fixtures/issue-310-comment-6233162641.txt');
   const bodySha = createHash('sha256').update(body, 'utf8').digest('hex');
   assert.equal(bodySha, '6e969e32d25197e1b4d865eb969dd88d87afa317864faba1b60c47c7936caedb');
   const selected = codexScopedActionStatus(body, commentId);

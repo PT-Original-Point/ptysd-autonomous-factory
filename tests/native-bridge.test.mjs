@@ -41,6 +41,7 @@ const mkjob = (opts = {}) => ({ schema: 1, project_id: PROJECT, host: 'DESKTOP-1
 const encoded = o => JOB_MARKER + JSON.stringify(o);
 const com = (id, body, login = 't14210184') => ({ id, body, user: { login } });
 const h = x => createHash('sha256').update(x).digest('hex');
+const readTextFixture = name => readFileSync(new URL(name, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const codexPlan = write_paths => ({ schema: 4, project_id: PROJECT, host: 'DESKTOP-1B6PD2P',
   request_id: `PTYSD_HUMAN_GOAL_6188322050_${h(humanGoalBody).slice(0, 42).toUpperCase()}`,
   kind: 'codex_plan', source_sha: commit,
@@ -49,7 +50,7 @@ const codexPlan = write_paths => ({ schema: 4, project_id: PROJECT, host: 'DESKT
   goal_comment_id: 6188322050, goal_body_sha256: h(humanGoalBody), goal_author: 't14210184',
   goal_marker: 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015' });
 const anchorComment = () => humanGoalComment({ id: 6233162641,
-  body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+  body: readTextFixture('./fixtures/issue-310-comment-6233162641.txt') });
 const resolvedDirective = () => humanGoalComment({ id: 6569393440,
   body: '<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261106 -->\n**Codex 下一動作**：Review bounded source.' });
 const directiveReceipt = (directive, host, publisher, id = 8000000001) => {
@@ -736,12 +737,12 @@ test('Worker reports the failing observation API stage without persisting provid
 });
 
 test('only the exact verified non-Human handoff is skipped without falling back across changed identity', async () => {
-  const body = readFileSync(new URL('./fixtures/issue-310-comment-6569393438.txt', import.meta.url), 'utf8');
+  const body = readTextFixture('./fixtures/issue-310-comment-6569393438.txt');
   assert.equal(h(body), '45da457d7181d0d29d4649fa4f121f09651a0b5e6746eaa6639b37b55a93b417');
   const handoff = { id: 6569393438, issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
     user: { login: 't14210184' }, body };
   const anchor = humanGoalComment({ id: 6233162641,
-    body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+    body: readTextFixture('./fixtures/issue-310-comment-6233162641.txt') });
   assert.equal(h(anchor.body), '6e969e32d25197e1b4d865eb969dd88d87afa317864faba1b60c47c7936caedb');
   const newerHuman = humanGoalComment({ id: 6569393440,
     body: '<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261106 -->\n' +
@@ -785,7 +786,7 @@ test('only the exact verified non-Human handoff is skipped without falling back 
 test('terminal or stale schema-3 Codex jobs do not manufacture an eligibility wait', async () => {
   const host = hostname().toUpperCase();
   const anchor = humanGoalComment({ id: 6233162641,
-    body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+    body: readTextFixture('./fixtures/issue-310-comment-6233162641.txt') });
   for (const stale of [true, false]) {
     const job = { schema: 3, project_id: PROJECT, host,
       request_id: `PTYSD_CODEX_SCHEMA3_NOT_READY_${stale ? 'STALE' : 'TERMINAL'}`,
@@ -840,7 +841,7 @@ test('Worker recognizes the two trusted Human R4 directive markers without start
   for (const { id, marker } of directives) {
     const comment = humanGoalComment({ id, body: `# Human directive\n<!-- ${marker} -->` });
     const anchor = humanGoalComment({ id: 6233162641,
-      body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+      body: readTextFixture('./fixtures/issue-310-comment-6233162641.txt') });
     const fixture = makeObservationWorkerFixture({ goalComments: [anchor, comment] });
     try {
       await fixture.run();
@@ -861,7 +862,7 @@ test('a scoped-action omission is reported even when an explicit Codex policy ex
   const comment = humanGoalComment({ id,
     body: '# Human directive\n<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261021 -->\nNo scoped next action.' });
   const anchor = humanGoalComment({ id: 6233162641,
-    body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+    body: readTextFixture('./fixtures/issue-310-comment-6233162641.txt') });
   const fixture = makeObservationWorkerFixture({ goalComments: [anchor, comment], configOverrides: {
     human_goal_codex_policy: { enabled: true, model: 'gpt-6.1-sol', reasoning_effort: 'medium',
       write_paths: ['native-bridge/worker.mjs'] },
@@ -4218,7 +4219,7 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
     const prior={id:6218136570,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
       user:{login:'t14210184'},body:'Earlier directive\nPTYSD_V53R4_P0_ISSUE310_407_CODEX_DELIVERY_RECOVERY_20261016\nEarlier bytes.'};
     const reference = humanGoalComment({ id: 6233162641,
-      body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+      body: readTextFixture('./fixtures/issue-310-comment-6233162641.txt') });
     const directive={id:6569393440,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
       user:{login:'t14210184'},body:`${marker}\n` +
         '**Codex 下一動作**：Perform this bounded source-only unit within the pinned write paths.\n'};
@@ -4444,7 +4445,7 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
     assert.equal(triggers,beforeStaleTriggers,'changed source bytes never trigger an additional executor run');
     assert.equal(directReads,2,'the selected body and the pre-dispatch body are both read back');
 
-    const handoffBody = readFileSync(new URL('./fixtures/issue-310-comment-6569393438.txt', import.meta.url), 'utf8');
+    const handoffBody = readTextFixture('./fixtures/issue-310-comment-6569393438.txt');
     const handoff = { id: 6569393438, issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
       user: { login: 't14210184' }, body: handoffBody };
     for (const [name, finalComment, expected] of [
