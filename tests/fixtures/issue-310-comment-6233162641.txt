@@ -1,0 +1,35 @@
+# PTYSD V5.3-R4｜Human 最新補充：Codex Token 消耗最小化、W1/W2 外包優先、原生接單閉環
+<!-- PTYSD_V53R4_CODEX_DIRECTIVE_TOKEN_FIRST_20261017 -->
+
+**立即生效的 Human 優先順序**：**(0) 停止無效 Codex Token 消耗 → (1) GitHub／Win11 真實同步與自動接單 → (2) 讓 W1/W2 真正可交付 → (3) 外包成果回收／返工 → (4) Codex 僅按需高價值介入**。本指示是既有 #310 V5.3-R4 Human GOAL #6188322050 及 W1/W2 限制 #6233118477 的最新補充，不是新 Mission、R15、付費／Production 授權、排程或控制面。**優化後仍要能完成工作，不准以省 Token 為名改成永遠 WAITING。**
+
+**本輪 GitHub 來源讀回（操作前需 fresh-read）**：main `0862789845c304b8b8ba4134a85e53e40b5340f7`；最新現役候選 PR #443 OPEN/Draft HEAD `5d251ed2b528e86fd254a2f3c4774e3f23afeb54`；#407 observation #6144415195 sequence 2 為過期，Win11 實機仍未有正式新 Publisher／模型 Executor 部署收據。最新 Human 源讀回 #6233118477 不能因 marker 不符合過時 regex 就失效。
+
+## P0｜不呼叫模型也能做的工作，全部交還原生 L0
+- 沿用既有五分鐘 Windows Task Scheduler、`git/gh`、GitHub Issue #310/#407、PR/CI、Task/OS 原生事件、SHA 與現有收據，做可信新指令偵測、資格檢查、異動比對、工作擁有者、執行結果、發布及同來源讀回；**無 material delta：Codex/W1/W2 模型呼叫數全部為零**，不得為了產生「狀態報告」喚醒模型。
+- 狀態不同層次分開：CANDIDATE PR、main accepted、Win11 deployed SHA、OS LIVE／TTL；不必讓 Draft 的 SHA 冒充已部署來取得表面一致。現有 #407 snapshot/TTL 過期要標 `STALE`，修復原生單一 Publisher 後自然更新；不新增 2667／第二 Monitor／Task DB。
+- **現有候選缺陷的針對性測試**：`native-bridge/worker.mjs` 的 `V53_HUMAN_DIRECTIVE_MARKER` 目前不接受 #6233118477（`W1_W2_CLI_ONLY...`）和 #6232811908（`DUAL_AUDIT...`）專用標記。應保留 trusted author、repo/project、comment body SHA、scope 與去重，不把任意留言當 shell；確保最新 Human 指令不會被偷偷忽略。此留言使用已受支援的 `CODEX_DIRECTIVE` 標記，是為了可被合法候選讀取，**不是**目前已部署的證據。
+
+## P1｜Codex 立即停止大量低價值工作；只做必要的 Bootstrapping
+- Codex **不再反覆做**：每小時全 Repo／全 Session 歷史重讀、數萬行長報告、週期性狀態輪詢、CI 綠燈摘要、一般程式碼編寫、固定重新建立 snapshot PR、無新事實的同錯重試、把巨大 Human comment／完整 JSONL 反覆灌入模型。
+- 原生工具一次取得 `project_id + latest Human comment ID/body SHA + task/owner + accepted source/head + diff/test failure excerpt + attempt/receipt`，形成僅**本回合**所需的最短工作上下文；仍保存原文來源與精確雜湊供稽核，不擅刪授權和安全判斷。特別審查 `codexExecutorPrompt()` 目前把 `verifiedGoal` 含完整 body 直接插入模型 prompt 的高耗用設計。可改為**原生驗過真實完整內容後**，把同任務必需之精確縮減範圍交模型；測試不能遺漏 Human 最新限制、任務身份/寫入範圍或可信驗收。
+- 現有 Desktop automation `v5-3-r3` 曾讀回 TOML `FREQ=HOURLY;INTERVAL=1`，但自然觸發證據仍 UNKNOWN。**過渡期間保留同 ID、不另建第二筆，prompt 改為「只看自上次可信收據後的實質新變化；無變化立即結束」，且不重讀 809 MB JSONL**。等原生 L0→Codex CLI→GitHub 結果的自然週期、失敗恢復、無雙主均實機驗收後，才停止這筆週期性高價模型喚醒；不能在替代路徑不存在時關掉唯一可用續工通道。
+- Codex 正常只做：首次分工及真正的策略/風險裁決、跨 Worker 衝突、難以修復的根因、成果語意抽驗/最終整合驗收。**把主要 AI 寫碼移往 W1/W2**；在兩者暫時不合格時，Codex 僅做讓 Worker 恢復資格/接單的**最小必要原生源碼修補**，不默默接管所有 W1/W2 工作。獨立 READY source-only 原生測試照常進行。
+
+## P2｜兩個外包 Worker 先可用，再追求並行
+- **W1** 只能官方 **OpenCode V2 CLI**；按實際可取得的 08:00 免費模型日報推薦排序，重新核對官方免費 SKU/CLI 授權、資料政策、真實 provider 權限/限額後派工；僅有 Desktop service、舊 Session、空 auth list 不等於可寫編碼已驗收。不准替代 CLI／付費或貢獻者訓練條款不合的私密任務。
+- **W2** 只能官方 **Antigravity CLI** + 精確可驗證的 **Gemini 3.8 Flash High**；沒有 CLI、模型 High、原生登入/資格就只停 W2，不自動換模型、GUI 或第三方 Agent。
+- **W1/W2 皆禁止 Computer Use/GUI 代理或遠端桌面代工**。獨立 task、真 OS 身分/ACL、non-overlap worktree/write scope；Codex 一次分派真正 READY 的多個獨立工作，外包使用 CLI 原生 Session、工具、Diff、單元測試，完成後由原生 Git/CI 收斂，Codex 只看例外/必要品質證據。Worker 失敗，先用精確 CI 錯誤/受影響路徑要求原作者局部返工；不得無限重做相同 SHA/相同錯誤。
+
+## P3｜以真實模型用量與完成率衡量，不要編造節省百分比
+- **重用已存在的** `native-bridge/codex-executor.mjs:readCodexExecutionEvidence()` 與 `opencode-v2.mjs:readOpenCodeV2RunEvidence()`，以及官方 CLI／provider 可讀的**聚合**用量：每次 model/session/attempt 的 input、cached_input、output、reasoning tokens、是否真的推論、工作成功/返工/時間與交付 SHA。W2 若 CLI 無用量資料標 `UNKNOWN`，不能填 0。Codex Desktop 既有 809 MB JSONL 是檔案大小**不是 Token 總數**，不得為了計數載入整份到高階模型，也不公開原文或秘密。
+- 從真實可比期間建立 `Codex total tokens`、`Codex idle wakes`、`Codex tokens / accepted logical work`、`W1/W2 truly accepted tasks`、`rework attempts`、`provider denial/fallback`。缺歷史原生 Usage 就寫 `BASELINE_UNKNOWN`，不要聲稱「已省 80%」。不要另建 Quota DB、成本服務或新 Session/Log 權威；只在現有 PR/receipt 附最少數值證據，變化發生才報告。
+- 不新增任意 token/day、任務數或模型工時硬上限；遵守平台真實限額和 Human 授權，**重點是減少不必要的 Codex 喚醒、重複讀取、自己寫碼與返工**，不能犧牲必要的長工作、真實驗收、來源身分/秘密隔離與 UNKNOWN 不重派。
+
+## 最小驗收（按先後，不自創額外 Gate）
+1. Source tests：idle/no material delta 不啟動模型；trusted 新指令含 #6233118477 能被發現但跨作者/跨專案/修改後 SHA 或重播不能冒派；W1/W2 CLI/模型限制負例；`verifiedGoal` 精簡後仍有完整 source 身分和必要授權語意。
+2. **Host LIVE**：三個自然 5 分鐘 L0 週期與 #407 同源 snapshot/readback；10 個無變化 tick 的模型呼叫次數 = 0；真正排程喚醒／結果收據可回收；同一外部效果不雙主。
+3. W1 真正免費 OpenCode V2 CLI `edit→diff→test→commit/PR→CI`，Codex 對其成果必要驗收；W2 真正 Antigravity CLI + 指定 Gemini 模式等價證據（資格不足則明確 `W2_BLOCKED`，不阻擋 P0/W1）。
+4. 有足夠原生 Token 用量後，跨可比工作比較節省量、完成率、返工率；每次短回報 `main / current PR head / host SHA+TTL / Codex tokens (known/UNKNOWN) / W1-W2 accepted+blocked / next READY`，GitHub 同來源讀回；未部署不得宣稱成功。
+
+**Codex 下一動作**：fresh-read #310 本留言、#6233118477、現有 #443/source/Host；首先把零 Token L0 與 Worker CLI 可用性做成現有候選的最小修補/測試，再安排真正 W1/W2 工作；任何超出既有費用、身份、OAuth/MFA、Production、不可逆權限擴張仍需 Human。**發布留言 ≠ Codex 已讀、已部署或已降低用量。**

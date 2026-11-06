@@ -48,6 +48,21 @@ const codexPlan = write_paths => ({ schema: 4, project_id: PROJECT, host: 'DESKT
   model: 'gpt-6.1-sol', reasoning_effort: 'medium', write_paths,
   goal_comment_id: 6188322050, goal_body_sha256: h(humanGoalBody), goal_author: 't14210184',
   goal_marker: 'PTYSD_V53R4_DELETE_FIRST_AUTONOMY_GOAL_20261015' });
+const anchorComment = () => humanGoalComment({ id: 6233162641,
+  body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+const resolvedDirective = () => humanGoalComment({ id: 6569393440,
+  body: '<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261106 -->\n**Codex 下一動作**：Review bounded source.' });
+const directiveReceipt = (directive, host, publisher, id = 8000000001) => {
+  const bodySha = h(directive.body);
+  const marker = directive.body.match(/PTYSD_V53R4_[A-Z0-9_]+_\d{8}/)[0];
+  const job = { ...codexPlan(['tests/anchor-receipt-fixture-only.mjs']), host,
+    request_id: `PTYSD_HUMAN_GOAL_${directive.id}_${bodySha.slice(0, 42).toUpperCase()}`,
+    goal_comment_id: directive.id, goal_body_sha256: bodySha, goal_marker: marker };
+  return com(id, RECEIPT_MARKER + JSON.stringify(receipt(job.request_id,
+    '11111111-1111-4111-8111-111111111111', 'BLOCKED', job,
+    { outcome: 'CODEX_EXECUTOR_PREFLIGHT_BLOCKED', exit_code: 46,
+      model_invoked: false, session_started: false, external_effects: 'NONE' })), publisher);
+};
 
 test('Antigravity stream evidence binds the exact candidate cwd and reports mismatch or missing cwd without leaking paths', async () => {
   const root=mkdtempSync(join(homedir(),'.ptysd-agy-cwd-evidence-'));
@@ -461,7 +476,10 @@ test('Worker preserves the invalid observation reason and continues independent 
 });
 
 test('Worker main publishes the seeded observation, verifies sequence readback, and preserves legal dispatch on ambiguity', async () => {
-  const successful = makeObservationWorkerFixture();
+  const anchor = anchorComment(), directive = resolvedDirective();
+  const successful = makeObservationWorkerFixture({ goalComments: [anchor, directive],
+    taskComments: [directiveReceipt(anchor, hostname().toUpperCase(), 'trusted-publisher'),
+      directiveReceipt(directive, hostname().toUpperCase(), 'trusted-publisher', 8000000002)] });
   const diagnosticPath = join(successful.root, 'state', 'operator-observation-last-error.json');
   try {
     await successful.run();
@@ -573,7 +591,10 @@ test('poll disposition and safe wait code separate an empty queue, a waiting gat
   const readObservation = store => parseOperatorObservation(
     store.comments.find(comment => comment.body.startsWith(OPERATOR_MARKER)).body);
 
-  const empty = makeObservationWorkerFixture({ includeDefaultJob: false });
+  const anchor = anchorComment(), directive = resolvedDirective();
+  const empty = makeObservationWorkerFixture({ includeDefaultJob: false, goalComments: [anchor, directive],
+    taskComments: [directiveReceipt(anchor, hostname().toUpperCase(), 'trusted-publisher'),
+      directiveReceipt(directive, hostname().toUpperCase(), 'trusted-publisher', 8000000002)] });
   try {
     const result = await empty.run();
     assert.equal(result.state, 'NO_DELTA');
@@ -593,8 +614,9 @@ test('poll disposition and safe wait code separate an empty queue, a waiting gat
     source_sha: commit, spec_path: 'native-bridge/tasks/poll-disposition.md',
     spec_sha256: hash, model: 'opencode/deepseek-v4.1-flash-free', variant: null,
     edit_paths: ['native-bridge/worker.mjs'] };
-  const waiting = makeObservationWorkerFixture({ includeDefaultJob: false,
-    taskComments: [com(704, encoded(waitingJob), 't14210184')] });
+  const waiting = makeObservationWorkerFixture({ includeDefaultJob: false, goalComments: [anchor, directive],
+    taskComments: [com(704, encoded(waitingJob), 't14210184'),
+      directiveReceipt(anchor, host, 'trusted-publisher'), directiveReceipt(directive, host, 'trusted-publisher', 8000000002)] });
   try {
     const result = await waiting.run();
     assert.equal(result.state, 'WAITING_ELIGIBILITY');
@@ -610,7 +632,9 @@ test('poll disposition and safe wait code separate an empty queue, a waiting gat
     assert.equal(waiting.codexDispatchCalls.count, 0);
   } finally { waiting.cleanup(); }
 
-  const selected = makeObservationWorkerFixture();
+  const selected = makeObservationWorkerFixture({ goalComments: [anchor, directive],
+    taskComments: [directiveReceipt(anchor, host, 'trusted-publisher'),
+      directiveReceipt(directive, host, 'trusted-publisher', 8000000002)] });
   try {
     await selected.run();
     const observation = readObservation(selected.store);
@@ -711,20 +735,119 @@ test('Worker reports the failing observation API stage without persisting provid
   } finally { readback.cleanup(); }
 });
 
+test('only the exact verified non-Human handoff is skipped without falling back across changed identity', async () => {
+  const body = readFileSync(new URL('./fixtures/issue-310-comment-6569393438.txt', import.meta.url), 'utf8');
+  assert.equal(h(body), '45da457d7181d0d29d4649fa4f121f09651a0b5e6746eaa6639b37b55a93b417');
+  const handoff = { id: 6569393438, issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
+    user: { login: 't14210184' }, body };
+  const anchor = humanGoalComment({ id: 6233162641,
+    body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+  assert.equal(h(anchor.body), '6e969e32d25197e1b4d865eb969dd88d87afa317864faba1b60c47c7936caedb');
+  const newerHuman = humanGoalComment({ id: 6569393440,
+    body: '<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261106 -->\n' +
+      '**Codex 下一動作**：First action.\n**Codex 下一動作**：Conflicting second action.' });
+  const latest = humanGoalComment({ id: 6569393441,
+    body: '<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261106 -->\nNew Human instruction without action.' });
+  const cases = [
+    { comments: [anchor, newerHuman, handoff], expected: `HUMAN_GOAL_SCOPED_ACTION_INVALID_${newerHuman.id}_NO_MODEL` },
+    { comments: [anchor, newerHuman, handoff, latest], expected: `HUMAN_GOAL_SCOPED_ACTION_MISSING_${latest.id}_NO_MODEL` },
+    { comments: [anchor, newerHuman, { ...handoff, id: 6569393439 }],
+      expected: 'HUMAN_GOAL_HANDOFF_IDENTITY_UNKNOWN_NO_DISPATCH' },
+    ...[
+      [], [{ ...anchor, body: anchor.body + '\nchanged' }],
+      [{ ...anchor, user: { login: 'other' } }],
+      [{ ...anchor, issue_url: `https://api.github.com/repos/${REPO}/issues/311` }],
+      [{ ...anchor, id: 6233162642 }], [anchor, anchor],
+    ].map(reference => ({ comments: [...reference, newerHuman, handoff], expected: 'HUMAN_GOAL_REFERENCE_IDENTITY_UNKNOWN_NO_DISPATCH' })),
+    ...[
+      { ...handoff, body: handoff.body + '\nchanged' },
+      { ...handoff, body: 'marker removed' },
+      { ...handoff, user: { login: 'other' } },
+      { ...handoff, issue_url: `https://api.github.com/repos/${REPO}/issues/311` },
+      { ...handoff, issue_url: 'https://api.github.com/repos/other/repo/issues/310' },
+      { ...handoff, body: null },
+    ].map(changed => ({ comments: [anchor, newerHuman, changed], expected: 'HUMAN_GOAL_HANDOFF_IDENTITY_UNKNOWN_NO_DISPATCH' })),
+  ];
+  for (const { comments, expected } of cases) {
+    const fixture = makeObservationWorkerFixture({ goalComments: comments, includeDefaultJob: false,
+      configOverrides: { human_goal_codex_policy: { enabled: true, model: 'gpt-6.1-sol',
+        reasoning_effort: 'medium', write_paths: ['native-bridge/worker.mjs'] } } });
+    try {
+      await fixture.run();
+      assert.ok(fixture.logs.includes(expected), JSON.stringify(fixture.logs));
+      assert.equal(fixture.codexDispatchCalls.count, 0);
+      assert.equal(fixture.modelCalls.count, 0);
+      assert.equal(fixture.receiptWrites.length, 0);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test('terminal or stale schema-3 Codex jobs do not manufacture an eligibility wait', async () => {
+  const host = hostname().toUpperCase();
+  const anchor = humanGoalComment({ id: 6233162641,
+    body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+  for (const stale of [true, false]) {
+    const job = { schema: 3, project_id: PROJECT, host,
+      request_id: `PTYSD_CODEX_SCHEMA3_NOT_READY_${stale ? 'STALE' : 'TERMINAL'}`,
+      kind: 'codex_plan', source_sha: stale ? 'f'.repeat(40) : commit,
+      spec_path: 'native-bridge/tasks/codex-review.md', spec_sha256: hash,
+      model: 'gpt-6.1-sol', reasoning_effort: 'medium', write_paths: ['native-bridge/sample.mjs'] };
+    const taskComments = [com(9801, encoded(job)), directiveReceipt(anchor, host, 'trusted-publisher')];
+    if (!stale) taskComments.push(com(9802, RECEIPT_MARKER + JSON.stringify(receipt(
+      job.request_id, '11111111-1111-4111-8111-111111111111', 'BLOCKED', job,
+      { outcome: 'CODEX_EXECUTOR_PREFLIGHT_BLOCKED', exit_code: 46,
+        model_invoked: false, session_started: false, external_effects: 'NONE' })), 't14210184'));
+    const fixture = makeObservationWorkerFixture({ includeDefaultJob: false,
+      goalComments: [anchor], taskComments });
+    try {
+      const result = await fixture.run();
+      assert.equal(result.state, 'NO_DELTA', JSON.stringify({ stale, result, logs: fixture.logs }));
+      assert.equal(result.reason, 'NO_DISPATCHABLE_JOB');
+      assert.ok(fixture.logs.includes(`CODEX_SCHEMA3_NOT_CURRENTLY_READY_${job.request_id}_NO_WAIT`));
+      assert.ok(fixture.logs.includes('NO_DELTA_NO_LLM'));
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test('unparseable latest Human directive blocks queued schema-3 even with its prior receipt', async () => {
+  const anchor = anchorComment(), host = hostname().toUpperCase();
+  const unparseable = humanGoalComment({ id: 6233162642,
+    body: '<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261106 -->\nCurrent Human text has no scoped Codex action.' });
+  const queued = { schema: 3, project_id: PROJECT, host, kind: 'codex_plan',
+    request_id: 'PTYSD_CODEX_SCHEMA3_HUMAN_SCOPE_TEST', source_sha: commit,
+    spec_path: 'native-bridge/tasks/codex-review.md', spec_sha256: hash,
+    model: 'gpt-6.1-sol', reasoning_effort: 'medium', write_paths: ['tests/example.mjs'] };
+  for (const prior of [false, true]) {
+    const fixture = makeObservationWorkerFixture({ includeDefaultJob: false, goalComments: [anchor, unparseable],
+      taskComments: [com(700, encoded(queued)),
+        ...(prior ? [directiveReceipt(unparseable, host, 'trusted-publisher')] : [])] });
+    try {
+      const result = await fixture.run();
+      assert.equal(result.state, 'WAITING_ELIGIBILITY');
+      assert.equal(result.reason, 'HUMAN_GOAL_SCOPED_ACTION_MISSING');
+      assert.equal(fixture.codexDispatchCalls.count, 0);
+      assert.equal(fixture.modelCalls.count, 0);
+      assert.equal(fixture.receiptWrites.length, 0);
+    } finally { fixture.cleanup(); }
+  }
+});
+
 test('Worker recognizes the two trusted Human R4 directive markers without starting a model', async () => {
   const directives = [
-    { id: 6232811908, marker: 'PTYSD_V53R4_DUAL_AUDIT_RECONCILIATION_R2_20261017' },
-    { id: 6233118477, marker: 'PTYSD_V53R4_W1_W2_CLI_ONLY_SYNC_FIRST_ROUTING_20261017' },
+    { id: 6569393440, marker: 'PTYSD_V53R4_DUAL_AUDIT_RECONCILIATION_R2_20261017' },
+    { id: 6569393441, marker: 'PTYSD_V53R4_W1_W2_CLI_ONLY_SYNC_FIRST_ROUTING_20261017' },
   ];
   for (const { id, marker } of directives) {
     const comment = humanGoalComment({ id, body: `# Human directive\n<!-- ${marker} -->` });
-    const fixture = makeObservationWorkerFixture({ goalComments: [comment] });
+    const anchor = humanGoalComment({ id: 6233162641,
+      body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+    const fixture = makeObservationWorkerFixture({ goalComments: [anchor, comment] });
     try {
       await fixture.run();
       assert.ok(fixture.logs.includes(`HUMAN_GOAL_SCOPED_ACTION_MISSING_${id}_NO_MODEL`),
         'a trusted goal without a scoped Codex action is explicitly rejected');
-      assert.ok(fixture.logs.includes(`HUMAN_GOAL_CODEX_POLICY_NOT_CONFIGURED_${id}_NO_MODEL`),
-        `the latest trusted Human marker ${marker} must be discovered`);
+      assert.equal(fixture.logs.includes('HUMAN_GOAL_REFERENCE_IDENTITY_UNKNOWN_NO_DISPATCH'), false,
+        `the pinned Human reference and latest marker ${marker} must be discovered`);
       assert.equal(fixture.modelCalls.count, 0,
         'marker discovery alone must not invoke a Codex model');
       assert.equal(fixture.codexDispatchCalls.count, 0,
@@ -734,10 +857,12 @@ test('Worker recognizes the two trusted Human R4 directive markers without start
 });
 
 test('a scoped-action omission is reported even when an explicit Codex policy exists', async () => {
-  const id = 6233999101;
+  const id = 6569393442;
   const comment = humanGoalComment({ id,
     body: '# Human directive\n<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261021 -->\nNo scoped next action.' });
-  const fixture = makeObservationWorkerFixture({ goalComments: [comment], configOverrides: {
+  const anchor = humanGoalComment({ id: 6233162641,
+    body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+  const fixture = makeObservationWorkerFixture({ goalComments: [anchor, comment], configOverrides: {
     human_goal_codex_policy: { enabled: true, model: 'gpt-6.1-sol', reasoning_effort: 'medium',
       write_paths: ['native-bridge/worker.mjs'] },
   } });
@@ -3464,7 +3589,14 @@ test('Issue #310 structured candidate task dispatches through the existing Execu
       issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
     const wrongIssueTask={...com(12,encoded(wrongIssueJob),'t14210184'),
       issue_url:`https://api.github.com/repos/${REPO}/issues/311`};
-    const receiptComments=[];
+    const queuedCodex = { schema: 3, project_id: PROJECT, host, kind: 'codex_plan',
+      request_id: 'PTYSD_W1_UNPARSEABLE_GOAL_CODEX', source_sha: commit,
+      spec_path: 'native-bridge/tasks/codex-review.md', spec_sha256: hash,
+      model: 'gpt-6.1-sol', reasoning_effort: 'medium', write_paths: ['tests/unrelated.mjs'] };
+    const stopDirective = humanGoalComment({ id: 6569393440,
+      body: '<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261106 -->\n**Codex 下一動作**：停止所有 Codex 派工。' });
+    const receiptComments=[com(1, encoded(queuedCodex)), directiveReceipt(stopDirective, host, 'worker')];
+    const goalLogs=[];
     const executor={task_name:'\\PTYSD\\OpenCodeExecutor',user_sid:'S-1-5-21-100-200-300-1001',
       publisher_sid:'S-1-5-21-100-200-300-1002',
       wscript_path:'C:\\Windows\\System32\\wscript.exe',
@@ -3478,7 +3610,7 @@ test('Issue #310 structured candidate task dispatches through the existing Execu
       allowed_models:{'opencode/spark':['high']}};
     let bundleCalls=0,dispatchCalls=0,modelCalls=0,candidatePrReads=0,posted=[];
     const result=await executeWorker(config,{
-      goalCommentsRead:()=>[humanGoalComment(),goalTaskComment,untrustedGoalTask,wrongIssueTask],
+      goalCommentsRead:()=>[humanGoalComment(),anchorComment(),stopDirective,goalTaskComment,untrustedGoalTask,wrongIssueTask],
       readExecutorWorkspace:()=>workspace,
       apiRead(uri){
         if(uri==='user')return {login:'worker'};
@@ -3512,10 +3644,13 @@ test('Issue #310 structured candidate task dispatches through the existing Execu
       },
       runPlan:()=>{modelCalls++;throw new Error('DISPATCHER_MUST_NOT_RUN_MODEL_INLINE');},
       observationDependencies:{collectWindowsObservation:()=>({status:'UNKNOWN'})},
+      log:value=>goalLogs.push(value),
     });
     assert.equal(result.state,'DISPATCHED');
     assert.equal(result.request_id,job.request_id);
     assert.equal(bundleCalls,1); assert.equal(dispatchCalls,1); assert.equal(modelCalls,0);
+    assert.ok(goalLogs.includes(`CODEX_HUMAN_SCOPE_BINDING_REQUIRED_${queuedCodex.request_id}_NO_DISPATCH`));
+    assert.equal(posted.some(item=>item.data.request_id===queuedCodex.request_id),false);
     assert.equal(candidatePrReads,2,'read the exact PR head for selection and again before dispatch');
     assert.equal(posted.length,1);
     assert.equal(posted[0].data.state,'STARTED');
@@ -3571,7 +3706,14 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
     const pingJob=mkjob({host,request_id:'PTYSD_PING_DURING_W2_WAIT_20261018'});
     const pingComment={...com(411,encoded(pingJob),'t14210184'),
       issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
-    const comments=[jobComment,pingComment];
+    const queuedCodex = { schema: 3, project_id: PROJECT, host, kind: 'codex_plan',
+      request_id: 'PTYSD_W2_UNPARSEABLE_GOAL_CODEX', source_sha: commit,
+      spec_path: 'native-bridge/tasks/codex-review.md', spec_sha256: hash,
+      model: 'gpt-6.1-sol', reasoning_effort: 'medium', write_paths: ['tests/unrelated.mjs'] };
+    const differentDirective = humanGoalComment({ id: 6569393440,
+      body: '<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261106 -->\n**Codex 下一動作**：Only review an unrelated documentation task.' });
+    const comments=[com(1,encoded(queuedCodex)),jobComment,pingComment,
+      directiveReceipt(differentDirective,host,'worker')];
     const attestation={model:ANTIGRAVITY_V2_MODEL,entitlement:'VERIFIED',
       cost:'NO_ADDITIONAL_CHARGE',observed_at:new Date().toISOString()};
     const policyConfig={enable_antigravity_model_runs:true,antigravity_execution_attestation:attestation,
@@ -3596,7 +3738,7 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
     let bundles=0,dispatches=0,inlineRuns=0,prReads=0,readinessCalls=0,nextReceiptId=420;
     const posted=[],logs=[];
     const adapters={
-      goalCommentsRead:()=>[humanGoalComment(),...comments],
+      goalCommentsRead:()=>[humanGoalComment(),anchorComment(),differentDirective,...comments],
       readExecutorWorkspace:()=>workspace,
       apiRead(uri){
         if(uri==='user')return {login:'worker'};
@@ -3660,6 +3802,8 @@ test('trusted W2 waits without authorization, keeps ping moving, then dispatches
       log:value=>logs.push(value),
     };
     const first=await executeWorker(config,adapters);
+    assert.ok(logs.includes(`CODEX_HUMAN_SCOPE_BINDING_REQUIRED_${queuedCodex.request_id}_NO_DISPATCH`));
+    assert.equal(posted.some(item=>item.request_id===queuedCodex.request_id),false);
     assert.equal(first.state,'FINISHED');
     assert.equal(first.request_id,pingJob.request_id,
       'a W2 task waiting for authorization cannot starve an independent ping');
@@ -4073,8 +4217,10 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
     const marker='PTYSD_V53R4_P0_ISSUE310_407_CODEX_DELIVERY_RECOVERY_20261016';
     const prior={id:6218136570,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
       user:{login:'t14210184'},body:'Earlier directive\nPTYSD_V53R4_P0_ISSUE310_407_CODEX_DELIVERY_RECOVERY_20261016\nEarlier bytes.'};
-    const directive={id:6219236273,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
-      user:{login:'t14210184'},body:`# P0\n${marker}\nBind this exact source and perform one bounded source-only unit.\n\n` +
+    const reference = humanGoalComment({ id: 6233162641,
+      body: readFileSync(new URL('./fixtures/issue-310-comment-6233162641.txt', import.meta.url), 'utf8') });
+    const directive={id:6569393440,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
+      user:{login:'t14210184'},body:`${marker}\n` +
         '**Codex 下一動作**：Perform this bounded source-only unit within the pinned write paths.\n'};
     const untrusted={id:6219999999,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
       user:{login:'untrusted'},body:`${marker}\nDo not accept this author.`};
@@ -4082,7 +4228,7 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
       user:{login:'t14210184'},body:'Ordinary prose without a PTYSD V5.3-R4 directive marker.'};
     const statusReport={id:6229979682,issue_url:`https://api.github.com/repos/${REPO}/issues/310`,
       user:{login:'t14210184'},body:'PTYSD_V53R4_BOOTSTRAP_READBACK_DELTA_20261017\nStatus report only; no dispatch requested.'};
-    const goalComments=[humanGoalComment(),prior,directive,untrusted,ordinary,statusReport];
+    const goalComments=[humanGoalComment(),prior,reference,directive,untrusted,ordinary,statusReport];
     const spec='# Source-only Human goal execution\nChoose one bounded source task.\n';
     const policy={enabled:true,model:'gpt-6.1-sol',reasoning_effort:'medium',
       write_paths:['native-bridge/worker.mjs','tests/native-bridge.test.mjs']};
@@ -4165,7 +4311,7 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
       scoped_action:'Perform this bounded source-only unit within the pinned write paths.'});
     assert.ok(logs.some(message=>message===`HUMAN_GOAL_READBACK_${directive.id}_${h(directive.body)}_${sent.humanGoalContext.fetched_at}`),
       'the local discovery log must bind comment id, exact body digest, and readback time');
-    assert.equal(sent.job.goal_comment_id,6219236273,'a later status-report marker by the trusted author is not an executable directive');
+    assert.equal(sent.job.goal_comment_id,directive.id,'a status-report marker by the trusted author is not an executable directive');
 
     const terminal=receipt(sent.job.request_id,'00000000-0000-0000-0000-000000000777',
       'BLOCKED',sent.job,{exit_code:45,outcome:'CODEX_EXECUTOR_PREFLIGHT_BLOCKED',
@@ -4203,7 +4349,7 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
       'BLOCKED',legacyJob,{exit_code:45,outcome:'CODEX_EXECUTOR_PREFLIGHT_BLOCKED',
         model_invoked:false,session_started:false,tool_execution_evidence:'OBSERVED',
         tool_execution_count:0,file_change_tool_evidence:'UNKNOWN'});
-    const legacyAdapterSet={...editedAdapters,goalCommentsRead:()=>[humanGoalComment(),changedBodyDirective],
+    const legacyAdapterSet={...editedAdapters,goalCommentsRead:()=>[humanGoalComment(),reference,changedBodyDirective],
       commentsRead:()=>[com(100,RECEIPT_MARKER+JSON.stringify(legacyTerminal),'worker')]};
     const legacy=await executeWorker({...config,state_dir:legacyState},legacyAdapterSet);
     assert.equal(legacy.state,'CODEX_EXECUTOR_REQUESTED',
@@ -4278,13 +4424,13 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
     assert.equal(hashPending.reason,'HUMAN_GOAL_LEGACY_RECEIPT_BODY_UNKNOWN');
 
     const staleState=join(root,'stale-state'); mkdirSync(staleState);
-    const staleDirective={...directive,id:6219236274,
-      body:`# P0\n${marker}\nOriginal directive body before final readback.\n` +
+    const staleDirective={...directive,id:6569393441,
+      body:`${marker}\n` +
         '**Codex 下一動作**：Perform this bounded source-only unit within the pinned write paths.\n'};
     const editedDirective={...staleDirective,body:`${staleDirective.body}\nEdited after intake.`};
     let directReads=0;
     const staleAdapters={...adapters,
-      goalCommentsRead:()=>[humanGoalComment(),prior,staleDirective],
+      goalCommentsRead:()=>[humanGoalComment(),prior,reference,staleDirective],
       apiRead(uri){
         if(uri===`repos/${REPO}/issues/comments/${staleDirective.id}`)
           return ++directReads===1 ? staleDirective : editedDirective;
@@ -4297,6 +4443,51 @@ test('Worker requests one executor-adapter dispatch for the exact trusted Issue 
     assert.equal(requests.length,beforeStaleRequests,'edited source bytes never reach an additional request publication');
     assert.equal(triggers,beforeStaleTriggers,'changed source bytes never trigger an additional executor run');
     assert.equal(directReads,2,'the selected body and the pre-dispatch body are both read back');
+
+    const handoffBody = readFileSync(new URL('./fixtures/issue-310-comment-6569393438.txt', import.meta.url), 'utf8');
+    const handoff = { id: 6569393438, issue_url: `https://api.github.com/repos/${REPO}/issues/310`,
+      user: { login: 't14210184' }, body: handoffBody };
+    for (const [name, finalComment, expected] of [
+      ['edited-handoff', { ...handoff, body: 'changed without marker' }, 'WAITING_HUMAN_GOAL_READBACK'],
+      ['missing-handoff', null, 'WAITING_HUMAN_GOAL_READBACK'],
+      ['missing-reference', handoff, 'WAITING_HUMAN_GOAL_READBACK'],
+      ['changed-reference', handoff, 'WAITING_HUMAN_GOAL_READBACK'],
+      ['new-directive', { id: 6569393442, issue_url: handoff.issue_url, user: handoff.user,
+        body: '<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261106 -->\nA newer directive.' }, 'STALE_HUMAN_GOAL'],
+    ]) {
+      const raceState = join(root, name); mkdirSync(raceState);
+      let goalReads = 0;
+      const raceAdapters = { ...adapters, commentsRead: () => [],
+        goalCommentsRead: () => ++goalReads === 1
+          ? [reference, staleDirective, handoff] : [
+            ...(name === 'missing-reference' ? [] : [name === 'changed-reference'
+              ? { ...reference, body: reference.body + '\nchanged' } : reference]),
+            staleDirective, ...(name === 'new-directive' ? [handoff] : []),
+            ...(finalComment ? [finalComment] : [])],
+        apiRead(uri) {
+          if (uri === `repos/${REPO}/issues/comments/${staleDirective.id}`) return staleDirective;
+          return adapters.apiRead(uri);
+        } };
+      const result = await executeWorker({ ...config, state_dir: raceState }, raceAdapters);
+      assert.equal(result.state, expected);
+      assert.ok(goalReads >= 2, 'latest directive is checked again immediately before dispatch');
+      assert.equal(requests.length, beforeStaleRequests);
+      assert.equal(triggers, beforeStaleTriggers);
+    }
+    const unboundState = join(root, 'unbound-before-schema4'); mkdirSync(unboundState);
+    const unboundJob = { schema: 3, project_id: PROJECT, host, kind: 'codex_plan',
+      request_id: 'PTYSD_UNBOUND_BEFORE_BOUND_CODEX', source_sha: commit,
+      spec_path: 'native-bridge/tasks/codex-review.md', spec_sha256: hash,
+      model: 'gpt-6.1-sol', reasoning_effort: 'medium', write_paths: ['tests/unrelated.mjs'] };
+    writeFileSync(join(unboundState, `codex-claim-${unboundJob.request_id}.json`), '{}');
+    const boundResult = await executeWorker({ ...config, state_dir: unboundState }, {
+      ...adapters, commentsRead: () => [com(1, encoded(unboundJob))],
+      goalCommentsRead: () => [reference, directive],
+    });
+    assert.equal(boundResult.state, 'CODEX_EXECUTOR_REQUESTED');
+    assert.equal(requests.at(-1).job.schema, 4);
+    assert.equal(requests.length, beforeStaleRequests + 1);
+    assert.equal(triggers, beforeStaleTriggers + 1);
   } finally { rmSync(root,{recursive:true,force:true}); }
 });
 
@@ -6041,8 +6232,10 @@ test('publisher records executor WAITING, continues a ping, then re-dispatches t
     const sourceComment = com(9701, encoded(editJob));
     const started = receipt(requestId, attemptId, 'STARTED', editJob);
     const pingJob = mkjob({ host, request_id: 'PTYSD_PING_AFTER_WAITING_RESULT_20261018' });
+    const anchor = anchorComment(), directive = resolvedDirective();
     const comments = [sourceComment, com(9702, RECEIPT_MARKER + JSON.stringify(started), 'worker'),
-      com(9703, encoded(pingJob))];
+      com(9703, encoded(pingJob)), directiveReceipt(anchor, host, 'worker'),
+      directiveReceipt(directive, host, 'worker', 8000000002)];
     const executor = { task_name: '\\PTYSD\\OpenCodeExecutor',
       user_sid: 'S-1-5-21-100-200-300-1001', publisher_sid: 'S-1-5-21-100-200-300-1002',
       wscript_path: 'C:\\Windows\\System32\\wscript.exe',
@@ -6078,6 +6271,7 @@ test('publisher records executor WAITING, continues a ping, then re-dispatches t
     'a WAITING receipt claiming a Session cannot use the no-capture recovery path');
     writeFileSync(resultPath, JSON.stringify(waitingResult), { flag: 'wx' });
     const adapters = {
+      goalCommentsRead: () => [anchor, directive],
       readExecutorWorkspace:()=>workspace,
       apiRead(uri) {
         if (uri === 'user') return { login: 'worker' };
@@ -6530,7 +6724,7 @@ test('receipt identity rejects foreign project and wrong source cannot mask curr
   assert.equal(selectNext(state,['t14210184'],'worker',job.host,job.source_sha)?.id,1);
 });
 
-test('Worker routes an authorized Codex job through the isolated executor adapter without invoking a model inline', async () => {
+test('Worker rejects unbound schema-3 Codex before invoking the executor', async () => {
   const root = mkdtempSync(join(homedir(), '.ptysd-codex-worker-route-'));
   try {
     const workspace = join(root, 'workspace');
@@ -6545,7 +6739,10 @@ test('Worker routes an authorized Codex job through the isolated executor adapte
       spec_sha256: h(spec), model: 'gpt-6.1-sol', reasoning_effort: 'medium',
       write_paths: ['native-bridge/sample.mjs'] };
     const comment = com(9001, encoded(codexJob));
-    const comments = [comment];
+    const anchor = anchorComment();
+    const directive = humanGoalComment({ id: 6569393440,
+      body: '<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261106 -->\n**Codex 下一動作**：Review bounded source.' });
+    const comments = [comment, directiveReceipt(directive, host, 'worker')];
     const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
       workspace, state_dir: stateDir, codex_spool: codexSpool,
       dispatchers: ['t14210184'], github_transport_verified: true,
@@ -6572,8 +6769,8 @@ test('Worker routes an authorized Codex job through the isolated executor adapte
       throw new Error(`UNEXPECTED_MOCK_API_ROUTE:${uri}`);
     };
     const calls = { bundle: 0, start: 0, trigger: 0, inline: 0 };
-    const result = await executeWorker(config, {
-      apiRead, commentsRead: () => comments,
+    const routeAdapters = {
+      apiRead, commentsRead: () => comments, goalCommentsRead: () => [anchor, directive],
       assertCodexExecutorTaskReady: () => ({ ready: true }),
       writeReceipt: () => { throw new Error('GENERIC_RECEIPT_PATH_MUST_NOT_RUN'); },
       runPlan: () => { calls.inline++; throw new Error('MODEL_MUST_NOT_RUN_INLINE'); },
@@ -6586,56 +6783,16 @@ test('Worker routes an authorized Codex job through the isolated executor adapte
         trigger: () => { calls.trigger++; },
       },
       log: () => {},
-    });
-    assert.equal(result.state, 'CODEX_EXECUTOR_REQUESTED');
-    assert.equal(calls.bundle, 1);
-    assert.equal(calls.start, 1);
-    assert.equal(calls.trigger, 1, 'only the injected synthetic trigger runs');
-    assert.equal(calls.inline, 0, 'the five-minute dispatcher never runs a model inline');
-    const started = parseReceipt(comments.at(-1).body);
-    assert.equal(started.kind, 'codex_plan');
-    assert.equal(started.state, 'STARTED');
-    assert.equal(started.outcome, 'CODEX_EXECUTOR_DISPATCH_ACK_NOT_ACCEPTANCE');
-    assert.equal(started.task_fingerprint?.length, 64);
-    assert.equal(comments.filter(item => parseReceipt(item.body)?.request_id === codexJob.request_id).length, 1);
-
-    const lockDir = join(codexSpool, 'locks');
-    mkdirSync(lockDir);
-    writeFileSync(join(lockDir, 'executor.active'), JSON.stringify({ schema: 1,
-      pid: 98765, phase: 'MODEL_RUNNING' }));
-    comments.push(com(9004, RECEIPT_MARKER + JSON.stringify({ ...started,
-      state: 'BLOCKED', outcome: 'CODEX_SPAWN_FAILED' }), 'worker'));
-    const pendingJob = { ...codexJob, request_id: 'PTYSD_CODEX_ACTIVE_LOCK_GUARD_20261015',
-      write_paths: ['native-bridge/another-sample.mjs'] };
-    const pendingComment = com(9003, encoded(pendingJob));
-    comments.push(pendingComment);
-    const lockLogs = [];
-    const guarded = await executeWorker(config, {
-      apiRead: uri => {
-        if (uri === 'user') return { login: 'worker' };
-        if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
-        if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: commit } };
-        const match = uri.match(/\/issues\/comments\/(\d+)$/);
-        if (match) return comments.find(item => item.id === Number(match[1]));
-        if (uri === `repos/${REPO}/contents/${pendingJob.spec_path}?ref=${commit}`)
-          return { encoding: 'base64', content: Buffer.from(spec).toString('base64') };
-        throw new Error(`UNEXPECTED_MOCK_API_ROUTE:${uri}`);
-      },
-      commentsRead: () => comments,
-      dispatchCodexJob: () => { throw new Error('ACTIVE_EXECUTOR_MUST_NOT_BE_TRIGGERED_AGAIN'); },
-      runPlan: () => { throw new Error('ACTIVE_LOCK_GUARD_MUST_NOT_RUN_A_MODEL'); },
-      writeReceipt: () => { throw new Error('ACTIVE_LOCK_GUARD_MUST_NOT_WRITE_A_RECEIPT'); },
-      log: value => lockLogs.push(value),
-    });
-    assert.equal(guarded.state, 'WAITING_ELIGIBILITY');
-    assert.equal(guarded.reason, 'CODEX_EXECUTOR_SPOOL_OR_OWNER_NOT_READY');
-    assert.ok(lockLogs.includes(
-      'CODEX_LANE_WAITING_ELIGIBILITY_CODEX_EXECUTOR_SPOOL_OR_OWNER_NOT_READY'), lockLogs.join('\n'));
-    assert.equal(comments.filter(item => parseReceipt(item.body)?.request_id === pendingJob.request_id).length, 0);
+    };
+    const result = await executeWorker(config, routeAdapters);
+    assert.equal(result.state, 'WAITING_ELIGIBILITY');
+    assert.equal(result.reason, 'CODEX_HUMAN_SCOPE_BINDING_REQUIRED');
+    assert.deepEqual(calls, { bundle: 0, start: 0, trigger: 0, inline: 0 });
+    assert.equal(comments.filter(item => parseReceipt(item.body)?.request_id === codexJob.request_id).length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('live Codex Task mismatch blocks only that lane and leaves an independent ping eligible', async () => {
+test('unbound schema-3 Codex does not block an independent ping', async () => {
   const root = mkdtempSync(join(homedir(), '.ptysd-codex-task-readback-'));
   try {
     const workspace = join(root, 'workspace');
@@ -6652,7 +6809,10 @@ test('live Codex Task mismatch blocks only that lane and leaves an independent p
     const codexComment = com(9051, encoded(codexJob));
     const pingJob = mkjob({ host, request_id: 'PTYSD_PING_AFTER_CODEX_TASK_MISMATCH_20261015' });
     const pingComment = com(9052, encoded(pingJob));
-    const comments = [codexComment, pingComment];
+    const anchor = anchorComment();
+    const directive = humanGoalComment({ id: 6569393440,
+      body: '<!-- PTYSD_V53R4_CODEX_DIRECTIVE_20261106 -->\n**Codex 下一動作**：Review bounded source.' });
+    const comments = [codexComment, pingComment, directiveReceipt(directive, host, 'worker')];
     const config = { repo: REPO, project_id: PROJECT, host, issue: 407,
       workspace, state_dir: stateDir, codex_spool: codexSpool,
       dispatchers: ['t14210184'], github_transport_verified: true,
@@ -6682,7 +6842,7 @@ test('live Codex Task mismatch blocks only that lane and leaves an independent p
     const writes = [];
     const logs = [];
     const result = await executeWorker(config, {
-      apiRead, commentsRead: () => comments,
+      apiRead, commentsRead: () => comments, goalCommentsRead: () => [anchor, directive],
       assertCodexExecutorTaskReady: () => { throw Object.assign(new Error('TASK_DISABLED'), {
         code: 'CODEX_EXECUTOR_TASK_DISABLED' }); },
       writeReceipt: (_config, data, login) => {
@@ -6696,8 +6856,7 @@ test('live Codex Task mismatch blocks only that lane and leaves an independent p
     assert.equal(result.request_id, pingJob.request_id);
     assert.ok(writes.length > 0 && writes.every(item => item.kind === 'ping'));
     assert.equal(comments.filter(item => parseReceipt(item.body)?.request_id === codexJob.request_id).length, 0);
-    assert.ok(logs.some(value => value.includes(
-      'CODEX_LANE_WAITING_ELIGIBILITY_CODEX_EXECUTOR_TASK_READBACK_CODEX_EXECUTOR_TASK_DISABLED')));
+    assert.ok(logs.includes(`CODEX_HUMAN_SCOPE_BINDING_REQUIRED_${codexJob.request_id}_NO_DISPATCH`));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
