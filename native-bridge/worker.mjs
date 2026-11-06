@@ -2588,8 +2588,11 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
     'If more content is needed, use the known byte length and a valid next byte offset; never use a line number or an offset beyond the returned content/file length. ' +
     'Immediately before each `edit_file`, reread the exact current target text from the same path and attempt workspace. ' +
     'Build the replacement from that fresh text, not from an earlier read or remembered source. ' +
-    'If an exact target no longer matches, reread the affected section once and adjust to the current exact text. ' +
-    'If the target is still ambiguous or absent, stop without broad replacement and report the blocker. ' +
+    'If an exact target no longer matches, never repeat the same stale target or replacement. ' +
+    'Reread the affected section exactly once from the same absolute path inside the current attempt workspace, ' +
+    'form one smaller, unique exact target from that fresh text, and allow at most one retry for that mismatched section. ' +
+    'If that retry fails or a unique exact target cannot be formed, stop editing that section without broad replacement and report the blocker. ' +
+    'Never rewrite the whole file or request broader permissions as a fallback. ' +
     'After each edit, reread the changed span and verify the intended result before proceeding. ' +
 
     'Do not run shell commands, access the network, inspect credentials, or edit any other path. ' +

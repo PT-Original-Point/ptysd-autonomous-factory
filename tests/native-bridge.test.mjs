@@ -4969,10 +4969,16 @@ test('Antigravity edit uses the pinned CLI/model only after a fresh no-overage a
           'prompt must require fresh target text readback immediately before each edit_file');
         assert.ok(promptContent.includes('Build the replacement from that fresh text, not from an earlier read or remembered source'),
           'prompt must require replacement to be built from fresh text');
-        assert.ok(promptContent.includes('If an exact target no longer matches, reread the affected section once and adjust to the current exact text'),
-          'prompt must require one reread on target mismatch');
-        assert.ok(promptContent.includes('stop without broad replacement and report the blocker'),
-          'prompt must require stopping without broad replacement if target is ambiguous or absent');
+        assert.ok(promptContent.includes('If an exact target no longer matches, never repeat the same stale target or replacement'),
+          'prompt must prohibit replaying a stale target or replacement');
+        assert.ok(promptContent.includes('Reread the affected section exactly once from the same absolute path inside the current attempt workspace'),
+          'prompt must reread only the affected section from the exact attempt path');
+        assert.ok(promptContent.includes('form one smaller, unique exact target from that fresh text, and allow at most one retry for that mismatched section'),
+          'prompt must constrain recovery to one smaller exact target and one retry');
+        assert.ok(promptContent.includes('If that retry fails or a unique exact target cannot be formed, stop editing that section without broad replacement and report the blocker'),
+          'prompt must stop after a failed retry or ambiguous target without broad replacement');
+        assert.ok(promptContent.includes('Never rewrite the whole file or request broader permissions as a fallback'),
+          'prompt must prohibit whole-file rewrites and permission escalation as fallback');
         assert.ok(promptContent.includes('After each edit, reread the changed span and verify the intended result before proceeding'),
           'prompt must require post-edit readback verification');
         assert.ok(promptContent.includes('Do not run shell commands, access the network, inspect credentials, or edit any other path'),
