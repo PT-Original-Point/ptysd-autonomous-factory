@@ -584,11 +584,17 @@
   const TASK_KINDS_WITHOUT_SOURCE_PR = new Set([
     'ping','native_preflight','native_v2_qualify','opencode_plan',
   ]);
+  const TASK_STATES_WITH_SOURCE = new Set([
+    'QUEUED_NOT_STARTED','STARTED_UNVERIFIED','WAITING_ELIGIBILITY',
+    'FINISHED_NOT_ACCEPTANCE','BLOCKED','SOURCE_UNKNOWN','STALE_SOURCE','AMBIGUOUS_DUPLICATE',
+  ]);
   function candidatePrPinState(observation) {
     if (observation?.status !== 'FRESH') return { status:'UNKNOWN', pin:null };
     const task=observation.snapshot?.native_worker?.latest_task;
     if (!object(task) || !/^[A-Z][A-Z0-9_-]{7,79}$/.test(task.request_id || '') ||
-        !safeSha(task.source_sha)) return { status:'UNKNOWN', pin:null };
+        !safeSha(task.source_sha) ||
+        !TASK_STATES_WITH_SOURCE.has(String(task.state || '').toUpperCase()))
+      return { status:'UNKNOWN', pin:null };
     if (TASK_KINDS_WITHOUT_SOURCE_PR.has(task.kind)) {
       if (Object.prototype.hasOwnProperty.call(task,'source_pr'))
         return { status:'UNKNOWN', pin:null, task_kind:task.kind };
@@ -4476,6 +4482,26 @@
       checksLink.textContent=prPin ? 'PR #' + prPin.number + ' CI' : '任務來源 PR CI';
     }
     renderEvents(classifyRecentEvents(comments,snapshot,currentChecks,resources.dispatches,now));
+    alignWorkerCardHeaders();
+  }
+  function targetWorkerHeaderHeight(heights, desktop) {
+    if (!desktop || !Array.isArray(heights) || heights.length === 0 ||
+        heights.some(height => !Number.isFinite(height) || height < 0)) return null;
+    return Math.ceil(Math.max(176,...heights));
+  }
+  function alignWorkerCardHeaders() {
+    if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+    const heads=[...document.querySelectorAll('.worker-grid .worker-head')];
+    if (!heads.length) return;
+    heads.forEach(head => { head.style.minHeight='0px'; });
+    const desktop=typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(min-width:1201px)').matches : true;
+    if (!desktop) {
+      heads.forEach(head => { head.style.minHeight=''; });
+      return;
+    }
+    const target=targetWorkerHeaderHeight(heads.map(head => head.getBoundingClientRect().height),true);
+    if (target !== null) heads.forEach(head => { head.style.minHeight=target + 'px'; });
   }
   const testApi = {
     parseSnapshot, findSnapshot, latestTask, summarizeChecks, fieldFreshness, validJob,
@@ -4490,6 +4516,7 @@
     codexReviewedW2TrustedChecks,
     dispatchCardData, renderDispatchCard, w1SourceHarvestLabel, render,
     freshnessOfSnapshot, workerObservationLabel, createApiClient, createResourceStore, renderRateStatus,
+    targetWorkerHeaderHeight, alignWorkerCardHeaders,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
     nativeTaskBadgeDetails, nativeTaskResultLabel,
     w2EvidenceData, renderW2Evidence, workerMetricSummary, modelExecutionSwitchLabel,
@@ -4500,6 +4527,8 @@
   };
   if (typeof window !== 'undefined') window.PTYSDOperatorPanel = testApi;
   if (typeof window !== 'undefined' && window.__PTYSD_TEST__) return;
+  if (typeof window.addEventListener === 'function')
+    window.addEventListener('resize',alignWorkerCardHeaders);
   let rateStorage=null, rateChannel=null;
   try { rateStorage=window.localStorage || null; } catch {}
   try {

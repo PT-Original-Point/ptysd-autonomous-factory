@@ -21,7 +21,9 @@ The page checks the publisher account, exact project/repository/Issue identity,
 snapshot schema, source comment ID, time bounds, and expiry. Missing, duplicate, mismatched,
 expired, or unreadable observations show UNKNOWN or STALE. W1/W2/W3 have
 separate cards. W1 and W2 activity is bound to its task, attempt, and recent
-role-specific evidence. W3 is labeled “ChatGPT Web / Codex” with the Full Automation harness name kept in its subtitle,
+role-specific evidence. Desktop worker-card headers are measured and synchronized
+to the tallest current header; the spacer is released when cards stack on narrow
+screens. W3 is labeled “ChatGPT Web / Codex” with the Full Automation harness name kept in its subtitle,
 but its current status stays UNKNOWN unless a trusted same-source receipt binds
 the Web harness mode, model, task, attempt, and recent tool activity. A spawned
 agent, static configuration, or legacy Zero Risk record alone does not prove

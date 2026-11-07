@@ -444,6 +444,8 @@ test('schema task kinds without source PR are not applicable; malformed and unkn
     {request_id:'PTYSD_UNKNOWN_KIND_20261030',kind:'future_task_kind',source_sha:head},
     {request_id:'PTYSD_EDIT_MISSING_PR_20261030',kind:'opencode_edit',source_sha:head},
     {request_id:'PTYSD_INVALID_NO_PR_20261030',kind:'native_v2_qualify',source_sha:head,source_pr:437},
+    {request_id:'PTYSD_NO_STATE_NO_PR_20261030',kind:'native_v2_qualify',source_sha:head},
+    {request_id:'PTYSD_BAD_STATE_NO_PR_20261030',kind:'native_v2_qualify',source_sha:head,state:'RUNNING'},
   ]) {
     const observation=panel.findSnapshot(observationWithLatestTask(baseTime,task),baseTime);
     assert.equal(panel.candidatePrPinState(observation).status,'UNKNOWN');
@@ -452,6 +454,14 @@ test('schema task kinds without source PR are not applicable; malformed and unkn
   const stale=panel.findSnapshot(observationWithLatestTask(baseTime-11*60_000,
     {request_id:'PTYSD_STALE_NO_PR_20261030',kind:'native_v2_qualify',source_sha:head}),baseTime);
   assert.equal(panel.candidatePrPinState(stale).status,'UNKNOWN');
+});
+
+test('desktop worker headers share the tallest measured content and stacked cards release the spacer', () => {
+  assert.equal(panel.targetWorkerHeaderHeight([176,212,193],true),212);
+  assert.equal(panel.targetWorkerHeaderHeight([219.2,212,193],true),220);
+  assert.equal(panel.targetWorkerHeaderHeight([176,212,193],false),null);
+  assert.equal(panel.targetWorkerHeaderHeight([],true),null);
+  assert.equal(panel.targetWorkerHeaderHeight([176,NaN,193],true),null);
 });
 
 test('a fresh native_v2_qualify snapshot reports PR and CI not applicable without fetching either', async () => {
