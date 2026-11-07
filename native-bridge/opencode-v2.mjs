@@ -135,12 +135,14 @@ export function discoverV2Executables(env = process.env, win = platform() === 'w
   const userHome = env.USERPROFILE || env.HOME || homedir();
   if (userHome) dirs.unshift(join(userHome, '.opencode', 'bin'));
   const configuredLocalAppData = typeof env.LOCALAPPDATA === 'string' ? env.LOCALAPPDATA : '';
-  const localAppData = win
-    ? isAbsolute(configuredLocalAppData)
-      ? normalize(configuredLocalAppData)
-      : configuredLocalAppData === '' && typeof env.USERPROFILE === 'string' && isAbsolute(env.USERPROFILE)
-        ? normalize(join(env.USERPROFILE, 'AppData', 'Local')) : null
-    : null;
+  const localAppDataRoots = [];
+  if (win && isAbsolute(configuredLocalAppData))
+    localAppDataRoots.push(normalize(configuredLocalAppData));
+  if (win && typeof env.USERPROFILE === 'string' && isAbsolute(env.USERPROFILE)) {
+    const profileLocalAppData = normalize(join(env.USERPROFILE, 'AppData', 'Local'));
+    if (!localAppDataRoots.some(root => root.toLowerCase() === profileLocalAppData.toLowerCase()))
+      localAppDataRoots.push(profileLocalAppData);
+  }
   // Explicit local configuration is trusted only when absolute; no GitHub job can set it.
   const named = win ? ['opencode2.exe', 'opencode.exe'] : ['opencode2', 'opencode'];
   const found = []; const seen = new Set();
@@ -148,16 +150,18 @@ export function discoverV2Executables(env = process.env, win = platform() === 'w
     const p = normalize(env.PTYSD_OPENCODE_V2_EXE);
     if (regularFile(p)) { seen.add(p.toLowerCase()); found.push(p); }
   }
-  if (win && localAppData) {
+  for (const localAppData of localAppDataRoots) {
     const bundled = normalize(join(localAppData, 'Programs', '@opencodedesktop',
       'resources', 'opencode-cli.exe'));
-    const key = bundled.toLowerCase();
-    if (!seen.has(key) && regularFile(bundled)) { seen.add(key); found.push(bundled); }
-  }
-  if (win && localAppData) {
-    // The managed PTYSD OpenCode install uses a versioned local directory and
-    // the official @opencode/cli package layout. Discover only valid version
-    // names; qualifyOpenCodeV2 still verifies Authenticode before running one.
+    const bundledKey = bundled.toLowerCase();
+    if (!seen.has(bundledKey) && regularFile(bundled)) {
+      seen.add(bundledKey); found.push(bundled);
+    }
+
+    // Search the configured LocalAppData first, then the canonical current-
+    // profile directory. Some scheduled executors expose a noncanonical but
+    // absolute LOCALAPPDATA; both roots stay within the current user's profile
+    // and every binary must still pass Authenticode and the stable V2 floor.
     let installs = [];
     try {
       installs = readdirSync(localAppData, { withFileTypes: true })

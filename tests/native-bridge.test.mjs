@@ -7668,6 +7668,39 @@ test('native preflight records Antigravity readiness without claiming model enti
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
+test('native preflight records sanitized LocalAppData relationship for OpenCode qualification', () => {
+  const root=mkdtempSync(join(homedir(),'.ptysd-opencode-preflight-env-'));
+  try {
+    const workspace=join(root,'workspace'),state=join(root,'state');
+    const userProfile=join(root,'profile'),configuredLocalAppData=join(root,'executor-localappdata');
+    mkdirSync(workspace); mkdirSync(state); mkdirSync(userProfile); mkdirSync(configuredLocalAppData);
+    mkdirSync(join(userProfile,'AppData','Local'),{recursive:true});
+    const baseEnv={PATH:'clean',USERPROFILE:userProfile,LOCALAPPDATA:configuredLocalAppData};
+    const result=nativePreflight({host:hostname().toUpperCase(),workspace,state_dir:state,
+      allowed_models:{},enable_v2_model_runs:false},
+    mkjob({kind:'native_preflight',host:hostname().toUpperCase(),
+      request_id:'PTYSD_OPENCODE_PREFLIGHT_ENV_20261107'}),{
+      qualifyOpenCodeV2:(env,win)=>{
+        assert.equal(env,baseEnv);
+        assert.equal(win,process.platform==='win32');
+        return {ready:false,candidates_checked:3,reason:'OPEN_CODE_V2_VERSION_POLICY_REJECTED',
+          rejected_versions:['2.1.3']};
+      },
+      baseEnv,
+      runAntigravityV2Readiness:()=>({status:'NOT_TESTED',inference_executed:false}),
+    });
+    assert.equal(result.outcome,'OPENCODE_V2_CLI_VERSION_POLICY_REJECTED');
+    const file=readdirSync(state).find(name=>name.startsWith('native-evidence-'));
+    const facts=JSON.parse(readFileSync(join(state,file),'utf8'));
+    assert.equal(facts.opencode_userprofile_absolute,process.platform==='win32');
+    assert.equal(facts.opencode_localappdata_absolute,process.platform==='win32');
+    assert.equal(facts.opencode_localappdata_matches_profile,process.platform==='win32' ? false : null);
+    assert.equal(facts.opencode_profile_localappdata_exists,process.platform==='win32');
+    assert.equal(JSON.stringify(facts).includes(root),false,
+      'preflight should record enough to diagnose roots without persisting public paths');
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
 
 test('parseReceipt rejects schema-6 Antigravity receipt with impossible file-target aggregate evidence', () => {
   const job = withHumanGoal({
