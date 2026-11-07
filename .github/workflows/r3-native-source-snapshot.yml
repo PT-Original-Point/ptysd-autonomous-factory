@@ -1,0 +1,189 @@
+# R3-03 / T07 / T16 Native Source Snapshot Qualification (Reviewed Migration)
+# Purpose: Independent public qualification of immutable candidate commit on standard ephemeral GitHub-hosted runner.
+# Note: Snapshot receipts and commit targets are immutable PER-ATTEMPT. Baseline tree verification permits
+# strictly reviewed migration evidence (D022, D023, D024, D025) while enforcing strict blob immutability across
+# all other existing baseline tests. No permanent software or model version pins are introduced.
+name: R3 Native Source Snapshot Qualification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/r3-native-source-snapshot.yml'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  source-snapshot-qualification:
+    if: github.repository == 'PT-Original-Point/ptysd-vnext42-governance-sandbox' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      REPO_URL: 'https://github.com/PT-Original-Point/ptysd-vnext42-governance-sandbox.git'
+      EXPECTED_BASE_SHA: 'd39486601d851e31256852a24e9c1393b9046fe5'
+      CANDIDATE_HEAD_SHA: 'ada188e861358135fa5f7a7e95f3d5958d97fd6e'
+      CANONICAL_REF: 'refs/heads/v45/factory-control'
+      PROJECT_ID: 'CHATGPT_GLOBAL_SKILL_GOVERNANCE'
+    steps:
+      - name: Verify Host Identity and Validate Inputs
+        run: |
+          echo "Observed runner: ${RUNNER_ENVIRONMENT} (${RUNNER_OS})"
+          if [[ "${RUNNER_ENVIRONMENT}" != "github-hosted" || "${RUNNER_OS}" != "Linux" ]]; then
+            echo "Error: Execution must run on a GitHub-hosted Linux runner" >&2
+            exit 1
+          fi
+
+          git --version
+          node --version
+
+          SHA_RE='^[0-9a-f]{40}$'
+          if [[ ! "${EXPECTED_BASE_SHA}" =~ ${SHA_RE} || ! "${CANDIDATE_HEAD_SHA}" =~ ${SHA_RE} ]]; then
+            echo "Error: Invalid SHA format for baseline or candidate commit" >&2
+            exit 1
+          fi
+
+      - name: Fetch and Verify Lineage
+        run: |
+          mkdir workspace && cd workspace
+          git init -q
+          git remote add origin "${REPO_URL}"
+
+          git fetch --depth=2 origin "${CANDIDATE_HEAD_SHA}"
+          git fetch --depth=1 origin "${EXPECTED_BASE_SHA}"
+          git fetch --depth=1 origin "${CANONICAL_REF}"
+
+          REMOTE_CANONICAL_SHA=$(git ls-remote origin "${CANONICAL_REF}" | awk '{print $1}')
+          echo "Remote canonical ${CANONICAL_REF}: ${REMOTE_CANONICAL_SHA}"
+          if [[ "${REMOTE_CANONICAL_SHA}" != "${EXPECTED_BASE_SHA}" ]]; then
+            echo "Error: Canonical ref does not match baseline SHA" >&2
+            exit 1
+          fi
+
+          PARENTS=($(git log --pretty=%P -n 1 "${CANDIDATE_HEAD_SHA}"))
+          if [[ ${#PARENTS[@]} -ne 1 || "${PARENTS[0]}" != "${EXPECTED_BASE_SHA}" ]]; then
+            echo "Error: Candidate commit must have exactly one parent matching baseline ${EXPECTED_BASE_SHA}" >&2
+            exit 1
+          fi
+
+      - name: Verify Reviewed Baseline Migration and Tree Immutability
+        run: |
+          cd workspace
+          echo "=== Auditing baseline test suite against reviewed migration evidence ==="
+          BASELINE_FILES=$(git ls-tree -r --name-only "${EXPECTED_BASE_SHA}" tools/csg/cell-kernel/tests)
+          if [[ -z "${BASELINE_FILES}" ]]; then
+            echo "Error: Baseline test directory cannot be empty" >&2
+            exit 1
+          fi
+
+          declare -A APPROVED_OLD
+          declare -A APPROVED_NEW
+
+          # D022: Dynamic version observation replaces permanent software/model constants
+          APPROVED_OLD["tools/csg/cell-kernel/tests/adapter-abi.test.mjs"]="2db76c2666f7d4b9135889c077d4c1d1055535c0"
+          APPROVED_NEW["tools/csg/cell-kernel/tests/adapter-abi.test.mjs"]="87d1ca6dfbdfb9fc05080246e179f30b3a557066"
+
+          # D023: Explicit source retirement of obsolete advisor module and internal guard test
+          APPROVED_OLD["tools/csg/cell-kernel/tests/advisor-guard.test.mjs"]="125739572c711223042ad43bc52104cbecfc788f"
+          APPROVED_NEW["tools/csg/cell-kernel/tests/advisor-guard.test.mjs"]="DELETED"
+
+          # D024: Fix test regex typo RESOURCE_WIDF -> RESOURCE_WIDEN
+          APPROVED_OLD["tools/csg/cell-kernel/tests/capability.test.mjs"]="6ac524a9f6e2fbee7b0663031b0823f4b29f4fec"
+          APPROVED_NEW["tools/csg/cell-kernel/tests/capability.test.mjs"]="dced32e154e6775b1e3e674eccc0e0b2a8bf6bf8"
+
+          # D023: Rewired N1 caller removing advisor checks while preserving 6 public tests
+          APPROVED_OLD["tools/csg/cell-kernel/tests/n1-e2e.test.mjs"]="c649a1932928d3487b32e73996cb4108ce71a3d8"
+          APPROVED_NEW["tools/csg/cell-kernel/tests/n1-e2e.test.mjs"]="53adb2f34e96a41470b56e137b12214aa8c4aabf"
+
+          # D025: Symlink, resolved-path, case-folding, and READ_ONLY regressions
+          APPROVED_OLD["tools/csg/cell-kernel/tests/policy-middleware.test.mjs"]="0ea6da2fb1ca9f156cd032d353dab2af6ebb8d27"
+          APPROVED_NEW["tools/csg/cell-kernel/tests/policy-middleware.test.mjs"]="abc148b94bbd852c301b06e3a989a468bd98438c"
+
+          COUNT=0
+          UNCHANGED_COUNT=0
+          MODIFIED_COUNT=0
+          DELETED_COUNT=0
+
+          while IFS= read -r FILE; do
+            [[ -z "${FILE}" ]] && continue
+            COUNT=$((COUNT + 1))
+            BASE_BLOB=$(git rev-parse --verify --quiet "${EXPECTED_BASE_SHA}:${FILE}" || true)
+            CAND_BLOB=$(git rev-parse --verify --quiet "${CANDIDATE_HEAD_SHA}:${FILE}" || true)
+
+            if [[ -n "${APPROVED_OLD[${FILE}]-}" ]]; then
+              EXP_OLD="${APPROVED_OLD[${FILE}]}"
+              EXP_NEW="${APPROVED_NEW[${FILE}]}"
+              if [[ "${BASE_BLOB}" != "${EXP_OLD}" ]]; then
+                echo "Error: Baseline blob mismatch for approved migration file: ${FILE} (expected ${EXP_OLD}, got ${BASE_BLOB})" >&2
+                exit 1
+              fi
+              if [[ "${EXP_NEW}" == "DELETED" ]]; then
+                if [[ -n "${CAND_BLOB}" ]]; then
+                  echo "Error: File marked for approved deletion still present in candidate: ${FILE}" >&2
+                  exit 1
+                fi
+                echo "Verified approved deletion: ${FILE} (baseline blob ${BASE_BLOB})"
+                DELETED_COUNT=$((DELETED_COUNT + 1))
+              else
+                if [[ "${CAND_BLOB}" != "${EXP_NEW}" ]]; then
+                  echo "Error: Candidate blob mismatch for approved migration file: ${FILE} (expected ${EXP_NEW}, got ${CAND_BLOB})" >&2
+                  exit 1
+                fi
+                echo "Verified approved mutation: ${FILE} (base: ${BASE_BLOB} -> cand: ${CAND_BLOB})"
+                MODIFIED_COUNT=$((MODIFIED_COUNT + 1))
+              fi
+            else
+              if [[ -z "${CAND_BLOB}" ]]; then
+                echo "Error: Unapproved baseline test deletion: ${FILE}" >&2
+                exit 1
+              fi
+              if [[ "${BASE_BLOB}" != "${CAND_BLOB}" ]]; then
+                echo "Error: Unapproved baseline test mutation: ${FILE} (base: ${BASE_BLOB}, cand: ${CAND_BLOB})" >&2
+                exit 1
+              fi
+              echo "Verified unchanged baseline file: ${FILE} (${BASE_BLOB})"
+              UNCHANGED_COUNT=$((UNCHANGED_COUNT + 1))
+            fi
+          done <<< "${BASELINE_FILES}"
+
+          echo "=== Baseline Test Audit Summary ==="
+          echo "Total checked: ${COUNT} (Expected: 9)"
+          echo "Unchanged:     ${UNCHANGED_COUNT} (Expected: 4)"
+          echo "Modified:      ${MODIFIED_COUNT} (Expected: 4)"
+          echo "Deleted:       ${DELETED_COUNT} (Expected: 1)"
+
+          if [[ ${COUNT} -ne 9 || ${UNCHANGED_COUNT} -ne 4 || ${MODIFIED_COUNT} -ne 4 || ${DELETED_COUNT} -ne 1 ]]; then
+            echo "Error: Baseline audit counts do not match expected 9 total (4 unchanged, 4 modified, 1 deleted)" >&2
+            exit 1
+          fi
+
+          echo "=== Verifying Source Retirement of Advisor Module ==="
+          if git rev-parse --verify --quiet "${CANDIDATE_HEAD_SHA}:tools/csg/cell-kernel/advisor-guard.mjs" >/dev/null; then
+            echo "Error: Retired advisor-guard.mjs must be absent in candidate tree" >&2
+            exit 1
+          fi
+          echo "Source-only retirement confirmed: tools/csg/cell-kernel/advisor-guard.mjs is absent in candidate tree."
+          echo "Note: This is a source qualification receipt; live/T24 runtime status remains UNKNOWN."
+
+      - name: Execute Candidate Tests
+        run: |
+          cd workspace
+          git checkout -q "${CANDIDATE_HEAD_SHA}"
+          echo "=== Candidate Identity Receipt ==="
+          echo "Candidate HEAD: $(git rev-parse HEAD)"
+          echo "Candidate TREE: $(git rev-parse HEAD^{tree})"
+          echo "Baseline Parent: ${EXPECTED_BASE_SHA}"
+          node --test --test-reporter=tap tools/csg/cell-kernel/tests/*.test.mjs
+
+      - name: Post-test Canonical Guard
+        run: |
+          cd workspace
+          CURRENT_REMOTE_SHA=$(git ls-remote origin "${CANONICAL_REF}" | awk '{print $1}')
+          if [[ "${CURRENT_REMOTE_SHA}" != "${EXPECTED_BASE_SHA}" ]]; then
+            echo "Error: Post-test canonical ref alteration detected. Authority promotion forbidden." >&2
+            exit 1
+          fi
+          echo "Canonical guard verified: ${CANONICAL_REF} remains ${CURRENT_REMOTE_SHA}"
