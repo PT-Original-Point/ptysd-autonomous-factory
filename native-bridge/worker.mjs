@@ -2988,12 +2988,19 @@ async function runAntigravityEdit(spec, config, job, attemptId, dependencies = {
 export function nativePreflight(config, job, dependencies = {}) {
   const qualify = dependencies.qualifyOpenCodeV2 ?? qualifyOpenCodeV2;
   const readiness = dependencies.runAntigravityV2Readiness ?? runAntigravityV2Readiness;
-  const cli = qualify();
+  const baseEnv = dependencies.baseEnv ?? process.env;
+  const cli = qualify(baseEnv, platform() === 'win32');
   const localAppData = typeof dependencies.localAppData === 'string'
-    ? dependencies.localAppData : process.env.LOCALAPPDATA;
+    ? dependencies.localAppData : baseEnv.LOCALAPPDATA;
   const antigravityBin = typeof localAppData === 'string' && isAbsolute(localAppData)
     ? join(localAppData, 'agy', 'bin', 'agy.exe') : '';
-  const baseEnv = dependencies.baseEnv ?? process.env;
+  const userProfile = typeof baseEnv.USERPROFILE === 'string' ? baseEnv.USERPROFILE : '';
+  const configuredLocalAppData = typeof baseEnv.LOCALAPPDATA === 'string' ? baseEnv.LOCALAPPDATA : '';
+  const profileLocalAppData = platform() === 'win32' && isAbsolute(userProfile)
+    ? join(userProfile, 'AppData', 'Local') : '';
+  const localAppDataMatchesProfile = profileLocalAppData && isAbsolute(configuredLocalAppData)
+    ? resolve(profileLocalAppData).toLowerCase() === resolve(configuredLocalAppData).toLowerCase()
+    : null;
   let projectId = config.antigravity_cli_project_id;
   if (projectId === undefined || projectId === null) {
     const binding = (dependencies.resolveAntigravityProjectId ?? resolveAntigravityProjectId)(
@@ -3008,6 +3015,10 @@ export function nativePreflight(config, job, dependencies = {}) {
     node_version: process.version, platform: platform(), architecture: process.arch,
     opencode_v2_verified: cli.ready,
     native_executables_checked: cli.candidates_checked,
+    opencode_userprofile_absolute: platform() === 'win32' && isAbsolute(userProfile),
+    opencode_localappdata_absolute: platform() === 'win32' && isAbsolute(configuredLocalAppData),
+    opencode_localappdata_matches_profile: localAppDataMatchesProfile,
+    opencode_profile_localappdata_exists: Boolean(profileLocalAppData && existsSync(profileLocalAppData)),
     model_allowlist_entries: Object.keys(config.allowed_models || {}).length,
     v2_model_execution_enabled: config.enable_v2_model_runs === true,
     cli_version: cli.version ?? cli.rejected_versions?.[0] ?? 'NOT_FOUND_OR_WRONG_MAJOR',

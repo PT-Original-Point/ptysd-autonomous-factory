@@ -675,6 +675,62 @@ test('Windows V2 discovery falls back to the current profile LocalAppData when L
     assert.equal(result.version,'2.2.5');
   } finally {rmSync(tmp,{recursive:true,force:true});}
 });
+test('Windows V2 discovery also searches canonical profile LocalAppData when LOCALAPPDATA is overridden', () => {
+  const tmp=mkdtempSync(join(tmpdir(),'oc2-profile-localappdata-override-'));
+  try {
+    const home=join(tmp,'user'), configured=join(tmp,'executor-localappdata');
+    const exe=join(home,'AppData','Local','PTYSDOpenCodeCLI-v2.2.5',
+      'node_modules','@opencode','cli','bin','opencode.exe');
+    mkdirSync(home); mkdirSync(configured);
+    mkdirSync(join(exe,'..'),{recursive:true});
+    writeFileSync(exe,'synthetic executable');
+    const env={PATH:'',USERPROFILE:home,LOCALAPPDATA:configured};
+    assert.deepEqual(discoverV2Executables(env,true),[exe]);
+
+    const calls=[];
+    const result=qualifyOpenCodeV2(env,true,(path,args)=>{
+      calls.push(['version',path,args]);
+      assert.equal(path,exe);
+      return 'opencode v2.2.5';
+    },path=>{
+      calls.push(['signature',path]);
+      return path===exe;
+    });
+    assert.equal(result.ready,true);
+    assert.equal(result.bin,exe);
+    assert.equal(result.signature_status,'VALID');
+    assert.deepEqual(calls,[['signature',exe],['version',exe,['--version']]]);
+  } finally {rmSync(tmp,{recursive:true,force:true});}
+});
+test('canonical profile discovery does not bypass OpenCode signature or minimum-version gates', () => {
+  const tmp=mkdtempSync(join(tmpdir(),'oc2-profile-localappdata-override-policy-'));
+  try {
+    const home=join(tmp,'user'), configured=join(tmp,'executor-localappdata');
+    const exeFor=version=>join(home,'AppData','Local',`PTYSDOpenCodeCLI-v${version}`,
+      'node_modules','@opencode','cli','bin','opencode.exe');
+    const newest=exeFor('2.2.5'), older=exeFor('2.2.4');
+    mkdirSync(home); mkdirSync(configured);
+    for(const exe of [newest,older]) mkdirSync(join(exe,'..'),{recursive:true});
+    for(const exe of [newest,older]) writeFileSync(exe,'synthetic executable');
+    const env={PATH:'',USERPROFILE:home,LOCALAPPDATA:configured};
+    assert.deepEqual(discoverV2Executables(env,true),[newest,older]);
+
+    const calls=[];
+    const result=qualifyOpenCodeV2(env,true,(path,args)=>{
+      calls.push(['version',path,args]);
+      return 'opencode v2.2.4';
+    },path=>{
+      calls.push(['signature',path]);
+      return path===older;
+    });
+    assert.equal(result.ready,false);
+    assert.equal(result.reason,'OPEN_CODE_V2_VERSION_POLICY_REJECTED');
+    assert.deepEqual(result.rejected_versions,['2.2.4']);
+    assert.deepEqual(calls,[['signature',newest],['signature',older],
+      ['version',older,['--version']]],
+    'an unsigned 2.2.5 candidate is never executed and signed versions below 2.2.5 remain rejected');
+  } finally {rmSync(tmp,{recursive:true,force:true});}
+});
 test('Windows V2 profile LocalAppData fallback retains signature and minimum-version gates', () => {
   const tmp=mkdtempSync(join(tmpdir(),'oc2-profile-policy-'));
   try {
