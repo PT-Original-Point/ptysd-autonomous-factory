@@ -1,0 +1,131 @@
+{
+  "schema": "vnext5.1.trust-plane-baseline-audit.v1",
+  "project_id": "CHATGPT_GLOBAL_SKILL_GOVERNANCE",
+  "status": "NONCANONICAL_FINDINGS_CONFIRMED_REVIEW_CANDIDATE",
+  "observed_at_utc": "2026-09-28 23:01:18 UTC",
+  "source": {
+    "main_ref": "refs/heads/main",
+    "main_commit": "1dcec5ea8124e4d1b69b53652c657df8b65eb3ef",
+    "main_tree": "b12e07578ea83ee1d69799345ca5cdefbaae6a1a",
+    "project_directory_ref": "refs/heads/governance/project-directory",
+    "project_directory_commit": "38f4fc7cb2841e2318a97ff7a53e41b2ec07aef1",
+    "control_ref": "refs/heads/v45/factory-control",
+    "control_commit": "a5ebfd86d440b61ecc4e4dc3ba7b8291836769c7",
+    "accepted_source_ref": "refs/heads/v49/accepted-source",
+    "accepted_source_commit": "7784663cca65dc7b0aa96c599db3224ad8317817"
+  },
+  "active_trust_paths": [
+    {
+      "path": ".github/workflows/factory-bounded.yml",
+      "blob_oid": "a27f6feea3cdc592781f24af663b57934e1eb62a",
+      "finding": "workflow_dispatch bounded-driver-acceptance uses PTYSD-V46-CONTROL-TRUSTED and executes tests from input-selected control_sha; candidate-controlled bytes can execute on privileged runner."
+    },
+    {
+      "path": ".github/workflows/v45-bounded-self-hosted.yml",
+      "blob_oid": "96eaa3e3a95c6d2a7821ee298659b43da8656db5",
+      "finding": "workflow_dispatch runs on self-hosted/windows/ptysd-governance-v45, checks out the event ref, and executes candidate-controlled scripts/tests; no immutable-base/ref guard is present."
+    },
+    {
+      "path": "governance/csg/trust-root/csg-trusted-pr-verifier.mjs",
+      "blob_oid": "e8112a6fd5d8f896dbda406e1c054d7bf6e41b81",
+      "finding": "TRUST_ROOT lists two exact workflow paths and trust-root/template prefixes, not the whole .github/workflows namespace; e.g. v45-bounded-self-hosted and new workflows are not path-denied."
+    }
+  ],
+  "candidate_pr322": {
+    "base": "7784663cca65dc7b0aa96c599db3224ad8317817",
+    "head": "e021b03bca502f5d5354c0d30a26631b337676ee",
+    "tree": "e47e6bf95b689fe80ddce594c4121d9891b0cf88",
+    "exact_head_csg_trusted_verifier": "FAIL",
+    "candidate_trust_assets": [
+      {
+        "path": "governance/v50/trust-root-candidates/r4-08/csg-trusted-pr-verifier.mjs",
+        "blob_oid": "b77394daa7cb9e692b15ce4856beba3ef6ecf2e4"
+      },
+      {
+        "path": "governance/v50/trust-root-candidates/r4-08/csg-trusted-pr-verifier-paths.test.mjs",
+        "blob_oid": "7e22f2600afdce36e1a012aa233db21b8dbb34d7"
+      },
+      {
+        "path": "governance/v50/trust-root-candidates/r4-08/factory-bounded.yml",
+        "blob_oid": "f10364c686eb59695b05c115d04f3aef9258fb0b"
+      },
+      {
+        "path": "governance/v50/trust-root-candidates/r4-08/manifest.json",
+        "blob_oid": "c4068d48ccc8486fdce45bb9b8983be36688ed60"
+      }
+    ],
+    "qualification_boundary": "These candidate files are stored under a non-active governance candidate path. They are not the current trusted verifier/workflow and do not qualify or repair the active trust plane. Candidate factory-bounded.yml moves bounded-driver tests to ubuntu-24.04 and leaves only the immutable verifier on the trusted runner, but does not address the active v45-bounded-self-hosted workflow."
+  },
+  "mirror_pr327": {
+    "head": "8021cd29e26082ec4125a6ad0123cd5e15d20a7e",
+    "csg_trusted_verifier_run": 36433575764,
+    "job": 108965657918,
+    "result": "PASS",
+    "scope": "Three Factory MCP source blobs only; no trust-plane candidate files and no PR322 whole-head qualification."
+  },
+  "findings": [
+    {
+      "id": "V51-07-F1",
+      "severity": "P0",
+      "result": "FAIL",
+      "claim": "Active workflow_dispatch job executes control_sha-selected candidate tests on the privileged trusted self-hosted runner."
+    },
+    {
+      "id": "V51-07-F2",
+      "severity": "P0",
+      "result": "FAIL",
+      "claim": "A second active self-hosted workflow executes the event-ref source and tests; the current path verifier does not deny this workflow path."
+    },
+    {
+      "id": "V51-07-F3",
+      "severity": "P1",
+      "result": "FAIL",
+      "claim": "The active verifier does not default-deny all .github/workflows paths; candidate workflow additions/changes outside two named paths can evade this path gate."
+    },
+    {
+      "id": "V51-07-F4",
+      "severity": "P1",
+      "result": "NOT_ESTABLISHED",
+      "claim": "Repository rulesets endpoint returned an empty list. Main branch protection returned HTTP 403. Runner-group allowlist and v45/factory-control branch-protection state remain NOT_ESTABLISHED."
+    }
+  ],
+  "required_closure": [
+    "Run ordinary candidate tests only on GitHub-hosted unprivileged runners.",
+    "Restrict privileged runner execution to an immutable trusted verifier workflow; candidate source is data only and is never executed there.",
+    "Default-deny the complete .github/workflows namespace and trust-root/template paths in the immutable verifier, with explicitly qualified exact blob exceptions only.",
+    "Retire or convert v45-bounded-self-hosted.yml so it cannot execute code from a candidate-selected ref on the privileged runner.",
+    "Read back provider runner-group allowlist and branch/ruleset controls from an authorized provider-admin route.",
+    "Bind every protected result to exact base/head/tree/path/blob identities and do not transfer mirror results."
+  ],
+  "boundaries": {
+    "active_files_modified": false,
+    "canonical_refs_modified": false,
+    "host_or_runner_mutated": false,
+    "production_business_paid_scope": false,
+    "candidate_acceptance_claimed": false
+  },
+  "provider_readback": {
+    "rulesets_endpoint": {
+      "endpoint": "GET /repos/PT-Original-Point/ptysd-vnext42-governance-sandbox/rulesets?per_page=100",
+      "result": [],
+      "interpretation": "No repository ruleset entries were returned by this endpoint."
+    },
+    "main_branch_protection": {
+      "endpoint": "GET /repos/PT-Original-Point/ptysd-vnext42-governance-sandbox/branches/main/protection",
+      "result": "DENIED",
+      "http_status": 403,
+      "message": "Resource not accessible by integration"
+    },
+    "control_branch_protection": {
+      "endpoint": "GET branch protection for refs/heads/v45/factory-control",
+      "result": "NOT_ESTABLISHED",
+      "reason": "GitHub connector rejected the slash-containing branch protection URL before an API response"
+    },
+    "runner_group_policy": {
+      "endpoint": "repository Actions runner groups",
+      "result": "NOT_ESTABLISHED",
+      "reason": "GitHub connector rejected endpoint as unsupported; local gh CLI is absent"
+    },
+    "local_gh_cli": "ABSENT"
+  }
+}
