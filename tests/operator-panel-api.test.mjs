@@ -70,6 +70,14 @@ function observationComments(now, { prNumber = 437, sourceSha = head, latestTask
     body: 'PTYSD_OPERATOR_OBSERVATION_V1\n' + JSON.stringify(snapshot) }];
 }
 
+function observationWithLatestTask(now, task) {
+  const comments=observationComments(now,{latestTask:false});
+  const snapshot=JSON.parse(comments[0].body.slice('PTYSD_OPERATOR_OBSERVATION_V1\n'.length));
+  snapshot.native_worker.latest_task=task;
+  comments[0].body='PTYSD_OPERATOR_OBSERVATION_V1\n'+JSON.stringify(snapshot);
+  return comments;
+}
+
 function pullRequest(number, sha, { state = 'open', baseRepo = repository, headRepo = repository } = {}) {
   return { number, state, base: { ref: 'main', repo: { id: 1352411536, full_name: baseRepo } },
     head: { sha, repo: { id: 1352411536, full_name: headRepo } } };
@@ -418,6 +426,61 @@ test('missing or stale observation pins never fall back to a hard-coded PR or ch
     assert.equal(calls.some(url => url.includes('/pulls/') || url.includes('/check-runs')), false);
     assert.equal(store.resources.checks.error, 'TASK_PR_PIN_UNKNOWN');
   }
+});
+
+test('schema task kinds without source PR are not applicable; malformed and unknown pins stay unknown', async () => {
+  const noPrKinds=['ping','native_preflight','native_v2_qualify','opencode_plan'];
+  for (const [index,kind] of noPrKinds.entries()) {
+    const comments=observationWithLatestTask(baseTime,{request_id:`PTYSD_NO_PR_KIND_${index}`,
+      kind,source_sha:head,state:'FINISHED_NOT_ACCEPTANCE'});
+    const observation=panel.findSnapshot(comments,baseTime);
+    assert.equal(observation.status,'FRESH');
+    const pinState=panel.candidatePrPinState(observation);
+    assert.equal(pinState.status,'NOT_APPLICABLE');
+    assert.equal(pinState.pin,null);
+    assert.equal(pinState.task_kind,kind);
+  }
+  for (const task of [
+    {request_id:'PTYSD_UNKNOWN_KIND_20261030',kind:'future_task_kind',source_sha:head},
+    {request_id:'PTYSD_EDIT_MISSING_PR_20261030',kind:'opencode_edit',source_sha:head},
+    {request_id:'PTYSD_INVALID_NO_PR_20261030',kind:'native_v2_qualify',source_sha:head,source_pr:437},
+  ]) {
+    const observation=panel.findSnapshot(observationWithLatestTask(baseTime,task),baseTime);
+    assert.equal(panel.candidatePrPinState(observation).status,'UNKNOWN');
+    assert.equal(panel.candidatePrPinState(observation).pin,null);
+  }
+  const stale=panel.findSnapshot(observationWithLatestTask(baseTime-11*60_000,
+    {request_id:'PTYSD_STALE_NO_PR_20261030',kind:'native_v2_qualify',source_sha:head}),baseTime);
+  assert.equal(panel.candidatePrPinState(stale).status,'UNKNOWN');
+});
+
+test('a fresh native_v2_qualify snapshot reports PR and CI not applicable without fetching either', async () => {
+  let now=baseTime;
+  const calls=[];
+  const comments=observationWithLatestTask(now,{request_id:'PTYSD_V2_QUALIFY_NO_PR_20261030',
+    kind:'native_v2_qualify',source_sha:head,state:'FINISHED_NOT_ACCEPTANCE'});
+  const client=panel.createApiClient(async url=>{
+    calls.push(url);
+    if (url===urls.issue) return response(200,comments,quotaHeaders(now));
+    if (url===urls.main) return response(200,{sha:head},quotaHeaders(now));
+    throw new Error(`UNEXPECTED_NO_PR_READ:${url}`);
+  },{now:()=>now});
+  const store=panel.createResourceStore(client,()=>now);
+  store.resources.pr.error='PREVIOUS_TASK_PR_READ_FAILED';
+  const cycle=await panel.runSyncCycle(store,client,{issue:urls.issue,main:urls.main});
+  assert.equal(cycle.prPin,null);
+  assert.equal(cycle.prPinStatus,'NOT_APPLICABLE');
+  assert.equal(cycle.pullLifecycle.status,'TASK_PR_NOT_APPLICABLE');
+  assert.equal(store.resources.checks.error,null);
+  assert.deepEqual(calls,[urls.issue,urls.main]);
+  domElements.clear();
+  store.resources.issue.latestComments=comments;
+  store.resources.issue.latestComplete=true;
+  panel.render(null,store.resources,null,now,{status:'READY',coordination:'SHARED_LOCKED',remaining:40,
+    lastError:null,lastSuccessAt:now,resetAt:null,pauseUntil:null,indefinite:false});
+  assert.match(domElements.get('pr-state').textContent,/native_v2_qualify 不產生來源 PR；PR／CI 不適用/);
+  assert.match(domElements.get('checks-detail').textContent,/不適用 PR／CI/);
+  assert.match(domElements.get('metric-ci').textContent,/PR／CI 不適用/);
 });
 
 test('PR identity mismatch never requests checks for an unpinned or foreign candidate', async () => {
@@ -1548,6 +1611,12 @@ test('dispatch layout uses two readable desktop columns, collapsible technical d
   assert.match(html, /id="w2-task-badge"/);
   assert.match(html, /id="w3-task-badge"/);
   assert.match(html, /@media\s*\(max-width:\s*700px\)/);
+  assert.match(html,/worker-name\">ChatGPT Web \/ Codex/);
+  assert.match(html,/Full Automation harness/);
+  assert.match(html,/\.worker-head \{ min-height:176px/);
+  assert.match(html,/@media \(max-width:1200px\)[\s\S]*?\.worker-head \{ min-height:0 \}/);
+  assert.match(html,/Full Automation harness；實際模式、工具與執行狀態以同來源收據為準/);
+  assert.doesNotMatch(html,/ChatGPT Web／Codex Zero Risk|Human 手動轉送|Zero Risk MCP 呼叫/);
 });
 
 test('W2 skipped job in a cancelled workflow stays non-acceptance evidence', () => {
@@ -1583,23 +1652,23 @@ test('W2 reviewed source requires zero failures and preserves skipped test count
   assert.equal(panel.validW2SourceTest('node --test tests/other.test.mjs;20_total;20_passed;0_failed;0_skipped',paths),false);
 });
 
-test('W3 Agent/request identifiers do not stand in for handoff, MCP execution, completion, or Codex receipt', () => {
+test('W3 task identifiers do not prove Full harness mode, Web tools, completion, or independent acceptance', () => {
   const agentId='01a16cdd-bbf7-71c0-af1e-0ba1e568790e';
   const snapshot={workers:[{worker_id:'W3',status:'UNKNOWN',task_id:agentId,
     task_comment_id:6368000001,attempt_id:'11111111-1111-4111-8111-111111111111'}]};
   const card=panel.dispatchCardData('W3',snapshot,[],{dispatches:{}},{status:'UNKNOWN'},baseTime);
   assert.equal(card.hasTask,true);
   assert.match(card.task,/候選留言 #6368000001（未驗證）/);
-  assert.match(card.w3Stages.formal,/UNKNOWN/);
-  assert.match(card.w3Stages.handoff,/UNKNOWN/);
-  assert.match(card.w3Stages.toolCalls,/UNKNOWN/);
+  assert.match(card.w3Stages.fullHarness,/UNKNOWN/);
+  assert.match(card.w3Stages.webModel,/UNKNOWN/);
+  assert.match(card.w3Stages.toolActivity,/UNKNOWN/);
   assert.match(card.w3Stages.completion,/UNKNOWN/);
-  assert.match(card.w3Stages.codexReceipt,/UNKNOWN/);
-  assert.match(card.summaryProgress,/同來源收據與各階段仍待核對/);
+  assert.match(card.w3Stages.independentAcceptance,/UNKNOWN/);
+  assert.match(card.summaryProgress,/Full harness 與工具活動仍 UNKNOWN/);
   assert.doesNotMatch(card.summaryProgress,/已完成|已傳送|工具執行成功/);
 });
 
-test('W3 self-reported tool activity and launcher traces do not prove Zero Risk execution or delivery', () => {
+test('legacy W3 activity and self-reported tool traces do not prove current Full harness execution or delivery', () => {
   const now=baseTime;
   const record={worker_id:'W3',status:'RUNNING_VERIFIED',task_id:'W3_PANEL_CANDIDATE',
     attempt_id:'11111111-1111-4111-8111-111111111111',task_source:'issue-407',
@@ -1611,11 +1680,14 @@ test('W3 self-reported tool activity and launcher traces do not prove Zero Risk 
     'generic classification alone would promote the source-only claim');
   const classified=panel.classifyW3(record,'FRESH',now);
   assert.equal(classified.status,'UNKNOWN');
+  assert.match(classified.reason,/Full harness/);
   const card=panel.workerCardData('W3',record,classified,{workers:[record]});
   for (const field of ['session','activity','progress','changes','delivery','source'])
     assert.match(card[field],/UNKNOWN/);
   assert.doesNotMatch(card.progress,/launcher_1|launcher_5/);
   assert.doesNotMatch(card.delivery,/Commit a{40}|交付階段 ACCEPTED/);
+  assert.doesNotMatch(card.blocker,/Human|Zero Risk/);
+  assert.doesNotMatch(card.next,/Human|Zero Risk/);
   assert.equal(panel.classifyW3(record,'STALE',now).status,'STALE');
 });
 
@@ -2948,6 +3020,9 @@ test('operator panel documentation binds live PR data to task evidence, not a fi
   assert.match(readme, /one-time W2 direct CLI lineage.*historical PR identities/i);
   assert.match(readme, /task source PRs.*fresh Issue #407 native Worker observation.*Issue #310 schema-6 dispatch/i);
   assert.match(readme, /runtime deployment PR.*observation provenance.*displayed separately from.*task source PR/i);
+  assert.match(readme, /Known probe and read-only task kinds.*PR\/CI as not applicable/);
+  assert.match(readme, /W3.*Full Automation.*current status stays UNKNOWN/);
+  assert.match(readme, /legacy Zero Risk record alone does not prove current execution/);
   assert.match(readme, /Issue #407 and #310.*every 5 minutes/);
   assert.match(readme, /pagination and separate per-worker source PR reads add requests/i);
   assert.match(readme, /W2.*native.*direct CLI.*separate/i);
