@@ -63,7 +63,7 @@
     .section p { color:var(--muted); font-size:13px }
     .worker-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px }
     .worker-card { min-width:0; min-height:390px; display:flex; flex-direction:column }
-    .worker-head { display:grid; grid-template-columns:minmax(0,1fr) minmax(122px,42%);
+    .worker-head { min-height:176px; display:grid; grid-template-columns:minmax(0,1fr) minmax(122px,42%);
       align-items:start; gap:10px; margin-bottom:10px }
     .worker-head > div:first-child { min-width:0 }
     .worker-title-line { display:flex; align-items:center; flex-wrap:wrap; gap:8px }
@@ -126,10 +126,11 @@
     .links { display:flex; flex-wrap:wrap; gap:10px 18px; margin-top:14px }
     code { font:12px/1.5 ui-monospace,Consolas,monospace; overflow-wrap:anywhere }
     .footnote { color:var(--muted); font-size:12px; margin-top:14px }
-    @media (max-width:1000px) {
+    @media (max-width:1200px) {
       main { padding:22px 18px 38px }
       .worker-grid { grid-template-columns:1fr }
       .worker-card { min-height:0 }
+      .worker-head { min-height:0 }
       .dispatch-grid { grid-template-columns:1fr }
     }
     @media (max-width:700px) {
@@ -249,10 +250,10 @@
     </article>
     <article class="panel worker-card">
       <div class="worker-head">
-        <div><div class="worker-title-line"><div><span class="worker-id">W3</span><h2 class="worker-name">ChatGPT Web／Codex</h2></div><span id="w3-task-badge" class="badge neutral">證據不足</span></div><span class="worker-harness">執行路徑、模型活動與結果須由同一任務收據分別核對</span><div class="worker-latest"><span id="w3-header-progress">最新任務進度未確認</span><time id="w3-last-event">最後任務事件：未確認</time></div></div>
+        <div><div class="worker-title-line"><div><span class="worker-id">W3</span><h2 class="worker-name">ChatGPT Web / Codex</h2></div><span id="w3-task-badge" class="badge neutral">未驗證</span></div><span class="worker-harness">Full Automation harness；實際模式、工具與執行狀態以同來源收據為準</span><div class="worker-latest"><span id="w3-header-progress">最新任務進度未確認</span><time id="w3-last-event">最後任務事件：未確認</time></div></div>
         <div class="worker-live"><span class="worker-live-label">即時施工</span><span id="w3-badge" class="badge neutral">狀態未確認</span></div>
       </div>
-      <p id="w3-empty" class="worker-empty" hidden>證據不足：尚無同來源 W3 派工／執行收據；分派、啟動、執行路徑、模型活動、完成與驗收均 UNKNOWN。</p>
+      <p id="w3-empty" class="worker-empty" hidden>目前沒有可核對的 W3 Full harness 任務與近期工具活動證據；狀態 UNKNOWN。</p>
       <div id="w3-worker-details">
       <div class="field"><strong>正式任務</strong><span id="w3-task">未確認</span></div>
       <div class="field"><strong>工作階段／執行者</strong><span id="w3-session">未確認</span></div>
@@ -328,7 +329,7 @@
       </details>
     </article>
     <article class="panel dispatch-card">
-      <div class="dispatch-head"><div><span class="worker-id">W3</span><h3>W3 執行與收據</h3></div><span id="w3-dispatch-state" class="badge neutral">證據不足</span></div>
+      <div class="dispatch-head"><div><span class="worker-id">W3</span><h3>ChatGPT Web / Codex Full Automation 派工證據</h3></div><span id="w3-dispatch-state" class="badge neutral">未驗證</span></div>
       <div class="dispatch-summary">
         <p class="dispatch-summary-line"><strong>任務摘要</strong><span id="w3-dispatch-summary-task">未確認</span></p>
         <p class="dispatch-summary-line"><strong>最新進度</strong><span id="w3-dispatch-summary-progress">未確認</span></p>
@@ -336,24 +337,24 @@
         <p class="dispatch-summary-line"><strong>阻擋／驗收</strong><span id="w3-dispatch-summary-blocker">未確認</span></p>
         <p class="dispatch-summary-line"><strong>下一負責人</strong><span id="w3-dispatch-summary-next">未確認</span></p>
       </div>
-      <details class="dispatch-technical"><summary>技術明細：任務識別、執行路徑、呼叫、回傳與 Codex 收據</summary>
+      <details class="dispatch-technical"><summary>技術明細：任務、Full harness、模型、工具活動、完成回傳與獨立驗收</summary>
         <dl class="facts">
           <dt>request_id／派工留言</dt><dd id="w3-dispatch-task">UNKNOWN</dd>
           <dt>attempt_id／最新收據</dt><dd id="w3-dispatch-attempt">UNKNOWN</dd>
           <dt>模型／變體／工具</dt><dd id="w3-dispatch-model">UNKNOWN</dd>
           <dt>來源 PR／精確 SHA</dt><dd id="w3-dispatch-source">UNKNOWN</dd>
           <dt>規格檔／SHA-256</dt><dd id="w3-dispatch-spec">UNKNOWN</dd>
-          <dt>同來源任務／啟動收據</dt><dd id="w3-dispatch-formal">UNKNOWN</dd>
-          <dt>Human handoff（若此路徑適用）</dt><dd id="w3-dispatch-handoff">UNKNOWN</dd>
-          <dt>Web／Native2／MCP 呼叫與回傳</dt><dd id="w3-dispatch-tool-calls">UNKNOWN</dd>
+          <dt>Full harness 模式／設定</dt><dd id="w3-dispatch-formal">UNKNOWN</dd>
+          <dt>Web 模型／Effort</dt><dd id="w3-dispatch-handoff">UNKNOWN</dd>
+          <dt>同任務工具活動</dt><dd id="w3-dispatch-tool-calls">UNKNOWN</dd>
           <dt>完整完成回傳</dt><dd id="w3-dispatch-completion">UNKNOWN</dd>
-          <dt>Codex 收件確認</dt><dd id="w3-dispatch-codex-receipt">UNKNOWN</dd>
+          <dt>主控獨立驗收</dt><dd id="w3-dispatch-codex-receipt">UNKNOWN</dd>
           <dt>目前證據進度</dt><dd id="w3-dispatch-progress">UNKNOWN</dd>
           <dt>差異／測試／交付</dt><dd id="w3-dispatch-delivery">UNKNOWN</dd>
           <dt>下一負責人</dt><dd id="w3-dispatch-next">UNKNOWN</dd>
           <dt>最後事件時間</dt><dd id="w3-dispatch-time">UNKNOWN</dd>
         </dl>
-        <div class="dispatch-links"><a id="w3-dispatch-job-link" target="_blank" rel="noopener noreferrer" hidden>W3 任務來源</a><a id="w3-dispatch-receipt-link" target="_blank" rel="noopener noreferrer" hidden>W3 收據</a></div>
+        <div class="dispatch-links"><a id="w3-dispatch-job-link" target="_blank" rel="noopener noreferrer" hidden>W3 Full harness 任務</a><a id="w3-dispatch-receipt-link" target="_blank" rel="noopener noreferrer" hidden>W3 工具執行收據</a></div>
       </details>
     </article>
   </section>
@@ -580,6 +581,29 @@
     return { number:task.source_pr, source_sha:task.source_sha.toLowerCase(),
       request_id:task.request_id, task_state:String(task.state || 'UNKNOWN') };
   }
+  const TASK_KINDS_WITHOUT_SOURCE_PR = new Set([
+    'ping','native_preflight','native_v2_qualify','opencode_plan',
+  ]);
+  const TASK_STATES_WITH_SOURCE = new Set([
+    'QUEUED_NOT_STARTED','STARTED_UNVERIFIED','WAITING_ELIGIBILITY',
+    'FINISHED_NOT_ACCEPTANCE','BLOCKED','SOURCE_UNKNOWN','STALE_SOURCE','AMBIGUOUS_DUPLICATE',
+  ]);
+  function candidatePrPinState(observation) {
+    if (observation?.status !== 'FRESH') return { status:'UNKNOWN', pin:null };
+    const task=observation.snapshot?.native_worker?.latest_task;
+    if (!object(task) || !/^[A-Z][A-Z0-9_-]{7,79}$/.test(task.request_id || '') ||
+        !safeSha(task.source_sha) ||
+        !TASK_STATES_WITH_SOURCE.has(String(task.state || '').toUpperCase()))
+      return { status:'UNKNOWN', pin:null };
+    if (TASK_KINDS_WITHOUT_SOURCE_PR.has(task.kind)) {
+      if (Object.prototype.hasOwnProperty.call(task,'source_pr'))
+        return { status:'UNKNOWN', pin:null, task_kind:task.kind };
+      return { status:'NOT_APPLICABLE', pin:null, task_kind:task.kind };
+    }
+    const pin=candidatePrPin(observation);
+    return pin ? { status:'PINNED', pin, task_kind:task.kind }
+      : { status:'UNKNOWN', pin:null, task_kind:task.kind };
+  }
   function candidatePullIdentityMatches(pull, pin) {
     return object(pull) && object(pin) && pull.number === pin.number &&
       pull.base?.ref === 'main' && pull.base?.repo?.id === 1352411536 &&
@@ -590,7 +614,10 @@
       pull.head.repo.full_name.toLowerCase() === REPO.toLowerCase() &&
       safeSha(pull.head?.sha) !== null;
   }
-  function candidatePullLifecycle(pull, pin) {
+  function candidatePullLifecycle(pull, pin, pinStatus = pin ? 'PINNED' : 'UNKNOWN') {
+    if (!object(pin) && pinStatus === 'NOT_APPLICABLE')
+      return { status:'TASK_PR_NOT_APPLICABLE', lifecycle:'NOT_APPLICABLE', identity_matches:false,
+        source_sha_matches:false, checks_allowed:false };
     if (!object(pin)) return { status:'TASK_PR_PIN_UNKNOWN', lifecycle:'UNKNOWN', identity_matches:false,
       source_sha_matches:false, checks_allowed:false };
     if (!object(pull)) return { status:'PR_METADATA_UNAVAILABLE', lifecycle:'UNKNOWN', identity_matches:false,
@@ -1515,7 +1542,7 @@
     // A #407 worker row cannot independently attest same-task assignment,
     // execution route, model activity, tool calls, completion, or acceptance.
     if (observed.status === 'STALE') return observed;
-    return {status:'UNKNOWN',reason:'W3 尚未核對同來源任務收據；分派、執行路徑、模型活動、呼叫、完成與驗收均 UNKNOWN。'};
+    return {status:'UNKNOWN',reason:'W3 同來源 Full harness 模式、Web 工具活動、完成回傳與獨立驗收收據均 UNKNOWN。'};
   }
   function classifyW1(oc, nativeWorker, freshness, now, formalTask = null) {
     if (freshness === 'STALE') return { status:'STALE', reason:'W1 的 Win11 快照已過期。' };
@@ -2384,7 +2411,7 @@
       await resourceStore.loadResource('issue',urls.issue,0,true);
       if (apiClient.takeRecoveryNotice?.()) recoveryProbeCompleted=true;
       if (recoveryProbeCompleted || apiClient.isPaused?.())
-        return {head:null,prPin:null,recoveryProbeCompleted,
+        return {head:null,prPin:null,prPinStatus:'UNKNOWN',recoveryProbeCompleted,
           rateState:apiClient.getRateState?.() || null};
     }
     await resourceStore.loadResource('issue',urls.issue,adaptivePollInterval('issue',apiClient),force);
@@ -2410,16 +2437,19 @@
           ? latestSchema6Job(resourceStore.resources.goal.latestComments)?.job || null : null);
     if (apiClient.takeRecoveryNotice?.()) recoveryProbeCompleted=true;
     const observation=findSnapshot(resourceStore.resources.issue.data || [],resourceStore.now());
-    const prPin=candidatePrPin(observation);
+    const prPinState=candidatePrPinState(observation);
+    const prPin=prPinState.pin;
     const prUrl=resourceStore.bindPullRequest(prPin);
     if (!recoveryProbeCompleted && !apiClient.isPaused?.() && prUrl)
       await resourceStore.loadResource('pr',prUrl,adaptivePollInterval('pr',apiClient),force);
     if (!recoveryProbeCompleted && !apiClient.isPaused?.())
       await resourceStore.loadResource('main',urls.main,adaptivePollInterval('main',apiClient),force);
     const pull=resourceStore.resources.pr.data;
-    const pullLifecycle=resourceStore.resources.pr.error ? { status:'PR_FETCH_FAILED', lifecycle:'UNKNOWN',
-      identity_matches:false, source_sha_matches:false, checks_allowed:false }
-      : candidatePullLifecycle(pull,prPin);
+    const pullLifecycle=prPinState.status === 'NOT_APPLICABLE'
+      ? candidatePullLifecycle(null,null,prPinState.status)
+      : resourceStore.resources.pr.error ? { status:'PR_FETCH_FAILED', lifecycle:'UNKNOWN',
+        identity_matches:false, source_sha_matches:false, checks_allowed:false }
+        : candidatePullLifecycle(pull,prPin,prPinState.status);
     const pullIdentityMatches=pullLifecycle.identity_matches;
     const head=pullLifecycle.checks_allowed ? pullLifecycle.head_sha : null;
     if (!recoveryProbeCompleted && !apiClient.isPaused?.() && head) {
@@ -2428,9 +2458,10 @@
       if (apiClient.takeRecoveryNotice?.()) recoveryProbeCompleted=true;
     } else {
       resourceStore.bindChecksHead(null);
-      const checksNotApplicable=['CLOSED_UNMERGED','MERGED','SOURCE_SHA_DRIFT'].includes(pullLifecycle.status);
-      resourceStore.resources.checks.error=resourceStore.resources.pr.error ? 'PR_FETCH_FAILED'
-        : checksNotApplicable ? null : pullLifecycle.status;
+      const checksNotApplicable=['CLOSED_UNMERGED','MERGED','SOURCE_SHA_DRIFT',
+        'TASK_PR_NOT_APPLICABLE'].includes(pullLifecycle.status);
+      resourceStore.resources.checks.error=checksNotApplicable ? null
+        : resourceStore.resources.pr.error ? 'PR_FETCH_FAILED' : pullLifecycle.status;
     }
     const snapshot=observation.snapshot;
     for (const id of ['W1','W2','W3']) {
@@ -2537,7 +2568,7 @@
     if (!recoveryProbeCompleted && !apiClient.isPaused?.() && resultWorkflowRunsUrl)
       await resourceStore.loadResource('w2ResultWorkflowRuns',resultWorkflowRunsUrl,
         adaptivePollInterval('checks',apiClient),force);
-    return { head, prPin, pullIdentityMatches, pullLifecycle, recoveryProbeCompleted,
+    return { head, prPin, prPinStatus:prPinState.status, pullIdentityMatches, pullLifecycle, recoveryProbeCompleted,
       rateState:apiClient.getRateState?.() || null };
   }
   function readTime(value) {
@@ -2627,12 +2658,12 @@
     const taskText = taskId
       ? String(taskId) + (taskKind ? '／' + String(taskKind) : '') +
         (id === 'W1' && taskState ? '；' + String(taskState) : '') +
-        (id === 'W3' ? '；#407 候選識別字，尚無同來源 W3 收據' : '')
-      : id === 'W3' ? '同來源 W3 任務識別與收據未核對'
+        (id === 'W3' ? '；任務候選識別字，Full harness 執行未核對' : '')
+      : id === 'W3' ? 'UNKNOWN：沒有可配對的 W3 Full harness 任務收據'
       : '沒有可核對的正式任務';
     const sessionText = id === 'W3'
       ? (record?.attempt_id ? '觀測 attempt 候選 ' + String(record.attempt_id) + '；' : '') +
-        '同來源 W3 attempt／執行者收據 UNKNOWN'
+        'Web 執行者與工具活動收據 UNKNOWN'
       : record?.attempt_id
       ? '執行批次 ' + String(record.attempt_id)
       : id === 'W1'
@@ -2640,21 +2671,20 @@
           '；活動 Session 未確認'
         : '沒有可核對的執行批次';
     const steps = id === 'W3'
-      ? 'UNKNOWN：#407 步驟或 launcher traces 未綁定同來源 W3 執行收據'
+      ? 'UNKNOWN：沒有同任務、近期 W3 Full harness 工具活動收據'
       : Array.isArray(record?.verified_steps)
       ? record.verified_steps.filter(x => typeof x === 'string').slice(0,5).join('、')
       : '沒有可驗證步驟清單';
-    const blocker = record?.blocker_code || (classification.status === 'BLOCKED'
-      ? classification.reason : id === 'W3'
-        ? '同來源 W3 任務收據缺少；分派、路徑、模型活動與結果未知。'
-        : '未回報受信任阻擋代碼。');
+    const blocker = id === 'W3' ? 'UNKNOWN：沒有當前 W3 Full harness 阻擋收據'
+      : record?.blocker_code || (classification.status === 'BLOCKED'
+        ? classification.reason : '未回報受信任阻擋代碼。');
     const matchedW1SourceAcceptance=id === 'W1' && sourceAcceptance?.status === 'ACCEPTED' &&
       sourceAcceptance.requestId === taskId && (!record ||
         sourceAcceptance.attemptId === record.attempt_id &&
         sourceAcceptance.sourceSha === String(record.task_source_sha || '').toLowerCase())
       ? sourceAcceptance : null;
     const modified = id === 'W3'
-      ? 'UNKNOWN：W3 差異、測試與驗收須綁定同來源完整執行回傳；#407 宣稱僅屬候選。'
+      ? 'UNKNOWN：沒有同一 W3 任務的檔案差異與工具回傳可供核對。'
       : matchedW1SourceAcceptance && !record
         ? 'Codex 已核對 schema-6 W1 成果來源並接受 PR #' +
           matchedW1SourceAcceptance.resultPr + '；目前沒有相符的 Win11 Worker 快照，' +
@@ -2672,7 +2702,7 @@
       prefix, classification,
       modelExecutionSwitch:modelExecutionSwitchLabel(id,record),
       task:taskText, session:sessionText,
-      activity:id === 'W3' ? 'W3 模型／工具活動時間 UNKNOWN；#407 候選時間 ' +
+      activity:id === 'W3' ? 'W3 Web 工具活動 UNKNOWN；觀測候選時間 ' +
         (activity ? readTime(activity) : '未確認')
         : activity ? readTime(activity) : '沒有可核對的近期活動時間',
       progress:steps,
@@ -2684,15 +2714,16 @@
           String(record?.external_effects || 'UNKNOWN') + '；live_acceptance=NOT_CLAIMED'
         : 'UNKNOWN：沒有與目前 W1 request／attempt／來源 SHA 配對的 Codex source acceptance',
       delivery:id === 'W3'
-        ? 'UNKNOWN：#407 的 Commit／PR／交付狀態是候選；尚無同 request 的 W3 完成回傳與 Codex 收件驗證。'
+        ? 'UNKNOWN：沒有同任務的 W3 完成回傳、結果 PR／CI 與獨立驗收證據。'
         : matchedW1SourceAcceptance
           ? deliveryParts.join('；') + '；Codex source delivery：PR #' + matchedW1SourceAcceptance.resultPr +
             ' SOURCE_ACCEPTED；tested head ' + matchedW1SourceAcceptance.resultHead +
             '；merge commit ' + matchedW1SourceAcceptance.mergeCommit +
             '；精確 HEAD CI 已由 #407 source readback 確認'
           : deliveryParts.join('；'),
-      next:record?.next_owner || (id === 'W3' ? '同來源 W3 收據與下一負責人未確認' : '未確認'),
-      source:id === 'W3' ? 'Issue #407 workers 候選欄位；同來源 W3 派工／執行收據 UNKNOWN' :
+      next:id === 'W3' ? 'UNKNOWN：沒有當前 W3 Full harness 下一負責人收據'
+        : record?.next_owner || '未確認',
+      source:id === 'W3' ? 'UNKNOWN：Issue #407 僅有候選欄位；Full harness 模式與工具活動未驗證' :
         record ? 'Issue #407 workers 記錄 · ' + classification.status :
         id === 'W1' ? 'Issue #407 opencode_v2／native_worker · ' + classification.status
           : 'Issue #407 未提供此角色的當前證據 · UNKNOWN',
@@ -3055,15 +3086,16 @@
     const resource=resources.dispatches?.[id] || (task?.jobComment ? {data:task.jobComment} : null);
     const fallbackState=classification?.status || 'UNKNOWN';
     const w3Stages={
-      formal:'UNKNOWN：尚無同來源 W3 任務／啟動收據；request_id／Agent ID 只是識別線索。',
-      handoff:'UNKNOWN：Human handoff 是否發生或適用，尚未由同來源路徑收據確認。',
-      toolCalls:'UNKNOWN：尚無同 request 的 Web／Native2／MCP 呼叫識別與回傳收據。',
-      completion:'UNKNOWN：尚無同 request 的完整終態／串流結束回傳。',
-      codexReceipt:'UNKNOWN：尚無 Codex 確認收到並核對完整回傳的收據。',
+      fullHarness:'UNKNOWN：沒有同來源的 Web Full harness 模式設定與驗證收據。',
+      webModel:'UNKNOWN：沒有與目前任務配對的 Web 模型／Effort 收據。',
+      toolActivity:'UNKNOWN：沒有同任務、近期 Web 工具活動證據。',
+      completion:'UNKNOWN：沒有同任務的完成回傳。',
+      independentAcceptance:'UNKNOWN：尚無主控端獨立驗收收據。',
     };
     const base={id, status:fallbackState, label:fallbackState, task:'UNKNOWN', attempt:'UNKNOWN',
       model:'UNKNOWN', source:'UNKNOWN', spec:'UNKNOWN', progress:'UNKNOWN', delivery:'UNKNOWN',
-      next:task?.next_owner || record?.next_owner || '未確認', eventAt:null,
+      next:id === 'W3' ? 'UNKNOWN：沒有當前 W3 Full harness 下一負責人收據'
+        : task?.next_owner || record?.next_owner || '未確認', eventAt:null,
       jobUrl:null, receiptUrl:null, prUrl:null, resultPrUrl:null, reconciliationUrl:null,
       requestId:null, expectedAttemptId:null, receiptAttemptId:null, receiptState:null,
       hasBoundReceipt:false,
@@ -3099,18 +3131,18 @@
         ? 'PR #' + task.source_pr : '來源 PR 未核對';
       return { ...base,hasTask:true,shortStatus:'證據不足',
         status:fallbackState === 'STALE' ? 'STALE' : 'UNKNOWN',
-        label:'證據不足／同來源 W3 收據缺少／' + (fallbackState === 'STALE' ? '快照過期' : 'UNKNOWN'),
+        label:'Full harness 證據待核對／' + (fallbackState === 'STALE' ? 'STALE' : 'UNKNOWN'),
         task:String(taskId) + (Number.isSafeInteger(commentId)
-          ? '；候選留言 #' + commentId + '（未驗證）' : '；正式任務未核對'),
-        attempt:task.attempt_id ? String(task.attempt_id) + '（#407 觀測欄位，非 MCP 收據）' :
-          'UNKNOWN：尚無已配對 W3 attempt／subagent 收據',
-        model:'UNKNOWN：尚無已配對 W3 執行路徑、模型與工具回傳',
-        source:sourcePr + '；來源 SHA ' + (sourceSha || 'UNKNOWN') + '（觀測值，未核對正式派工）',
-        progress:'#407 出現 request_id／Agent ID 候選；分派、路徑、模型活動、呼叫、完整回傳及 Codex 收據均 UNKNOWN。',
-        delivery:'W3 差異／測試／驗收無同來源回傳；不可視為完成。',
-        summaryTask:'W3 任務識別候選：' + String(taskId),
-        summaryProgress:'僅確認觀測欄位有識別字；同來源收據與各階段仍待核對。',
-        summaryBlocker:'證據不足：同來源 W3 收據未讀回；不能宣稱未派工、RUNNING 或已完成。',
+          ? '；#310 候選留言 #' + commentId + '（未驗證）' : '；正式派工留言未核對'),
+        attempt:task.attempt_id ? String(task.attempt_id) + '（觀測候選；非 Web 工具收據）' :
+          'UNKNOWN：尚無可配對的 W3 attempt 收據',
+        model:'UNKNOWN：尚無可配對的 Web 模型／Effort 證據',
+        source:sourcePr + '；來源 SHA ' + (sourceSha || 'UNKNOWN') + '（觀測候選，未驗證 Web 派工）',
+        progress:'僅有任務識別字候選；Full harness、Web 工具活動、完成回傳與獨立驗收均 UNKNOWN。',
+        delivery:'沒有同任務差異、測試與結果 PR／CI 收據；不可視為完成。',
+        summaryTask:'W3 Web 任務候選：' + String(taskId),
+        summaryProgress:'僅讀到候選識別字；Full harness 與工具活動仍 UNKNOWN。',
+        summaryBlocker:'目前缺少可配對的 Web 任務與執行收據；不能宣稱 W3 正在施工或已完成。',
       };
     }
     base.task=String(taskId) + (task?.kind ? '／' + String(task.kind) : '') +
@@ -3330,9 +3362,9 @@
     text(prefix + 'receipt-provenance',data?.receiptProvenance || 'UNKNOWN');
     if (id === 'W3') {
       for (const [stage,value] of Object.entries({
-        formal:data?.w3Stages?.formal,handoff:data?.w3Stages?.handoff,
-        'tool-calls':data?.w3Stages?.toolCalls,completion:data?.w3Stages?.completion,
-        'codex-receipt':data?.w3Stages?.codexReceipt,
+        formal:data?.w3Stages?.fullHarness,handoff:data?.w3Stages?.webModel,
+        'tool-calls':data?.w3Stages?.toolActivity,completion:data?.w3Stages?.completion,
+        'codex-receipt':data?.w3Stages?.independentAcceptance,
       })) text(prefix + stage,value || 'UNKNOWN');
     }
     text(prefix + 'delivery',data?.delivery);
@@ -3364,7 +3396,7 @@
         'Win11 快照 task.state=UNKNOWN · observed_at=時間未確認 · UNKNOWN');
     for (const [suffix,url,label] of [
       ['job-link',data?.jobUrl,'Issue #310 派工'],
-      ['receipt-link',data?.receiptUrl,id === 'W3' ? '工具回傳證據' : 'Issue #407 收據'],
+      ['receipt-link',data?.receiptUrl,id === 'W3' ? 'W3 工具執行收據' : 'Issue #407 收據'],
       ['pr-link',data?.prUrl,'來源 PR'],
       ['result-link',data?.resultPrUrl,'結果 PR'],
       ['reconciliation-link',data?.reconciliationUrl,'#407 差異核對'],
@@ -4036,7 +4068,8 @@
       ? issueResource.latestComments
       : Array.isArray(issueResource.data) ? issueResource.data : [];
     const observation = findSnapshot(comments, now);
-    const prPin = candidatePrPin(observation);
+    const prPinState = candidatePrPinState(observation);
+    const prPin = prPinState.pin;
     const issueReadFreshness = resourceFreshness(issueResource, now, 3 * ISSUE_POLL_MS);
     const osFreshness = freshnessOfSnapshot(observation, now, issueResource);
     const prUrl = prPin ? API + '/pulls/' + prPin.number : '';
@@ -4046,9 +4079,11 @@
     const checksFresh = resourceFreshness(resources.checks, now, CHECKS_POLL_MS);
     const prRead = prFresh === 'FRESH' ? resources.pr.data : null;
     const prLifecycle = prRead
-      ? candidatePullLifecycle(prRead,prPin)
-      : { status:resources.pr.error ? 'PR_FETCH_FAILED' : 'PR_METADATA_UNAVAILABLE',
-        lifecycle:'UNKNOWN', identity_matches:false, source_sha_matches:false, checks_allowed:false };
+      ? candidatePullLifecycle(prRead,prPin,prPinState.status)
+      : !prPin && prPinState.status === 'NOT_APPLICABLE'
+        ? candidatePullLifecycle(null,null,prPinState.status)
+        : { status:resources.pr.error ? 'PR_FETCH_FAILED' : 'PR_METADATA_UNAVAILABLE',
+          lifecycle:'UNKNOWN', identity_matches:false, source_sha_matches:false, checks_allowed:false };
     const pr = prLifecycle.identity_matches ? prRead : null;
     const main = mainFresh === 'FRESH' ? resources.main.data : null;
     const head = prLifecycle.identity_matches ? safeSha(pr?.head?.sha) : null;
@@ -4167,14 +4202,14 @@
     const blocked = osFreshness === 'FRESH'
       ? Object.values(records).filter(record => record.status === 'BLOCKED').length : null;
     text('metric-blocked', blocked === null ? '未確認' : String(blocked) + ' 個 Worker 明確受阻');
-    text('metric-human',osFreshness !== 'FRESH' ? 'UNKNOWN：Win11 與 W3 同來源收據未確認 Human 動作'
-      : dispatchData.W3.hasBoundReceipt
-        ? 'W3 Human handoff 狀態依同來源路徑收據判定'
-        : 'W3 同來源收據缺少；Human handoff 是否發生或適用均 UNKNOWN');
+    text('metric-human',osFreshness !== 'FRESH' ? 'UNKNOWN：Win11 等待人工作業狀態未確認'
+      : records.W3.status === 'AWAITING_HUMAN' ? 'W3 收據明確要求 Human 處理'
+        : '沒有明確的待 Human 動作證據');
     text('metric-main', main?.sha ? safeSha(main.sha) || 'SHA 格式錯誤'
       : mainFresh === 'STALE' ? '上次讀回已過期' : '讀回未知');
     text('metric-ci',currentChecks ? ciLabel(currentChecks)
-      : prLifecycle.status === 'CLOSED_UNMERGED' ? '歷史 PR 已關閉；無目前 PR checks'
+      : prLifecycle.status === 'TASK_PR_NOT_APPLICABLE' ? '最新任務不產生 PR；PR／CI 不適用'
+        : prLifecycle.status === 'CLOSED_UNMERGED' ? '歷史 PR 已關閉；無目前 PR checks'
         : prLifecycle.lifecycle === 'MERGED' ? 'PR 已合併；任務 checks／正式接受另核'
           : prLifecycle.status === 'SOURCE_SHA_DRIFT' ? '任務來源 SHA 漂移；不套用目前 PR checks'
             : checksFresh === 'STALE' ? 'CI 讀回已過期' : '精確 HEAD 檢查未知');
@@ -4292,7 +4327,9 @@
       w1SourceHarvestLabel(dispatchData.W1),
       dispatchData.W2.externalEffectClass === 'PARTIAL_OR_AMBIGUOUS'
         ? 'W2 回收證據待同一 Host 核對；不得重播' : 'W2 ' + dispatchData.W2.summaryBlocker,
-      'W3 證據不足：同來源收據缺少；分派／執行路徑／啟動／模型活動／呼叫／完成／驗收均 UNKNOWN',
+      dispatchData.W3.hasTask
+        ? 'W3 僅有候選識別字；Full harness、模型、工具活動、完成回傳與獨立驗收均 UNKNOWN'
+        : 'W3 Full harness 任務與活動收據未讀回；派工狀態 UNKNOWN',
     ].join('；'));
     text('codex-evidence','UNKNOWN：公開觀測未提供可歸屬主控 Codex 的即時程序、模型推論與工具活動。');
     text('codex-observed',snapshot
@@ -4305,9 +4342,9 @@
     const independentCodexSummary='這只描述正式 Worker 佇列，不代表 Codex GOAL 沒有 READY；Codex 仍可依 #310 授權續做獨立、互不衝突的 pre-Production R4 來源工程。';
     const laneFollowUp=dispatchData.W1.resultPr
       ? (dispatchData.W1.codexSourceAcceptance
-        ? 'W1 source acceptance 已核對；原始 Worker task_acceptance／外部效果仍保持 UNKNOWN；W2 未知效果不得重播；W3 待同來源收據與路徑核對。'
-        : '後續核對 W1 Codex source acceptance 與 W2 同 Host 回收證據；W2 未知效果不得重播；W3 待同來源收據與路徑核對。')
-      : '後續核對 W1 diff／CI；W2 保留未知效果、不重播；W3 分派、路徑及結果待同來源收據核對。';
+        ? 'W1 source acceptance 已核對；原始 Worker task_acceptance／外部效果仍保持 UNKNOWN；W2 未知效果不得重播；W3 Full harness 證據維持 UNKNOWN。'
+        : '後續核對 W1 Codex source acceptance 與 W2 同 Host 回收證據；W2 未知效果不得重播；W3 Full harness 證據維持 UNKNOWN。')
+      : '後續核對 W1 diff／CI；W2 保留未知效果、不重播；W3 任務與執行收據尚未由可信來源讀回。';
     text('codex-next',workerQueueSummary + independentCodexSummary + laneFollowUp);
     const registration = snapshot?.github?.runner_registration;
     text('runner-registration',osFreshness === 'FRESH' && registration?.status === 'FRESH' &&
@@ -4328,6 +4365,7 @@
     else if (currentChecks?.status === 'CHECKS_SUCCESS') { runnerStatus='DELIVERED'; runnerLabel='檢查成功；驗收另核'; runnerKind='good'; }
     else if (currentChecks?.status === 'COMPLETED_WITH_SKIPS') { runnerStatus='UNKNOWN'; runnerLabel='有略過項；不計 PASS'; }
     else if (currentChecks?.status === 'COMPLETED_WITH_NON_SUCCESS') { runnerStatus='UNKNOWN'; runnerLabel='有取消項；不計 PASS'; }
+    else if (prLifecycle.status === 'TASK_PR_NOT_APPLICABLE') runnerLabel='PR／CI 不適用';
     badge('runner-badge',runnerStatus,runnerLabel,runnerKind);
     text('runner-checks',currentChecks
       ? 'HEAD ' + safeSha(currentChecks.head_sha) + '；成功 ' + counts.success +
@@ -4335,14 +4373,18 @@
         '／pending ' + counts.pending +
         '／in_progress ' + counts.in_progress + '／略過或 neutral ' + counts.skipped + '／取消 ' + counts.cancelled +
         '／其他 ' + counts.other + '；' + ciLabel(currentChecks)
-      : '沒有對應目前 PR HEAD 的新鮮 check-run 讀回。');
+      : prLifecycle.status === 'TASK_PR_NOT_APPLICABLE'
+        ? '此任務類型不產生 PR；不適用 PR HEAD 與 checks。'
+        : '沒有對應目前 PR HEAD 的新鮮 check-run 讀回。');
     const legacy = currentChecks?.checks?.find(check => check.name === 'csg-trusted-verifier');
     text('runner-legacy',legacy
       ? legacy.status === 'queued' ? 'csg-trusted-verifier：queued，等待 Runner；是否 required 未知。'
         : 'csg-trusted-verifier：' + legacy.status + (legacy.conclusion ? '/' + legacy.conclusion : '') +
           '；是否 required 未知。'
       : '本次精確 HEAD 資料沒有此檢查或 CI 未讀回；required 規則 UNKNOWN。');
-    const lifecycleText = prLifecycle.status === 'SOURCE_SHA_DRIFT'
+    const lifecycleText = prLifecycle.status === 'TASK_PR_NOT_APPLICABLE'
+      ? '最新任務類型 ' + (prPinState.task_kind || 'UNKNOWN') + ' 不產生來源 PR；PR／CI 不適用。'
+      : prLifecycle.status === 'SOURCE_SHA_DRIFT'
       ? '來源 SHA 漂移：任務 pin ' + (prPin?.source_sha || 'UNKNOWN') + '；PR HEAD ' + (head || 'UNKNOWN') +
         '；PR lifecycle ' + prLifecycle.lifecycle + '；checks 不沿用。'
       : prLifecycle.lifecycle === 'CLOSED_UNMERGED'
@@ -4384,6 +4426,8 @@
       ? '任務來源 PR 已進入 main；Win11 Worker 部署仍需獨立來源驗收。'
       : prLifecycle.lifecycle === 'MERGED'
         ? 'PR 已合併，但 task source SHA 不符；不得將合併狀態套用至此任務。'
+      : prLifecycle.status === 'TASK_PR_NOT_APPLICABLE'
+        ? '目前任務不產生 PR；沒有 PR 可部署或套用 CI。'
       : prLifecycle.lifecycle === 'CLOSED_UNMERGED'
         ? '歷史 PR 已關閉且未合併；不屬於可部署來源。'
         : prLifecycle.status === 'SOURCE_SHA_DRIFT'
@@ -4392,7 +4436,8 @@
     const acceptedPr=prLifecycle.lifecycle === 'MERGED' && prLifecycle.source_sha_matches;
     badge('pr-badge',acceptedPr ? 'ACCEPTED'
       : ['OPEN_DRAFT','OPEN_REVIEWABLE'].includes(prLifecycle.lifecycle) ? 'PENDING' : 'UNKNOWN',
-      acceptedPr ? '來源已合併；部署另驗'
+      prLifecycle.status === 'TASK_PR_NOT_APPLICABLE' ? 'PR／CI 不適用'
+      : acceptedPr ? '來源已合併；部署另驗'
         : prLifecycle.lifecycle === 'CLOSED_UNMERGED' ? '已關閉未合併（歷史）'
           : prLifecycle.lifecycle === 'OPEN_DRAFT' ? 'Draft／未合併'
             : prLifecycle.lifecycle === 'OPEN_REVIEWABLE' ? '開啟／未合併' : '來源狀態未確認',
@@ -4402,11 +4447,15 @@
         (prLifecycle.source_sha_matches ? ' task source SHA 相符。'
           : ' task source SHA ' + (prPin?.source_sha || 'UNKNOWN') + ' 與 PR HEAD 不符。')
       : prPin ? '任務來源 PR #' + prPin.number + '；' + lifecycleText
-        : '沒有新鮮且唯一的正式任務 PR pin；PR／CI 顯示 UNKNOWN。');
+        : prLifecycle.status === 'TASK_PR_NOT_APPLICABLE'
+          ? '此任務類型不產生來源 PR；沒有 PR／CI 讀取。'
+          : '沒有新鮮且唯一的正式任務 PR pin；PR／CI 顯示 UNKNOWN。');
     text('checks-detail',currentChecks
       ? currentChecks.checks.map(check => check.name + '=' + check.status +
           (check.conclusion ? '/' + check.conclusion : '')).join('；')
-      : !prPin ? '沒有任務 PR pin；不讀取 CI。'
+      : prLifecycle.status === 'TASK_PR_NOT_APPLICABLE'
+        ? '任務類型不適用 PR／CI；沒有讀取 checks。'
+        : !prPin ? '沒有任務 PR pin；不讀取 CI。'
         : !prLifecycle.identity_matches ? 'PR 身分／metadata 未核對；不套用任何 checks。'
           : !prLifecycle.checks_allowed ? '此 PR lifecycle／source SHA 不允許套用目前 checks：' +
             prLifecycle.status + '。'
@@ -4433,10 +4482,30 @@
       checksLink.textContent=prPin ? 'PR #' + prPin.number + ' CI' : '任務來源 PR CI';
     }
     renderEvents(classifyRecentEvents(comments,snapshot,currentChecks,resources.dispatches,now));
+    alignWorkerCardHeaders();
+  }
+  function targetWorkerHeaderHeight(heights, desktop) {
+    if (!desktop || !Array.isArray(heights) || heights.length === 0 ||
+        heights.some(height => !Number.isFinite(height) || height < 0)) return null;
+    return Math.ceil(Math.max(176,...heights));
+  }
+  function alignWorkerCardHeaders() {
+    if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+    const heads=[...document.querySelectorAll('.worker-grid .worker-head')];
+    if (!heads.length) return;
+    heads.forEach(head => { head.style.minHeight='0px'; });
+    const desktop=typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(min-width:1201px)').matches : true;
+    if (!desktop) {
+      heads.forEach(head => { head.style.minHeight=''; });
+      return;
+    }
+    const target=targetWorkerHeaderHeight(heads.map(head => head.getBoundingClientRect().height),true);
+    if (target !== null) heads.forEach(head => { head.style.minHeight=target + 'px'; });
   }
   const testApi = {
     parseSnapshot, findSnapshot, latestTask, summarizeChecks, fieldFreshness, validJob,
-    candidatePrPin, candidatePullIdentityMatches, candidatePullLifecycle,
+    candidatePrPin, candidatePrPinState, candidatePullIdentityMatches, candidatePullLifecycle,
     classifyWorker, classifyW1, classifyW3, workerRecord, workerCardData,
     workerChangeLabel, normalizeFormalTask, classifyRecentEvents,
     validSchema6DispatchJob, validSchema6DispatchComment, dispatchTaskSource, schema6TaskSource,
@@ -4447,6 +4516,7 @@
     codexReviewedW2TrustedChecks,
     dispatchCardData, renderDispatchCard, w1SourceHarvestLabel, render,
     freshnessOfSnapshot, workerObservationLabel, createApiClient, createResourceStore, renderRateStatus,
+    targetWorkerHeaderHeight, alignWorkerCardHeaders,
     ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
     nativeTaskBadgeDetails, nativeTaskResultLabel,
     w2EvidenceData, renderW2Evidence, workerMetricSummary, modelExecutionSwitchLabel,
@@ -4457,6 +4527,8 @@
   };
   if (typeof window !== 'undefined') window.PTYSDOperatorPanel = testApi;
   if (typeof window !== 'undefined' && window.__PTYSD_TEST__) return;
+  if (typeof window.addEventListener === 'function')
+    window.addEventListener('resize',alignWorkerCardHeaders);
   let rateStorage=null, rateChannel=null;
   try { rateStorage=window.localStorage || null; } catch {}
   try {
@@ -4499,7 +4571,7 @@
       const mainUrl = API + '/commits/main';
       await runSyncCycle(resourceStore,apiClient,{issue:issueUrl,goal:goalUrl,main:mainUrl},{force:manual});
       const observation=findSnapshot(resources.issue.data || [],Date.now());
-      const prPin=candidatePrPin(observation);
+      const prPin=candidatePrPinState(observation).pin;
       const pull=resources.pr.data;
       const pullMatches=candidatePullIdentityMatches(pull,prPin);
       const head = pullMatches ? safeSha(pull.head?.sha) : null;

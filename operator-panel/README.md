@@ -6,7 +6,9 @@ Node, PowerShell, Windows Terminal, a local listener, or a database. It reads
 the single PTYSD_OPERATOR_OBSERVATION_V1 comment and native Issue #407 receipts.
 It selects current task source PRs from the fresh Issue #407 native Worker
 observation and validates them against the Issue #310 schema-6 dispatch and its
-pinned source SHA.
+pinned source SHA. Known probe and read-only task kinds that do not define a
+source PR show PR/CI as not applicable; unknown task kinds, missing fields, or
+stale observations remain UNKNOWN and do not trigger a PR or checks read.
 The runtime deployment PR and module hashes remain observation provenance and
 are displayed separately from the task source PR. The page also reads current
 main and check-runs attached to each exact task PR head from the public GitHub
@@ -18,8 +20,14 @@ historical/unknown status.
 The page checks the publisher account, exact project/repository/Issue identity,
 snapshot schema, source comment ID, time bounds, and expiry. Missing, duplicate, mismatched,
 expired, or unreadable observations show UNKNOWN or STALE. W1/W2/W3 have
-separate cards; a Worker only becomes RUNNING_VERIFIED when the observation
-binds a task and attempt to recent role-specific activity. Historical sessions,
+separate cards. W1 and W2 activity is bound to its task, attempt, and recent
+role-specific evidence. Desktop worker-card headers are measured and synchronized
+to the tallest current header; the spacer is released when cards stack on narrow
+screens. W3 is labeled “ChatGPT Web / Codex” with the Full Automation harness name kept in its subtitle,
+but its current status stays UNKNOWN unless a trusted same-source receipt binds
+the Web harness mode, model, task, attempt, and recent tool activity. A spawned
+agent, static configuration, or legacy Zero Risk record alone does not prove
+current execution or completion. Historical sessions,
 Tunnel status, receipts, process presence, task exit codes, and Runner service
 state do not by themselves prove coding or acceptance. CI queued, in-progress,
 completed, failed, cancelled, skipped, and neutral outcomes remain distinct;
