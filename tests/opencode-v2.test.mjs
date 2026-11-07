@@ -731,6 +731,48 @@ test('canonical profile discovery does not bypass OpenCode signature or minimum-
     'an unsigned 2.2.5 candidate is never executed and signed versions below 2.2.5 remain rejected');
   } finally {rmSync(tmp,{recursive:true,force:true});}
 });
+test('Windows V2 discovery searches the current-user Codex package cache without weakening signature or version gates', () => {
+  const tmp=mkdtempSync(join(tmpdir(),'oc2-codex-package-cache-'));
+  try {
+    const home=join(tmp,'user'), localAppData=join(tmp,'local');
+    const cacheExe=join(localAppData,'Packages','OpenAI.Codex_2p2nqsd0c76g0',
+      'LocalCache','Local','PTYSDOpenCodeCLI-v2.2.5','node_modules','@opencode','cli','bin','opencode.exe');
+    const unrelatedExe=join(localAppData,'Packages','OpenAI.Other_123',
+      'LocalCache','Local','PTYSDOpenCodeCLI-v9.9.9','node_modules','@opencode','cli','bin','opencode.exe');
+    mkdirSync(home); mkdirSync(localAppData);
+    mkdirSync(join(cacheExe,'..'),{recursive:true});
+    mkdirSync(join(unrelatedExe,'..'),{recursive:true});
+    writeFileSync(cacheExe,'Codex package-cache OpenCode CLI');
+    writeFileSync(unrelatedExe,'unrelated package CLI');
+    const env={PATH:'',USERPROFILE:home,LOCALAPPDATA:localAppData};
+    assert.deepEqual(discoverV2Executables(env,true),[cacheExe],
+      'only the current-user OpenAI.Codex package cache is added as a discovery root');
+
+    const calls=[];
+    const accepted=qualifyOpenCodeV2(env,true,(path,args)=>{
+      calls.push(['version',path,args]);
+      return 'opencode v2.2.5';
+    },path=>{
+      calls.push(['signature',path]);
+      return path===cacheExe;
+    });
+    assert.equal(accepted.ready,true);
+    assert.equal(accepted.bin,cacheExe);
+    assert.equal(accepted.version,'2.2.5');
+    assert.deepEqual(calls,[['signature',cacheExe],['version',cacheExe,['--version']]]);
+
+    const belowFloor=qualifyOpenCodeV2(env,true,()=> 'opencode v2.2.4',()=>true);
+    assert.equal(belowFloor.ready,false);
+    assert.equal(belowFloor.reason,'OPEN_CODE_V2_VERSION_POLICY_REJECTED');
+    assert.deepEqual(belowFloor.rejected_versions,['2.2.4']);
+
+    let unsignedExecuted=false;
+    const unsigned=qualifyOpenCodeV2(env,true,()=>{unsignedExecuted=true;return 'opencode v2.2.5';},()=>false);
+    assert.equal(unsigned.ready,false);
+    assert.equal(unsigned.reason,'OPEN_CODE_V2_NOT_FOUND');
+    assert.equal(unsignedExecuted,false,'an unsigned package-cache executable is never run');
+  } finally {rmSync(tmp,{recursive:true,force:true});}
+});
 test('Windows V2 profile LocalAppData fallback retains signature and minimum-version gates', () => {
   const tmp=mkdtempSync(join(tmpdir(),'oc2-profile-policy-'));
   try {

@@ -143,6 +143,30 @@ export function discoverV2Executables(env = process.env, win = platform() === 'w
     if (!localAppDataRoots.some(root => root.toLowerCase() === profileLocalAppData.toLowerCase()))
       localAppDataRoots.push(profileLocalAppData);
   }
+  // The Codex desktop MSIX keeps its per-user CLI cache below Packages rather
+  // than directly under LocalAppData. Search only this publisher/package
+  // family and keep every discovered binary behind the same Authenticode and
+  // stable-version gates as other OpenCode V2 candidates.
+  const packageCacheRoots = [];
+  const seenPackageRoots = new Set(localAppDataRoots.map(root => root.toLowerCase()));
+  for (const localAppData of localAppDataRoots) {
+    let packages = [];
+    try {
+      packages = readdirSync(join(localAppData, 'Packages'), { withFileTypes: true })
+        .filter(entry => entry.isDirectory() && /^OpenAI\.Codex_[A-Za-z0-9_-]+$/i.test(entry.name));
+    } catch { packages = []; }
+    for (const entry of packages) {
+      const cacheRoot = normalize(join(localAppData, 'Packages', entry.name, 'LocalCache', 'Local'));
+      const key = cacheRoot.toLowerCase();
+      if (seenPackageRoots.has(key)) continue;
+      try {
+        if (statSync(cacheRoot).isDirectory()) {
+          seenPackageRoots.add(key);
+          packageCacheRoots.push(cacheRoot);
+        }
+      } catch { /* An unavailable package cache is not a CLI candidate root. */ }
+    }
+  }
   // Explicit local configuration is trusted only when absolute; no GitHub job can set it.
   const named = win ? ['opencode2.exe', 'opencode.exe'] : ['opencode2', 'opencode'];
   const found = []; const seen = new Set();
@@ -150,7 +174,7 @@ export function discoverV2Executables(env = process.env, win = platform() === 'w
     const p = normalize(env.PTYSD_OPENCODE_V2_EXE);
     if (regularFile(p)) { seen.add(p.toLowerCase()); found.push(p); }
   }
-  for (const localAppData of localAppDataRoots) {
+  for (const localAppData of [...localAppDataRoots, ...packageCacheRoots]) {
     const bundled = normalize(join(localAppData, 'Programs', '@opencodedesktop',
       'resources', 'opencode-cli.exe'));
     const bundledKey = bundled.toLowerCase();
