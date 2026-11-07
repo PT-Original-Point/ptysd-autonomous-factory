@@ -653,6 +653,56 @@ test('Windows V2 discovery finds managed PTYSDOpenCodeCLI installs newest-first 
     'an unsigned newer install must never be executed; signed fallback remains available');
   } finally {rmSync(tmp,{recursive:true,force:true});}
 });
+test('Windows V2 discovery falls back to the current profile LocalAppData when LOCALAPPDATA is absent', () => {
+  const tmp=mkdtempSync(join(tmpdir(),'oc2-profile-localappdata-'));
+  try {
+    const home=join(tmp,'user');
+    const exe=join(home,'AppData','Local','PTYSDOpenCodeCLI-v2.2.5',
+      'node_modules','@opencode','cli','bin','opencode.exe');
+    mkdirSync(home);
+    mkdirSync(join(exe,'..'),{recursive:true});
+    writeFileSync(exe,'synthetic executable');
+    const env={PATH:'',USERPROFILE:home};
+    assert.deepEqual(discoverV2Executables(env,true),[exe]);
+
+    const result=qualifyOpenCodeV2(env,true,(path,args)=>{
+      assert.equal(path,exe);
+      assert.deepEqual(args,['--version']);
+      return 'opencode v2.2.5';
+    },path=>path===exe);
+    assert.equal(result.ready,true);
+    assert.equal(result.bin,exe);
+    assert.equal(result.version,'2.2.5');
+  } finally {rmSync(tmp,{recursive:true,force:true});}
+});
+test('Windows V2 profile LocalAppData fallback retains signature and minimum-version gates', () => {
+  const tmp=mkdtempSync(join(tmpdir(),'oc2-profile-policy-'));
+  try {
+    const home=join(tmp,'user');
+    const exeFor=version=>join(home,'AppData','Local',`PTYSDOpenCodeCLI-v${version}`,
+      'node_modules','@opencode','cli','bin','opencode.exe');
+    const newest=exeFor('2.2.5'), older=exeFor('2.2.4');
+    mkdirSync(home);
+    for(const exe of [newest,older]) mkdirSync(join(exe,'..'),{recursive:true});
+    for(const exe of [newest,older]) writeFileSync(exe,'synthetic executable');
+    const env={PATH:'',USERPROFILE:home};
+    assert.deepEqual(discoverV2Executables(env,true),[newest,older]);
+
+    const calls=[];
+    const result=qualifyOpenCodeV2(env,true,(path,args)=>{
+      calls.push(['version',path,args]);
+      return 'opencode v2.2.4';
+    },path=>{
+      calls.push(['signature',path]);
+      return path===older;
+    });
+    assert.equal(result.ready,false);
+    assert.equal(result.reason,'OPEN_CODE_V2_VERSION_POLICY_REJECTED');
+    assert.deepEqual(result.rejected_versions,['2.2.4']);
+    assert.deepEqual(calls,[['signature',newest],['signature',older],
+      ['version',older,['--version']]]);
+  } finally {rmSync(tmp,{recursive:true,force:true});}
+});
 test('Windows V2 qualification verifies the signed publisher before executing a discovered CLI', () => {
   const tmp=mkdtempSync(join(tmpdir(),'oc2-signature-'));
   try {

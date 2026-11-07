@@ -134,6 +134,13 @@ export function discoverV2Executables(env = process.env, win = platform() === 'w
   const dirs = String(env.PATH || env.Path || '').split(splitter).filter(Boolean);
   const userHome = env.USERPROFILE || env.HOME || homedir();
   if (userHome) dirs.unshift(join(userHome, '.opencode', 'bin'));
+  const configuredLocalAppData = typeof env.LOCALAPPDATA === 'string' ? env.LOCALAPPDATA : '';
+  const localAppData = win
+    ? isAbsolute(configuredLocalAppData)
+      ? normalize(configuredLocalAppData)
+      : configuredLocalAppData === '' && typeof env.USERPROFILE === 'string' && isAbsolute(env.USERPROFILE)
+        ? normalize(join(env.USERPROFILE, 'AppData', 'Local')) : null
+    : null;
   // Explicit local configuration is trusted only when absolute; no GitHub job can set it.
   const named = win ? ['opencode2.exe', 'opencode.exe'] : ['opencode2', 'opencode'];
   const found = []; const seen = new Set();
@@ -141,17 +148,16 @@ export function discoverV2Executables(env = process.env, win = platform() === 'w
     const p = normalize(env.PTYSD_OPENCODE_V2_EXE);
     if (regularFile(p)) { seen.add(p.toLowerCase()); found.push(p); }
   }
-  if (win && typeof env.LOCALAPPDATA === 'string' && isAbsolute(env.LOCALAPPDATA)) {
-    const bundled = normalize(join(env.LOCALAPPDATA, 'Programs', '@opencodedesktop',
+  if (win && localAppData) {
+    const bundled = normalize(join(localAppData, 'Programs', '@opencodedesktop',
       'resources', 'opencode-cli.exe'));
     const key = bundled.toLowerCase();
     if (!seen.has(key) && regularFile(bundled)) { seen.add(key); found.push(bundled); }
   }
-  if (win && typeof env.LOCALAPPDATA === 'string' && isAbsolute(env.LOCALAPPDATA)) {
+  if (win && localAppData) {
     // The managed PTYSD OpenCode install uses a versioned local directory and
     // the official @opencode/cli package layout. Discover only valid version
     // names; qualifyOpenCodeV2 still verifies Authenticode before running one.
-    const localAppData = normalize(env.LOCALAPPDATA);
     let installs = [];
     try {
       installs = readdirSync(localAppData, { withFileTypes: true })
