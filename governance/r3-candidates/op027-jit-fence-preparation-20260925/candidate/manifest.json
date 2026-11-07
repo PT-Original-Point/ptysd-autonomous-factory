@@ -1,0 +1,27 @@
+{
+  "schema": "vnext5.r3.local-candidate-manifest.v1",
+  "classification": "LOCAL_NONCANONICAL",
+  "file_count": 4,
+  "files": [
+    {
+      "path": "jit-fence-preparation-candidate.json",
+      "bytes": 6420,
+      "sha256": "c7246cbec320368f1483b0a40e258cdafbdda91c0101d17b1d634f69350bf841"
+    },
+    {
+      "path": "next-action-gate-recompute.json",
+      "bytes": 3746,
+      "sha256": "1eca75e371253739b97fe4624ab1725d49364c28c261a08d915599b0533468c0"
+    },
+    {
+      "path": "README.md",
+      "bytes": 1805,
+      "sha256": "525814e6aa7224d51e9844a01ff7d2af2514320e360a7fb2ba78128691e6ff64"
+    },
+    {
+      "path": "source-pins.json",
+      "bytes": 6312,
+      "sha256": "1a38f957d7401918fd635c9a7d1580386f1c6367ffdee4e3d9717b5a253aff65"
+    }
+  ]
+}
