@@ -12,6 +12,9 @@ on:
       - main
       - v45/factory-control
     types: [opened, synchronize, reopened]
+    paths-ignore:
+      - 'monitor/**'
+      - '.github/workflows/v53-r4-monitor-tests.yml'
 
 permissions:
   contents: read
