@@ -1,0 +1,121 @@
+{
+  "schema": "vnext5.1.trust-plane-closure-candidate.v1",
+  "project_id": "CHATGPT_GLOBAL_SKILL_GOVERNANCE",
+  "status": "NONCANONICAL_CANDIDATE_DATA_ONLY_DO_NOT_PROMOTE",
+  "observed_at_utc": "2026-09-29 00:25:30 UTC",
+  "exact_base": {
+    "ref": "main",
+    "sha": "1dcec5ea8124e4d1b69b53652c657df8b65eb3ef",
+    "tree": "b12e07578ea83ee1d69799345ca5cdefbaae6a1a"
+  },
+  "candidate_assets": [
+    {
+      "path": "proposed-factory-bounded.yml",
+      "derived_from_pr": 322,
+      "source_path": "governance/v50/trust-root-candidates/r4-08/factory-bounded.yml",
+      "source_blob_oid": "f10364c686eb59695b05c115d04f3aef9258fb0b",
+      "use": "candidate tests on GitHub-hosted ubuntu-24.04; immutable verifier only on restricted runner; passes trusted checkout root and immutable workflow SHA"
+    },
+    {
+      "path": "proposed-trusted-verifier.mjs",
+      "derived_from_pr": 322,
+      "source_path": "governance/v50/trust-root-candidates/r4-08/csg-trusted-pr-verifier.mjs",
+      "source_blob_oid": "b77394daa7cb9e692b15ce4856beba3ef6ecf2e4",
+      "candidate_changes": [
+        "load the fixed expected set from the clean immutable workflow_sha checkout",
+        "bind exact base/ref/direct-parent/head/tree/path-status/blob OIDs",
+        "default deny full workflow/action and authority namespaces"
+      ],
+      "use": "inert proposed verifier only; no trust-root qualification"
+    },
+    {
+      "path": "proposed-trusted-verifier-paths.test.mjs",
+      "derived_from_pr": 322,
+      "source_path": "governance/v50/trust-root-candidates/r4-08/csg-trusted-pr-verifier-paths.test.mjs",
+      "source_blob_oid": "7e22f2600afdce36e1a012aa233db21b8dbb34d7",
+      "candidate_changes": [
+        "correct verifier import path",
+        "cover current authority namespaces and exact expected-set enforcement"
+      ],
+      "use": "candidate-owned regression input only; not acceptance evidence"
+    }
+  ],
+  "trusted_expected_set": {
+    "path": "governance/csg/trust-root/trusted-transition-expected-set.json",
+    "source": "clean checkout pinned to github.workflow_sha",
+    "required_fields": [
+      "schema",
+      "repository_id",
+      "baseRef",
+      "baseOid",
+      "headOid",
+      "treeOid",
+      "changes"
+    ],
+    "required_change_fields": [
+      "path",
+      "status",
+      "blobOid"
+    ],
+    "candidate_supplied": false,
+    "bootstrap": "separately reviewed trusted-root transition before activation; no self-authenticating transition"
+  },
+  "required_active_delta": [
+    {
+      "path": ".github/workflows/factory-bounded.yml",
+      "action": "replace only through an independently qualified trust-root transition",
+      "rationale": "move candidate-controlled workflow_dispatch tests off privileged self-hosted runner"
+    },
+    {
+      "path": ".github/workflows/v45-bounded-self-hosted.yml",
+      "base_blob_oid": "96eaa3e3a95c6d2a7821ee298659b43da8656db5",
+      "action": "retire/delete only through an independently qualified trust-root transition",
+      "rationale": "current workflow runs event-ref scripts/tests on self-hosted runner"
+    },
+    {
+      "path": "governance/csg/trust-root/csg-trusted-pr-verifier.mjs",
+      "base_blob_oid": "e8112a6fd5d8f896dbda406e1c054d7bf6e41b81",
+      "action": "replace only through an independently qualified transition that first pins the expected set",
+      "rationale": "default deny protected paths and allow only one exact independently pinned target"
+    },
+    {
+      "path": "governance/csg/trust-root/trusted-transition-expected-set.json",
+      "action": "publish in a separately qualified trusted-root transition before activation",
+      "rationale": "break verifier self-reference and independently bind exact target head/tree/path/blob identities"
+    }
+  ],
+  "provider_admin_gate": {
+    "rulesets": "GET endpoint returned []",
+    "main_branch_protection": "HTTP 403 Resource not accessible by integration",
+    "runner_group_allowlist": "NOT_ESTABLISHED; connector rejected endpoint and local gh is absent",
+    "v45_control_branch_protection": "NOT_ESTABLISHED"
+  },
+  "acceptance_requirements": [
+    "No candidate-controlled code executes on any privileged self-hosted runner, including workflow_dispatch from a candidate-selected ref.",
+    "Runner-group policy limits privileged execution to the immutable trusted verifier workflow; same-source provider-admin readback is required.",
+    "Candidate functional tests run only on unprivileged GitHub-hosted runners.",
+    "Immutable verifier rejects every .github/workflows/** and .github/actions/** change by default.",
+    "Current pointer, checkpoint, project-directory, versioned Mission, and versioned Execution Policy paths fail closed by default.",
+    "A protected-path exception requires an expected set from a clean checkout at github.workflow_sha and exact base/ref/direct-parent/head/tree/path/status/blob binding.",
+    "No candidate-controlled expected set or test can qualify itself.",
+    "No active workflow, trust root, runner group, canonical ref, Host, Production, business, or paid state is changed by this package."
+  ],
+  "boundaries": {
+    "active_workflows_modified": false,
+    "trusted_verifier_modified": false,
+    "runner_group_or_service_mutated": false,
+    "canonical_refs_modified": false,
+    "production_business_paid_scope": false,
+    "host_mutation": false
+  },
+  "local_candidate_self_test": {
+    "command": "node --test proposed-trusted-verifier-paths.test.mjs",
+    "runtime": "Node.js v24.19.0",
+    "result": "PASS",
+    "passed": 11,
+    "failed": 0,
+    "verifier_sha256": "a7b33140ccc8706829165006b0223e02d400168859c2730bf8bc1ab927d48ecf",
+    "test_sha256": "d7a982d52e4c011a6992fb5e8f8e9e1a6cc1b9853a597d62193f8e57d6d7faf7",
+    "qualification": "CANDIDATE_OWNED_LOCAL_TESTS_ONLY_NOT_TRUSTED_ACCEPTANCE"
+  }
+}
