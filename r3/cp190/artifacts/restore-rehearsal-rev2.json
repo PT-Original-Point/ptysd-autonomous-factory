@@ -1,0 +1,16 @@
+{
+  "status": "RESTORE_REHEARSAL_PASS",
+  "candidate": "VNEXT5.0-R3-CP190-LEGACY-CHECKPOINT-SCHEMA-COMPATIBILITY-CANDIDATE-20260925",
+  "package_revision": 2,
+  "file_count_in_manifest": 28,
+  "source_file_count_including_manifest": 29,
+  "node_modules_count": 0,
+  "credential_pattern_matches": 0,
+  "manifest_sha256": "17961f593c9616eb32c04c5faff5ccbdbc4287337b79a26877efca2c46532ec4",
+  "archive_sha256": "d55cb62b262c5b6386433fc2937134696414ed69598fc0d86f62986691699660",
+  "archive_path": "VNEXT5.0-R3-CP190-LEGACY-CHECKPOINT-SCHEMA-COMPATIBILITY-CANDIDATE-20260925-FROZEN-REV2.zip",
+  "extracted_file_set_exact": true,
+  "extracted_file_digests_exact": true,
+  "restored_candidate_tests": "18 passed, 0 failed",
+  "canonical_status": "LOCAL_NONCANONICAL_CANDIDATE"
+}
