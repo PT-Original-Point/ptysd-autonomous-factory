@@ -1945,8 +1945,10 @@
         return data;
       } catch (error) {
         let normalized=error;
-        if (!error?.code) {
-          const code=error?.name === 'AbortError' ? 'GITHUB_TIMEOUT' : 'GITHUB_CORS_OR_NETWORK_UNKNOWN';
+        const isAbort=error?.name === 'AbortError';
+        const hasKnownGithubCode=typeof error?.code === 'string' && error.code.startsWith('GITHUB_');
+        if (isAbort || !hasKnownGithubCode) {
+          const code=isAbort ? 'GITHUB_TIMEOUT' : 'GITHUB_CORS_OR_NETWORK_UNKNOWN';
           normalized=Object.assign(new Error(code),{code});
           rate.lastError=code;
         }
@@ -3979,12 +3981,12 @@
   }
   function resourceFreshness(resource, now, maxAge = 15 * 60 * 1000) {
     if (!resource?.data || !resource.fetchedAt) return 'UNKNOWN';
-    return now - resource.fetchedAt > maxAge ? 'STALE' : 'FRESH';
+    return resource.error || now - resource.fetchedAt > maxAge ? 'STALE' : 'FRESH';
   }
   function sourceStatusLabel(resource, now, ttl) {
     if (!resource?.data || !resource.fetchedAt) return 'UNKNOWN';
+    if (resource.error) return '更新失敗 · STALE';
     if (now-resource.fetchedAt > ttl) return '過期 STALE';
-    if (resource.error) return '歷史';
     return '最新';
   }
   function countdownLabel(until, now) {
@@ -4517,7 +4519,7 @@
     dispatchCardData, renderDispatchCard, w1SourceHarvestLabel, render,
     freshnessOfSnapshot, workerObservationLabel, createApiClient, createResourceStore, renderRateStatus,
     targetWorkerHeaderHeight, alignWorkerCardHeaders,
-    ciLabel, adaptivePollInterval, runSyncCycle, sourceStatusLabel, countdownLabel,
+    ciLabel, adaptivePollInterval, runSyncCycle, resourceFreshness, sourceStatusLabel, countdownLabel,
     nativeTaskBadgeDetails, nativeTaskResultLabel,
     w2EvidenceData, renderW2Evidence, workerMetricSummary, modelExecutionSwitchLabel,
     w2ModelEligibility, w2ModelEligibilityLabel, findLastTerminalReceipt,
