@@ -2082,6 +2082,53 @@ test('a rejected fetch surfaces GITHUB_CORS_OR_NETWORK_UNKNOWN without faking da
   assert.equal(store.resources.main.retryAt, retryAt);
 });
 
+test('an AbortError with legacy code 20 is a timeout, keeps stale success, and recovers on the next poll', async () => {
+  let now = baseTime;
+  let calls = 0;
+  const client = panel.createApiClient(async () => {
+    calls++;
+    if (calls === 1) return response(200, { sha: head }, quotaHeaders(now, 100));
+    if (calls === 2) {
+      const error = new DOMException('aborted', 'AbortError');
+      assert.equal(error.code, 20, 'the browser-compatible AbortError carries its legacy numeric code');
+      throw error;
+    }
+    return response(200, { sha: 'b'.repeat(40) }, quotaHeaders(now, 99));
+  }, { now: () => now });
+  const store = panel.createResourceStore(client, () => now);
+
+  assert.deepEqual(await store.loadResource('main', urls.main, 0), { sha: head });
+  const successfulAt = client.getRateState().lastSuccessAt;
+  assert.equal(successfulAt, now);
+
+  assert.deepEqual(await store.loadResource('main', urls.main, 0), { sha: head },
+    'a failed refresh returns the prior success rather than replacing it');
+  assert.equal(store.resources.main.error, 'GITHUB_TIMEOUT');
+  assert.equal(store.resources.main.data.sha, head);
+  assert.equal(store.resources.main.fetchedAt, baseTime, 'failed refresh does not refresh fetchedAt');
+  assert.equal(panel.resourceFreshness(store.resources.main, now, 15 * 60 * 1000), 'STALE',
+    'a failed refresh marks retained success as stale even while its prior timestamp is recent');
+  assert.equal(panel.sourceStatusLabel(store.resources.main, now, 15 * 60 * 1000), '更新失敗 · STALE');
+  assert.equal(client.getRateState().lastSuccessAt, successfulAt, 'failed refresh does not update success time');
+  assert.equal(calls, 2);
+
+  now = store.resources.main.retryAt;
+  assert.ok(now > successfulAt && now <= successfulAt + 5 * 60 * 1000,
+    'the normal per-resource retry remains bounded');
+  assert.deepEqual(await store.loadResource('main', urls.main, 0), { sha: 'b'.repeat(40) });
+  assert.equal(store.resources.main.error, null);
+  assert.equal(store.resources.main.fetchedAt, now);
+  assert.equal(client.getRateState().lastSuccessAt, now);
+  assert.equal(calls, 3, 'network recovery is observed on the existing resource poll');
+});
+
+test('unexpected numeric or non-GitHub error codes are normalized to a named network category', async () => {
+  const client = panel.createApiClient(async () => {
+    throw Object.assign(new Error('unexpected platform error'), { code: 20 });
+  }, { now: () => baseTime });
+  await assert.rejects(client.requestJson(urls.issue), { code: 'GITHUB_CORS_OR_NETWORK_UNKNOWN' });
+});
+
 test('an HTTP 503 with remaining quota fails locally, lets unrelated reads proceed, and backs off per resource', async () => {
   let now = baseTime;
   const calls = [];
