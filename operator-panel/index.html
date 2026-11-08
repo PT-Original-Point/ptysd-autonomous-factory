@@ -66,7 +66,8 @@
     .worker-head { min-height:176px; display:grid; grid-template-columns:minmax(0,1fr) minmax(122px,42%);
       align-items:start; gap:10px; margin-bottom:10px }
     .worker-head > div:first-child { min-width:0 }
-    .worker-title-line { display:flex; align-items:center; flex-wrap:wrap; gap:8px }
+    .worker-title-line { display:flex; align-items:center; align-content:flex-start; flex-wrap:wrap;
+      gap:8px; min-height:60px }
     .worker-title-line > div { display:flex; align-items:baseline; flex-wrap:wrap; gap:7px }
     .worker-live { display:flex; flex-direction:column; align-items:flex-end; gap:4px; min-width:0 }
     .worker-live .badge { box-sizing:border-box; max-width:100%; min-width:0;
@@ -131,6 +132,7 @@
       .worker-grid { grid-template-columns:1fr }
       .worker-card { min-height:0 }
       .worker-head { min-height:0 }
+      .worker-title-line { min-height:0 }
       .dispatch-grid { grid-template-columns:1fr }
     }
     @media (max-width:700px) {
