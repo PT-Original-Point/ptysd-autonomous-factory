@@ -420,6 +420,23 @@ function hasIsolatedW2ScopedEditDiff(receipt, job) {
     receipt.cli_binary_integrity_evidence === 'MATCHED' &&
     receipt.forbidden_tool_execution_evidence === 'NOT_OBSERVED';
 }
+function isExplicitFreeUsageLimitNoToolReceipt(receiptValue) {
+  return receiptValue?.state === 'BLOCKED' && receiptValue.outcome === 'V2_EDIT_NO_DIFF' &&
+    receiptValue.exit_code === 47 && receiptValue.model_invoked === null &&
+    receiptValue.session_started === true &&
+    /^ses_[A-Za-z0-9_-]{8,100}$/.test(receiptValue.session_id || '') &&
+    receiptValue.external_effects === 'UNKNOWN' && receiptValue.task_acceptance === 'UNKNOWN' &&
+    receiptValue.coding_state === 'NO_DIFF' && receiptValue.source_diff_evidence === 'CAPTURED' &&
+    receiptValue.scope_valid === true && receiptValue.diff_bytes === 0 &&
+    receiptValue.diff_sha256 === digest(Buffer.alloc(0)) && receiptValue.changed_files_count === 0 &&
+    receiptValue.changed_files_sha256 === digest(Buffer.from('[]', 'utf8')) &&
+    receiptValue.provider_usage_evidence === 'UNKNOWN' &&
+    receiptValue.model_activity_evidence === 'UNKNOWN' &&
+    receiptValue.tool_execution_evidence === 'UNKNOWN' && receiptValue.tool_execution_count === 0 &&
+    receiptValue.file_change_tool_completed_count === 0 &&
+    receiptValue.file_change_tool_failed_count === 0 &&
+    receiptValue.file_change_tool_incomplete_count === 0;
+}
 function hasCompletedScopedEditDiff(receipt, job) {
   // FINISHED plus a complete request-bound diff releases the same-path lease;
   // task acceptance remains a separate review.
@@ -443,15 +460,17 @@ function unresolvedEditAttempt(job, entries, { allowIsolatedW2ScopedDiff = false
     attemptEntries.sort((a, b) => a.id - b.id);
     const lastEntry = attemptEntries.at(-1);
     const last = lastEntry?.receipt;
-    const noWriteLeaseResolved = verifiedNoWriteAttemptKeys.has(
-      `${job.request_id}\0${last?.attempt_id}`) &&
-      last?.state === 'BLOCKED' && last.outcome === 'V2_EDIT_NO_DIFF' &&
-      last.external_effects === 'UNKNOWN' && last.task_acceptance === 'UNKNOWN' &&
-      last.model_invoked === true && last.coding_state === 'NO_DIFF' &&
-      last.source_diff_evidence === 'CAPTURED' && last.scope_valid === true &&
-      last.diff_bytes === 0 && last.changed_files_count === 0 &&
-      last.file_change_tool_completed_count === 0 &&
-      last.file_change_tool_failed_count === 0 && last.file_change_tool_incomplete_count === 0;
+    const noWriteKeyVerified = verifiedNoWriteAttemptKeys.has(
+      `${job.request_id}\0${last?.attempt_id}`);
+    const confirmedReadOnlyNoWriteReceipt = last?.state === 'BLOCKED' &&
+      last.outcome === 'V2_EDIT_NO_DIFF' && last.external_effects === 'UNKNOWN' &&
+      last.task_acceptance === 'UNKNOWN' && last.model_invoked === true &&
+      last.coding_state === 'NO_DIFF' && last.source_diff_evidence === 'CAPTURED' &&
+      last.scope_valid === true && last.diff_bytes === 0 && last.changed_files_count === 0 &&
+      last.file_change_tool_completed_count === 0 && last.file_change_tool_failed_count === 0 &&
+      last.file_change_tool_incomplete_count === 0;
+    const noWriteLeaseResolved = noWriteKeyVerified &&
+      (confirmedReadOnlyNoWriteReceipt || isExplicitFreeUsageLimitNoToolReceipt(last));
     if (noWriteLeaseResolved) continue;
     const completedScopedDiff = hasCompletedScopedEditDiff(last, job);
     const isolatedW2ScopedDiff = allowIsolatedW2ScopedDiff &&
@@ -3766,17 +3785,28 @@ export function hasVerifiedReadOnlyNoDiffAttempt(job, officialReceipt, result, s
         !Object.hasOwn(officialReceipt, key) || terminal[key] !== officialReceipt[key])) return false;
     const emptySha = digest(Buffer.alloc(0));
     const emptyChangedFilesSha = digest(Buffer.from('[]', 'utf8'));
+    // A free-usage refusal can produce a complete, one-event error trace with
+    // zero tool calls while provider/model effects remain UNKNOWN. An exact
+    // empty trace plus unchanged registered and candidate roots proves only
+    // that this attempt did not write scoped files; it cannot prove no inference
+    // or task acceptance.
+    const confirmedReadOnlyToolRun = terminal.model_invoked === true &&
+      terminal.provider_usage_evidence === 'CONFIRMED' &&
+      terminal.model_activity_evidence === 'CONFIRMED' &&
+      terminal.tool_execution_evidence === 'OBSERVED' &&
+      Number.isSafeInteger(terminal.tool_execution_count) && terminal.tool_execution_count >= 1;
+    const explicitFreeLimitNoToolRun = isExplicitFreeUsageLimitNoToolReceipt(terminal) &&
+      local.opencode_run?.reason === 'OPEN_CODE_FREE_USAGE_LIMIT_REACHED';
     if (terminal.state !== 'BLOCKED' || terminal.outcome !== 'V2_EDIT_NO_DIFF' ||
-        terminal.exit_code !== 47 || terminal.model_invoked !== true ||
+        terminal.exit_code !== 47 ||
         terminal.session_started !== true || !/^ses_[A-Za-z0-9_-]{8,100}$/.test(terminal.session_id || '') ||
         terminal.external_effects !== 'UNKNOWN' || terminal.task_acceptance !== 'UNKNOWN' ||
         terminal.coding_state !== 'NO_DIFF' || terminal.source_diff_evidence !== 'CAPTURED' ||
         terminal.scope_valid !== true || terminal.diff_bytes !== 0 || terminal.diff_sha256 !== emptySha ||
         terminal.changed_files_count !== 0 || terminal.changed_files_sha256 !== emptyChangedFilesSha ||
         terminal.file_change_tool_completed_count !== 0 || terminal.file_change_tool_failed_count !== 0 ||
-        terminal.file_change_tool_incomplete_count !== 0 || terminal.tool_execution_evidence !== 'OBSERVED' ||
-        !Number.isSafeInteger(terminal.tool_execution_count) || terminal.tool_execution_count < 1 ||
-        terminal.provider_usage_evidence !== 'CONFIRMED' || terminal.model_activity_evidence !== 'CONFIRMED' ||
+        terminal.file_change_tool_incomplete_count !== 0 ||
+        !(confirmedReadOnlyToolRun || explicitFreeLimitNoToolRun) ||
         local.process_tree_state !== 'DEAD' ||
         local.provider_authorization !== 'EXPLICIT_LOCAL_UNAUTHENTICATED_FREE_MODEL_ALLOWLIST' ||
         local.opencode_run?.valid !== true || !Number.isSafeInteger(local.opencode_run.event_count) ||

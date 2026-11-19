@@ -24,8 +24,11 @@ function editJob(requestId, sourcePr, sha, editPaths = paths) {
 }
 
 function attemptEvidence(job, { tool = 'read', toolStatus = 'completed', changedRoot = false,
+  emptyToolTrace = false,
   processState = 'DEAD', externalEffects = 'UNKNOWN', taskAcceptance = 'UNKNOWN' } = {}) {
-  const events = [
+  const events = emptyToolTrace ? [
+    { type: 'error', sessionID: sessionId, error: { code: 'OPEN_CODE_FREE_USAGE_LIMIT_REACHED' } },
+  ] : [
     { type: 'step_start', sessionID: sessionId, part: { type: 'step-start', sessionID: sessionId } },
     { type: 'tool_use', sessionID: sessionId, part: { type: 'tool', tool,
       state: { status: toolStatus }, sessionID: sessionId } },
@@ -44,11 +47,14 @@ function attemptEvidence(job, { tool = 'read', toolStatus = 'completed', changed
     evidence_bytes: stdout.length + separator.length,
     diff_sha256: emptySha, diff_bytes: 0, changed_files: changedFiles,
     coding_state: 'NO_DIFF', scope_valid: true, cli_exit_code: 1,
-    model: job.model, variant: job.variant, model_invoked: true, session_started: true,
+    model: job.model, variant: job.variant, model_invoked: emptyToolTrace ? null : true,
+    session_started: true,
     session_id: sessionId, external_effects: externalEffects, task_acceptance: taskAcceptance,
-    source_diff_evidence: 'CAPTURED', provider_usage_evidence: 'CONFIRMED',
-    model_activity_evidence: 'CONFIRMED', tool_execution_evidence: 'OBSERVED',
-    tool_execution_count: 2, file_change_tool_evidence: 'UNKNOWN',
+    source_diff_evidence: 'CAPTURED',
+    provider_usage_evidence: emptyToolTrace ? 'UNKNOWN' : 'CONFIRMED',
+    model_activity_evidence: emptyToolTrace ? 'UNKNOWN' : 'CONFIRMED',
+    tool_execution_evidence: emptyToolTrace ? 'UNKNOWN' : 'OBSERVED',
+    tool_execution_count: emptyToolTrace ? 0 : 2, file_change_tool_evidence: 'UNKNOWN',
     file_change_tool_completed_count: 0, file_change_tool_failed_count: 0,
     file_change_tool_incomplete_count: 0,
     local_evidence: { stdout_sha256: hash(stdout), stderr_sha256: hash(stderr) },
@@ -65,7 +71,8 @@ function attemptEvidence(job, { tool = 'read', toolStatus = 'completed', changed
       stderr_sha256: hash(stderr), stderr_bytes: stderr.length,
       provider_authorization: 'EXPLICIT_LOCAL_UNAUTHENTICATED_FREE_MODEL_ALLOWLIST',
       process_tree_state: processState, termination_state: 'NOT_REQUESTED',
-      opencode_run: { valid: true, reason: 'OPEN_CODE_FREE_USAGE_LIMIT_REACHED',
+      opencode_run: { valid: true, reason: emptyToolTrace
+        ? 'OPEN_CODE_FREE_USAGE_LIMIT_REACHED' : 'OPEN_CODE_RUN_COMPLETED',
         event_count: events.length, stdout_bytes: stdout.length },
       executor_workspace_guard: {
         registered_root_identity_sha256: '1'.repeat(64),
@@ -122,6 +129,43 @@ test('verified read-only no-diff evidence releases only the overlapping file lea
   assert.equal(selectNext(changedComments, [dispatcher], workerLogin, host, sourceSha, [], sourceHeads,
     new Set([leaseKey])), null,
   'a caller-supplied key cannot release a different terminal receipt');
+});
+
+test('verified free-usage refusal with an empty tool trace releases only the local file lease', () => {
+  const owner = editJob('W1_FREE_LIMIT_EMPTY_TRACE_OWNER_20261120', 672, 'f'.repeat(40));
+  const queued = editJob('W1_FREE_LIMIT_EMPTY_TRACE_NEXT_20261120', 679, sourceSha);
+  const evidence = attemptEvidence(owner, { emptyToolTrace: true });
+  const parsed = parseReceipt(`${RECEIPT_MARKER}${JSON.stringify(evidence.terminal)}`);
+  assert.ok(parsed, 'fixture must preserve the exact unknown-effect terminal receipt');
+  assert.equal(hasVerifiedReadOnlyNoDiffAttempt(owner, parsed, evidence.result, evidence.stdout), true);
+  assert.equal(evidence.terminal.model_invoked, null);
+  assert.equal(evidence.terminal.provider_usage_evidence, 'UNKNOWN');
+  assert.equal(evidence.terminal.model_activity_evidence, 'UNKNOWN');
+  assert.equal(evidence.terminal.tool_execution_evidence, 'UNKNOWN');
+  assert.equal(evidence.terminal.tool_execution_count, 0);
+  assert.equal(evidence.terminal.external_effects, 'UNKNOWN');
+  assert.equal(evidence.terminal.task_acceptance, 'UNKNOWN');
+
+  const comments = [comment(1, `${JOB_MARKER}${JSON.stringify(owner)}`),
+    comment(2, `${JOB_MARKER}${JSON.stringify(queued)}`),
+    comment(3, `${RECEIPT_MARKER}${JSON.stringify(evidence.terminal)}`)];
+  const sourceHeads = new Map([[679, sourceSha]]);
+  assert.equal(selectNext(comments, [dispatcher], workerLogin, host, sourceSha, [], sourceHeads), null,
+    'unknown provider effects remain fenced without local result verification');
+  const leaseKey = `${owner.request_id}\0${attemptId}`;
+  assert.equal(selectNext(comments, [dispatcher], workerLogin, host, sourceSha, [], sourceHeads,
+    new Set([leaseKey]))?.job.request_id, queued.request_id,
+  'complete empty-tool and unchanged-root evidence releases only the path lease');
+
+  const wrongReason = { ...evidence.result, local_evidence: { ...evidence.result.local_evidence,
+    opencode_run: { ...evidence.result.local_evidence.opencode_run, reason: 'OTHER_REFUSAL' } } };
+  assert.equal(hasVerifiedReadOnlyNoDiffAttempt(owner, parsed, wrongReason, evidence.stdout), false,
+    'an unrelated refusal does not release the path lease');
+  const changedRoot = attemptEvidence(owner, { emptyToolTrace: true, changedRoot: true });
+  assert.equal(hasVerifiedReadOnlyNoDiffAttempt(owner,
+    parseReceipt(`${RECEIPT_MARKER}${JSON.stringify(changedRoot.terminal)}`),
+    changedRoot.result, changedRoot.stdout), false,
+  'the empty trace cannot release the lease if either guarded root changed');
 });
 
 test('no-write reconciliation fails closed on mutation tools, changed roots, live processes, or changed receipt identity', () => {
