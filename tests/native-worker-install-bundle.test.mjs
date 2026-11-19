@@ -11,6 +11,11 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const sourceDir = join(root, 'native-bridge');
 const installer = readFileSync(join(sourceDir, 'install.ps1'), 'utf8');
 const executorInstaller = readFileSync(join(sourceDir, 'install-codex-executor.ps1'), 'utf8');
+const artifactFunctionStart = executorInstaller.indexOf('function Assert-CodexExecutorCliRefreshArtifacts');
+const artifactFunctionEnd = executorInstaller.indexOf('\nfunction Test-CodexExecutorConfigPinOnlyDifference', artifactFunctionStart);
+assert.notEqual(artifactFunctionStart, -1, 'CLI refresh artifact verifier is present');
+assert.notEqual(artifactFunctionEnd, -1, 'CLI refresh artifact verifier is independently testable');
+const artifactFunction = executorInstaller.slice(artifactFunctionStart, artifactFunctionEnd);
 const pinDriftFunctionStart = executorInstaller.indexOf('function Test-CodexExecutorConfigPinOnlyDifference');
 const pinDriftFunctionEnd = executorInstaller.indexOf('\nfunction Find-CodexExecutorConfigPinDriftBaseline', pinDriftFunctionStart);
 assert.notEqual(pinDriftFunctionStart, -1, 'CLI config drift comparator is present');
@@ -19,6 +24,47 @@ const pinDriftFunction = executorInstaller.slice(pinDriftFunctionStart, pinDrift
 const installIndex = installer.indexOf("if ($Mode -eq 'Install')");
 assert.notEqual(installIndex, -1, 'installer has an explicit install mode');
 const installBlock = installer.slice(installIndex);
+
+test('runtime refresh tolerates the inert pre-pin backup but validates it when reconciling pin drift', { skip: process.platform !== 'win32' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'ptysd-codex-runtime-backup-'));
+  try {
+    const rootB64 = Buffer.from(root, 'utf8').toString('base64');
+    const script = [
+      `function Get-CodexExecutorInstallTree([string]$Path) {`,
+      `  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return [pscustomobject]@{ Exists=$false; Directories=@(); Files=@() } }`,
+      `  $entries = @(Get-ChildItem -LiteralPath $Path -Force)`,
+      `  return [pscustomobject]@{ Exists=$true; Directories=@($entries | Where-Object { $_.PSIsContainer } | ForEach-Object Name); Files=@($entries | Where-Object { -not $_.PSIsContainer } | ForEach-Object Name) }`,
+      `}`,
+      `function Get-FileHash([string]$LiteralPath,[string]$Algorithm) { $sha=[Security.Cryptography.SHA256]::Create(); $hash=[BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($LiteralPath))).Replace('-',''); [pscustomobject]@{Hash=$hash} }`,
+      `function Assert-CodexExecutorCliRefreshSettledClaims([string]$SpoolPath) {}`,
+      `function Assert-CodexExecutorInstallPathChain([string]$Path) { if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'TEST_PATH_MISSING' } }`,
+      artifactFunction,
+      `$root = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${rootB64}'))`,
+      `$spool = Join-Path $root 'spool'; $runtime = Join-Path $root 'runtime'`,
+      `$null = New-Item -ItemType Directory -Path $spool,$runtime`,
+      `$names = @('requests','bundles','claims','results','evidence','workspaces','locks')`,
+      `foreach ($name in $names) { $null = New-Item -ItemType Directory -Path (Join-Path $spool $name) }`,
+      `$module = Join-Path $runtime 'codex-executor.mjs'; [IO.File]::WriteAllText($module,'runtime')`,
+      `$backup = Join-Path $runtime 'executor-config.json.pre-cli-path-20261107-1.bak'; [IO.File]::WriteAllText($backup,'historical config bytes')`,
+      `$hashes = [ordered]@{ 'codex-executor.mjs'=(Get-FileHash $module -Algorithm SHA256).Hash.ToLowerInvariant() }`,
+      `$runtimeTree=Get-CodexExecutorInstallTree $runtime; if ($runtimeTree.Files.Count -ne 2 -or $runtimeTree.Directories.Count -ne 0 -or $hashes.Count -ne 1) { throw 'TEST_FIXTURE_LAYOUT_INVALID' }`,
+      `Assert-CodexExecutorCliRefreshArtifacts -SpoolPath $spool -RuntimePath $runtime -SpoolDirectoryNames $names -ExpectedRuntimeHashes $hashes`,
+      `'HISTORICAL_BACKUP_IGNORED_WHEN_PIN_IS_CURRENT'`,
+      `$wrongRejected = $false; try { Assert-CodexExecutorCliRefreshArtifacts -SpoolPath $spool -RuntimePath $runtime -SpoolDirectoryNames $names -ExpectedRuntimeHashes $hashes -KnownConfigBackupHash ('f' * 64) } catch { $wrongRejected = $_.Exception.Message -eq 'CODEX_CLI_REFRESH_CONFIG_BACKUP_HASH_MISMATCH' }`,
+      `if (-not $wrongRejected) { throw 'PIN_DRIFT_DID_NOT_REJECT_WRONG_BACKUP_HASH' }`,
+      `Assert-CodexExecutorCliRefreshArtifacts -SpoolPath $spool -RuntimePath $runtime -SpoolDirectoryNames $names -ExpectedRuntimeHashes $hashes -KnownConfigBackupHash (Get-FileHash $backup -Algorithm SHA256).Hash.ToLowerInvariant()`,
+      `'MANIFEST_PINNED_BACKUP_ACCEPTED_FOR_PIN_DRIFT'`,
+    ].join('\n');
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive',
+      '-EncodedCommand', encoded], { encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, 0, result.stderr || result.error?.message || 'PowerShell helper failed');
+    assert.match(result.stdout, /HISTORICAL_BACKUP_IGNORED_WHEN_PIN_IS_CURRENT/);
+    assert.match(result.stdout, /MANIFEST_PINNED_BACKUP_ACCEPTED_FOR_PIN_DRIFT/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('Codex CLI pin refresh reconciles only a proven stale pin', { skip: process.platform !== 'win32' }, () => {
   const baseline = {

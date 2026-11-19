@@ -351,14 +351,16 @@ function Assert-CodexExecutorCliRefreshArtifacts([string]$SpoolPath, [string]$Ru
         }
     }
     if ($knownConfigBackups.Count -eq 1) {
-        if ($KnownConfigBackupHash -notmatch '^[0-9a-fA-F]{64}$') {
-            throw 'CODEX_CLI_REFRESH_CONFIG_BACKUP_HASH_UNAVAILABLE'
-        }
         $backupPath = Join-Path $RuntimePath $knownConfigBackups[0]
         Assert-CodexExecutorInstallPathChain $backupPath
-        if ((Get-FileHash -LiteralPath $backupPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
-            $KnownConfigBackupHash.ToLowerInvariant()) {
-            throw 'CODEX_CLI_REFRESH_CONFIG_BACKUP_HASH_MISMATCH'
+        if (-not [string]::IsNullOrWhiteSpace($KnownConfigBackupHash)) {
+            if ($KnownConfigBackupHash -notmatch '^[0-9a-fA-F]{64}$') {
+                throw 'CODEX_CLI_REFRESH_CONFIG_BACKUP_HASH_UNAVAILABLE'
+            }
+            if ((Get-FileHash -LiteralPath $backupPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+                $KnownConfigBackupHash.ToLowerInvariant()) {
+                throw 'CODEX_CLI_REFRESH_CONFIG_BACKUP_HASH_MISMATCH'
+            }
         }
     }
 }
@@ -1158,9 +1160,10 @@ function Invoke-CodexExecutorCliPinRefresh([string]$NewCodexExecutable, [switch]
         # normal refresh transaction below updates config and manifest together.
         $runtimeHashes['executor-config.json'] = $currentConfigHash
     }
+    $knownConfigBackupHash = if ($null -ne $pinDriftBaseline) { $manifestConfigHash } else { '' }
     Assert-CodexExecutorCliRefreshArtifacts -SpoolPath $spoolDir -RuntimePath $runtimeDir `
         -SpoolDirectoryNames @('requests','bundles','claims','results','evidence','workspaces','locks') `
-        -ExpectedRuntimeHashes $runtimeHashes -KnownConfigBackupHash $manifestConfigHash
+        -ExpectedRuntimeHashes $runtimeHashes -KnownConfigBackupHash $knownConfigBackupHash
     if ($RefreshRuntimeModules) {
         Invoke-CodexExecutorRuntimeModuleRefresh -Task $task -RuntimeHashes $runtimeHashes -PreflightManifestHash $preflightManifestHash -WorkerConfigHash $workerConfigHash
         return
