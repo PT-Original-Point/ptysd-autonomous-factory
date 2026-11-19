@@ -353,6 +353,7 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
   readCommentFailure = null, readCommentsFailure = null, patchCommentFailure = null,
   seededObservation = true, includeDefaultJob = true,
   collectWindowsFailure = null, windowsObservation = null, goalComments = [], taskComments = [], candidatePulls = {},
+  candidateComparisons = {},
   issueCommentsCount = null, configOverrides = {}, contentFiles = {}, workerOverrides = {} } = {}) {
   const root = mkdtempSync(join(homedir(), '.ptysd-worker-observation-'));
   const workspace = join(root, 'workspace');
@@ -398,6 +399,13 @@ function makeObservationWorkerFixture({ ambiguousReadback = false, priorObservat
       const pull = candidatePulls[Number(pullMatch[1])];
       if (!pull) throw new Error(`MOCK_PULL_MISSING:${pullMatch[1]}`);
       return structuredClone(pull);
+    }
+    const comparisonMatch = uri.match(new RegExp(`^repos/${REPO}/compare/([a-f0-9]{40})\\.\\.\\.([a-f0-9]{40})$`, 'i'));
+    if (comparisonMatch) {
+      const key = `${comparisonMatch[1].toLowerCase()}...${comparisonMatch[2].toLowerCase()}`;
+      const comparison = candidateComparisons[key];
+      if (!comparison) throw new Error(`MOCK_COMPARE_MISSING:${key}`);
+      return structuredClone(comparison);
     }
     const match = uri.match(/\/issues\/comments\/(\d+)$/);
     if (match) return store.comments.find(c => c.id === Number(match[1])) ||
@@ -1289,6 +1297,159 @@ test('candidate edit jobs remain source-pinned after an exact official PR merge'
   assert.equal(selectNext(comments, ['t14210184'], 'worker', host,
     'f'.repeat(40), [], changedHead), null,
   'merge acceptance does not weaken exact PR-head SHA binding');
+});
+
+test('merged PR source may advance to a SHA proven on current main, and rejects a side history', async () => {
+  const host = hostname().toUpperCase();
+  const prHeadSha = 'a'.repeat(40), mergeSha = 'b'.repeat(40);
+  const sourceSha = 'c'.repeat(40), liveMainSha = 'd'.repeat(40);
+  const candidate = withHumanGoal({ schema: 6, project_id: PROJECT, host,
+    request_id: 'PTYSD_MERGED_EDIT_MAIN_DESCENDANT_20261119', kind: 'opencode_edit',
+    source_sha: sourceSha, spec_path: 'native-bridge/tasks/w1-worker-poll-freshness-20261101.md',
+    spec_sha256: hash, model: 'opencode/deepseek-v4.1-flash-free', variant: null,
+    edit_paths: ['operator-panel/index.html', 'tests/operator-panel-api.test.mjs'], source_pr: 676 });
+  const comment = { ...com(10, encoded(candidate), 't14210184'),
+    issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+  const repo = { id: 1352411536, full_name: REPO };
+  const mergedPull = { number: 676, state: 'closed', merged: true,
+    merged_at: '2026-11-10T08:00:00Z', merge_commit_sha: mergeSha,
+    base: { ref: 'main', repo }, head: { sha: prHeadSha, repo } };
+  const goal = humanGoalComment();
+  const comparison = (baseSha, status, aheadBy, behindBy) => ({ status,
+    ahead_by: aheadBy, behind_by: behindBy, base_commit: { sha: baseSha } });
+  const candidateComparisons = {
+    [`${mergeSha}...${sourceSha}`]: comparison(mergeSha, 'ahead', 2, 0),
+    [`${sourceSha}...${liveMainSha}`]: comparison(sourceSha, 'ahead', 1, 0),
+  };
+  const logs = [];
+  const read = path => path.endsWith('/6188322050') ? goal :
+    path === `repos/${REPO}/pulls/676` ? mergedPull :
+      candidateComparisons[path.split('/compare/')[1]];
+  const mergedSources = await readPinnedCandidateSources([comment], ['t14210184'], 'worker', host,
+    read, message => logs.push(message), [], () => [goal], liveMainSha);
+  assert.equal(mergedSources.get(676), sourceSha,
+    'GitHub ancestry evidence keeps the exact queued source available after the official PR merge');
+  assert.equal(selectNext([comment], ['t14210184'], 'worker', host,
+    liveMainSha, [], mergedSources)?.job.request_id, candidate.request_id);
+
+  const sideHistoryComparisons = {
+    ...candidateComparisons,
+    [`${sourceSha}...${liveMainSha}`]: comparison(sourceSha, 'diverged', 1, 1),
+  };
+  const sideHistoryLogs = [];
+  const sideHistorySources = await readPinnedCandidateSources([comment], ['t14210184'], 'worker', host,
+    path => path.endsWith('/6188322050') ? goal :
+      path === `repos/${REPO}/pulls/676` ? mergedPull :
+        sideHistoryComparisons[path.split('/compare/')[1]],
+    message => sideHistoryLogs.push(message), [], () => [goal], liveMainSha);
+  assert.equal(sideHistorySources.size, 0,
+    'a source SHA that is not an ancestor of current main fails closed');
+  assert.ok(sideHistoryLogs.some(message => message.includes(
+    'REASON_MERGED_SOURCE_NOT_ON_LIVE_MAIN_')));
+
+  const unknownLogs = [];
+  const unknownSources = await readPinnedCandidateSources([comment], ['t14210184'], 'worker', host,
+    path => {
+      if (path.endsWith('/6188322050')) return goal;
+      if (path === `repos/${REPO}/pulls/676`) return mergedPull;
+      throw new Error('COMPARE_READBACK_UNAVAILABLE');
+    }, message => unknownLogs.push(message), [], () => [goal], liveMainSha);
+  assert.equal(unknownSources.size, 0,
+    'an unavailable ancestry response cannot authorize a merged successor SHA');
+  assert.ok(unknownLogs.some(message => message.includes(
+    'REASON_MERGED_SOURCE_ANCESTRY_UNKNOWN_')));
+});
+
+test('W1 uses the existing executor when its merged PR source is a verified current-main descendant', async () => {
+  const root = mkdtempSync(join(homedir(), '.ptysd-w1-merged-main-source-'));
+  try {
+    const workspace = join(root, 'workspace'), stateDir = join(root, 'state');
+    mkdirSync(join(workspace, 'operator-panel'), { recursive: true });
+    mkdirSync(join(workspace, 'tests'), { recursive: true });
+    mkdirSync(stateDir);
+    const host = hostname().toUpperCase();
+    const prHeadSha = 'a'.repeat(40), mergeSha = 'b'.repeat(40);
+    const sourceSha = 'c'.repeat(40), liveMainSha = 'd'.repeat(40);
+    const specPath = 'native-bridge/tasks/w1-worker-poll-freshness-20261101.md';
+    const spec = readTextFixture('../native-bridge/tasks/w1-worker-poll-freshness-20261101.md');
+    const model = 'opencode/deepseek-v4.1-flash-free';
+    const job = withHumanGoal({ schema: 6, project_id: PROJECT, host,
+      request_id: 'W1_MERGED_PR_MAIN_DESCENDANT_DISPATCH_20261119', kind: 'opencode_edit',
+      source_sha: sourceSha, spec_path: specPath, spec_sha256: h(spec), model, variant: null,
+      edit_paths: ['operator-panel/index.html', 'tests/operator-panel-api.test.mjs'], source_pr: 676 });
+    const jobComment = { ...com(6733342821, encoded(job), 't14210184'),
+      issue_url: `https://api.github.com/repos/${REPO}/issues/310` };
+    const goal = humanGoalComment();
+    const repo = { id: 1352411536, full_name: REPO };
+    const pull = { number: 676, state: 'closed', merged: true,
+      merged_at: '2026-11-10T08:00:00Z', merge_commit_sha: mergeSha,
+      base: { ref: 'main', repo }, head: { sha: prHeadSha, repo } };
+    const compare = (baseSha, status, aheadBy, behindBy) => ({ status,
+      ahead_by: aheadBy, behind_by: behindBy, base_commit: { sha: baseSha } });
+    const comparisons = new Map([
+      [`${mergeSha}...${sourceSha}`, compare(mergeSha, 'ahead', 1, 0)],
+      [`${sourceSha}...${liveMainSha}`, compare(sourceSha, 'identical', 0, 0)],
+    ]);
+    const executor = { task_name: '\\PTYSD\\OpenCodeExecutor',
+      user_sid: 'S-1-5-21-100-200-300-1001', publisher_sid: 'S-1-5-21-100-200-300-1002',
+      wscript_path: 'C:\\Windows\\System32\\wscript.exe',
+      launcher_path: 'C:\\PTYSD\\HiddenCodexExecutor.vbs', node_bin: 'C:\\Node\\node.exe',
+      script_path: 'C:\\PTYSD\\executor.mjs', config_path: 'C:\\PTYSD\\executor.json',
+      manifest_dir: join(root, 'manifests'), results_dir: join(root, 'results'),
+      working_directory: root, source_bundle_per_attempt: true };
+    const config = { repo: REPO, project_id: PROJECT, host, issue: 407, workspace, state_dir: stateDir,
+      dispatchers: ['t14210184'], executors: { opencode: executor,
+        antigravity: executorDescriptorForLane('Antigravity', 1003) }, enable_v2_model_runs: true,
+      allowed_models: { [model]: [null] }, unauthenticated_free_models: [model] };
+    const writes = [], dispatches = [], compareReads = new Map();
+    const result = await executeWorker(config, {
+      goalCommentsRead: () => [goal, jobComment],
+      commentsRead: () => [],
+      readExecutorWorkspace: () => workspace,
+      apiRead(uri) {
+        if (uri === 'user') return { login: 'worker' };
+        if (uri === `repos/${REPO}/issues/407`) return { title: ISSUE_TITLE, state: 'open' };
+        if (uri === `repos/${REPO}/git/ref/heads/main`) return { object: { sha: liveMainSha } };
+        if (uri === `repos/${REPO}/issues/comments/6188322050`) return goal;
+        if (uri === `repos/${REPO}/issues/comments/6733342821`) return jobComment;
+        if (uri === `repos/${REPO}/pulls/676`) return pull;
+        const comparison = uri.match(new RegExp(`^repos/${REPO}/compare/([a-f0-9]{40}\\.\\.\\.[a-f0-9]{40})$`, 'i'));
+        if (comparison) {
+          const key = comparison[1].toLowerCase();
+          compareReads.set(key, (compareReads.get(key) || 0) + 1);
+          const value = comparisons.get(key);
+          if (!value) throw new Error(`UNEXPECTED_COMPARE_${key}`);
+          return value;
+        }
+        if (uri === `repos/${REPO}/contents/${specPath}?ref=${sourceSha}`)
+          return { encoding: 'base64', content: Buffer.from(spec).toString('base64') };
+        throw new Error(`UNEXPECTED_W1_API_${uri}`);
+      },
+      assertExecutorTaskReady: descriptor => { assert.equal(descriptor, executor); return { ready: true }; },
+      createExecutorSourceBundle: ({ descriptor, job: sourceJob, attemptId }) => {
+        assert.equal(descriptor, executor);
+        assert.equal(sourceJob.request_id, job.request_id);
+        return { attempt_id: attemptId, source_sha: sourceJob.source_sha, sha256: 'e'.repeat(64) };
+      },
+      dispatchToExecutor: (descriptor, manifest) => {
+        assert.equal(descriptor, executor);
+        dispatches.push(manifest);
+        return { outcome: 'SYNTHETIC_DISPATCH_ACK_NOT_EXECUTION' };
+      },
+      writeReceipt: (_receiptConfig, data, login) => writes.push({ data, login }),
+      observationDependencies: { collectWindowsObservation: () => ({ status: 'UNKNOWN' }) },
+    });
+    assert.equal(result.state, 'DISPATCHED', JSON.stringify(result));
+    assert.equal(result.request_id, job.request_id);
+    assert.equal(dispatches.length, 1);
+    assert.equal(dispatches[0].job.source_sha, sourceSha);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].data.state, 'STARTED');
+    assert.equal(writes[0].login, 'worker');
+    assert.equal(compareReads.get(`${mergeSha}...${sourceSha}`), 1);
+    assert.equal(compareReads.get(`${sourceSha}...${liveMainSha}`), 1,
+      'selection and final dispatch validation reuse the same exact GitHub ancestry readbacks');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('an unresolved W2 STARTED attempt is not replayed after its pinned source drifts', () => {
