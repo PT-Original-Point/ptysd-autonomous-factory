@@ -16,6 +16,7 @@ import { parseJob, selectNext, parseReceipt, parseCodexSourceAcceptance, receipt
   writePathsOverlap,
   publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight, derivePollDisposition,
   isRecoverableModelPreflightWait, readVerifiedCodexSourceAcceptances,
+  readWorkerIssueComments,
   parseWorkflowPathFilters, SOURCE_ACCEPTANCE_WORKFLOWS }
   from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, OPERATOR_COMMENT_ID, encodeOperatorObservation, parseOperatorObservation }
@@ -3965,6 +3966,77 @@ test('Issue #310 structured candidate task dispatches through the existing Execu
     assert.equal(modelCalls,0);
     assert.equal(posted.length,1,'an existing #407 STARTED receipt must not be reposted');
   } finally { rmSync(root,{recursive:true,force:true}); }
+});
+
+test('Worker reads canonical Goal jobs and receipt comments together without copying them', () => {
+  const workerLogin='wfvupu1212', host='DESKTOP-1B6PD2P';
+  const sourceSha='a'.repeat(40), specSha='b'.repeat(64);
+  const job={schema:6,project_id:PROJECT,host,request_id:'W1_CANONICAL_ISSUE_ROUTING_TEST',
+    kind:'opencode_edit',source_sha:sourceSha,spec_path:'native-bridge/tasks/w1-routing-test.md',
+    spec_sha256:specSha,model:'opencode/deepseek-v4.1-flash-free',variant:null,
+    edit_paths:['operator-panel/index.html'],source_pr:676,goal_comment_id:6188322050,
+    goal_body_sha256:specSha};
+  const goalComment={...com(6733342821,encoded(job),'t14210184'),
+    issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+  const receiptComment={...com(6733342822,RECEIPT_MARKER+'{}',workerLogin),
+    issue_url:`https://api.github.com/repos/${REPO}/issues/407`};
+  const calls=[];
+  const comments=readWorkerIssueComments({issue:407},issue=>{
+    calls.push(issue);
+    return issue===310?[goalComment]:[receiptComment];
+  });
+
+  assert.deepEqual(calls,[310,407]);
+  assert.deepEqual(comments.map(comment=>comment.id),[6733342821,6733342822]);
+  assert.equal(parseJob(comments[0].body)?.request_id,job.request_id);
+  const selected=selectNext(comments,['t14210184'],workerLogin,host,sourceSha,
+    [],new Map([[676,sourceSha]]));
+  assert.equal(selected?.job.request_id,job.request_id);
+});
+
+test('Worker queries one stream when its receipt issue is already the canonical Goal issue', () => {
+  const calls=[];
+  const goalComment={...com(6733342821,encoded({schema:6,project_id:PROJECT,
+    host:'DESKTOP-1B6PD2P',request_id:'W1_SINGLE_ISSUE_ROUTING_TEST',kind:'ping',
+    source_sha:commit,spec_path:null,spec_sha256:null}),'t14210184'),
+    issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+  const comments=readWorkerIssueComments({issue:310},issue=>{
+    calls.push(issue);
+    return [goalComment];
+  });
+
+  assert.deepEqual(calls,[310]);
+  assert.equal(comments.length,1);
+});
+
+test('an existing #407 STARTED receipt suppresses replay of the exact #310 request', () => {
+  const workerLogin='wfvupu1212', host='DESKTOP-1B6PD2P';
+  const sourceSha='a'.repeat(40), specSha='b'.repeat(64);
+  const job={schema:6,project_id:PROJECT,host,request_id:'W1_CANONICAL_ISSUE_REPLAY_GUARD_TEST',
+    kind:'opencode_edit',source_sha:sourceSha,spec_path:'native-bridge/tasks/w1-routing-test.md',
+    spec_sha256:specSha,model:'opencode/deepseek-v4.1-flash-free',variant:null,
+    edit_paths:['operator-panel/index.html'],source_pr:676,goal_comment_id:6188322050,
+    goal_body_sha256:specSha};
+  const goalComment={...com(6733342821,encoded(job),'t14210184'),
+    issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+  const receiptComment={...com(6733342822,RECEIPT_MARKER+JSON.stringify({
+    schema:1,project_id:PROJECT,host,request_id:job.request_id,
+    attempt_id:'123e4567-e89b-12d3-a456-426614174000',state:'STARTED',
+    kind:'opencode_edit',source_sha:sourceSha,model_invoked:true,external_effects:'UNKNOWN',
+  }),workerLogin),issue_url:`https://api.github.com/repos/${REPO}/issues/407`};
+  const comments=readWorkerIssueComments({issue:407},issue=>
+    issue===310?[goalComment]:[receiptComment]);
+
+  assert.equal(selectNext(comments,['t14210184'],workerLogin,host,sourceSha,
+    [],new Map([[676,sourceSha]])),null);
+});
+
+test('Worker fails closed if a global comment ID has conflicting content across issue streams', () => {
+  const goalComment={...com(6733342821,'goal body','t14210184'),
+    issue_url:`https://api.github.com/repos/${REPO}/issues/310`};
+  const conflict={...goalComment,issue_url:`https://api.github.com/repos/${REPO}/issues/407`,body:'different'};
+  assert.throws(()=>readWorkerIssueComments({issue:407},issue=>
+    issue===310?[goalComment]:[conflict]),/WORKER_ISSUE_COMMENT_IDENTITY_COLLISION/);
 });
 
 test('trusted W2 waits without authorization, keeps ping moving, then dispatches the same candidate through the existing Executor', async () => {

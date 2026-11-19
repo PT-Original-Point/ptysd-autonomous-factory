@@ -1765,7 +1765,32 @@ function issueCommentsFor(issueNumber) {
   const raw = JSON.parse(gh(['api', `repos/${REPO}/issues/${issueNumber}/comments?per_page=100`, '--paginate', '--slurp']));
   return raw.flat().filter(c => typeof c?.id === 'number').sort((a, b) => a.id - b.id);
 }
-function issueComments(config) { return issueCommentsFor(config.issue); }
+export function readWorkerIssueComments(config, readCommentsFor) {
+  if (!config || !Number.isSafeInteger(config.issue) || config.issue < 1 ||
+      typeof readCommentsFor !== 'function') throw new Error('WORKER_ISSUE_COMMENT_SOURCE_INVALID');
+  // Human schema-6 requests live on the canonical V5.3-R4 Goal issue, while
+  // native Worker receipts remain on config.issue (normally Issue #407).
+  // Read both streams so the existing Worker can consume the authorized job
+  // without copying or rewriting its request, and so #407 receipts continue
+  // to suppress replay. Comment IDs are repository-global; collisions with
+  // different content fail closed instead of silently selecting one stream.
+  const issueNumbers = [...new Set([V53_GOAL_ISSUE, config.issue])];
+  const byId = new Map();
+  for (const issueNumber of issueNumbers) {
+    const comments = readCommentsFor(issueNumber);
+    if (!Array.isArray(comments)) throw new Error('WORKER_ISSUE_COMMENT_READ_INVALID');
+    for (const comment of comments) {
+      if (!Number.isSafeInteger(comment?.id) || comment.id < 1) continue;
+      const prior = byId.get(comment.id);
+      if (prior && (prior.body !== comment.body || prior.issue_url !== comment.issue_url ||
+          prior.user?.login !== comment.user?.login))
+        throw new Error('WORKER_ISSUE_COMMENT_IDENTITY_COLLISION');
+      if (!prior) byId.set(comment.id, comment);
+    }
+  }
+  return [...byId.values()].sort((a, b) => a.id - b.id);
+}
+function issueComments(config) { return readWorkerIssueComments(config, issueCommentsFor); }
 function capturedDiffReceiptSummary(receipt) {
   if (!receipt || !['FINISHED', 'BLOCKED'].includes(receipt.state) ||
       receipt.coding_state !== 'DIFF_CAPTURED_UNVERIFIED' || receipt.scope_valid !== true ||
