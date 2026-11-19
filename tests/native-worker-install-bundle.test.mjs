@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -10,9 +11,76 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const sourceDir = join(root, 'native-bridge');
 const installer = readFileSync(join(sourceDir, 'install.ps1'), 'utf8');
 const executorInstaller = readFileSync(join(sourceDir, 'install-codex-executor.ps1'), 'utf8');
+const pinDriftFunctionStart = executorInstaller.indexOf('function Test-CodexExecutorConfigPinOnlyDifference');
+const pinDriftFunctionEnd = executorInstaller.indexOf('\nfunction Find-CodexExecutorConfigPinDriftBaseline', pinDriftFunctionStart);
+assert.notEqual(pinDriftFunctionStart, -1, 'CLI config drift comparator is present');
+assert.notEqual(pinDriftFunctionEnd, -1, 'CLI config drift comparator is independently testable');
+const pinDriftFunction = executorInstaller.slice(pinDriftFunctionStart, pinDriftFunctionEnd);
 const installIndex = installer.indexOf("if ($Mode -eq 'Install')");
 assert.notEqual(installIndex, -1, 'installer has an explicit install mode');
 const installBlock = installer.slice(installIndex);
+
+test('Codex CLI pin refresh reconciles only a proven stale pin', { skip: process.platform !== 'win32' }, () => {
+  const baseline = {
+    project_id: 'CHATGPT_GLOBAL_SKILL_GOVERNANCE',
+    repo: 'PT-Original-Point/ptysd-autonomous-factory',
+    codex_executable: 'C:\\Users\\worker\\AppData\\Local\\OpenAI\\Codex\\bin\\old\\codex.exe',
+    codex_executable_sha256: 'a'.repeat(64),
+    codex_cli_qualified: false,
+    codex_login_verified: false,
+    enable_codex_model_runs: false,
+    codex_usage_authorized: false,
+    codex_sandbox_boundary: 'UNKNOWN',
+    allowed_codex_models: {},
+  };
+  const invoke = (current, expected) => {
+    const baselineB64 = Buffer.from(JSON.stringify(baseline), 'utf8').toString('base64');
+    const currentB64 = Buffer.from(JSON.stringify(current), 'utf8').toString('base64');
+    const script = `${pinDriftFunction}\n` +
+      `$baseline = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${baselineB64}')) | ConvertFrom-Json\n` +
+      `$current = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${currentB64}')) | ConvertFrom-Json\n` +
+      `if (Test-CodexExecutorConfigPinOnlyDifference $current $baseline) { 'ACCEPT' } else { 'REJECT' }`;
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive',
+      '-EncodedCommand', encoded], { encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, 0, result.stderr || result.error?.message || 'PowerShell helper failed');
+    assert.equal(result.stdout.trim().split(/\r?\n/).at(-1), expected);
+  };
+
+  const pinOnly = { ...baseline,
+    codex_executable: 'C:\\Program Files\\WindowsApps\\OpenAI.Codex\\app\\resources\\codex.exe',
+    codex_executable_sha256: 'b'.repeat(64) };
+  invoke(pinOnly, 'ACCEPT');
+  invoke({ ...pinOnly, codex_usage_authorized: true }, 'REJECT');
+  invoke({ ...pinOnly, allowed_codex_models: { 'gpt-6-luna': ['max'] } }, 'REJECT');
+  invoke({ ...baseline, codex_executable: pinOnly.codex_executable }, 'REJECT');
+});
+
+test('Codex CLI pin drift requires the manifest-pinned runtime backup and preserves all model authorization gates', () => {
+  assert.match(executorInstaller,
+    /\$backupHash\s+-ne\s+\$expectedConfigHash/i,
+    'the retained config must match the current installer manifest byte hash');
+  assert.ok(executorInstaller.includes('executor-config\\.json\\.pre-cli-path-\\d{8}-\\d+\\.bak'),
+    'runtime layout admits only the exact versioned pre-pin config backup');
+  assert.match(executorInstaller,
+    /KnownConfigBackupHash[\s\S]*?CODEX_CLI_REFRESH_CONFIG_BACKUP_HASH_MISMATCH/i,
+    'the retained runtime backup must match the old manifest-pinned config bytes');
+  assert.match(executorInstaller,
+    /Find-CodexExecutorConfigPinDriftBaseline[\s\S]*?Test-CodexExecutorConfigPinOnlyDifference[\s\S]*?runtimeBaselines\.Count\s+-gt\s+1/i,
+    'pin-only recovery must be unique and match every non-pin config property');
+  assert.match(executorInstaller,
+    /if \(Test-Path -LiteralPath \(\[string\]\$config\.codex_executable\) -PathType Leaf\)[\s\S]*?Find-CodexExecutorConfigPinDriftBaseline/i,
+    'reconciliation is limited to a missing prior CLI executable');
+  assert.match(executorInstaller,
+    /\$runtimeHashes\['executor-config\.json'\]\s*=\s*\$currentConfigHash/i,
+    'the regular atomic refresh transaction adopts the exact current config hash');
+  assert.match(executorInstaller,
+    /if \(\$RefreshRuntimeModules\) \{ throw 'CODEX_CLI_REFRESH_CONFIG_HASH_MISMATCH' \}/i,
+    'runtime-module refresh cannot consume a CLI pin drift reconciliation');
+  assert.match(executorInstaller,
+    /CODEX_CLI_PIN_DRIFT=KNOWN_PIN_ONLY_RECONCILED/,
+    'the successful recovery leaves an explicit native receipt');
+});
 
 function staticLocalImportClosure(entry) {
   const found = new Set();

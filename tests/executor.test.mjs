@@ -70,7 +70,7 @@ test('error labels never expose arbitrary messages or untrusted code fields', ()
     assert.equal(safeErrorCode({}, code), code, `existing fallback code ${code} remains available`);
 });
 
-test('Codex child isolates GitHub publisher credentials from Git and gh', () => {
+test('Codex child isolates publisher credentials and the desktop AppX selector', () => {
   const root = mkdtempSync(join(tmpdir(), 'ptysd-codex-git-auth-'));
   try {
     const evidenceDir = join(root, 'evidence');
@@ -81,6 +81,7 @@ test('Codex child isolates GitHub publisher credentials from Git and gh', () => 
       attempt_id: ATTEMPT };
     const { env, ghConfigDir } = buildCodexChildEnvironment(request, evidenceDir, {
       PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT || 'C:\\Windows',
+      CODEX_WINDOWS_REGISTERED_CORE: '1',
       USERPROFILE: root, GH_TOKEN: 'SYNTHETIC_PUBLISHER_TOKEN',
       GITHUB_TOKEN: 'SYNTHETIC_PUBLISHER_TOKEN', GIT_CONFIG_NOSYSTEM: '0',
       GIT_CONFIG_GLOBAL: 'untrusted-global-config', GIT_CONFIG_COUNT: '1',
@@ -94,6 +95,8 @@ test('Codex child isolates GitHub publisher credentials from Git and gh', () => 
 
     assert.equal(env.GH_CONFIG_DIR, ghConfigDir);
     assert.equal(env.GH_PROMPT_DISABLED, '1');
+    assert.equal(env.CODEX_WINDOWS_REGISTERED_CORE, undefined,
+      'an unpackaged scheduled CLI child must not inherit the desktop MSIX selector');
     assert.equal(env.GITHUB_TOKEN, undefined);
     assert.equal(env.GH_TOKEN, undefined);
     assert.equal(env.GIT_CONFIG_NOSYSTEM, '1');

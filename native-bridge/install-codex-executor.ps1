@@ -313,7 +313,8 @@ function Assert-CodexExecutorCliRefreshSettledClaims([string]$SpoolPath) {
 }
 
 function Assert-CodexExecutorCliRefreshArtifacts([string]$SpoolPath, [string]$RuntimePath,
-    [string[]]$SpoolDirectoryNames, [System.Collections.IDictionary]$ExpectedRuntimeHashes) {
+    [string[]]$SpoolDirectoryNames, [System.Collections.IDictionary]$ExpectedRuntimeHashes,
+    [string]$KnownConfigBackupHash = '') {
     $spool = Get-CodexExecutorInstallTree $SpoolPath
     if (-not $spool.Exists) { throw 'CODEX_CLI_REFRESH_SPOOL_MISSING' }
     foreach ($relative in $spool.Directories + $spool.Files) {
@@ -332,8 +333,12 @@ function Assert-CodexExecutorCliRefreshArtifacts([string]$SpoolPath, [string]$Ru
     }
     Assert-CodexExecutorCliRefreshSettledClaims -SpoolPath $SpoolPath
     $runtime = Get-CodexExecutorInstallTree $RuntimePath
+    $knownConfigBackups = @($runtime.Files | Where-Object {
+        $_ -match '^executor-config\.json\.pre-cli-path-\d{8}-\d+\.bak$'
+    })
+    if ($knownConfigBackups.Count -gt 1) { throw 'CODEX_CLI_REFRESH_CONFIG_BACKUP_AMBIGUOUS' }
     if (-not $runtime.Exists -or $runtime.Directories.Count -gt 0 -or
-        $runtime.Files.Count -ne $ExpectedRuntimeHashes.Count) {
+        $runtime.Files.Count -ne ($ExpectedRuntimeHashes.Count + $knownConfigBackups.Count)) {
         throw 'CODEX_CLI_REFRESH_RUNTIME_LAYOUT_MISMATCH'
     }
     foreach ($name in $ExpectedRuntimeHashes.Keys) {
@@ -345,6 +350,71 @@ function Assert-CodexExecutorCliRefreshArtifacts([string]$SpoolPath, [string]$Ru
             throw 'CODEX_CLI_REFRESH_RUNTIME_HASH_MISMATCH'
         }
     }
+    if ($knownConfigBackups.Count -eq 1) {
+        if ($KnownConfigBackupHash -notmatch '^[0-9a-fA-F]{64}$') {
+            throw 'CODEX_CLI_REFRESH_CONFIG_BACKUP_HASH_UNAVAILABLE'
+        }
+        $backupPath = Join-Path $RuntimePath $knownConfigBackups[0]
+        Assert-CodexExecutorInstallPathChain $backupPath
+        if ((Get-FileHash -LiteralPath $backupPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
+            $KnownConfigBackupHash.ToLowerInvariant()) {
+            throw 'CODEX_CLI_REFRESH_CONFIG_BACKUP_HASH_MISMATCH'
+        }
+    }
+}
+
+function Test-CodexExecutorConfigPinOnlyDifference([object]$Current, [object]$Baseline) {
+    if ($null -eq $Current -or $null -eq $Baseline) { return $false }
+    $currentNames = @($Current.PSObject.Properties | ForEach-Object { $_.Name } | Sort-Object)
+    $baselineNames = @($Baseline.PSObject.Properties | ForEach-Object { $_.Name } | Sort-Object)
+    if ([string]::Join("`n", $currentNames) -cne [string]::Join("`n", $baselineNames)) {
+        return $false
+    }
+
+    $differences = New-Object System.Collections.Generic.List[string]
+    foreach ($name in $currentNames) {
+        $currentValue = ConvertTo-Json -InputObject $Current.PSObject.Properties[$name].Value `
+            -Depth 20 -Compress
+        $baselineValue = ConvertTo-Json -InputObject $Baseline.PSObject.Properties[$name].Value `
+            -Depth 20 -Compress
+        if ($currentValue -ceq $baselineValue) { continue }
+        if ($name -notin @('codex_executable','codex_executable_sha256')) { return $false }
+        $differences.Add($name)
+    }
+
+    $currentPath = [string]$Current.PSObject.Properties['codex_executable'].Value
+    $baselinePath = [string]$Baseline.PSObject.Properties['codex_executable'].Value
+    $currentHash = [string]$Current.PSObject.Properties['codex_executable_sha256'].Value
+    $baselineHash = [string]$Baseline.PSObject.Properties['codex_executable_sha256'].Value
+    return $differences.Count -eq 2 -and $currentPath -cne $baselinePath -and
+        $currentHash -cne $baselineHash -and
+        $currentHash -match '^[0-9a-fA-F]{64}$' -and
+        $baselineHash -match '^[0-9a-fA-F]{64}$'
+}
+
+function Find-CodexExecutorConfigPinDriftBaseline([object]$Current, [object]$Manifest) {
+    $expectedConfigHash = [string]$Manifest.runtime_sha256.'executor-config.json'
+    $runtimeBaselines = New-Object System.Collections.Generic.List[object]
+    foreach ($backup in @(Get-ChildItem -LiteralPath $runtimeDir `
+        -Filter 'executor-config.json.pre-cli-path-*.bak' -File -ErrorAction Stop)) {
+        if ($backup.Name -notmatch '^executor-config\.json\.pre-cli-path-\d{8}-\d+\.bak$') { continue }
+        Assert-CodexExecutorInstallPathChain $backup.FullName
+        $backupHash = (Get-FileHash -LiteralPath $backup.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        if ($backupHash -ne $expectedConfigHash) { continue }
+        try {
+            $baseline = Get-Content -LiteralPath $backup.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        } catch { continue }
+        if (Test-CodexExecutorConfigPinOnlyDifference $Current $baseline) {
+            $runtimeBaselines.Add([pscustomobject]@{
+                ConfigPath = $backup.FullName
+                ConfigSha256 = $backupHash
+                Name = $backup.Name
+            })
+        }
+    }
+    if ($runtimeBaselines.Count -gt 1) { throw 'CODEX_CLI_REFRESH_PIN_DRIFT_BASELINE_AMBIGUOUS' }
+    if ($runtimeBaselines.Count -eq 1) { return $runtimeBaselines[0] }
+    return $null
 }
 
 function Initialize-CodexExecutorInstallState([string]$ManifestPath, [string]$ManifestText,
@@ -1073,11 +1143,24 @@ function Invoke-CodexExecutorCliPinRefresh([string]$NewCodexExecutable, [switch]
     if (-not $runtimeHashes.Contains('executor-config.json')) {
         throw 'CODEX_CLI_REFRESH_CONFIG_HASH_MISSING'
     }
-    if ((Get-FileHash -LiteralPath $executorConfigPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
-        $runtimeHashes['executor-config.json']) { throw 'CODEX_CLI_REFRESH_CONFIG_HASH_MISMATCH' }
+    $manifestConfigHash = $runtimeHashes['executor-config.json']
+    $pinDriftBaseline = $null
+    $currentConfigHash = (Get-FileHash -LiteralPath $executorConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    if ($currentConfigHash -ne $runtimeHashes['executor-config.json']) {
+        if ($RefreshRuntimeModules) { throw 'CODEX_CLI_REFRESH_CONFIG_HASH_MISMATCH' }
+        if (Test-Path -LiteralPath ([string]$config.codex_executable) -PathType Leaf) {
+            throw 'CODEX_CLI_REFRESH_CONFIG_HASH_MISMATCH'
+        }
+        $pinDriftBaseline = Find-CodexExecutorConfigPinDriftBaseline -Current $config -Manifest $manifest
+        if ($null -eq $pinDriftBaseline) { throw 'CODEX_CLI_REFRESH_CONFIG_HASH_MISMATCH' }
+        # Reconcile only an absent CLI pin when the manifest-pinned pre-pin
+        # runtime backup proves every other config field is unchanged. The
+        # normal refresh transaction below updates config and manifest together.
+        $runtimeHashes['executor-config.json'] = $currentConfigHash
+    }
     Assert-CodexExecutorCliRefreshArtifacts -SpoolPath $spoolDir -RuntimePath $runtimeDir `
         -SpoolDirectoryNames @('requests','bundles','claims','results','evidence','workspaces','locks') `
-        -ExpectedRuntimeHashes $runtimeHashes
+        -ExpectedRuntimeHashes $runtimeHashes -KnownConfigBackupHash $manifestConfigHash
     if ($RefreshRuntimeModules) {
         Invoke-CodexExecutorRuntimeModuleRefresh -Task $task -RuntimeHashes $runtimeHashes -PreflightManifestHash $preflightManifestHash -WorkerConfigHash $workerConfigHash
         return
@@ -1199,6 +1282,9 @@ function Invoke-CodexExecutorCliPinRefresh([string]$NewCodexExecutable, [switch]
         if (-not $preserveRefreshLock) { Remove-CodexExecutorCliRefreshLock -LockPath $refreshLockPath }
     }
     Write-Output ('CODEX_CLI_PIN_REFRESH=SUCCESS;path=' + $newCodexPath + ';sha256=' + $newCodexHash)
+    if ($null -ne $pinDriftBaseline) {
+        Write-Output ('CODEX_CLI_PIN_DRIFT=KNOWN_PIN_ONLY_RECONCILED;baseline=' + $pinDriftBaseline.Name)
+    }
     Write-Output ('CODEX_CLI_PIN_REFRESH_BACKUP=' + $backupDir)
     Write-Output ('CODEX_CLI_PIN_REFRESH_OLD_CONFIG_SHA256=' + $oldConfigHash)
     Write-Output ('CODEX_CLI_PIN_REFRESH_OLD_INSTALL_STATE_SHA256=' + $oldManifestHash)
