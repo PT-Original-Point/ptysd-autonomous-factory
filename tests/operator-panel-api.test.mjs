@@ -1724,39 +1724,77 @@ test('future timestamps never masquerade as current observations or dispatch eve
 });
 
 test('W1 and W2 show native observation freshness separately from their last task event', () => {
+  assert.match(html,/id="w1-observed">最近 Win11 原生觀測（非派工／非模型活動）：/);
+  assert.match(html,/id="w2-observed">最近 Win11 原生觀測（非派工／非模型活動）：/);
+  assert.doesNotMatch(html,/id="w[12]-observed">Win11 現場觀測/);
   const now=baseTime;
   const freshAt=new Date(now-30_000).toISOString();
   const oldEventAt=new Date(now-24*60*60*1000).toISOString();
-  const freshResult={status:'FRESH',snapshot:{windows:{observed_at:freshAt}}};
-  const freshLabel=panel.workerObservationLabel(freshResult,'FRESH',now);
-  assert.match(freshLabel,/Win11 快照.*FRESH/);
-  assert.doesNotMatch(freshLabel,/任務事件|Session|驗收/);
+  const issueResource={fetchedAt:now,error:null};
+  const withWindows=(windows)=>{
+    const comments=observationComments(now);
+    const snapshot=JSON.parse(comments[0].body.slice('PTYSD_OPERATOR_OBSERVATION_V1\n'.length));
+    if (windows === undefined) delete snapshot.windows;
+    else snapshot.windows=windows;
+    comments[0].body='PTYSD_OPERATOR_OBSERVATION_V1\n'+JSON.stringify(snapshot);
+    return panel.findSnapshot(comments,now);
+  };
+
+  const freshObservation=withWindows({status:'FRESH',observed_at:freshAt});
+  assert.equal(freshObservation.status,'FRESH');
+  const freshFreshness=panel.freshnessOfSnapshot(freshObservation,now,issueResource);
+  assert.equal(freshFreshness,'FRESH');
+  const freshLabel=panel.workerObservationLabel(freshObservation,freshFreshness,now);
+  assert.match(freshLabel,/^最近 Win11 原生觀測（非派工／非模型活動）：/);
+  assert.match(freshLabel,/ · FRESH$/);
+  assert.match(freshLabel,/非派工／非模型活動/);
+  assert.doesNotMatch(freshLabel,/Win11 快照|task\.state|Session|工作階段|task_acceptance|external_effects|已驗收|ACCEPTED/);
+  assert.match(panel.workerObservationLabel(freshObservation,'UNKNOWN',now),/ · UNKNOWN$/,
+    'a valid timestamp is still marked UNKNOWN when the enclosing snapshot is not trusted');
 
   for (const id of ['W1','W2']) {
     panel.renderDispatchCard(id,{eventAt:oldEventAt,observationLabel:freshLabel});
     assert.equal(domElements.get(id.toLowerCase()+'-observed').textContent,freshLabel);
-    assert.match(domElements.get(id.toLowerCase()+'-last-event').textContent,/最後同來源任務事件：/);
-    assert.notEqual(domElements.get(id.toLowerCase()+'-observed').textContent,
-      domElements.get(id.toLowerCase()+'-last-event').textContent);
+    const lastEvent=domElements.get(id.toLowerCase()+'-last-event').textContent;
+    assert.match(lastEvent,/最後同來源任務事件：/);
+    assert.match(lastEvent,/\d{4}/);
+    assert.doesNotMatch(lastEvent,/未確認|最近 Win11 原生觀測/);
+    assert.notEqual(lastEvent,freshLabel);
+    assert.doesNotMatch(domElements.get(id.toLowerCase()+'-observed').textContent,/最後同來源任務事件/);
   }
 
   const staleAt=new Date(now-11*60*1000).toISOString();
-  assert.match(panel.workerObservationLabel(
-    {status:'STALE',snapshot:{windows:{observed_at:staleAt}}},'STALE',now),
-  /Win11 快照.*STALE/);
-  assert.match(panel.workerObservationLabel(freshResult,'STALE',now),
-    /Win11 快照.*STALE/);
+  const staleObservation=withWindows({status:'FRESH',observed_at:staleAt});
+  assert.equal(staleObservation.status,'FRESH');
+  assert.equal(panel.freshnessOfSnapshot(staleObservation,now,issueResource),'STALE');
+  assert.match(panel.workerObservationLabel(staleObservation,'STALE',now),/ · STALE$/);
+  assert.match(panel.workerObservationLabel(freshObservation,'STALE',now),/ · STALE$/);
 
-  for (const observedAt of [undefined,'not-a-time',new Date(now+1000).toISOString()]) {
-    for (const snapshotFreshness of ['FRESH','STALE']) {
-      const label=panel.workerObservationLabel(
-        {status:'FRESH',snapshot:{windows:{observed_at:observedAt}}},snapshotFreshness,now);
-      assert.match(label,/Win11 快照.*observed_at=時間未確認 · UNKNOWN/);
-      assert.doesNotMatch(label,/\d{4}/);
-    }
+  for (const windows of [undefined,{status:'FRESH'},
+      {status:'FRESH',observed_at:'not-a-time'},
+      {status:'FRESH',observed_at:new Date(now+1000).toISOString()}]) {
+    const observation=withWindows(windows);
+    assert.equal(observation.status,'FRESH');
+    const freshness=panel.freshnessOfSnapshot(observation,now,issueResource);
+    assert.equal(freshness,'UNKNOWN');
+    const label=panel.workerObservationLabel(observation,freshness,now);
+    assert.match(label,/^最近 Win11 原生觀測（非派工／非模型活動）：時間未確認 · UNKNOWN$/);
+    assert.doesNotMatch(label,/\d{4}/,
+      'missing, malformed, or future windows.observed_at never falls back to another timestamp');
+    assert.doesNotMatch(label,/Session|工作階段|task_acceptance|external_effects|已驗收|ACCEPTED/);
   }
+
+  // A missing windows.observed_at must not fall back to the snapshot's own
+  // observed_at, the GitHub updated_at, a task receipt, a Session, or another
+  // lane's activity time.
+  const fallbackLabel=panel.workerObservationLabel(withWindows(undefined),'FRESH',now);
+  assert.match(fallbackLabel,/時間未確認 · UNKNOWN$/);
+  assert.doesNotMatch(fallbackLabel,/\d{4}/);
+
   assert.match(panel.workerObservationLabel(null,'UNKNOWN',now),
-    /Win11 快照.*observed_at=時間未確認 · UNKNOWN/);
+    /^最近 Win11 原生觀測（非派工／非模型活動）：時間未確認 · UNKNOWN$/);
+  assert.match(panel.workerObservationLabel({status:'UNKNOWN'},'FRESH',now),
+    /^最近 Win11 原生觀測（非派工／非模型活動）：時間未確認 · UNKNOWN$/);
 });
 
 test('future and foreign attempt receipts cannot override a valid matching dispatch', () => {
