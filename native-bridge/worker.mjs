@@ -1313,8 +1313,61 @@ function candidatePullRequestSourceStatus(job, pull) {
   else if (!observedSha) reason = 'HEAD_SHA_INVALID';
   return { eligible: reason === null, reason, sha: reason === null ? observedSha : null, observedSha };
 }
-function candidatePullRequestHeadSha(job, pull) {
-  return candidatePullRequestSourceStatus(job, pull).sha;
+function candidatePullRequestNeedsMainAncestry(job, pull) {
+  return pull?.state === 'closed' && pull.merged === true &&
+    SHA.test(pull.merge_commit_sha || '') && SHA.test(pull.head?.sha || '') &&
+    pull.head.sha.toLowerCase() !== (typeof job?.source_sha === 'string'
+      ? job.source_sha.toLowerCase() : null);
+}
+// A queued task may stay pinned to the live-main SHA after its exact source PR
+// merges. Preserve exact PR-head pins; accept a later pin only when GitHub
+// proves it lies after the merge commit and on the current official main history.
+async function candidatePullRequestResolvedSourceStatus(job, pull, apiRead, liveMainSha,
+  comparisonReadbacks = new Map()) {
+  const status = candidatePullRequestSourceStatus(job, pull);
+  const pinnedSha = SHA.test(job?.source_sha || '') ? job.source_sha.toLowerCase() : null;
+  if (!status.eligible) return { ...status, sha: null };
+  if (!pinnedSha) return { ...status, eligible: false, reason: 'JOB_SOURCE_SHA_INVALID', sha: null };
+  if (status.sha === pinnedSha) return status;
+  if (pull?.state !== 'closed' || pull.merged !== true) return status;
+  const mergeSha = SHA.test(pull?.merge_commit_sha || '') ? pull.merge_commit_sha.toLowerCase() : null;
+  const mainSha = SHA.test(liveMainSha || '') ? liveMainSha.toLowerCase() : null;
+  if (!mergeSha || !mainSha)
+    return { ...status, eligible: false, reason: 'MERGED_SOURCE_MAIN_ANCESTRY_UNKNOWN', sha: null };
+
+  const compare = async (baseSha, headSha) => {
+    const key = `${baseSha}...${headSha}`;
+    if (!comparisonReadbacks.has(key)) {
+      try {
+        comparisonReadbacks.set(key,
+          await apiRead(`repos/${REPO}/compare/${key}`));
+      } catch {
+        comparisonReadbacks.set(key, null);
+      }
+    }
+    const readback = comparisonReadbacks.get(key);
+    const observedBaseSha = readback?.base_commit?.sha;
+    if (typeof observedBaseSha !== 'string' || !SHA.test(observedBaseSha) ||
+        observedBaseSha.toLowerCase() !== baseSha) return null;
+    if (!Number.isSafeInteger(readback.ahead_by) || !Number.isSafeInteger(readback.behind_by) ||
+        !['ahead', 'identical', 'behind', 'diverged'].includes(readback.status)) return null;
+    if (readback.behind_by !== 0) return false;
+    return (readback.status === 'identical' && readback.ahead_by === 0) ||
+      (readback.status === 'ahead' && readback.ahead_by > 0);
+  };
+
+  const afterMerge = await compare(mergeSha, pinnedSha);
+  if (afterMerge !== true)
+    return { ...status, eligible: false,
+      reason: afterMerge === false ? 'MERGED_SOURCE_NOT_AFTER_MERGE' : 'MERGED_SOURCE_ANCESTRY_UNKNOWN',
+      sha: null };
+  const onLiveMain = await compare(pinnedSha, mainSha);
+  if (onLiveMain !== true)
+    return { ...status, eligible: false,
+      reason: onLiveMain === false ? 'MERGED_SOURCE_NOT_ON_LIVE_MAIN' : 'MERGED_SOURCE_ANCESTRY_UNKNOWN',
+      sha: null };
+  return { ...status, eligible: true, reason: null, sha: pinnedSha,
+    sourceBinding: 'MERGED_PR_SOURCE_ANCESTOR_OF_LIVE_MAIN' };
 }
 function staleCandidateSourceEntries(comments, dispatchers, workerLogin, host, candidateSourceShas) {
   const jobs = new Map();
@@ -1492,7 +1545,8 @@ function humanDirectiveCodexJob(comment, host, sourceSha, spec, policy) {
   return parseCodexJob(JOB_MARKER + JSON.stringify(job)) ? job : null;
 }
 export async function readPinnedCandidateSources(comments, dispatchers, workerLogin, host,
-  apiRead, log = () => {}, blockedKinds = [], goalCommentsRead = () => issueCommentsFor(V53_GOAL_ISSUE)) {
+  apiRead, log = () => {}, blockedKinds = [], goalCommentsRead = () => issueCommentsFor(V53_GOAL_ISSUE),
+  liveMainSha = null, comparisonReadbacks = new Map()) {
   const jobs = new Map();
   const receipts = new Map();
   for (const comment of comments) {
@@ -1533,6 +1587,7 @@ export async function readPinnedCandidateSources(comments, dispatchers, workerLo
   }
   const pullReadbacks = new Map();
   const goalReadbacks = new Map();
+  const conflictingSourcePrs = new Set();
   for (const { job, duplicate } of jobs.values()) {
     if (duplicate || blockedKinds.includes(job.kind)) continue;
     const prior = (receipts.get(job.request_id) || []).filter(entry =>
@@ -1565,8 +1620,17 @@ export async function readPinnedCandidateSources(comments, dispatchers, workerLo
     }
     const pull = pullReadbacks.get(job.source_pr);
     if (pull === null || pull === undefined) continue;
-    const sourceStatus = candidatePullRequestSourceStatus(job, pull);
-    if (sourceStatus.eligible) sourceShas.set(job.source_pr, sourceStatus.sha);
+    const sourceStatus = await candidatePullRequestResolvedSourceStatus(job, pull, apiRead,
+      liveMainSha, comparisonReadbacks);
+    if (sourceStatus.eligible) {
+      const priorSha = sourceShas.get(job.source_pr);
+      if (conflictingSourcePrs.has(job.source_pr)) continue;
+      if (priorSha && priorSha.toLowerCase() !== sourceStatus.sha.toLowerCase()) {
+        sourceShas.delete(job.source_pr);
+        conflictingSourcePrs.add(job.source_pr);
+        log(`CANDIDATE_SOURCE_PIN_CONFLICT_PR_${job.source_pr}_NO_DISPATCH`);
+      } else sourceShas.set(job.source_pr, sourceStatus.sha);
+    }
     else log(`CANDIDATE_SOURCE_NOT_DISPATCHABLE_${job.request_id}_PR_${job.source_pr}_` +
       `REASON_${sourceStatus.reason}_EXPECTED_SHA_${job.source_sha.toLowerCase()}_` +
       `OBSERVED_SHA_${sourceStatus.observedSha || 'UNKNOWN'}_NO_DISPATCH`);
@@ -3845,6 +3909,7 @@ async function findVerifiedNoWriteAttemptLeases(comments, config, workerLogin,
 export async function runWorker(configInput, adapters = {}) {
   const config = guardConfig(configInput);
   const apiRead = adapters.apiRead ?? api;
+  const candidateComparisonReadbacks = new Map();
   const commentsRead = adapters.commentsRead ?? issueComments;
   const goalCommentsRead = adapters.goalCommentsRead ?? (() => issueCommentsFor(V53_GOAL_ISSUE));
   const postReceipt = adapters.writeReceipt ?? writeReceipt;
@@ -4075,8 +4140,19 @@ export async function runWorker(configInput, adapters = {}) {
             log(`PENDING_EXECUTOR_CANDIDATE_SOURCE_READBACK_UNKNOWN_${s.request_id}_NO_REPLAY`);
             continue;
           }
-          if (candidatePullRequestHeadSha(expectedJob, currentPull)?.toLowerCase() !==
-              expectedJob.source_sha.toLowerCase()) {
+          let liveMainSha = null;
+          if (candidatePullRequestNeedsMainAncestry(expectedJob, currentPull)) {
+            try {
+              liveMainSha = (await apiRead(`repos/${REPO}/git/ref/heads/main`))?.object?.sha;
+              if (!SHA.test(liveMainSha || '')) throw new Error('MAIN_HEAD_UNREADABLE');
+            } catch {
+              log(`PENDING_EXECUTOR_CANDIDATE_MAIN_READBACK_UNKNOWN_${s.request_id}_NO_REPLAY`);
+              continue;
+            }
+          }
+          const sourceStatus = await candidatePullRequestResolvedSourceStatus(expectedJob,
+            currentPull, apiRead, liveMainSha, candidateComparisonReadbacks);
+          if (sourceStatus.sha?.toLowerCase() !== expectedJob.source_sha.toLowerCase()) {
             log(`PENDING_EXECUTOR_CANDIDATE_SOURCE_CHANGED_${s.request_id}_NO_REPLAY`);
             continue;
           }
@@ -4198,7 +4274,7 @@ export async function runWorker(configInput, adapters = {}) {
   }
   const candidateSourceShas = await readPinnedCandidateSources(comments,
     config.dispatchers, me, config.host, apiRead, log, [...blockedKinds],
-    () => humanGoalComments ?? goalCommentsRead());
+    () => humanGoalComments ?? goalCommentsRead(), head, candidateComparisonReadbacks);
   const verifiedSourceAcceptanceKeys = await readVerifiedCodexSourceAcceptances(
     comments, config.dispatchers, me, config.host, apiRead, log);
   if (humanGoalAuthorityBlocker) {
@@ -4497,7 +4573,20 @@ export async function runWorker(configInput, adapters = {}) {
       log(`CANDIDATE_PR_FINAL_READBACK_UNKNOWN_${job.source_pr}_NO_DISPATCH`);
       return { state: 'WAITING_CANDIDATE_SOURCE_READBACK', request_id: job.request_id };
     }
-    if (candidatePullRequestHeadSha(job, currentPull)?.toLowerCase() !== job.source_sha.toLowerCase()) {
+    let liveMainSha = null;
+    if (candidatePullRequestNeedsMainAncestry(job, currentPull)) {
+      try {
+        liveMainSha = (await apiRead(`repos/${REPO}/git/ref/heads/main`))?.object?.sha;
+        if (!SHA.test(liveMainSha || '')) throw new Error('MAIN_HEAD_UNREADABLE');
+      } catch {
+        discardPreparedSourceBundle();
+        log(`CANDIDATE_MAIN_FINAL_READBACK_UNKNOWN_${job.source_pr}_NO_DISPATCH`);
+        return { state: 'WAITING_CANDIDATE_SOURCE_READBACK', request_id: job.request_id };
+      }
+    }
+    const sourceStatus = await candidatePullRequestResolvedSourceStatus(job, currentPull,
+      apiRead, liveMainSha, candidateComparisonReadbacks);
+    if (sourceStatus.sha?.toLowerCase() !== job.source_sha.toLowerCase()) {
       discardPreparedSourceBundle();
       log(`CANDIDATE_PR_HEAD_OR_BASE_CHANGED_${job.source_pr}_NO_DISPATCH`);
       return { state: 'STALE_CANDIDATE_SOURCE', request_id: job.request_id };
