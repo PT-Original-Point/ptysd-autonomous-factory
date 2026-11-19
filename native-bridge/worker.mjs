@@ -3308,9 +3308,28 @@ function readSpecBytes(path, sourceSha, apiRead = api) {
   if (b.encoding !== 'base64' || typeof b.content !== 'string') throw new Error('SPEC_UNREADABLE');
   return Buffer.from(b.content.replace(/\s+/g, ''), 'base64');
 }
-function readSpec(job, apiRead = api) {
+function readPortableMarkdownSpec(bytes, expectedHash) {
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes) || text.includes('\0') || /\r(?!\n)/.test(text))
+    return null;
+  const crlfCount = (text.match(/\r\n/g) ?? []).length;
+  const bareLfCount = (text.match(/(?<!\r)\n/g) ?? []).length;
+  if (crlfCount > 0 && bareLfCount > 0) return null;
+  const lfText = text.replace(/\r\n/g, '\n');
+  const lfBytes = Buffer.from(lfText, 'utf8');
+  if (digest(lfBytes) === expectedHash) return lfText;
+  const crlfText = lfText.replace(/\n/g, '\r\n');
+  if (digest(Buffer.from(crlfText, 'utf8')) === expectedHash) return crlfText;
+  return null;
+}
+export function readSpec(job, apiRead = api) {
   const bytes = readSpecBytes(job.spec_path, job.source_sha, apiRead);
-  if (digest(bytes) !== job.spec_sha256) throw new Error('SPEC_HASH_MISMATCH');
+  if (digest(bytes) !== job.spec_sha256) {
+    const portable = typeof job.spec_path === 'string' && /\.md$/i.test(job.spec_path)
+      ? readPortableMarkdownSpec(bytes, job.spec_sha256) : null;
+    if (portable === null) throw new Error('SPEC_HASH_MISMATCH');
+    return portable;
+  }
   return bytes.toString('utf8');
 }
 export function receipt(requestId, attemptId, state, job, result = null, dispatchIdentity = null) {
