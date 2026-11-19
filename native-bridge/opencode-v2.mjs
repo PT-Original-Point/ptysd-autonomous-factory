@@ -174,6 +174,17 @@ export function discoverV2Executables(env = process.env, win = platform() === 'w
     const p = normalize(env.PTYSD_OPENCODE_V2_EXE);
     if (regularFile(p)) { seen.add(p.toLowerCase()); found.push(p); }
   }
+  for (const localAppData of localAppDataRoots) {
+    // PTYSD can keep the official @opencode/cli package at this fixed
+    // per-user path. Discover only its Windows executable; the common
+    // Authenticode and stable-version checks still run before it is used.
+    const officialPackage = normalize(join(localAppData, 'PTYSDNativeBridge',
+      'official-cli-v2', 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe'));
+    const officialPackageKey = officialPackage.toLowerCase();
+    if (!seen.has(officialPackageKey) && regularFile(officialPackage)) {
+      seen.add(officialPackageKey); found.push(officialPackage);
+    }
+  }
   for (const localAppData of [...localAppDataRoots, ...packageCacheRoots]) {
     const bundled = normalize(join(localAppData, 'Programs', '@opencodedesktop',
       'resources', 'opencode-cli.exe'));

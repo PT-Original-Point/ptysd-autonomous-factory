@@ -773,6 +773,42 @@ test('Windows V2 discovery searches the current-user Codex package cache without
     assert.equal(unsignedExecuted,false,'an unsigned package-cache executable is never run');
   } finally {rmSync(tmp,{recursive:true,force:true});}
 });
+test('Windows V2 discovery includes the fixed per-user official CLI package while retaining signature and version gates', () => {
+  const tmp=mkdtempSync(join(tmpdir(),'oc2-official-cli-package-'));
+  try {
+    const home=join(tmp,'user'), localAppData=join(tmp,'local');
+    const officialExe=join(localAppData,'PTYSDNativeBridge','official-cli-v2',
+      'node_modules','@opencode','cli','bin','opencode.exe');
+    const unrelatedExe=join(localAppData,'PTYSDNativeBridge','other-cli-v2',
+      'node_modules','@opencode','cli','bin','opencode.exe');
+    mkdirSync(home);
+    mkdirSync(join(officialExe,'..'),{recursive:true});
+    mkdirSync(join(unrelatedExe,'..'),{recursive:true});
+    writeFileSync(officialExe,'official staged OpenCode CLI');
+    writeFileSync(unrelatedExe,'unrelated CLI');
+    const env={PATH:'',USERPROFILE:home,LOCALAPPDATA:localAppData};
+    assert.deepEqual(discoverV2Executables(env,true),[officialExe],
+      'only the fixed per-user official CLI package path is discovered');
+
+    const calls=[];
+    const accepted=qualifyOpenCodeV2(env,true,(path,args)=>{
+      calls.push(['version',path,args]);return 'opencode v2.2.5';
+    },path=>{
+      calls.push(['signature',path]);return path===officialExe;
+    });
+    assert.equal(accepted.ready,true);
+    assert.equal(accepted.bin,officialExe);
+    assert.equal(accepted.version,'2.2.5');
+    assert.deepEqual(calls,[['signature',officialExe],['version',officialExe,['--version']]]);
+
+    let unsignedExecuted=false;
+    const unsigned=qualifyOpenCodeV2(env,true,
+      ()=>{unsignedExecuted=true;return 'opencode v2.2.5';},()=>false);
+    assert.equal(unsigned.ready,false);
+    assert.equal(unsigned.reason,'OPEN_CODE_V2_NOT_FOUND');
+    assert.equal(unsignedExecuted,false,'an unsigned staged executable is never run');
+  } finally {rmSync(tmp,{recursive:true,force:true});}
+});
 test('Windows V2 profile LocalAppData fallback retains signature and minimum-version gates', () => {
   const tmp=mkdtempSync(join(tmpdir(),'oc2-profile-policy-'));
   try {
