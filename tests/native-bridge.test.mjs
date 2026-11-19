@@ -16,7 +16,7 @@ import { parseJob, selectNext, parseReceipt, parseCodexSourceAcceptance, receipt
   writePathsOverlap,
   publishOperatorObservation, buildOpenCodeChildEnv, nativePreflight, derivePollDisposition,
   isRecoverableModelPreflightWait, readVerifiedCodexSourceAcceptances,
-  parseWorkflowPathFilters, SOURCE_ACCEPTANCE_WORKFLOWS }
+  parseWorkflowPathFilters, SOURCE_ACCEPTANCE_WORKFLOWS, readSpec }
   from '../native-bridge/worker.mjs';
 import { OPERATOR_MARKER, OPERATOR_COMMENT_ID, encodeOperatorObservation, parseOperatorObservation }
   from '../native-bridge/operator-observation.mjs';
@@ -29,6 +29,39 @@ import { ANTIGRAVITY_V2_MODEL, buildAntigravityChildEnvironment, buildNativeChil
   readAntigravityV2RunEvidence }
   from '../native-bridge/v2-readiness.mjs';
 import { diffCaptureErrorEvidence } from '../native-bridge/safe-error-code.mjs';
+
+test('Worker reads a pinned Markdown spec when only Windows checkout line endings differ', () => {
+  const sourceSha = 'a'.repeat(40);
+  const path = 'native-bridge/tasks/line-ending-contract.md';
+  const remoteBytes = Buffer.from('# Authorized scope\nOne exact path.\n', 'utf8');
+  const windowsBytes = Buffer.from('# Authorized scope\r\nOne exact path.\r\n', 'utf8');
+  const expectedSha = createHash('sha256').update(windowsBytes).digest('hex');
+  const apiRead = route => {
+    assert.equal(route, `repos/${REPO}/contents/${path}?ref=${sourceSha}`);
+    return { encoding: 'base64', content: remoteBytes.toString('base64') };
+  };
+  const job = { spec_path: path, source_sha: sourceSha, spec_sha256: expectedSha };
+
+  const spec = readSpec(job, apiRead);
+  assert.equal(spec, windowsBytes.toString('utf8'));
+  assert.equal(createHash('sha256').update(Buffer.from(spec, 'utf8')).digest('hex'), expectedSha);
+});
+
+test('Worker still rejects changed, mixed-line-ending, and non-Markdown specs', () => {
+  const sourceSha = 'b'.repeat(40);
+  const path = 'native-bridge/tasks/line-ending-contract.md';
+  const expectedBytes = Buffer.from('# Authorized scope\r\nOne exact path.\r\n', 'utf8');
+  const expectedSha = createHash('sha256').update(expectedBytes).digest('hex');
+  const read = (specPath, bytes) => readSpec({ spec_path: specPath, source_sha: sourceSha,
+    spec_sha256: expectedSha }, () => ({ encoding: 'base64', content: bytes.toString('base64') }));
+
+  assert.throws(() => read(path, Buffer.from('# Changed scope\nOne exact path.\n', 'utf8')),
+    /SPEC_HASH_MISMATCH/);
+  assert.throws(() => read(path, Buffer.from('# Authorized scope\r\nOne exact path.\n', 'utf8')),
+    /SPEC_HASH_MISMATCH/);
+  assert.throws(() => read('native-bridge/tasks/line-ending-contract.txt',
+    Buffer.from('# Authorized scope\nOne exact path.\n', 'utf8')), /SPEC_HASH_MISMATCH/);
+});
 
 test('Worker diff catches retain safe diagnostics and fail closed with synthetic processes', async () => {
   const root = mkdtempSync(join(homedir(), '.ptysd-worker-diff-catch-'));
