@@ -4,10 +4,10 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, existsSync, lstatSync, mkdirSync,
-  openSync, closeSync, ftruncateSync, readFileSync, readdirSync, renameSync, writeFileSync,
-  writeSync, fsyncSync, unlinkSync, fstatSync } from 'node:fs';
+  mkdtempSync, openSync, closeSync, ftruncateSync, readFileSync, readdirSync, renameSync,
+  rmSync, writeFileSync, writeSync, fsyncSync, unlinkSync, fstatSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { uptime } from 'node:os';
+import { tmpdir, uptime } from 'node:os';
 import { dirname, join, relative, resolve, isAbsolute, parse, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readWindowsProcessTree, runCapturedProcess, terminateProcessTree }
@@ -383,21 +383,46 @@ export async function runCodex(request, config, worktree, evidenceDir, deps = {}
   // validated attempt_id, before output and credential-isolation paths exist.
   const validatedRequest = validateCodexExecutorRequest(request);
   const job = validatedRequest.job;
-  const args = buildCodexExecArgs(job, worktree, request.attempt_id);
+  const sourceEnvironment = deps.environment || process.env;
+  const temporaryBase = sourceEnvironment.TEMP || sourceEnvironment.TMP || tmpdir();
+  if (!isAbsolute(temporaryBase)) throw new Error('CODEX_TEMP_ROOT_INVALID');
+  const temporaryRoot = mkdtempSync(join(temporaryBase, `pty-codex-${request.attempt_id}-`));
+  const childEnvironment = { ...sourceEnvironment, TEMP: temporaryRoot, TMP: temporaryRoot };
+  let capture = null;
+  let captureStarted = false;
+  let temporaryDirectoryCleanup = 'UNKNOWN';
   const outPath = join(evidenceDir, `${job.request_id}-${request.attempt_id}.stdout.jsonl`);
   const errPath = join(evidenceDir, `${job.request_id}-${request.attempt_id}.stderr.txt`);
-  // Do not expose a Publisher's stored gh configuration to the model process.
-  const { env } = buildCodexChildEnvironment(request, evidenceDir, deps.environment || process.env);
-  const capture = await (deps.captureProcess || runCapturedProcess)(config.codex_executable, args, {
-    cwd: worktree, env, stdoutPath: outPath, stderrPath: errPath,
-    stdinText: codexExecutorPrompt(validatedRequest),
-    spawnProcess: deps.spawnProcess || spawn,
-    terminate: deps.terminate || terminateProcessTree,
-    platformName: deps.platformName,
-    readProcessTree: deps.readProcessTree,
-    beforeSpawn: deps.beforeSpawn,
-    onSpawn: deps.onProcessSpawn,
-  });
+  try {
+    const args = buildCodexExecArgs(job, worktree, request.attempt_id, childEnvironment);
+    // Do not expose a Publisher's stored gh configuration to the model process.
+    const { env } = buildCodexChildEnvironment(request, evidenceDir, childEnvironment);
+    captureStarted = true;
+    capture = await (deps.captureProcess || runCapturedProcess)(config.codex_executable, args, {
+      cwd: worktree, env, stdoutPath: outPath, stderrPath: errPath,
+      stdinText: codexExecutorPrompt(validatedRequest),
+      spawnProcess: deps.spawnProcess || spawn,
+      terminate: deps.terminate || terminateProcessTree,
+      platformName: deps.platformName,
+      readProcessTree: deps.readProcessTree,
+      beforeSpawn: deps.beforeSpawn,
+      onSpawn: deps.onProcessSpawn,
+    });
+  } finally {
+    const processMayStillUseTemp = captureStarted && (!capture ||
+      ['ORPHAN_POSSIBLE', 'TERMINATION_REQUESTED', 'TERMINATION_UNCONFIRMED']
+        .includes(capture.local_evidence?.termination_state));
+    if (processMayStillUseTemp) {
+      temporaryDirectoryCleanup = 'PRESERVED_PROCESS_STATE_UNKNOWN';
+    } else {
+      try {
+        (deps.removeTempDirectory || rmSync)(temporaryRoot, { recursive: true, force: true });
+        temporaryDirectoryCleanup = 'REMOVED';
+      } catch {
+        temporaryDirectoryCleanup = 'FAILED';
+      }
+    }
+  }
   const evidence = capture.local_evidence;
   let evidenceReadError = null;
   let executionEvidence = { session_id: null, provider_usage_evidence: 'UNKNOWN',
@@ -416,6 +441,7 @@ export async function runCodex(request, config, worktree, evidenceDir, deps = {}
   const terminationUnknown = ['ORPHAN_POSSIBLE', 'TERMINATION_REQUESTED', 'TERMINATION_UNCONFIRMED']
     .includes(evidence.termination_state);
   const outcome = terminationUnknown ? 'CODEX_PROCESS_TERMINATION_FAILED' :
+    temporaryDirectoryCleanup === 'FAILED' ? 'CODEX_TEMP_CLEANUP_FAILED' :
     evidenceReadError ? evidenceReadError :
       capture.outcome === 'EVIDENCE_STORAGE_FAILED' ? 'CODEX_EVIDENCE_STORAGE_FAILED' :
       capture.outcome === 'OUTPUT_CAPTURE_FAILED' ? 'CODEX_OUTPUT_CAPTURE_FAILED' :
@@ -439,8 +465,10 @@ export async function runCodex(request, config, worktree, evidenceDir, deps = {}
     stdout_path: outPath, stderr_path: errPath,
     stdout_sha256: evidence.stdout_sha256, stderr_sha256: evidence.stderr_sha256,
     stdout_bytes: evidence.stdout_bytes, stderr_bytes: evidence.stderr_bytes,
-    input_error: evidence.stdin_error, capture_error: evidence.capture_error ?? evidenceReadError,
+    input_error: evidence.stdin_error, capture_error: evidence.capture_error ??
+      (temporaryDirectoryCleanup === 'FAILED' ? 'CODEX_TEMP_CLEANUP_FAILED' : evidenceReadError),
     storage_error: evidence.storage_error, termination_state: evidence.termination_state,
+    temporary_directory_cleanup: temporaryDirectoryCleanup,
     termination_error: evidence.termination_error,
     process_tree_state: evidence.process_tree_state,
     process_tree_error: evidence.process_tree_error,
@@ -1073,8 +1101,11 @@ export async function runExecutorOnce(config, deps = {}) {
       file_change_tool_completed_count: execution.file_change_tool_completed_count ?? 0,
       file_change_tool_failed_count: execution.file_change_tool_failed_count ?? 0,
       file_change_tool_incomplete_count: execution.file_change_tool_incomplete_count ?? 0,
-      input_error: execution.input_error, capture_error: execution.capture_error,
+      input_error: execution.input_error,
+      capture_error: execution.capture_error ??
+        (execution.temporary_directory_cleanup === 'FAILED' ? 'CODEX_TEMP_CLEANUP_FAILED' : null),
       storage_error: execution.storage_error, termination_state: execution.termination_state,
+      temporary_directory_cleanup: execution.temporary_directory_cleanup ?? 'UNKNOWN',
       termination_error: execution.termination_error,
       process_tree_state: execution.process_tree_state,
       process_tree_error: execution.process_tree_error,

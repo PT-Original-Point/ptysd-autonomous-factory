@@ -5,12 +5,13 @@ import { createHash } from 'node:crypto';
 import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync,
   writeFileSync } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JOB_MARKER, PROJECT, RECEIPT_MARKER, REPO, parseReceipt, receipt, runWorker,
   captureScopedEditDiff, verifyCapturedEvidence, runPlan } from '../native-bridge/worker.mjs';
 import { executePendingManifest } from '../native-bridge/executor.mjs';
-import { buildCodexChildEnvironment } from '../native-bridge/codex-executor.mjs';
+import { buildCodexChildEnvironment, runCodex } from '../native-bridge/codex-executor.mjs';
+import { codexTaskFingerprint } from '../native-bridge/codex-continuation.mjs';
 import { safeErrorCode } from '../native-bridge/safe-error-code.mjs';
 import {
   assertExecutorTaskReady, buildExecutorTaskXml, claimPendingManifest,
@@ -139,6 +140,111 @@ test('Codex child isolates publisher credentials and the desktop AppX selector',
     const header = spawnSync('git', ['config', '--get-urlmatch', 'http.extraheader',
       'https://github.com'], { cwd: repoDir, env, encoding: 'utf8', windowsHide: true });
     assert.equal(header.stdout.trim(), '', 'a repository-local publisher header must be cleared');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Codex run gives the CLI one attempt-scoped temp write root and removes it after known exit', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pty-codex-temp-scope-test-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const evidenceDir = join(root, 'evidence');
+    const hostTemp = join(root, 'host-temp');
+    mkdirSync(workspace);
+    mkdirSync(evidenceDir);
+    mkdirSync(hostTemp);
+    const spec = 'Synthetic test only; do not invoke a model.';
+    const job = {
+      schema: 3, project_id: PROJECT, host: hostname().toUpperCase(),
+      request_id: 'PTYSD_TEMP_SCOPE_TEST', kind: 'codex_plan', source_sha: 'a'.repeat(40),
+      spec_path: 'native-bridge/tasks/read-only-check.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gpt-6-luna', reasoning_effort: 'max', write_paths: ['native-bridge/sample.mjs'],
+    };
+    const request = {
+      schema: 1, kind: 'codex_plan', request_id: job.request_id,
+      source_sha: job.source_sha, attempt_id: ATTEMPT, job,
+      fingerprint: codexTaskFingerprint(job), spec_base64: Buffer.from(spec).toString('base64'),
+      bundle_path: join(root, 'source.bundle'), bundle_sha256: 'b'.repeat(64),
+    };
+    let attemptedTempRoot = null;
+    const result = await runCodex(request, { codex_executable: 'codex-test' }, workspace, evidenceDir, {
+      environment: { ...process.env, TEMP: hostTemp, TMP: hostTemp },
+      captureProcess: async (_executable, args, options) => {
+        attemptedTempRoot = options.env.TEMP;
+        assert.equal(options.env.TMP, attemptedTempRoot);
+        assert.notEqual(attemptedTempRoot, hostTemp,
+          'the child gets a unique per-attempt directory, not the shared user temp root');
+        assert.equal(dirname(attemptedTempRoot), hostTemp,
+          'the per-attempt directory is created only under the effective host temp root');
+        assert.equal(existsSync(attemptedTempRoot), true);
+        const filesystemProfile = args.find(value => value.startsWith('permissions.') &&
+          value.includes('.filesystem={'));
+        const tempEntryIndex = filesystemProfile?.indexOf(basename(attemptedTempRoot)) ?? -1;
+        assert.notEqual(tempEntryIndex, -1,
+          'the exact CLI permission profile includes the attempt temp root');
+        assert.match(filesystemProfile.slice(tempEntryIndex + basename(attemptedTempRoot).length),
+          /^"="write"/, 'the attempt temp root receives write access');
+        const probe = join(attemptedTempRoot, 'node-test-temp-probe.txt');
+        writeFileSync(probe, 'temporary test data');
+        assert.equal(readFileSync(probe, 'utf8'), 'temporary test data');
+        rmSync(probe);
+        return {
+          exit_code: 1, outcome: 'OPENCODE_PROCESS_FAILED',
+          local_evidence: {
+            storage_error: null, capture_error: 'SYNTHETIC_NO_CHILD_PROCESS',
+            termination_state: 'EXITED', exit_signal: null, stdout_sha256: null,
+            stdout_bytes: 0, stderr_sha256: null, stderr_bytes: 0, stdin_error: null,
+            termination_error: null, process_tree_state: 'EXITED', process_tree_error: null,
+          },
+        };
+      },
+    });
+    assert.equal(result.temporary_directory_cleanup, 'REMOVED');
+    assert.equal(existsSync(attemptedTempRoot), false,
+      'a known-exited attempt leaves no temp directory behind');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Codex run fails closed when its attempt-scoped temp directory cannot be removed', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pty-codex-temp-cleanup-test-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const evidenceDir = join(root, 'evidence');
+    const hostTemp = join(root, 'host-temp');
+    mkdirSync(workspace);
+    mkdirSync(evidenceDir);
+    mkdirSync(hostTemp);
+    const spec = 'Synthetic test only; do not invoke a model.';
+    const job = {
+      schema: 3, project_id: PROJECT, host: hostname().toUpperCase(),
+      request_id: 'PTYSD_TEMP_CLEANUP_TEST', kind: 'codex_plan', source_sha: 'a'.repeat(40),
+      spec_path: 'native-bridge/tasks/read-only-check.md',
+      spec_sha256: createHash('sha256').update(spec).digest('hex'),
+      model: 'gpt-6-luna', reasoning_effort: 'max', write_paths: ['native-bridge/sample.mjs'],
+    };
+    const request = {
+      schema: 1, kind: 'codex_plan', request_id: job.request_id,
+      source_sha: job.source_sha, attempt_id: ATTEMPT, job,
+      fingerprint: codexTaskFingerprint(job), spec_base64: Buffer.from(spec).toString('base64'),
+      bundle_path: join(root, 'source.bundle'), bundle_sha256: 'b'.repeat(64),
+    };
+    const result = await runCodex(request, { codex_executable: 'codex-test' }, workspace, evidenceDir, {
+      environment: { ...process.env, TEMP: hostTemp, TMP: hostTemp },
+      captureProcess: async () => ({
+        exit_code: 0, outcome: 'CODEX_EXEC_OK',
+        local_evidence: {
+          storage_error: null, capture_error: null, termination_state: 'EXITED', exit_signal: null,
+          stdout_sha256: '0'.repeat(64), stdout_bytes: 0, stderr_sha256: '1'.repeat(64),
+          stderr_bytes: 0, stdin_error: null, termination_error: null,
+          process_tree_state: 'EXITED', process_tree_error: null,
+        },
+      }),
+      removeTempDirectory: () => { throw new Error('synthetic cleanup denial'); },
+    });
+    assert.equal(result.temporary_directory_cleanup, 'FAILED');
+    assert.equal(result.outcome, 'CODEX_TEMP_CLEANUP_FAILED',
+      'cleanup failure must prevent a nominally successful terminal outcome');
+    assert.equal(result.capture_error, 'CODEX_TEMP_CLEANUP_FAILED');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
