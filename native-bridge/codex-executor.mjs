@@ -341,6 +341,8 @@ async function qualifyCodex(config) {
 
 export function buildCodexChildEnvironment(request, evidenceDir, source = process.env) {
   const env = {};
+  // The scheduled CLI child is not launched inside the desktop MSIX package.
+  // Keep the AppX registered-Core selector out of its allowlisted environment.
   for (const name of ['PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE',
     'LOCALAPPDATA', 'APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'CODEX_HOME', 'COMSPEC',
     'PROCESSOR_ARCHITECTURE', 'PROCESSOR_ARCHITEW6432']) {
