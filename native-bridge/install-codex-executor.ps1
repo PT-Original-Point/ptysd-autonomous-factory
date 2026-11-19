@@ -83,6 +83,29 @@ function Assert-CodexExecutorInstallPathChain([string]$Path) {
     }
 }
 
+function Test-CodexExecutorOfficialAppxCliPath([string]$Path) {
+    if (-not $Path -or [IO.Path]::GetFileName($Path) -ine 'codex.exe') { return $false }
+    try {
+        $candidate = [IO.Path]::GetFullPath($Path)
+        $packages = @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction Stop)
+        if ($packages.Count -ne 1) { return $false }
+        $package = $packages[0]
+        if ($package.Name -cne 'OpenAI.Codex' -or
+            $package.PackageFamilyName -cne 'OpenAI.Codex_2p2nqsd0c76g0' -or
+            [string]$package.Status -cne 'Ok' -or
+            [string]::IsNullOrWhiteSpace([string]$package.InstallLocation)) {
+            return $false
+        }
+        $packageRoot = [IO.Path]::GetFullPath([string]$package.InstallLocation)
+        $expected = [IO.Path]::GetFullPath((Join-Path $packageRoot 'app\resources\codex.exe'))
+        return [string]::Equals($candidate, $expected, [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        # Package discovery is an additional trust boundary. An unavailable or
+        # ambiguous AppX registration must never widen the executable allowlist.
+        return $false
+    }
+}
+
 function Assert-CodexExecutorTransitionAcl([string]$Path) {
     $target = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
     $writeMask = [int]([System.Security.AccessControl.FileSystemRights]::Write -bor
@@ -1072,8 +1095,14 @@ function Invoke-CodexExecutorCliPinRefresh([string]$NewCodexExecutable, [switch]
     if ([IO.Path]::GetFileName($newCodexPath) -ine 'codex.exe') { throw 'CODEX_EXECUTABLE_PATH_NOT_QUALIFIED' }
     $localCodexBin = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'))
     $codexBinDirectory = Split-Path -Parent (Split-Path -Parent $newCodexPath)
-    if (-not [string]::Equals([IO.Path]::GetFullPath($codexBinDirectory), $localCodexBin,
-        [StringComparison]::OrdinalIgnoreCase)) { throw 'CODEX_EXECUTABLE_MUST_BE_OFFICIAL_LOCAL_CODEX' }
+    $officialLocalCodexInstall = [string]::Equals([IO.Path]::GetFullPath($codexBinDirectory), $localCodexBin,
+        [StringComparison]::OrdinalIgnoreCase)
+    $officialAppxCodexInstall = if ($officialLocalCodexInstall) { $false } else {
+        Test-CodexExecutorOfficialAppxCliPath $newCodexPath
+    }
+    if (-not ($officialLocalCodexInstall -or $officialAppxCodexInstall)) {
+        throw 'CODEX_EXECUTABLE_MUST_BE_OFFICIAL_LOCAL_CODEX'
+    }
     Assert-CodexExecutorInstallPathChain $newCodexPath
     $signature = Get-AuthenticodeSignature -FilePath $newCodexPath
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'OpenAI OpCo, LLC') {

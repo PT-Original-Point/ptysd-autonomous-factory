@@ -40,6 +40,7 @@ $global:MockFailureInjected = $false
 $global:MockAclStore = @{}
 $global:MockProgramDataAcl = New-Object System.Security.AccessControl.DirectorySecurity
 $global:MockBadSignaturePath = ''
+$global:MockAppxPackages = @()
 $global:MockTaskNotFoundThrows = $true
 $global:MockReadbackPrincipalUserId = $null
 $global:MockNullReadbackTriggers = $false
@@ -265,6 +266,13 @@ function global:Get-AuthenticodeSignature {
         return [pscustomobject]@{ Status = 'NotSigned'; SignerCertificate = $null }
     }
     return [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=OpenAI OpCo, LLC' } }
+}
+
+function global:Get-AppxPackage {
+    [CmdletBinding()]
+    param([string]$Name)
+    if ($Name -cne 'OpenAI.Codex') { throw ('UNEXPECTED_APPX_PACKAGE_QUERY: ' + $Name) }
+    return @($global:MockAppxPackages)
 }
 
 function global:Set-Acl {
@@ -1223,6 +1231,46 @@ try {
         (Get-TestByteSha256 $transitionConfigBytes) 'config backup is byte-identical to the original'
     Assert-Equal (Get-FileHash -LiteralPath $backedUpManifest[-1].FullName -Algorithm SHA256).Hash.ToLowerInvariant() `
         (Get-TestByteSha256 $transitionManifestBytes) 'install-state backup is byte-identical to the original'
+
+    # The current Desktop MSIX owns the signed CLI under WindowsApps. Refresh
+    # may pin that exact registered package path, but must reject other AppX
+    # identities and keep model execution disabled.
+    $appxRoot = Join-Path $testRoot 'appx\OpenAI.Codex_26.1111.9664.0_x64__2p2nqsd0c76g0'
+    $appxCodexPath = Join-Path $appxRoot 'app\resources\codex.exe'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $appxCodexPath) -Force | Out-Null
+    [IO.File]::WriteAllText($appxCodexPath, 'synthetic signed Desktop package CLI')
+    $global:MockAppxPackages = @([pscustomobject]@{
+        Name='OpenAI.Codex'; PackageFamilyName='OpenAI.Codex_2p2nqsd0c76g0'; Status='Ok'; InstallLocation=$appxRoot
+    })
+    Remove-Item -LiteralPath $global:MockCodexRefreshPath -Force
+    $appxRefreshOutput = & $installerPath -Mode RefreshCodexCli -ExecutionPhase WIN11_TRANSITION `
+        -CodexExecutable $appxCodexPath 2>$null
+    if (@($appxRefreshOutput | Where-Object { $_ -like 'CODEX_CLI_PIN_REFRESH=SUCCESS;*' }).Count -ne 1) {
+        throw 'CODEX_CLI_REFRESH_VALID_OPENAI_APPX_PATH_REJECTED'
+    }
+    $appxRefreshedConfig = Get-Content -LiteralPath $transitionConfigPath -Raw | ConvertFrom-Json
+    Assert-Equal $appxRefreshedConfig.codex_executable $appxCodexPath `
+        'refresh accepts only the exact registered OpenAI Codex package CLI path'
+    Assert-Equal $appxRefreshedConfig.enable_codex_model_runs $false `
+        'AppX CLI refresh keeps model execution disabled'
+    Assert-Equal $appxRefreshedConfig.codex_usage_authorized $false `
+        'AppX CLI refresh keeps usage authorization disabled'
+
+    [IO.File]::WriteAllBytes($transitionConfigPath, $transitionConfigBytes)
+    [IO.File]::WriteAllBytes($transitionState, $transitionManifestBytes)
+    $appxConfigBeforeReject = [IO.File]::ReadAllBytes($transitionConfigPath)
+    $appxManifestBeforeReject = [IO.File]::ReadAllBytes($transitionState)
+    $global:MockAppxPackages = @([pscustomobject]@{
+        Name='OpenAI.Codex'; PackageFamilyName='OpenAI.Codex_OTHER'; Status='Ok'; InstallLocation=$appxRoot
+    })
+    $null = Invoke-CliRefreshAttempt 'CODEX_EXECUTABLE_MUST_BE_OFFICIAL_LOCAL_CODEX' $appxCodexPath
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($appxConfigBeforeReject)) 'foreign AppX identity cannot change the executor config'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionState))) `
+        ([BitConverter]::ToString($appxManifestBeforeReject)) 'foreign AppX identity cannot change the install manifest'
+    $global:MockAppxPackages = @()
+    New-Item -ItemType Directory -Path (Split-Path -Parent $global:MockCodexRefreshPath) -Force | Out-Null
+    [IO.File]::WriteAllText($global:MockCodexRefreshPath, 'synthetic signed refreshed Codex CLI')
 
     $runtimeModuleName = 'captured-process.mjs'
     $runtimeModulePath = Join-Path $global:MockRuntime $runtimeModuleName
