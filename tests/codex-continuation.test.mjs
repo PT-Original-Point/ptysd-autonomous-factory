@@ -6,7 +6,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync,
   writeFileSync } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 import { runCapturedProcess } from '../native-bridge/captured-process.mjs';
 import {
@@ -534,7 +534,9 @@ test('claim can be released only for the exact attempt before publication', () =
 
 test('Codex CLI args bind writes to exact task paths with native permissions and no shell or fallback', () => {
   const attemptId = '00000000-0000-0000-0000-000000000021';
-  const args = buildCodexExecArgs(job(), 'C:\\isolated\\attempt', attemptId);
+  const temporaryRoots = ['C:/Users/x/AppData/Local/Temp', 'D:/PTYSD-Temp'];
+  const args = buildCodexExecArgs(job(), 'C:\\isolated\\attempt', attemptId,
+    { TEMP: temporaryRoots[0], TMP: temporaryRoots[1] });
   const rawConfigs = args.flatMap((value, index) => value === '--config' ? [args[index + 1]] : []);
   const configs = rawConfigs.map(value => value.replace(/pty_exact_scope_[0-9a-f]{32}/g, 'pty_exact_scope'));
   assert.equal(args[0], 'exec');
@@ -551,7 +553,14 @@ test('Codex CLI args bind writes to exact task paths with native permissions and
   assert.equal(rawConfigs.includes('default_permissions="pty_exact_scope"'), false);
   assert.equal(rawConfigs.some(value => value.includes('permissions.pty_exact_scope.filesystem')), false,
     'the reusable profile name must never be selected for an execution');
-  assert.equal(configs.includes('permissions.pty_exact_scope.filesystem={":minimal"="read","C:\\\\isolated\\\\attempt"="read","C:\\\\isolated\\\\attempt\\\\native-bridge\\\\sample.mjs"="write"}'), true);
+  const expectedFilesystem = [
+    [':minimal', 'read'],
+    [win32.resolve('C:/isolated/attempt'), 'read'],
+    ...temporaryRoots.map(path => [win32.resolve(path), 'write']),
+    [win32.resolve('C:/isolated/attempt/native-bridge/sample.mjs'), 'write'],
+  ].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(',');
+  assert.equal(configs.includes(`permissions.pty_exact_scope.filesystem={${expectedFilesystem}}`), true,
+    'each TEMP/TMP directory is writable for tests while the workspace root remains read-only');
   assert.equal(configs.includes('permissions.pty_exact_scope.network.enabled=false'), true);
   assert.equal(configs.includes('permissions.pty_exact_scope.filesystem={":minimal"="read","C:\\\\isolated\\\\attempt"="write"}'), false,
     'the workspace root must stay read-only');
@@ -563,6 +572,10 @@ test('Codex CLI args bind writes to exact task paths with native permissions and
     'a different attempt must not reuse another attempt profile');
   assert.throws(() => buildCodexExecArgs(job(), 'C:\\isolated\\attempt'), /INVALID_ATTEMPT_ID/);
   assert.throws(() => buildCodexExecArgs(job(), 'C:\\isolated\\attempt', 'bad-profile'), /INVALID_ATTEMPT_ID/);
+  assert.throws(() => buildCodexExecArgs(job(), 'C:\\isolated\\attempt', attemptId,
+    { TEMP: 'relative-temp', TMP: temporaryRoots[1] }), /CODEX_TEMP_ROOT_INVALID/);
+  assert.throws(() => buildCodexExecArgs(job(), 'C:\\isolated\\attempt', attemptId,
+    { TEMP: 'C:/', TMP: temporaryRoots[1] }), /CODEX_TEMP_ROOT_CONTAINS_WORKSPACE/);
   const reasoningArgs = buildCodexExecArgs(job({ reasoning_effort: 'model-defined-tier-7' }),
     'C:\\isolated\\attempt', attemptId);
   const reasoningConfigs = reasoningArgs.flatMap((value, index) =>
@@ -2252,7 +2265,8 @@ test('Codex executor reports saved only after exact result readback and never re
           outcome: 'CODEX_SPAWN_FAILED', stdout_sha256: '0'.repeat(64),
           stderr_sha256: '1'.repeat(64), stdout_bytes: 0, stderr_bytes: 0,
           input_error: null, capture_error: null, storage_error: null,
-          termination_state: 'NOT_REQUESTED', termination_error: null };
+          termination_state: 'NOT_REQUESTED', temporary_directory_cleanup: 'REMOVED',
+          termination_error: null };
       },
       readResultFile: path => {
         const persisted = JSON.parse(readFileSync(path, 'utf8'));
@@ -2265,7 +2279,10 @@ test('Codex executor reports saved only after exact result readback and never re
       error => error.message === 'CODEX_RESULT_READBACK_MISMATCH');
     assert.equal(executions, 1);
     assert.ok(existsSync(resultPath), 'the uncertain result stays available for publisher reconciliation');
-    assert.equal(JSON.parse(readFileSync(resultPath, 'utf8')).outcome, 'CODEX_SPAWN_FAILED');
+    const saved = JSON.parse(readFileSync(resultPath, 'utf8'));
+    assert.equal(saved.outcome, 'CODEX_SPAWN_FAILED');
+    assert.equal(saved.temporary_directory_cleanup, 'REMOVED',
+      'the terminal receipt preserves exact temp cleanup readback');
 
     const retry = await runExecutorOnce(config, deps);
     assert.equal(retry.state, 'IDLE');

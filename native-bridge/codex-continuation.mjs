@@ -4,6 +4,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, openSync, writeFileSync, fsyncSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join, isAbsolute, relative, resolve, sep, win32 } from 'node:path';
+import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { buildHiddenWscriptArguments, getCurrentWindowsSid, validateWindowsTaskAction }
   from './windows-executor.mjs';
@@ -333,7 +334,7 @@ export function releaseCodexAttempt(job, claimed) {
   return true;
 }
 
-export function buildCodexExecArgs(job, workspace, attemptId) {
+export function buildCodexExecArgs(job, workspace, attemptId, environment = process.env) {
   if (!parseCodexJob(`PTYSD_NATIVE_JOB_V1\n${JSON.stringify(job)}`)) throw new Error('INVALID_CODEX_JOB');
   if (typeof workspace !== 'string' || !workspace) throw new Error('WORKSPACE_REQUIRED');
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(attemptId || ''))
@@ -351,6 +352,22 @@ export function buildCodexExecArgs(job, workspace, attemptId) {
       throw new Error('CODEX_WRITE_SCOPE_PATH_INVALID');
     return fullPath;
   });
+  const rawTemporaryRoots = [environment?.TEMP, environment?.TMP]
+    .filter(value => typeof value === 'string' && value.trim());
+  if (!rawTemporaryRoots.length) rawTemporaryRoots.push(tmpdir());
+  const temporaryRoots = new Map();
+  for (const value of rawTemporaryRoots) {
+    if (!isAbsolutePath(value)) throw new Error('CODEX_TEMP_ROOT_INVALID');
+    const temporaryRoot = resolvePath(value);
+    const relativeWorkspace = relativePath(temporaryRoot, root);
+    if (!relativeWorkspace ||
+        (relativeWorkspace !== '..' && !relativeWorkspace.startsWith(`..${pathSeparator}`) &&
+         !isAbsolutePath(relativeWorkspace))) {
+      throw new Error('CODEX_TEMP_ROOT_CONTAINS_WORKSPACE');
+    }
+    const key = windowsPath ? temporaryRoot.toLowerCase() : temporaryRoot;
+    temporaryRoots.set(key, temporaryRoot);
+  }
   // Project config is loaded for trusted workspaces. Give each execution a
   // fresh profile name so repository config cannot widen this attempt by
   // contributing additional rules to a predictable shared profile.
@@ -358,6 +375,7 @@ export function buildCodexExecArgs(job, workspace, attemptId) {
   const filesystem = [
     [':minimal', 'read'],
     [root, 'read'],
+    ...[...temporaryRoots.values()].map(path => [path, 'write']),
     ...scopedPaths.map(path => [path, 'write']),
   ].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(',');
   const config = [
