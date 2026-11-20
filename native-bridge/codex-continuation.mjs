@@ -433,9 +433,8 @@ export function buildCodexExecArgs(job, workspace, attemptId, environment = proc
   // Validate each requested path before launch. The executor creates a fresh
   // clone for this attempt and accepts only this exact path set afterward.
   return ['exec', '--json', '--ignore-user-config', '--strict-config', '--model', job.model,
-    // The built-in MxC profile supports Node/Windows path resolution and
-    // atomic edits inside the unique attempt clone. Exact write_paths remain
-    // the publication boundary in the native executor.
+    // Keep the native Codex Executor's existing Windows sandbox setting.
+    // This selects its configured mode without making a safety claim.
     '--sandbox', 'workspace-write',
     // Scheduled execution cannot answer approval prompts. Keep outbound
     // network disabled and do not bypass the native sandbox.

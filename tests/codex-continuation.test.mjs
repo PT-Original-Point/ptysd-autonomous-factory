@@ -8,7 +8,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { homedir, hostname, tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
-import { runCapturedProcess } from '../native-bridge/captured-process.mjs';
+import { readWindowsProcessTree, runCapturedProcess } from '../native-bridge/captured-process.mjs';
 import {
   CODEX_JOB_KEYS, CODEX_HUMAN_GOAL_JOB_KEYS, CODEX_HUMAN_GOAL_SPEC_PATH,
   NATIVE_JOB_MARKER, parseCodexJob, parseCodexReceipt,
@@ -600,7 +600,7 @@ test('claim can be released only for the exact attempt before publication', () =
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('Codex CLI args use native workspace-write only inside an isolated attempt clone', () => {
+test('Codex CLI args select workspace-write and bound isolated attempt temp roots', () => {
   const attemptId = '00000000-0000-0000-0000-000000000021';
   const temporaryRoots = ['C:/Users/x/AppData/Local/Temp', 'D:/PTYSD-Temp'];
   const args = buildCodexExecArgs(job(), 'C:\\isolated\\attempt', attemptId,
@@ -627,8 +627,11 @@ test('Codex CLI args use native workspace-write only inside an isolated attempt 
     win32.resolve(temporaryRoots[0]))}`), true);
   assert.equal(rawConfigs.includes(`shell_environment_policy.set.TMP=${JSON.stringify(
     win32.resolve(temporaryRoots[1]))}`), true);
+  assert.equal(rawConfigs.includes('features.prefer_mxc=true'), false,
+    'scheduled execution does not enable the experimental preference feature');
   assert.equal(rawConfigs.includes('windows.sandbox=mxc'), true,
-    'scheduled execution uses the qualified Windows sandbox backend');
+    'scheduled execution retains the native Codex Executor Windows sandbox setting');
+  assert.equal(rawConfigs.includes('windows.sandbox=unelevated'), false);
   assert.equal(args[args.indexOf('-C') + 1], 'C:\\isolated\\attempt');
   assert.equal(rawConfigs.some(value => value.startsWith('default_permissions=')), false,
     'the failed custom MxC permission profile is not selected');
@@ -3021,7 +3024,12 @@ test('executor serializes competing stale-lock recovery before archiving a live 
 
 test('Windows CIM readback retains a live model process tree and clears an absent one', {
   skip: process.platform !== 'win32',
-}, async () => {
+}, async t => {
+  const capability = readWindowsProcessTree(process.pid);
+  if (capability.state !== 'ALIVE' || !capability.process_ids.includes(process.pid)) {
+    t.skip(`Windows CIM process-tree readback unavailable: ${capability.error || capability.state}`);
+    return;
+  }
   const dir = mkdtempSync(join(tmpdir(), 'pty-codex-win32-tree-readback-'));
   try {
     const locks = join(dir, 'locks');
@@ -3311,7 +3319,7 @@ test('schema-4 Codex claim stays unresolved while the exact schema-6 W1 lane is 
 });
 
 test('runWorker dispatches the exact schema-6 W1 lane once while the schema-4 Codex gate waits', async () => {
-  const base = mkdtempSync(join(homedir(), 'pty-w1-schema6-lane-'));
+  const base = mkdtempSync(join(process.cwd(), '.tmp-pty-w1-schema6-lane-'));
   const workspace = join(base, 'workspace');
   const stateDir = join(base, 'state');
   const spool = join(base, 'spool');
