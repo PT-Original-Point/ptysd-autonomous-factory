@@ -545,6 +545,8 @@ test('Codex CLI args bind writes to exact task paths with native permissions and
     'legacy user sandbox settings must not override the per-task permissions profile');
   assert.equal(args.includes('--strict-config'), true,
     'unsupported permission configuration must fail closed before execution');
+  assert.equal(rawConfigs.includes('windows.sandbox=mxc'), true,
+    'scheduled execution must pin the host-verified Windows sandbox backend');
   assert.equal(args.includes('--sandbox'), false,
     'workspace-write would widen the per-file permission profile');
   assert.equal(configs.includes('default_permissions="pty_exact_scope"'), true);
