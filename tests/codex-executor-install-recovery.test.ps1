@@ -40,6 +40,7 @@ $global:MockFailureInjected = $false
 $global:MockAclStore = @{}
 $global:MockProgramDataAcl = New-Object System.Security.AccessControl.DirectorySecurity
 $global:MockBadSignaturePath = ''
+$global:MockSignerSubject = ''
 $global:MockAppxPackages = @()
 $global:MockTaskNotFoundThrows = $true
 $global:MockReadbackPrincipalUserId = $null
@@ -90,9 +91,10 @@ $qualificationFields = @('codex_qualification_profile','codex_qualification_mode
 $expectedHost = 'DESKTOP-1B6PD2P'
 $executorTaskName = 'PTYSD-Codex-Executor'
 foreach ($name in @('Set-CodexExecutorQualificationFlags','Assert-CodexExecutorQualificationProfile',
-        'Test-CodexExecutorQualificationDesktopServerProcess','Assert-CodexExecutorQualificationQuiescent',
+        'Test-CodexExecutorOfficialAppxCliPath','Test-CodexExecutorQualificationDesktopServerProcess',
+        'Assert-CodexExecutorQualificationQuiescent',
         'Invoke-CodexQualificationReadOnly','Set-CodexExecutorWorkerQualificationState',
-        'Test-CodexExecutorWorkerQualificationState')) {
+        'Test-CodexExecutorWorkerQualificationState','Test-CodexExecutorWorkerCliPinCompatibility')) {
     $functionAst = $installerAst.Find({ param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
     }, $true)
@@ -154,11 +156,18 @@ $workerQualificationFixture = [pscustomobject]@{
     codex_qualification_task=$null; codex_qualification_utc=$null
     codex_sandbox_boundary='UNKNOWN'; future_extension='preserve'
 }
+$workerQualificationFixture.codex_executable_sha256 = 'b' * 64
+Assert-Equal (Test-CodexExecutorWorkerCliPinCompatibility $workerQualificationFixture $roundTripQualification) $true `
+    'stale CLI mirror is reconcilable only while the Worker is fully disabled'
 Set-CodexExecutorWorkerQualificationState $workerQualificationFixture $roundTripQualification | Out-Null
 Assert-Equal (Test-CodexExecutorWorkerQualificationState $workerQualificationFixture $roundTripQualification) `
     'QUALIFIED' 'Worker config mirrors the verified executor qualification'
 Assert-Equal $workerQualificationFixture.codex_executable_sha256 ('a' * 64) `
     'Worker config receives the exact executable pin needed by the gate'
+$workerQualificationFixture.codex_executable_sha256 = 'b' * 64
+Assert-Equal (Test-CodexExecutorWorkerCliPinCompatibility $workerQualificationFixture $roundTripQualification) $false `
+    'stale CLI mirror blocks qualification when Worker authorization is enabled'
+$workerQualificationFixture.codex_executable_sha256 = [string]$roundTripQualification.codex_executable_sha256
 Assert-Equal $workerQualificationFixture.allowed_codex_models.'gpt-6-luna'[0] 'low' `
     'Worker model allowlist stays on the qualified low-effort profile'
 Assert-Equal $workerQualificationFixture.codex_sandbox_boundary 'UNKNOWN' `
@@ -365,7 +374,8 @@ function global:Get-AuthenticodeSignature {
         [IO.Path]::GetFullPath($global:MockBadSignaturePath), [StringComparison]::OrdinalIgnoreCase)) {
         return [pscustomobject]@{ Status = 'NotSigned'; SignerCertificate = $null }
     }
-    return [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=OpenAI OpCo, LLC' } }
+    $subject = if ($global:MockSignerSubject) { $global:MockSignerSubject } else { 'CN=OpenAI OpCo, LLC' }
+    return [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = $subject } }
 }
 
 function global:Get-AppxPackage {
@@ -540,6 +550,49 @@ $global:MockProcesses = @([pscustomobject]@{
     CommandLine=('"' + $expectedCodexExecutable + '" -c forced_login_method=chatgpt exec-server --concurrent-requests 32')
 })
 Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable
+$qualificationAppxRoot = Join-Path $global:MockRoot 'appx\OpenAI.Codex_26.1117.3838.0_x64__2p2nqsd0c76g0'
+$qualificationAppxCli = Join-Path $qualificationAppxRoot 'app\resources\codex.exe'
+New-Item -ItemType Directory -Path (Split-Path -Parent $qualificationAppxCli) -Force | Out-Null
+[IO.File]::WriteAllText($qualificationAppxCli, 'synthetic signed current AppX CLI')
+$global:MockAppxPackages = @([pscustomobject]@{
+    Name='OpenAI.Codex'; PackageFamilyName='OpenAI.Codex_2p2nqsd0c76g0'; Status='Ok'
+    InstallLocation=$qualificationAppxRoot
+})
+$global:MockSignerSubject = 'CN="OpenAI OpCo, LLC", O=OpenAI OpCo, LLC, L=San Francisco, S=California, C=US'
+$global:MockProcesses = @([pscustomobject]@{
+    Name='codex.exe'; ExecutablePath=$qualificationAppxCli
+    CommandLine=('"' + $qualificationAppxCli + '" app-server --analytics-default-enabled')
+})
+Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable
+$global:MockProcesses = @([pscustomobject]@{
+    Name='codex.exe'; ExecutablePath=$qualificationAppxCli
+    CommandLine=('"' + $qualificationAppxCli + '" exec-server --concurrent-requests 32')
+})
+Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable
+$global:MockProcesses = @([pscustomobject]@{
+    Name='codex.exe'; ExecutablePath=$qualificationAppxCli
+    CommandLine=('"' + $qualificationAppxCli + '" exec --sandbox workspace-write')
+})
+$qualificationProcessFailure = ''
+try { Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable }
+catch { $qualificationProcessFailure = $_.Exception.Message }
+Assert-Equal $qualificationProcessFailure 'CODEX_QUALIFICATION_EXECUTOR_OR_MODEL_PROCESS_RUNNING' `
+    'standalone exec from the newly registered AppX remains blocking'
+$global:MockAppxPackages = @([pscustomobject]@{
+    Name='OpenAI.Codex'; PackageFamilyName='OpenAI.Codex_UNTRUSTED'; Status='Ok'
+    InstallLocation=$qualificationAppxRoot
+})
+$global:MockProcesses = @([pscustomobject]@{
+    Name='codex.exe'; ExecutablePath=$qualificationAppxCli
+    CommandLine=('"' + $qualificationAppxCli + '" app-server')
+})
+$qualificationProcessFailure = ''
+try { Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable }
+catch { $qualificationProcessFailure = $_.Exception.Message }
+Assert-Equal $qualificationProcessFailure 'CODEX_QUALIFICATION_PROCESS_IDENTITY_UNKNOWN' `
+    'foreign AppX process cannot inherit the Desktop-server exception'
+$global:MockSignerSubject = ''
+$global:MockAppxPackages = @()
 $global:MockProcesses = @([pscustomobject]@{
     Name='codex.exe'; ExecutablePath=$expectedCodexExecutable
     CommandLine=('"' + $expectedCodexExecutable + '" exec --sandbox mxc')
