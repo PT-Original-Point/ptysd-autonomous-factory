@@ -1470,6 +1470,9 @@ try {
     $registrationBeforeRuntimeRefresh = $global:MockRegistration
     $runtimeRefreshOutput = & $installerPath -Mode RefreshRuntimeModules -ExecutionPhase WIN11_TRANSITION 2>$null
     if (@($runtimeRefreshOutput | Where-Object { $_ -like 'CODEX_RUNTIME_MODULE_REFRESH=SUCCESS;*' }).Count -ne 1) { throw 'CODEX_RUNTIME_MODULE_REFRESH_SUCCESS_RECEIPT_MISSING' }
+    if (@($runtimeRefreshOutput | Where-Object { $_ -eq 'MODEL_EXECUTION=NOT_INVOKED;MODEL_AUTHORIZATION=UNCHANGED' }).Count -ne 1) {
+        throw 'CODEX_RUNTIME_MODULE_REFRESH_EXECUTION_RECEIPT_MISSING'
+    }
     $runtimeSourcePath = Join-Path $repoRoot ('native-bridge\' + $runtimeModuleName)
     $runtimeSourceHash = (Get-FileHash -LiteralPath $runtimeSourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-Equal (Get-FileHash -LiteralPath $runtimeModulePath -Algorithm SHA256).Hash.ToLowerInvariant() $runtimeSourceHash 'runtime refresh installs exact current source bytes'
@@ -1498,6 +1501,9 @@ try {
     $manifestHashBeforeNoop = (Get-FileHash -LiteralPath $transitionState -Algorithm SHA256).Hash.ToLowerInvariant()
     $noopRuntimeRefresh = & $installerPath -Mode RefreshRuntimeModules -ExecutionPhase WIN11_TRANSITION 2>$null
     if (@($noopRuntimeRefresh | Where-Object { $_ -eq 'CODEX_RUNTIME_MODULE_REFRESH=NOT_REQUIRED' }).Count -ne 1) { throw 'CODEX_RUNTIME_MODULE_REFRESH_NOOP_RECEIPT_MISSING' }
+    if (@($noopRuntimeRefresh | Where-Object { $_ -eq 'MODEL_EXECUTION=NOT_INVOKED;MODEL_AUTHORIZATION=UNCHANGED' }).Count -ne 1) {
+        throw 'CODEX_RUNTIME_MODULE_REFRESH_NOOP_EXECUTION_RECEIPT_MISSING'
+    }
     Assert-Equal $global:MockTaskDisableCalls $disableCallsBeforeNoop 'no-op runtime refresh does not disable the task'
     Assert-Equal $global:MockTaskEnableCalls $enableCallsBeforeNoop 'no-op runtime refresh does not enable the task'
     Assert-Equal (Get-FileHash -LiteralPath $transitionState -Algorithm SHA256).Hash.ToLowerInvariant() $manifestHashBeforeNoop 'no-op runtime refresh does not rewrite install state'
@@ -1539,6 +1545,94 @@ try {
     $global:MockRuntimeRefreshTargetPath = ''
     $global:MockRuntimeRefreshExpectedHash = ''
     $global:MockRuntimeRefreshExternalBytes = [byte[]]@()
+
+    # A code-only runtime refresh must preserve an already-qualified profile.
+    $qualifiedExecutor = Get-Content -LiteralPath $transitionConfigPath -Raw | ConvertFrom-Json
+    Set-CodexExecutorQualificationFlags $qualifiedExecutor
+    $qualifiedExecutor.codex_qualification_profile = $qualificationProfile
+    $qualifiedExecutor.codex_qualification_model = $qualificationModel
+    $qualifiedExecutor.codex_qualification_reasoning = $qualificationReasoning
+    $qualifiedExecutor.codex_qualification_cli_version = 'codex-cli 0.169.1'
+    $qualifiedExecutor.codex_qualification_cli_sha256 = [string]$qualifiedExecutor.codex_executable_sha256
+    $qualifiedExecutor.codex_qualification_auth_kind = 'CHATGPT'
+    $qualifiedExecutor.codex_qualification_github_main_sha = 'b' * 40
+    $qualifiedExecutor.codex_qualification_host = $expectedHost
+    $qualifiedExecutor.codex_qualification_task = $executorTaskName
+    $qualifiedExecutor.codex_qualification_utc = '2026-11-20T06:00:00.0000000Z'
+    $qualifiedExecutorText = (ConvertTo-Json -InputObject $qualifiedExecutor -Depth 20 -Compress) + [Environment]::NewLine
+    $qualifiedExecutorBytes = ([Text.UTF8Encoding]::new($false)).GetBytes($qualifiedExecutorText)
+    $qualifiedWorker = Get-Content -LiteralPath $workerConfigPath -Raw | ConvertFrom-Json
+    Set-CodexExecutorWorkerQualificationState $qualifiedWorker $qualifiedExecutor | Out-Null
+    $qualifiedWorkerText = (ConvertTo-Json -InputObject $qualifiedWorker -Depth 20 -Compress) + [Environment]::NewLine
+    $qualifiedWorkerBytes = ([Text.UTF8Encoding]::new($false)).GetBytes($qualifiedWorkerText)
+    [IO.File]::WriteAllBytes($transitionConfigPath, $qualifiedExecutorBytes)
+    [IO.File]::WriteAllBytes($workerConfigPath, $qualifiedWorkerBytes)
+    $qualifiedModuleStaleBytes = ([Text.UTF8Encoding]::new($false)).GetBytes('synthetic stale module under qualified profile')
+    $qualifiedModuleStaleHash = Get-TestByteSha256 $qualifiedModuleStaleBytes
+    [IO.File]::WriteAllBytes($runtimeModulePath, $qualifiedModuleStaleBytes)
+    $qualifiedManifest = Get-Content -LiteralPath $transitionState -Raw | ConvertFrom-Json
+    $qualifiedConfigHashProperty = $qualifiedManifest.runtime_sha256.PSObject.Properties['executor-config.json']
+    $qualifiedModuleHashProperty = $qualifiedManifest.runtime_sha256.PSObject.Properties[$runtimeModuleName]
+    if ($null -eq $qualifiedConfigHashProperty -or $null -eq $qualifiedModuleHashProperty) {
+        throw 'QUALIFIED_RUNTIME_REFRESH_TEST_MANIFEST_HASH_MISSING'
+    }
+    $qualifiedConfigHashProperty.Value = Get-TestByteSha256 $qualifiedExecutorBytes
+    $qualifiedModuleHashProperty.Value = $qualifiedModuleStaleHash
+    $qualifiedManifestText = (ConvertTo-Json -InputObject $qualifiedManifest -Depth 10 -Compress) + [Environment]::NewLine
+    [IO.File]::WriteAllText($transitionState, $qualifiedManifestText, [Text.UTF8Encoding]::new($false))
+    $qualifiedConfigBeforeRefresh = [IO.File]::ReadAllBytes($transitionConfigPath)
+    $qualifiedWorkerBeforeRefresh = [IO.File]::ReadAllBytes($workerConfigPath)
+    $qualifiedTaskDisableCallsBeforeRefresh = $global:MockTaskDisableCalls
+    $qualifiedTaskEnableCallsBeforeRefresh = $global:MockTaskEnableCalls
+    $qualifiedRefreshOutput = & $installerPath -Mode RefreshRuntimeModules -ExecutionPhase WIN11_TRANSITION 2>$null
+    if (@($qualifiedRefreshOutput | Where-Object { $_ -like 'CODEX_RUNTIME_MODULE_REFRESH=SUCCESS;*' }).Count -ne 1) {
+        throw 'QUALIFIED_RUNTIME_MODULE_REFRESH_SUCCESS_RECEIPT_MISSING'
+    }
+    if (@($qualifiedRefreshOutput | Where-Object { $_ -eq 'MODEL_EXECUTION=NOT_INVOKED;MODEL_AUTHORIZATION=UNCHANGED' }).Count -ne 1) {
+        throw 'QUALIFIED_RUNTIME_MODULE_REFRESH_EXECUTION_RECEIPT_MISSING'
+    }
+    Assert-Equal (Get-FileHash -LiteralPath $runtimeModulePath -Algorithm SHA256).Hash.ToLowerInvariant() $runtimeSourceHash `
+        'qualified runtime refresh installs exact source bytes'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionConfigPath))) `
+        ([BitConverter]::ToString($qualifiedConfigBeforeRefresh)) 'qualified runtime refresh preserves executor config bytes'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($workerConfigPath))) `
+        ([BitConverter]::ToString($qualifiedWorkerBeforeRefresh)) 'qualified runtime refresh preserves publisher config bytes'
+    $qualifiedExecutorReadback = Get-Content -LiteralPath $transitionConfigPath -Raw | ConvertFrom-Json
+    $qualifiedWorkerReadback = Get-Content -LiteralPath $workerConfigPath -Raw | ConvertFrom-Json
+    Assert-Equal (Test-CodexExecutorWorkerQualificationState $qualifiedExecutorReadback $qualifiedExecutorReadback) `
+        'QUALIFIED' 'qualified executor profile remains valid after runtime refresh'
+    Assert-Equal (Test-CodexExecutorWorkerQualificationState $qualifiedWorkerReadback $qualifiedExecutorReadback) `
+        'QUALIFIED' 'publisher qualification projection remains aligned after runtime refresh'
+    Assert-Equal $global:MockTaskDisableCalls ($qualifiedTaskDisableCallsBeforeRefresh + 1) `
+        'qualified runtime refresh disables the existing task once'
+    Assert-Equal $global:MockTaskEnableCalls ($qualifiedTaskEnableCallsBeforeRefresh + 1) `
+        'qualified runtime refresh re-enables the existing task once'
+
+    # A mismatched Worker projection must fail before touching runtime files or the task.
+    $mismatchedWorker = Get-Content -LiteralPath $workerConfigPath -Raw | ConvertFrom-Json
+    $mismatchedWorker.codex_qualification_reasoning = 'medium'
+    $mismatchedWorkerBytes = ([Text.UTF8Encoding]::new($false)).GetBytes(
+        ((ConvertTo-Json -InputObject $mismatchedWorker -Depth 20 -Compress) + [Environment]::NewLine))
+    [IO.File]::WriteAllBytes($workerConfigPath, $mismatchedWorkerBytes)
+    [IO.File]::WriteAllBytes($runtimeModulePath, $qualifiedModuleStaleBytes)
+    $qualifiedMismatchManifest = Get-Content -LiteralPath $transitionState -Raw | ConvertFrom-Json
+    $qualifiedMismatchManifest.runtime_sha256.PSObject.Properties[$runtimeModuleName].Value = $qualifiedModuleStaleHash
+    $qualifiedMismatchManifestText = (ConvertTo-Json -InputObject $qualifiedMismatchManifest -Depth 10 -Compress) + [Environment]::NewLine
+    [IO.File]::WriteAllText($transitionState, $qualifiedMismatchManifestText, [Text.UTF8Encoding]::new($false))
+    $mismatchedManifestBeforeAttempt = [IO.File]::ReadAllBytes($transitionState)
+    $qualifiedTaskDisableCallsBeforeMismatch = $global:MockTaskDisableCalls
+    $null = Invoke-RuntimeModuleRefreshAttempt 'CODEX_CLI_REFRESH_PUBLISHER_QUALIFICATION_MISMATCH'
+    Assert-Equal (Get-FileHash -LiteralPath $runtimeModulePath -Algorithm SHA256).Hash.ToLowerInvariant() `
+        $qualifiedModuleStaleHash 'qualification mismatch leaves stale runtime bytes untouched'
+    Assert-Equal ([BitConverter]::ToString([IO.File]::ReadAllBytes($transitionState))) `
+        ([BitConverter]::ToString($mismatchedManifestBeforeAttempt)) 'qualification mismatch leaves install manifest untouched'
+    Assert-Equal $global:MockTaskDisableCalls $qualifiedTaskDisableCallsBeforeMismatch `
+        'qualification mismatch does not disable the executor task'
+
+    [IO.File]::WriteAllBytes($runtimeModulePath, $runtimeModuleBefore)
+    [IO.File]::WriteAllBytes($transitionState, $runtimeManifestBefore)
+    [IO.File]::WriteAllBytes($transitionConfigPath, $transitionConfigBytes)
+    [IO.File]::WriteAllBytes($workerConfigPath, $transitionWorkerBytes)
     # Restore the synthetic pre-refresh fixture so later installer recovery tests
     # continue from the original registered task/config state.
     [IO.File]::WriteAllBytes($transitionConfigPath, $transitionConfigBytes)

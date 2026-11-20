@@ -600,54 +600,56 @@ test('claim can be released only for the exact attempt before publication', () =
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('Codex CLI args bind writes to exact task paths with native permissions and no shell or fallback', () => {
+test('Codex CLI args use native workspace-write only inside an isolated attempt clone', () => {
   const attemptId = '00000000-0000-0000-0000-000000000021';
   const temporaryRoots = ['C:/Users/x/AppData/Local/Temp', 'D:/PTYSD-Temp'];
   const args = buildCodexExecArgs(job(), 'C:\\isolated\\attempt', attemptId,
     { TEMP: temporaryRoots[0], TMP: temporaryRoots[1] });
   const rawConfigs = args.flatMap((value, index) => value === '--config' ? [args[index + 1]] : []);
-  const configs = rawConfigs.map(value => value.replace(/pty_exact_scope_[0-9a-f]{32}/g, 'pty_exact_scope'));
   assert.equal(args[0], 'exec');
   assert.equal(args.includes('--json'), true);
   assert.equal(args.includes('--ignore-user-config'), true,
-    'legacy user sandbox settings must not override the per-task permissions profile');
+    'legacy user settings cannot silently change the qualified execution');
   assert.equal(args.includes('--strict-config'), true,
-    'unsupported permission configuration must fail closed before execution');
+    'unsupported config must fail before execution');
   assert.equal(rawConfigs.includes('approval_policy=never'), true,
-    'scheduled CLI execution remains noninteractive only inside the exact verified path profile');
+    'scheduled CLI execution remains noninteractive inside the sandbox');
+  const sandboxIndex = args.indexOf('--sandbox');
+  assert.notEqual(sandboxIndex, -1);
+  assert.equal(args[sandboxIndex + 1], 'workspace-write',
+    'the attempt clone uses Codex’s supported workspace-write sandbox');
+  assert.equal(rawConfigs.includes('sandbox_workspace_write.network_access=false'), true,
+    'outbound network stays disabled');
+  assert.equal(rawConfigs.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify(
+    temporaryRoots.map(path => win32.resolve(path)))}`), true,
+  'only the validated per-attempt TEMP/TMP paths are added as writable roots');
+  assert.equal(rawConfigs.includes(`shell_environment_policy.set.TEMP=${JSON.stringify(
+    win32.resolve(temporaryRoots[0]))}`), true);
+  assert.equal(rawConfigs.includes(`shell_environment_policy.set.TMP=${JSON.stringify(
+    win32.resolve(temporaryRoots[1]))}`), true);
   assert.equal(rawConfigs.includes('windows.sandbox=mxc'), true,
-    'scheduled execution must pin the host-verified Windows sandbox backend');
-  assert.equal(args.includes('--sandbox'), false,
-    'workspace-write would widen the per-file permission profile');
-  assert.equal(configs.includes('default_permissions="pty_exact_scope"'), true);
-  assert.equal(rawConfigs.includes(`default_permissions="pty_exact_scope_${attemptId.replace(/-/g, '')}"`), true,
-    'the profile name must be derived from the exact validated attempt');
-  assert.equal(rawConfigs.includes('default_permissions="pty_exact_scope"'), false);
-  assert.equal(rawConfigs.some(value => value.includes('permissions.pty_exact_scope.filesystem')), false,
-    'the reusable profile name must never be selected for an execution');
-  const expectedFilesystem = [
-    [':minimal', 'read'],
-    [win32.resolve('C:/isolated/attempt'), 'read'],
-    ...temporaryRoots.map(path => [win32.resolve(path), 'write']),
-    [win32.resolve('C:/isolated/attempt/native-bridge/sample.mjs'), 'write'],
-  ].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(',');
-  assert.equal(configs.includes(`permissions.pty_exact_scope.filesystem={${expectedFilesystem}}`), true,
-    'each TEMP/TMP directory is writable for tests while the workspace root remains read-only');
-  assert.equal(configs.includes('permissions.pty_exact_scope.network.enabled=false'), true);
-  assert.equal(configs.includes('permissions.pty_exact_scope.filesystem={":minimal"="read","C:\\\\isolated\\\\attempt"="write"}'), false,
-    'the workspace root must stay read-only');
-  const otherAttemptId = '00000000-0000-0000-0000-000000000022';
-  const otherConfigs = buildCodexExecArgs(job(), 'C:\\isolated\\attempt', otherAttemptId)
-    .flatMap((value, index, values) => value === '--config' ? [values[index + 1]] : []);
-  assert.equal(otherConfigs.includes(`default_permissions="pty_exact_scope_${otherAttemptId.replace(/-/g, '')}"`), true);
-  assert.equal(otherConfigs.includes(`default_permissions="pty_exact_scope_${attemptId.replace(/-/g, '')}"`), false,
-    'a different attempt must not reuse another attempt profile');
+    'scheduled execution uses the qualified Windows sandbox backend');
+  assert.equal(args[args.indexOf('-C') + 1], 'C:\\isolated\\attempt');
+  assert.equal(rawConfigs.some(value => value.startsWith('default_permissions=')), false,
+    'the failed custom MxC permission profile is not selected');
+  assert.equal(rawConfigs.some(value => value.startsWith('permissions.')), false,
+    'the failed custom MxC permission profile is not selected');
   assert.throws(() => buildCodexExecArgs(job(), 'C:\\isolated\\attempt'), /INVALID_ATTEMPT_ID/);
   assert.throws(() => buildCodexExecArgs(job(), 'C:\\isolated\\attempt', 'bad-profile'), /INVALID_ATTEMPT_ID/);
+  assert.throws(() => buildCodexExecArgs(job({ write_paths: ['../outside.txt'] }),
+    'C:\\isolated\\attempt', attemptId), /INVALID_CODEX_JOB/);
   assert.throws(() => buildCodexExecArgs(job(), 'C:\\isolated\\attempt', attemptId,
     { TEMP: 'relative-temp', TMP: temporaryRoots[1] }), /CODEX_TEMP_ROOT_INVALID/);
   assert.throws(() => buildCodexExecArgs(job(), 'C:\\isolated\\attempt', attemptId,
     { TEMP: 'C:/', TMP: temporaryRoots[1] }), /CODEX_TEMP_ROOT_CONTAINS_WORKSPACE/);
+  const nestedTempRoot = win32.join('C:/', 'isolated', 'attempt', 'tmp');
+  const nestedTempArgs = buildCodexExecArgs(job(), win32.join('C:/', 'isolated', 'attempt'), attemptId,
+    { TEMP: temporaryRoots[0], TMP: nestedTempRoot });
+  const nestedTempConfigs = nestedTempArgs.flatMap((value, index) =>
+    value === '--config' ? [nestedTempArgs[index + 1]] : []);
+  assert.equal(nestedTempConfigs.includes('sandbox_workspace_write.writable_roots=' + JSON.stringify(
+    [win32.resolve(temporaryRoots[0]), nestedTempRoot])), true,
+  'a TMP path already inside the attempt clone adds no write access outside the clone');
   const reasoningArgs = buildCodexExecArgs(job({ reasoning_effort: 'model-defined-tier-7' }),
     'C:\\isolated\\attempt', attemptId);
   const reasoningConfigs = reasoningArgs.flatMap((value, index) =>

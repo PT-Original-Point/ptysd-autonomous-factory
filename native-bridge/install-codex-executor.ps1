@@ -810,6 +810,37 @@ function Test-CodexExecutorWorkerQualificationState($WorkerConfig, $ExecutorConf
     return 'PARTIAL_OR_MISMATCHED'
 }
 
+function Assert-CodexExecutorRuntimeRefreshQualificationState($WorkerConfig, $ExecutorConfig) {
+    $qualificationActive = Assert-CodexExecutorQualificationProfile $ExecutorConfig -RequireCurrentCli
+    if ($qualificationActive) {
+        if ((Test-CodexExecutorWorkerQualificationState $ExecutorConfig $ExecutorConfig) -ne 'QUALIFIED') {
+            throw 'CODEX_RUNTIME_MODULE_REFRESH_EXECUTOR_QUALIFICATION_MISMATCH'
+        }
+        if ((Test-CodexExecutorWorkerQualificationState $WorkerConfig $ExecutorConfig) -ne 'QUALIFIED') {
+            throw 'CODEX_CLI_REFRESH_PUBLISHER_QUALIFICATION_MISMATCH'
+        }
+        return $true
+    }
+
+    if ($ExecutorConfig.enable_codex_model_runs -ne $false -or
+        $ExecutorConfig.codex_usage_authorized -ne $false -or
+        $ExecutorConfig.codex_cli_qualified -ne $false -or
+        $ExecutorConfig.codex_login_verified -ne $false -or
+        $null -eq $ExecutorConfig.allowed_codex_models -or
+        @($ExecutorConfig.allowed_codex_models.PSObject.Properties).Count -ne 0) {
+        throw 'CODEX_CLI_REFRESH_MODEL_AUTHORIZATION_MUST_REMAIN_DISABLED'
+    }
+    if ($WorkerConfig.enable_codex_model_runs -ne $false -or
+        $WorkerConfig.codex_usage_authorized -ne $false -or
+        $WorkerConfig.codex_cli_qualified -ne $false -or
+        $WorkerConfig.codex_login_verified -ne $false -or
+        $null -eq $WorkerConfig.allowed_codex_models -or
+        @($WorkerConfig.allowed_codex_models.PSObject.Properties).Count -ne 0) {
+        throw 'CODEX_CLI_REFRESH_PUBLISHER_CONFIG_MISMATCH'
+    }
+    return $false
+}
+
 function Assert-CodexExecutorQualificationTask($Task, [string]$NodePath) {
     if ($null -eq $Task -or $Task.TaskName -cne $executorTaskName -or $Task.TaskPath -cne '\' -or
         $Task.State -cne 'Ready' -or $Task.Settings.Enabled -ne $true -or
@@ -1368,7 +1399,7 @@ function Invoke-CodexExecutorRuntimeModuleRefresh($Task,
     }
     if ($changedNames.Count -eq 0) {
         Write-Output 'CODEX_RUNTIME_MODULE_REFRESH=NOT_REQUIRED'
-        Write-Output 'MODEL_EXECUTION=UNCHANGED_DISABLED'
+        Write-Output 'MODEL_EXECUTION=NOT_INVOKED;MODEL_AUTHORIZATION=UNCHANGED'
         return
     }
 
@@ -1462,21 +1493,7 @@ function Invoke-CodexExecutorRuntimeModuleRefresh($Task,
             }
             $lockedWorkerConfig = Get-Content -LiteralPath $workerConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             $lockedExecutorConfig = Get-Content -LiteralPath $executorConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            if ($lockedWorkerConfig.enable_codex_model_runs -ne $false -or
-                $lockedWorkerConfig.codex_usage_authorized -ne $false -or
-                $lockedWorkerConfig.codex_cli_qualified -ne $false -or
-                $lockedWorkerConfig.codex_login_verified -ne $false -or
-                $null -eq $lockedWorkerConfig.allowed_codex_models -or
-                @($lockedWorkerConfig.allowed_codex_models.PSObject.Properties).Count -ne 0 -or
-                $lockedExecutorConfig.enable_codex_model_runs -ne $false -or
-                $lockedExecutorConfig.codex_usage_authorized -ne $false -or
-                $lockedExecutorConfig.codex_cli_qualified -ne $false -or
-                $lockedExecutorConfig.codex_login_verified -ne $false -or
-                $null -eq $lockedExecutorConfig.allowed_codex_models -or
-                @($lockedExecutorConfig.allowed_codex_models.PSObject.Properties).Count -ne 0) {
-                throw 'CODEX_RUNTIME_MODULE_REFRESH_MODEL_AUTHORIZATION_MUST_REMAIN_DISABLED'
-            }
-            $null = Assert-CodexExecutorQualificationProfile $lockedExecutorConfig -RequireCurrentCli
+            $null = Assert-CodexExecutorRuntimeRefreshQualificationState $lockedWorkerConfig $lockedExecutorConfig
             if ((Get-FileHash -LiteralPath $workerConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
                 $WorkerConfigHash.ToLowerInvariant() -or
                 (Get-FileHash -LiteralPath $executorConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
@@ -1597,7 +1614,7 @@ function Invoke-CodexExecutorRuntimeModuleRefresh($Task,
         Write-Output ('CODEX_RUNTIME_MODULE_REFRESH=SUCCESS;updated=' + ($changedNames -join ','))
         Write-Output ('CODEX_RUNTIME_MODULE_REFRESH_BACKUP=' + $backupDir)
         Write-Output ('CODEX_RUNTIME_MODULE_REFRESH_OLD_INSTALL_STATE_SHA256=' + $PreflightManifestHash)
-        Write-Output 'MODEL_EXECUTION=UNCHANGED_DISABLED'
+        Write-Output 'MODEL_EXECUTION=NOT_INVOKED;MODEL_AUTHORIZATION=UNCHANGED'
     } finally {
         $workerConfigWriteLock.Dispose()
     }
@@ -1645,24 +1662,30 @@ function Invoke-CodexExecutorCliPinRefresh([string]$NewCodexExecutable, [switch]
         $workerConfig.codex_executor_task -ne $config.codex_executor_task -or
         $workerConfig.codex_executor_task_user -ne $config.codex_executor_task_user -or
         $workerConfig.codex_executor_config_path -ne $executorConfigPath -or
-        $workerConfig.codex_executor_script_path -ne $executorScriptPath -or
-        $workerConfig.enable_codex_model_runs -ne $false -or $workerConfig.codex_usage_authorized -ne $false -or
-        $workerConfig.codex_cli_qualified -ne $false -or $workerConfig.codex_login_verified -ne $false -or
-        $null -eq $workerConfig.allowed_codex_models -or
-        @($workerConfig.allowed_codex_models.PSObject.Properties).Count -ne 0) {
+        $workerConfig.codex_executor_script_path -ne $executorScriptPath) {
         throw 'CODEX_CLI_REFRESH_PUBLISHER_CONFIG_MISMATCH'
+    }
+    if ($RefreshRuntimeModules) {
+        $qualificationActive = Assert-CodexExecutorRuntimeRefreshQualificationState $workerConfig $config
+    } else {
+        if ($workerConfig.enable_codex_model_runs -ne $false -or $workerConfig.codex_usage_authorized -ne $false -or
+            $workerConfig.codex_cli_qualified -ne $false -or $workerConfig.codex_login_verified -ne $false -or
+            $null -eq $workerConfig.allowed_codex_models -or
+            @($workerConfig.allowed_codex_models.PSObject.Properties).Count -ne 0) {
+            throw 'CODEX_CLI_REFRESH_PUBLISHER_CONFIG_MISMATCH'
+        }
+        if ($config.enable_codex_model_runs -ne $false -or $config.codex_usage_authorized -ne $false -or
+            $config.codex_cli_qualified -ne $false -or $config.codex_login_verified -ne $false -or
+            $null -eq $config.allowed_codex_models -or
+            @($config.allowed_codex_models.PSObject.Properties).Count -ne 0) {
+            throw 'CODEX_CLI_REFRESH_MODEL_AUTHORIZATION_MUST_REMAIN_DISABLED'
+        }
+        $qualificationActive = Assert-CodexExecutorQualificationProfile $config -RequireCurrentCli
     }
     $installedNodePath = [IO.Path]::GetFullPath([string]$config.codex_executor_node_path)
     if (-not (Test-Path -LiteralPath $installedNodePath -PathType Leaf)) {
         throw 'CODEX_CLI_REFRESH_INSTALLED_NODE_UNAVAILABLE'
     }
-    if ($config.enable_codex_model_runs -ne $false -or $config.codex_usage_authorized -ne $false -or
-        $config.codex_cli_qualified -ne $false -or $config.codex_login_verified -ne $false -or
-        $null -eq $config.allowed_codex_models -or
-        @($config.allowed_codex_models.PSObject.Properties).Count -ne 0) {
-        throw 'CODEX_CLI_REFRESH_MODEL_AUTHORIZATION_MUST_REMAIN_DISABLED'
-    }
-    $qualificationActive = Assert-CodexExecutorQualificationProfile $config -RequireCurrentCli
     if ($qualificationActive -and -not $RefreshRuntimeModules) {
         throw 'CODEX_CLI_REFRESH_QUALIFICATION_ACTIVE_REVOKE_FIRST'
     }
