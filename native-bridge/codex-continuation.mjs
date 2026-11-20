@@ -387,6 +387,10 @@ export function buildCodexExecArgs(job, workspace, attemptId, environment = proc
     // Scheduled execution cannot answer approval prompts. Keep the CLI inside
     // its native exact-path permission profile and deny every undeclared write.
     '--config', 'approval_policy=never',
+    // Ignore user config so a legacy elevated backend cannot silently become
+    // the scheduled runtime. MXC was qualified on this host and enforced an
+    // outside-path denial.
+    '--config', 'windows.sandbox=mxc',
     '--config', `model_reasoning_effort=${JSON.stringify(job.reasoning_effort)}`,
     ...config.flatMap(value => ['--config', value]), '-C', root, '-'];
 }
