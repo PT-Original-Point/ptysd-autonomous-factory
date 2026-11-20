@@ -6,8 +6,8 @@ import { closeSync, openSync, writeFileSync, fsyncSync, mkdirSync, readFileSync,
 import { join, isAbsolute, relative, resolve, sep, win32 } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { buildHiddenWscriptArguments, getCurrentWindowsSid, validateWindowsTaskAction }
-  from './windows-executor.mjs';
+import { buildHiddenWscriptArguments, getCurrentWindowsSid, readNativeTaskState,
+  validateWindowsTaskAction, verifiedNativeTaskState } from './windows-executor.mjs';
 
 const CODEX_JOB_KIND = 'codex_plan';
 export const NATIVE_JOB_MARKER = 'PTYSD_NATIVE_JOB_V1\n';
@@ -278,7 +278,7 @@ export function codexExecutorTaskArguments(config) {
     config_path: config.codex_executor_config_path });
 }
 
-export function validateCodexExecutorTaskXml(xml, config) {
+export function validateCodexExecutorTaskXml(xml, config, { nativeRunLevel, nativeEnabled } = {}) {
   if (!codexExecutorTaskDescriptorReady(config)) throw new Error('CODEX_EXECUTOR_TASK_XML_INVALID');
   const result = validateWindowsTaskAction(xml, {
     taskName: `\\${CODEX_EXECUTOR_TASK}`,
@@ -289,6 +289,7 @@ export function validateCodexExecutorTaskXml(xml, config) {
     errorPrefix: 'CODEX_EXECUTOR_TASK',
     expectedLogonType: (config.codex_executor_execution_phase ?? 'VM_ISOLATED') === 'WIN11_TRANSITION'
       ? 'InteractiveToken' : 'Password',
+    nativeRunLevel, nativeEnabled,
   });
   return { ready: true, task_name: CODEX_EXECUTOR_TASK,
     executor_user: config.codex_executor_task_user, run_level: 'LeastPrivilege',
@@ -303,6 +304,7 @@ export function assertCodexExecutorTaskReady(config, {
     encoding: 'utf8', windowsHide: true, shell: false, timeout: 10000,
     stdio: ['ignore', 'pipe', 'pipe'],
   }),
+  readTaskState = readNativeTaskState,
 } = {}) {
   if (platform !== 'win32') throw new Error('CODEX_EXECUTOR_TASK_READBACK_WINDOWS_ONLY');
   if (config?.codex_executor_task !== CODEX_EXECUTOR_TASK ||
@@ -310,7 +312,13 @@ export function assertCodexExecutorTaskReady(config, {
     throw new Error('CODEX_EXECUTOR_TASK_IDENTITY_CONFIG_INVALID');
   if (String(currentSid()).toUpperCase() !== config.publisher_identity_sid.toUpperCase())
     throw new Error('CODEX_EXECUTOR_PUBLISHER_SID_MISMATCH');
-  return validateCodexExecutorTaskXml(readTaskXml(CODEX_EXECUTOR_TASK), config);
+  const taskName = '\\' + CODEX_EXECUTOR_TASK;
+  const descriptor = { task_name: taskName, user_sid: config.executor_identity_sid,
+    execution_phase: config.codex_executor_execution_phase ?? 'VM_ISOLATED' };
+  const nativeState = verifiedNativeTaskState(readTaskState(taskName), descriptor);
+  return validateCodexExecutorTaskXml(readTaskXml(CODEX_EXECUTOR_TASK), config, {
+    nativeRunLevel: nativeState.run_level, nativeEnabled: nativeState.enabled,
+  });
 }
 
 export function codexTaskFingerprint(job) {

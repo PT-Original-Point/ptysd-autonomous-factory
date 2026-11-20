@@ -262,7 +262,7 @@ export function getCurrentWindowsSid({ execFile = execFileSync, systemRoot = pro
   return match[0].toUpperCase();
 }
 
-function readNativeTaskState(taskName, {
+export function readNativeTaskState(taskName, {
   execFile = execFileSync, systemRoot = process.env.SystemRoot,
 } = {}) {
   if (process.platform !== 'win32' || !systemRoot) fail('EXECUTOR_TASK_NATIVE_READBACK_UNAVAILABLE');
@@ -295,7 +295,7 @@ function readNativeTaskState(taskName, {
   }
 }
 
-function verifiedNativeTaskState(readback, descriptor) {
+export function verifiedNativeTaskState(readback, descriptor) {
   if (!readback || typeof readback !== 'object' || Array.isArray(readback))
     fail('EXECUTOR_TASK_NATIVE_READBACK_INVALID');
   const expectedName = descriptor.task_name.toLowerCase();
