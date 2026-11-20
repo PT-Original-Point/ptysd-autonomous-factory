@@ -275,6 +275,13 @@ function codexTaskXml(config, overrides = {}) {
     `<WorkingDirectory>${values.workingDirectory}</WorkingDirectory></Exec></Actions></Task>`;
 }
 
+function codexNativeTaskReadback(config, overrides = {}) {
+  return { task_name: 'PTYSD-Codex-Executor', task_path: '\\',
+    user_sid: config.executor_identity_sid,
+    logon_type: config.codex_executor_execution_phase === 'WIN11_TRANSITION' ? 'Interactive' : 'Password',
+    run_level: 'Limited', enabled: true, state: 'Ready', ...overrides };
+}
+
 test('Codex dispatch task must match live identity, privilege, launch action and unbounded on-demand settings', () => {
   const config = readyConfig();
   assert.equal(codexExecutorTaskArguments(config),
@@ -294,6 +301,7 @@ test('Codex dispatch task must match live identity, privilege, launch action and
   assert.deepEqual(assertCodexExecutorTaskReady(config, {
     platform: 'win32', currentSid: () => config.publisher_identity_sid,
     readTaskXml: taskName => { assert.equal(taskName, 'PTYSD-Codex-Executor'); return xml; },
+    readTaskState: () => codexNativeTaskReadback(config),
   }).ready, true);
   for (const invalid of [
     codexTaskXml(config, { user: 'DESKTOP-1B6PD2P\\OTHER' }),
@@ -313,6 +321,30 @@ test('Codex dispatch task must match live identity, privilege, launch action and
   assert.throws(() => assertCodexExecutorTaskReady(config, {
     platform: 'win32', currentSid: () => config.executor_identity_sid, readTaskXml: () => xml,
   }), /CODEX_EXECUTOR_PUBLISHER_SID_MISMATCH/);
+});
+
+test('Codex task XML defaults require exact native Task Scheduler privilege readback', () => {
+  const config = readyConfig();
+  const xml = codexTaskXml(config)
+    .replace('<RunLevel>LeastPrivilege</RunLevel>', '')
+    .replace('<Enabled>true</Enabled>', '');
+  assert.throws(() => validateCodexExecutorTaskXml(xml, config),
+    /CODEX_EXECUTOR_TASK_RUNLEVEL_AMBIGUOUS/);
+
+  const assertTask = overrides => assertCodexExecutorTaskReady(config, {
+    platform: 'win32', currentSid: () => config.publisher_identity_sid,
+    readTaskXml: () => xml,
+    readTaskState: () => codexNativeTaskReadback(config, overrides),
+  });
+  const accepted = assertTask({});
+  assert.equal(accepted.ready, true);
+  assert.equal(accepted.run_level, 'LeastPrivilege');
+  assert.throws(() => assertTask({ run_level: 'Highest' }),
+    /CODEX_EXECUTOR_TASK_RUNLEVEL_UNSAFE/);
+  assert.throws(() => assertTask({ user_sid: 'S-1-5-21-9999' }),
+    /EXECUTOR_TASK_NATIVE_IDENTITY_MISMATCH/);
+  assert.throws(() => assertTask({ enabled: false }),
+    /CODEX_EXECUTOR_TASK_DISABLED/);
 });
 
 test('WIN11_TRANSITION accepts only the current same-SID Codex executor and interactive task', () => {
@@ -348,6 +380,7 @@ test('WIN11_TRANSITION accepts only the current same-SID Codex executor and inte
   assert.equal(validateCodexExecutorTaskXml(xml, config).logon_type, 'InteractiveToken');
   assert.equal(assertCodexExecutorTaskReady(config, {
     platform: 'win32', currentSid: () => sid, readTaskXml: () => xml,
+    readTaskState: () => codexNativeTaskReadback(config),
   }).ready, true);
   assert.equal(codexExecutionGate(job(), readyConfig({
     publisher_identity_sid: sid, executor_identity_sid: sid,
