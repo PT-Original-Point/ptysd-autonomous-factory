@@ -3,8 +3,9 @@
 # installer before the exact source and the Human model/cost gates are accepted.
 [CmdletBinding()]
 param(
-    [ValidateSet('Audit','Install','Uninstall','RefreshCodexCli','RefreshRuntimeModules')][string]$Mode = 'Audit',
+    [ValidateSet('Audit','Install','Uninstall','RefreshCodexCli','RefreshRuntimeModules','QualifyPreProductionCodex','RevokePreProductionCodex')][string]$Mode = 'Audit',
     [ValidateSet('WIN11_TRANSITION','VM_ISOLATED')][string]$ExecutionPhase = 'VM_ISOLATED',
+    [switch]$AuthorizePreProductionCodexUsage,
     [PSCredential]$ExecutorCredential,
     [string]$NodeExecutable = '',
     [string]$CodexExecutable = ''
@@ -42,6 +43,13 @@ $installStatePath = Join-Path (Split-Path -Parent $workerConfigPath) `
 $backupPath = $null
 $workerConfigWrittenHash = $null
 $registeredHere = $false
+$qualificationProfile = 'WIN11_PREPRODUCTION_CHATGPT_LOW_V1'
+$qualificationModel = 'gpt-6-luna'
+$qualificationReasoning = 'low'
+$qualificationFields = @('codex_qualification_profile','codex_qualification_model',
+    'codex_qualification_reasoning','codex_qualification_cli_version','codex_qualification_cli_sha256',
+    'codex_qualification_auth_kind','codex_qualification_github_main_sha','codex_qualification_host',
+    'codex_qualification_task','codex_qualification_utc')
 
 function Enter-WorkerConfigWriteLock {
     try {
@@ -666,6 +674,373 @@ function Remove-CodexExecutorCliRefreshLock([string]$LockPath) {
     if (Test-Path -LiteralPath $LockPath) { throw 'CODEX_CLI_REFRESH_EXECUTOR_LOCK_RELEASE_UNKNOWN' }
 }
 
+function Assert-CodexExecutorQualificationProfile($Config, [switch]$RequireCurrentCli) {
+    $profileProperty = $Config.PSObject.Properties['codex_qualification_profile']
+    $profile = if ($null -ne $profileProperty) { [string]$profileProperty.Value } else { '' }
+    if ([string]::IsNullOrEmpty($profile) -or $profile -ceq 'DISABLED') {
+        foreach ($field in $qualificationFields | Where-Object { $_ -ne 'codex_qualification_profile' }) {
+            $property = $Config.PSObject.Properties[$field]
+            if ($null -ne $property -and $null -ne $property.Value) {
+                throw 'CODEX_QUALIFICATION_DISABLED_STATE_MISMATCH'
+            }
+        }
+        return $false
+    }
+    foreach ($field in $qualificationFields) {
+        if ($null -eq $Config.PSObject.Properties[$field]) {
+            throw 'CODEX_QUALIFICATION_PROFILE_MISMATCH_FAIL_CLOSED'
+        }
+    }
+    if ($profile -cne $qualificationProfile -or
+        $Config.codex_qualification_model -cne $qualificationModel -or
+        $Config.codex_qualification_reasoning -cne $qualificationReasoning -or
+        [string]$Config.codex_qualification_cli_version -notmatch '^\S.{0,127}$' -or
+        [string]$Config.codex_qualification_cli_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        $Config.codex_qualification_auth_kind -cne 'CHATGPT' -or
+        [string]$Config.codex_qualification_github_main_sha -notmatch '^[0-9a-f]{40}$' -or
+        $Config.codex_qualification_host -cne $expectedHost -or
+        $Config.codex_qualification_task -cne $executorTaskName -or
+        [string]$Config.codex_qualification_utc -notmatch '^\d{4}-\d{2}-\d{2}T') {
+        throw 'CODEX_QUALIFICATION_PROFILE_MISMATCH_FAIL_CLOSED'
+    }
+    if ($RequireCurrentCli -and
+        ([string]$Config.codex_qualification_cli_sha256 -cne [string]$Config.codex_executable_sha256)) {
+        throw 'CODEX_QUALIFICATION_CLI_PIN_MISMATCH_REVOKE_REQUIRED'
+    }
+    return $true
+}
+
+function Set-CodexExecutorQualificationFlags($Config, [switch]$Revoke) {
+    if ($Revoke) {
+        $Config.github_transport_verified = $false
+        $Config.codex_cli_qualified = $false
+        $Config.codex_login_verified = $false
+        $Config.enable_codex_model_runs = $false
+        $Config.codex_usage_authorized = $false
+        $Config.allowed_codex_models = [pscustomobject]@{}
+        return
+    }
+    $Config.github_transport_verified = $true
+    $Config.codex_cli_qualified = $true
+    $Config.codex_login_verified = $true
+    $Config.enable_codex_model_runs = $true
+    $Config.codex_usage_authorized = $true
+    $allowedModels = [pscustomobject]@{}
+    $allowedModels | Add-Member -MemberType NoteProperty -Name $qualificationModel -Value @($qualificationReasoning)
+    $Config.allowed_codex_models = $allowedModels
+}
+
+function Assert-CodexExecutorQualificationTask($Task, [string]$NodePath) {
+    if ($null -eq $Task -or $Task.TaskName -cne $executorTaskName -or $Task.TaskPath -cne '\' -or
+        $Task.State -cne 'Ready' -or $Task.Settings.Enabled -ne $true -or
+        $Task.Principal.LogonType -cne 'Interactive' -or $Task.Principal.RunLevel -cne 'Limited' -or
+        $Task.Settings.MultipleInstances -cne 'IgnoreNew' -or $Task.Settings.Hidden -ne $true -or
+        $Task.Settings.AllowHardTerminate -ne $false -or
+        -not ($Task.Settings.ExecutionTimeLimit -eq [TimeSpan]::Zero -or
+            [string]$Task.Settings.ExecutionTimeLimit -in @('PT0S','00:00:00')) -or
+        @($Task.Triggers | Where-Object { $null -ne $_ }).Count -ne 0 -or @($Task.Actions).Count -ne 1) {
+        throw 'CODEX_QUALIFICATION_TASK_STATE_MISMATCH'
+    }
+    $taskSid = $null
+    try { $taskSid = Resolve-Sid ([string]$Task.Principal.UserId) } catch { $taskSid = $null }
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    $arguments = ('//B //NoLogo "' + $launcherPath + '" "' + $NodePath + '" "' +
+        $executorScriptPath + '" "' + $executorConfigPath + '"')
+    if ($taskSid -cne $publisherSid -or $Task.Actions[0].Execute -cne $wscript -or
+        $Task.Actions[0].Arguments -cne $arguments -or
+        [IO.Path]::GetFullPath([string]$Task.Actions[0].WorkingDirectory) -cne [IO.Path]::GetFullPath($spoolDir)) {
+        throw 'CODEX_QUALIFICATION_TASK_IDENTITY_MISMATCH'
+    }
+}
+
+function Assert-CodexExecutorQualificationQuiescent {
+    foreach ($directory in @('requests','claims','locks','workspaces')) {
+        $path = Join-Path $spoolDir $directory
+        if (-not (Test-Path -LiteralPath $path -PathType Container) -or
+            @(Get-ChildItem -LiteralPath $path -Force -Recurse -ErrorAction Stop).Count -gt 0) {
+            throw 'CODEX_QUALIFICATION_SPOOL_EFFECT_PRESENT_OR_UNKNOWN'
+        }
+    }
+    foreach ($directory in @('bundles','results','evidence')) {
+        $path = Join-Path $spoolDir $directory
+        if (-not (Test-Path -LiteralPath $path -PathType Container) -or
+            @(Get-ChildItem -LiteralPath $path -Force -Recurse -ErrorAction Stop).Count -gt 0) {
+            throw 'CODEX_QUALIFICATION_SPOOL_EFFECT_PRESENT_OR_UNKNOWN'
+        }
+    }
+    try { $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop) }
+    catch { throw 'CODEX_QUALIFICATION_PROCESS_STATE_UNKNOWN' }
+    foreach ($process in $processes) {
+        $name = [string]$process.Name
+        $exe = [string]$process.ExecutablePath
+        $command = [string]$process.CommandLine
+        $isExecutorProcess = $command -and
+            $command.IndexOf($executorScriptPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        if ($isExecutorProcess -or $name -ieq 'codex.exe' -or
+            ($name -in @('node.exe','wscript.exe') -and $command -and
+             $command.IndexOf($executorConfigPath, [StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+            throw 'CODEX_QUALIFICATION_EXECUTOR_OR_MODEL_PROCESS_RUNNING'
+        }
+        if (-not $command -and ($name -in @('codex.exe','node.exe','wscript.exe') -or
+            ($exe -and [IO.Path]::GetFileName($exe) -in @('codex.exe','node.exe','wscript.exe')))) {
+            throw 'CODEX_QUALIFICATION_PROCESS_STATE_UNKNOWN'
+        }
+    }
+}
+
+function Invoke-CodexQualificationReadOnly([string]$Executable, [string]$Arguments) {
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Executable
+    $start.Arguments = $Arguments
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    try {
+        if (-not $process.Start()) { throw 'CODEX_QUALIFICATION_READONLY_COMMAND_FAILED' }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(30000)) {
+            try { $process.Kill() } catch {}
+            throw 'CODEX_QUALIFICATION_READONLY_COMMAND_TIMEOUT'
+        }
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $null = $stderrTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) { throw 'CODEX_QUALIFICATION_READONLY_COMMAND_FAILED' }
+        return [string]$stdout
+    } finally { $process.Dispose() }
+}
+
+function Invoke-CodexExecutorQualification([switch]$Revoke) {
+    if ($ExecutionPhase -cne 'WIN11_TRANSITION' -or $null -ne $ExecutorCredential -or
+        -not $env:USERPROFILE -or [Diagnostics.Process]::GetCurrentProcess().SessionId -le 0) {
+        throw 'CODEX_QUALIFICATION_WIN11_TRANSITION_ONLY'
+    }
+    if (-not $Revoke -and -not $AuthorizePreProductionCodexUsage) {
+        throw 'CODEX_QUALIFICATION_EXPLICIT_AUTHORIZATION_REQUIRED'
+    }
+    foreach ($path in @($workerConfigPath,$executorConfigPath,$installStatePath)) {
+        Assert-CodexExecutorInstallPathChain $path
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'CODEX_QUALIFICATION_INSTALLED_STATE_REQUIRED' }
+    }
+    $workerConfigLock = Enter-WorkerConfigWriteLock
+    try {
+        $task = Get-TaskOptional $executorTaskName -Strict
+        if ($null -eq $task) { throw 'CODEX_QUALIFICATION_TASK_ABSENT' }
+        $configBytes = [IO.File]::ReadAllBytes($executorConfigPath)
+        $manifestBytes = [IO.File]::ReadAllBytes($installStatePath)
+        $configHash = Get-CodexExecutorBytesSha256 $configBytes
+        $manifestHash = Get-CodexExecutorBytesSha256 $manifestBytes
+        $config = ([Text.Encoding]::UTF8.GetString($configBytes)).TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
+        $manifest = ([Text.Encoding]::UTF8.GetString($manifestBytes)).TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
+        if ($config.project_id -cne $project -or $config.repo -cne $repo -or
+            $config.codex_executor_execution_phase -cne 'WIN11_TRANSITION' -or
+            [IO.Path]::GetFullPath([string]$config.spool_dir) -cne [IO.Path]::GetFullPath($spoolDir) -or
+            [IO.Path]::GetFullPath([string]$config.codex_executor_config_path) -cne [IO.Path]::GetFullPath($executorConfigPath) -or
+            [IO.Path]::GetFullPath([string]$config.codex_executor_script_path) -cne [IO.Path]::GetFullPath($executorScriptPath) -or
+            [IO.Path]::GetFullPath([string]$config.codex_executor_launcher_path) -cne [IO.Path]::GetFullPath($launcherPath) -or
+            [IO.Path]::GetFullPath([string]$config.codex_executor_wscript_path) -cne
+                [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32\wscript.exe')) -or
+            [IO.Path]::GetFullPath([string]$config.codex_executor_working_directory) -cne [IO.Path]::GetFullPath($spoolDir) -or
+            $config.codex_executor_task -cne $executorTaskName -or
+            $config.codex_executor_task_user -cne [Security.Principal.WindowsIdentity]::GetCurrent().Name -or
+            $config.publisher_identity_sid -cne $publisherSid -or $config.executor_identity_sid -cne $publisherSid -or
+            $config.codex_sandbox_boundary -cne 'UNKNOWN' -or
+            $null -eq $config.allowed_codex_models) {
+            throw 'CODEX_QUALIFICATION_INSTALLED_IDENTITY_MISMATCH'
+        }
+        $nodePath = [IO.Path]::GetFullPath([string]$config.codex_executor_node_path)
+        if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) { throw 'CODEX_QUALIFICATION_NODE_PATH_MISSING' }
+        Assert-CodexExecutorQualificationTask $task $nodePath
+        if ($manifest.schema -cne 'ptysd-codex-executor-install-state.v1' -or
+            $manifest.execution_phase -cne 'WIN11_TRANSITION' -or
+            $manifest.host -cne $expectedHost -or $manifest.publisher_sid -cne $publisherSid -or
+            $manifest.executor_sid -cne $publisherSid -or
+            [IO.Path]::GetFullPath([string]$manifest.spool_dir) -cne [IO.Path]::GetFullPath($spoolDir) -or
+            [IO.Path]::GetFullPath([string]$manifest.runtime_dir) -cne [IO.Path]::GetFullPath($runtimeDir) -or
+            $manifest.runtime_sha256.'executor-config.json' -cne $configHash) {
+            throw 'CODEX_QUALIFICATION_INSTALL_STATE_MISMATCH'
+        }
+        $expectedRuntimeNames = @($runtimeModuleNames) + @('executor-config.json')
+        $manifestEntries = @($manifest.runtime_sha256.PSObject.Properties)
+        if ($manifestEntries.Count -ne $expectedRuntimeNames.Count) { throw 'CODEX_QUALIFICATION_RUNTIME_HASH_SET_MISMATCH' }
+        foreach ($entry in $manifestEntries) {
+            if ($entry.Name -notin $expectedRuntimeNames) { throw 'CODEX_QUALIFICATION_RUNTIME_HASH_SET_MISMATCH' }
+            if ([string]$entry.Value -notmatch '^[0-9a-f]{64}$' -or
+                -not (Test-Path -LiteralPath (Join-Path $runtimeDir $entry.Name) -PathType Leaf) -or
+                (Get-FileHash -LiteralPath (Join-Path $runtimeDir $entry.Name) -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -cne [string]$entry.Value) {
+                throw 'CODEX_QUALIFICATION_RUNTIME_HASH_MISMATCH'
+            }
+        }
+        if (-not $Revoke) {
+            if ($config.github_transport_verified -ne $false -or $config.enable_codex_model_runs -ne $false -or
+                $config.codex_usage_authorized -ne $false -or $config.codex_cli_qualified -ne $false -or
+                $config.codex_login_verified -ne $false -or
+                @($config.allowed_codex_models.PSObject.Properties).Count -ne 0) {
+                throw 'CODEX_QUALIFICATION_EXISTING_AUTHORIZATION_REVOKE_FIRST'
+            }
+            $isQualified = Assert-CodexExecutorQualificationProfile $config -RequireCurrentCli
+            if ($isQualified) { throw 'CODEX_QUALIFICATION_ALREADY_ACTIVE_REVOKE_FIRST' }
+        }
+        Assert-CodexExecutorQualificationQuiescent
+
+        $currentQualificationProperty = $config.PSObject.Properties['codex_qualification_profile']
+        $currentQualificationProfile = if ($null -ne $currentQualificationProperty) {
+            [string]$currentQualificationProperty.Value
+        } else { '' }
+        if ($Revoke -and $config.github_transport_verified -eq $false -and
+            $config.codex_cli_qualified -eq $false -and $config.codex_login_verified -eq $false -and
+            $config.enable_codex_model_runs -eq $false -and $config.codex_usage_authorized -eq $false -and
+            @($config.allowed_codex_models.PSObject.Properties).Count -eq 0 -and
+            $currentQualificationProfile -ceq 'DISABLED') {
+            Write-Output 'CODEX_QUALIFICATION=ALREADY_REVOKED'
+            return
+        }
+
+        $codexPath = [IO.Path]::GetFullPath([string]$config.codex_executable)
+        $cliHash = ''
+        if (-not $Revoke) {
+            if (-not (Test-CodexExecutorOfficialAppxCliPath $codexPath)) { throw 'CODEX_QUALIFICATION_OFFICIAL_APPX_CLI_REQUIRED' }
+            Assert-CodexExecutorInstallPathChain $codexPath
+            $signature = Get-AuthenticodeSignature -FilePath $codexPath
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'OpenAI OpCo, LLC') {
+                throw 'CODEX_QUALIFICATION_CLI_SIGNATURE_INVALID'
+            }
+            $cliHash = (Get-FileHash -LiteralPath $codexPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+            if ($cliHash -cne [string]$config.codex_executable_sha256) { throw 'CODEX_QUALIFICATION_CLI_HASH_MISMATCH' }
+            if ($env:OPENAI_API_KEY) { throw 'CODEX_QUALIFICATION_OPENAI_API_KEY_PRESENT' }
+            $versionOutput = Invoke-CodexQualificationReadOnly $codexPath '--version'
+            $version = [regex]::Match($versionOutput, '(?im)^\s*(?:codex\s+)?(\S.{0,127})\s*$')
+            if (-not $version.Success) { throw 'CODEX_QUALIFICATION_CLI_VERSION_UNAVAILABLE' }
+            $loginOutput = Invoke-CodexQualificationReadOnly $codexPath 'login status'
+            if ($loginOutput -notmatch '(?im)chatgpt' -or $loginOutput -match '(?im)api.?key|not logged|unauthenticated') {
+                throw 'CODEX_QUALIFICATION_CHATGPT_LOGIN_REQUIRED'
+            }
+            if ($env:OPENAI_API_KEY) { throw 'CODEX_QUALIFICATION_OPENAI_API_KEY_PRESENT' }
+            $gh = Get-Command gh -ErrorAction Stop
+            $authOutput = Invoke-CodexQualificationReadOnly $gh.Source 'auth status'
+            if ($authOutput -notmatch '(?im)logged in to github\.com') { throw 'CODEX_QUALIFICATION_GITHUB_AUTH_REQUIRED' }
+            $apiOutput = Invoke-CodexQualificationReadOnly $gh.Source ('api repos/' + $repo + '/git/ref/heads/main')
+            $api = $apiOutput | ConvertFrom-Json -ErrorAction Stop
+            $mainSha = [string]$api.object.sha
+            if ($mainSha -cnotmatch '^[0-9a-fA-F]{40}$') { throw 'CODEX_QUALIFICATION_GITHUB_MAIN_SHA_INVALID' }
+            $null = Assert-CodexExecutorQualificationProfile $config
+        }
+
+        $newConfig = $config | ConvertTo-Json -Depth 30 | ConvertFrom-Json -ErrorAction Stop
+        if ($Revoke) {
+            foreach ($field in $qualificationFields) {
+                $value = if ($field -eq 'codex_qualification_profile') { 'DISABLED' } else { $null }
+                $newConfig | Add-Member -MemberType NoteProperty -Name $field -Value $value -Force
+            }
+            Set-CodexExecutorQualificationFlags $newConfig -Revoke
+        } else {
+            $values = @{
+                codex_qualification_profile=$qualificationProfile; codex_qualification_model=$qualificationModel
+                codex_qualification_reasoning=$qualificationReasoning; codex_qualification_cli_version=$version.Groups[1].Value.Trim()
+                codex_qualification_cli_sha256=$cliHash; codex_qualification_auth_kind='CHATGPT'
+                codex_qualification_github_main_sha=$mainSha.ToLowerInvariant(); codex_qualification_host=$expectedHost
+                codex_qualification_task=$executorTaskName; codex_qualification_utc=[DateTime]::UtcNow.ToString('o')
+            }
+            foreach ($field in $qualificationFields) { $newConfig | Add-Member -MemberType NoteProperty -Name $field -Value $values[$field] -Force }
+            Set-CodexExecutorQualificationFlags $newConfig
+        }
+        $newConfigBytes = ([Text.UTF8Encoding]::new($true)).GetPreamble() +
+            ([Text.UTF8Encoding]::new($false)).GetBytes(((ConvertTo-Json -InputObject $newConfig -Depth 30 -Compress) + [Environment]::NewLine))
+        $newConfigHash = Get-CodexExecutorBytesSha256 $newConfigBytes
+        $manifestText = [Text.Encoding]::UTF8.GetString($manifestBytes).TrimStart([char]0xFEFF)
+        $manifestPattern = '("executor-config\.json"\s*:\s*")[0-9a-fA-F]{64}(\")'
+        if ([regex]::Matches($manifestText, $manifestPattern).Count -ne 1) { throw 'CODEX_QUALIFICATION_MANIFEST_HASH_AMBIGUOUS' }
+        $manifestText = [regex]::Replace($manifestText, $manifestPattern, ('${1}' + $newConfigHash + '${2}'), 1)
+        $manifestCheck = $manifestText | ConvertFrom-Json -ErrorAction Stop
+        if ($manifestCheck.runtime_sha256.'executor-config.json' -cne $newConfigHash) { throw 'CODEX_QUALIFICATION_MANIFEST_UPDATE_FAILED' }
+        $newManifestBytes = ([Text.UTF8Encoding]::new($false)).GetBytes($manifestText)
+        $newManifestHash = Get-CodexExecutorBytesSha256 $newManifestBytes
+        $backupDir = Join-Path $sharedBase 'maintenance-backups'
+        Assert-CodexExecutorInstallPathChain $backupDir
+        if (-not (Test-Path -LiteralPath $backupDir -PathType Container)) { $null = New-Item -ItemType Directory -Path $backupDir -ErrorAction Stop }
+        Assert-CodexExecutorTransitionAcl $backupDir
+        $stem = 'codex-qualification-' + (Get-Date -Format 'yyyyMMddHHmmss') + '-' + [guid]::NewGuid().ToString('N')
+        $configBackup = Join-Path $backupDir ($stem + '-executor-config.json')
+        $manifestBackup = Join-Path $backupDir ($stem + '-install-state.json')
+        [IO.File]::WriteAllBytes($configBackup, $configBytes)
+        [IO.File]::WriteAllBytes($manifestBackup, $manifestBytes)
+        if ((Get-FileHash -LiteralPath $configBackup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $configHash -or
+            (Get-FileHash -LiteralPath $manifestBackup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $manifestHash) {
+            throw 'CODEX_QUALIFICATION_BACKUP_HASH_MISMATCH'
+        }
+        $refreshLockPath = New-CodexExecutorCliRefreshLock -SpoolPath $spoolDir
+        $preserveLock = $false
+        try {
+            if ((Get-FileHash -LiteralPath $executorConfigPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $configHash -or
+                (Get-FileHash -LiteralPath $installStatePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $manifestHash) {
+                throw 'CODEX_QUALIFICATION_STATE_CHANGED_BEFORE_WRITE'
+            }
+            Write-CodexExecutorAtomicReplacement $newConfigBytes $executorConfigPath $newConfigHash
+            $manifestText = [Text.Encoding]::UTF8.GetString($manifestBytes).TrimStart([char]0xFEFF)
+            $manifestText = [regex]::Replace($manifestText, $manifestPattern, ('${1}' + $newConfigHash + '${2}'), 1)
+            $manifestBytes = ([Text.UTF8Encoding]::new($false)).GetBytes($manifestText)
+            $newManifestHash = Get-CodexExecutorBytesSha256 $manifestBytes
+            Write-CodexExecutorAtomicReplacement $manifestBytes $installStatePath $newManifestHash
+            $readConfigBytes = [IO.File]::ReadAllBytes($executorConfigPath)
+            $readManifest = [IO.File]::ReadAllBytes($installStatePath)
+            if ((Get-CodexExecutorBytesSha256 $readConfigBytes) -cne $newConfigHash -or
+                (Get-CodexExecutorBytesSha256 $readManifest) -cne $newManifestHash) { throw 'CODEX_QUALIFICATION_READBACK_HASH_MISMATCH' }
+            $readConfig = ([Text.Encoding]::UTF8.GetString($readConfigBytes)).TrimStart([char]0xFEFF) | ConvertFrom-Json
+            $null = Assert-CodexExecutorQualificationProfile $readConfig
+            if (($Revoke -and $readConfig.codex_qualification_profile -cne 'DISABLED') -or
+                (-not $Revoke -and $readConfig.codex_qualification_profile -cne $qualificationProfile)) {
+                throw 'CODEX_QUALIFICATION_PROFILE_READBACK_MISMATCH'
+            }
+            if ($Revoke) {
+                if ($readConfig.github_transport_verified -ne $false -or $readConfig.codex_cli_qualified -ne $false -or
+                    $readConfig.codex_login_verified -ne $false -or $readConfig.enable_codex_model_runs -ne $false -or
+                    $readConfig.codex_usage_authorized -ne $false -or
+                    @($readConfig.allowed_codex_models.PSObject.Properties).Count -ne 0) {
+                    throw 'CODEX_QUALIFICATION_REVOKE_READBACK_MISMATCH'
+                }
+            } elseif ($readConfig.github_transport_verified -ne $true -or
+                $readConfig.codex_cli_qualified -ne $true -or $readConfig.codex_login_verified -ne $true -or
+                $readConfig.enable_codex_model_runs -ne $true -or $readConfig.codex_usage_authorized -ne $true -or
+                @($readConfig.allowed_codex_models.PSObject.Properties).Count -ne 1 -or
+                @($readConfig.allowed_codex_models.PSObject.Properties['gpt-6-luna'].Value).Count -ne 1 -or
+                $readConfig.allowed_codex_models.'gpt-6-luna'[0] -cne 'low') {
+                throw 'CODEX_QUALIFICATION_ENABLE_READBACK_MISMATCH'
+            }
+        } catch {
+            $original = $_.Exception.Message
+            $rollbackErrors = New-Object System.Collections.Generic.List[string]
+            foreach ($entry in @(
+                @{Path=$installStatePath; Backup=$manifestBackup; OldHash=$manifestHash; NewHash=$newManifestHash},
+                @{Path=$executorConfigPath; Backup=$configBackup; OldHash=$configHash; NewHash=$newConfigHash}
+            )) {
+                try {
+                    $current = (Get-FileHash -LiteralPath $entry.Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                    if ($current -eq $entry.OldHash) { continue }
+                    if ($current -cne $entry.NewHash) { throw 'THIRD_HASH' }
+                    $oldBytes = [IO.File]::ReadAllBytes($entry.Backup)
+                    if ((Get-CodexExecutorBytesSha256 $oldBytes) -cne $entry.OldHash) { throw 'BACKUP_HASH' }
+                    Write-CodexExecutorAtomicReplacement $oldBytes $entry.Path $entry.OldHash
+                } catch { $rollbackErrors.Add([string]$entry.Path) }
+            }
+            if ($rollbackErrors.Count) { $preserveLock = $true; throw ('CODEX_QUALIFICATION_PARTIAL_STATE_REVIEW_REQUIRED;backup=' + $backupDir) }
+            throw ('CODEX_QUALIFICATION_FAILED_ROLLED_BACK:' + $original)
+        } finally {
+            if (-not $preserveLock) { Remove-CodexExecutorCliRefreshLock $refreshLockPath }
+        }
+        Write-Output ('CODEX_QUALIFICATION=' + $(if ($Revoke) { 'REVOKED' } else { 'QUALIFIED' }))
+        if (-not $Revoke) {
+            Write-Output ('CODEX_QUALIFICATION_PROFILE=' + $qualificationProfile + ';model=' + $qualificationModel + ';reasoning=' + $qualificationReasoning)
+            Write-Output ('CODEX_QUALIFICATION_CLI_VERSION=' + $version.Groups[1].Value.Trim() + ';sha256=' + $cliHash)
+            Write-Output ('CODEX_QUALIFICATION_AUTH=CHATGPT;GITHUB_MAIN_SHA=' + $mainSha.ToLowerInvariant())
+            Write-Output ('CODEX_QUALIFICATION_UTC=' + $newConfig.codex_qualification_utc)
+        }
+        Write-Output ('CODEX_QUALIFICATION_BACKUP=' + $backupDir)
+    } finally { $workerConfigLock.Dispose() }
+}
+
 function Get-CodexExecutorRuntimeRefreshTaskIdentity($Task) {
     $actions = @($Task.Actions)
     if ($actions.Count -ne 1) { throw 'CODEX_RUNTIME_MODULE_REFRESH_TASK_IDENTITY_MISMATCH' }
@@ -883,6 +1258,7 @@ function Invoke-CodexExecutorRuntimeModuleRefresh($Task,
                 @($lockedExecutorConfig.allowed_codex_models.PSObject.Properties).Count -ne 0) {
                 throw 'CODEX_RUNTIME_MODULE_REFRESH_MODEL_AUTHORIZATION_MUST_REMAIN_DISABLED'
             }
+            $null = Assert-CodexExecutorQualificationProfile $lockedExecutorConfig -RequireCurrentCli
             if ((Get-FileHash -LiteralPath $workerConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
                 $WorkerConfigHash.ToLowerInvariant() -or
                 (Get-FileHash -LiteralPath $executorConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne
@@ -1067,6 +1443,10 @@ function Invoke-CodexExecutorCliPinRefresh([string]$NewCodexExecutable, [switch]
         $null -eq $config.allowed_codex_models -or
         @($config.allowed_codex_models.PSObject.Properties).Count -ne 0) {
         throw 'CODEX_CLI_REFRESH_MODEL_AUTHORIZATION_MUST_REMAIN_DISABLED'
+    }
+    $qualificationActive = Assert-CodexExecutorQualificationProfile $config -RequireCurrentCli
+    if ($qualificationActive -and -not $RefreshRuntimeModules) {
+        throw 'CODEX_CLI_REFRESH_QUALIFICATION_ACTIVE_REVOKE_FIRST'
     }
     $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
     $expectedArgs = ('//B //NoLogo "' + $launcherPath + '" "' + $installedNodePath + '" "' +
@@ -1431,7 +1811,20 @@ if ($Mode -eq 'RefreshCodexCli' -or $Mode -eq 'RefreshRuntimeModules') {
     }
     return
 }
-
+if ($Mode -eq 'QualifyPreProductionCodex' -or $Mode -eq 'RevokePreProductionCodex') {
+    $refreshMutex = [Threading.Mutex]::new($false, ('Local\PTYSD-CodexExecutor-CliRefresh-' + $publisherSid))
+    $refreshMutexAcquired = $false
+    try {
+        try { $refreshMutexAcquired = $refreshMutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $refreshMutexAcquired = $true }
+        if (-not $refreshMutexAcquired) { throw 'CODEX_QUALIFICATION_REFRESH_ALREADY_RUNNING' }
+        Invoke-CodexExecutorQualification -Revoke:($Mode -eq 'RevokePreProductionCodex')
+    } finally {
+        if ($refreshMutexAcquired) { $refreshMutex.ReleaseMutex() }
+        $refreshMutex.Dispose()
+    }
+    return
+}
 if ($Mode -eq 'Uninstall') {
     $task = Get-TaskOptional $executorTaskName
     if ($null -eq $task) { Write-Output 'CODEX_EXECUTOR_TASK=ALREADY_ABSENT'; return }
@@ -1567,6 +1960,11 @@ $executorConfig = [ordered]@{
     codex_executor_config_path=$executorConfigPath; codex_executor_working_directory=$spoolDir
     github_transport_verified=$false; codex_cli_qualified=$false; codex_login_verified=$false
     enable_codex_model_runs=$false; codex_usage_authorized=$false
+    codex_qualification_profile='DISABLED'; codex_qualification_model=$null
+    codex_qualification_reasoning=$null; codex_qualification_cli_version=$null
+    codex_qualification_cli_sha256=$null; codex_qualification_auth_kind=$null
+    codex_qualification_github_main_sha=$null; codex_qualification_host=$null
+    codex_qualification_task=$null; codex_qualification_utc=$null
     codex_sandbox_boundary='UNKNOWN'; allowed_codex_models=@{}
 }
 $configText = (ConvertTo-Json -InputObject $executorConfig -Depth 10 -Compress) + [Environment]::NewLine

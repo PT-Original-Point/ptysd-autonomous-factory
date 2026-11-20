@@ -183,6 +183,35 @@ export function parseCodexReceipt(body) {
   return receipt;
 }
 
+function win11CodexQualificationReady(job, config) {
+  const profile = 'WIN11_PREPRODUCTION_CHATGPT_LOW_V1';
+  const model = 'gpt-6-luna';
+  const effort = 'low';
+  const cliHash = config?.codex_qualification_cli_sha256;
+  const executableHash = config?.codex_executable_sha256;
+  const qualifiedModels = config?.allowed_codex_models;
+  const modelNames = qualifiedModels && typeof qualifiedModels === 'object' && !Array.isArray(qualifiedModels)
+    ? Object.keys(qualifiedModels) : [];
+  const qualifiedEfforts = qualifiedModels?.[model];
+  const timestamp = config?.codex_qualification_utc;
+  return config?.codex_qualification_profile === profile &&
+    job?.model === model && job?.reasoning_effort === effort &&
+    config?.codex_qualification_model === model && config?.codex_qualification_reasoning === effort &&
+    typeof config?.codex_qualification_cli_version === 'string' &&
+    /^\S.{0,127}$/.test(config.codex_qualification_cli_version) &&
+    typeof cliHash === 'string' && /^[0-9a-f]{64}$/i.test(cliHash) &&
+    typeof executableHash === 'string' && cliHash.toLowerCase() === executableHash.toLowerCase() &&
+    config?.codex_qualification_auth_kind === 'CHATGPT' &&
+    typeof config?.codex_qualification_github_main_sha === 'string' &&
+    /^[0-9a-f]{40}$/i.test(config.codex_qualification_github_main_sha) &&
+    typeof job?.host === 'string' && config?.codex_qualification_host === job.host &&
+    config?.codex_qualification_task === CODEX_EXECUTOR_TASK &&
+    typeof timestamp === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(timestamp) &&
+    Number.isFinite(Date.parse(timestamp)) && modelNames.length === 1 && modelNames[0] === model &&
+    Array.isArray(qualifiedEfforts) && qualifiedEfforts.length === 1 && qualifiedEfforts[0] === effort;
+}
+
 export function codexExecutionGate(job, config) {
   const reasons = [];
   if (!job || job.kind !== CODEX_JOB_KIND) reasons.push('INVALID_CODEX_JOB');
@@ -194,6 +223,8 @@ export function codexExecutionGate(job, config) {
   const publisherSid = config?.publisher_identity_sid;
   const executorSid = config?.executor_identity_sid;
   const phase = config?.codex_executor_execution_phase ?? 'VM_ISOLATED';
+  if (phase === 'WIN11_TRANSITION' && !win11CodexQualificationReady(job, config))
+    reasons.push('CODEX_QUALIFICATION_PROFILE_NOT_VERIFIED');
   // The Win11 transition deliberately uses one interactive identity, so a
   // second-SID exact-permission profile cannot exist there. Keep that stronger
   // boundary mandatory for the final VM-isolated execution phase.

@@ -225,6 +225,17 @@ function readyConfig(overrides = {}) {
     codex_login_verified: true,
     enable_codex_model_runs: true,
     codex_usage_authorized: true,
+    codex_executable_sha256: 'a'.repeat(64),
+    codex_qualification_profile: 'WIN11_PREPRODUCTION_CHATGPT_LOW_V1',
+    codex_qualification_model: 'gpt-6-luna',
+    codex_qualification_reasoning: 'low',
+    codex_qualification_cli_version: 'codex-cli 0.169.1',
+    codex_qualification_cli_sha256: 'a'.repeat(64),
+    codex_qualification_auth_kind: 'CHATGPT',
+    codex_qualification_github_main_sha: 'b'.repeat(40),
+    codex_qualification_host: 'DESKTOP-1B6PD2P',
+    codex_qualification_utc: '2026-11-20T06:00:00.0000000Z',
+    codex_qualification_task: 'PTYSD-Codex-Executor',
     codex_sandbox_boundary: 'VERIFIED_EXACT_PATH_PERMISSION_PROFILE',
     publisher_identity_sid: 'S-1-5-21-1000',
     executor_identity_sid: 'S-1-5-21-2000',
@@ -306,9 +317,33 @@ test('Codex dispatch task must match live identity, privilege, launch action and
 
 test('WIN11_TRANSITION accepts only the current same-SID Codex executor and interactive task', () => {
   const sid = 'S-1-5-21-1000';
+  const transitionJob = job({ model: 'gpt-6-luna', reasoning_effort: 'low' });
   const config = readyConfig({ publisher_identity_sid: sid, executor_identity_sid: sid,
-    codex_executor_execution_phase: 'WIN11_TRANSITION', codex_sandbox_boundary: 'UNKNOWN' });
-  assert.deepEqual(codexExecutionGate(job(), config), { allowed: true, reasons: [] });
+    codex_executor_execution_phase: 'WIN11_TRANSITION', codex_sandbox_boundary: 'UNKNOWN',
+    allowed_codex_models: { 'gpt-6-luna': ['low'] } });
+  assert.deepEqual(codexExecutionGate(transitionJob, config), { allowed: true, reasons: [] });
+  const differentProfile = codexExecutionGate(transitionJob, readyConfig({ publisher_identity_sid: sid,
+    executor_identity_sid: sid, codex_executor_execution_phase: 'WIN11_TRANSITION',
+    codex_qualification_profile: 'OTHER_PROFILE' }));
+  assert.equal(differentProfile.allowed, false);
+  assert.ok(differentProfile.reasons.includes('CODEX_QUALIFICATION_PROFILE_NOT_VERIFIED'));
+  for (const invalid of [
+    { job: job({ model: 'gpt-6.1-sol', reasoning_effort: 'medium' }), config },
+    { job: transitionJob, config: { ...config, codex_qualification_cli_sha256: 'c'.repeat(64) } },
+    { job: transitionJob, config: { ...config, codex_qualification_auth_kind: 'API_KEY' } },
+    { job: transitionJob, config: { ...config, codex_qualification_host: 'OTHER-HOST' } },
+    { job: transitionJob, config: { ...config, codex_qualification_cli_version: undefined } },
+    { job: transitionJob, config: { ...config, codex_qualification_utc: 'not-a-timestamp' } },
+    { job: transitionJob, config: { ...config, codex_executable_sha256: 'c'.repeat(64) } },
+    { job: transitionJob, config: { ...config, allowed_codex_models: {
+      'gpt-6-luna': ['low'], 'gpt-6.1-sol': ['medium'],
+    } } },
+    { job: transitionJob, config: { ...config, allowed_codex_models: { 'gpt-6-luna': ['medium'] } } },
+  ]) {
+    const rejected = codexExecutionGate(invalid.job, invalid.config);
+    assert.equal(rejected.allowed, false);
+    assert.ok(rejected.reasons.includes('CODEX_QUALIFICATION_PROFILE_NOT_VERIFIED'));
+  }
   const xml = codexTaskXml(config);
   assert.equal(validateCodexExecutorTaskXml(xml, config).logon_type, 'InteractiveToken');
   assert.equal(assertCodexExecutorTaskReady(config, {
@@ -545,6 +580,8 @@ test('Codex CLI args bind writes to exact task paths with native permissions and
     'legacy user sandbox settings must not override the per-task permissions profile');
   assert.equal(args.includes('--strict-config'), true,
     'unsupported permission configuration must fail closed before execution');
+  assert.equal(rawConfigs.includes('approval_policy=never'), true,
+    'scheduled CLI execution remains noninteractive only inside the exact verified path profile');
   assert.equal(rawConfigs.includes('windows.sandbox=mxc'), true,
     'scheduled execution must pin the host-verified Windows sandbox backend');
   assert.equal(args.includes('--sandbox'), false,

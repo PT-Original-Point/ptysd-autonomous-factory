@@ -80,6 +80,66 @@ function Assert-Equal($Actual, $Expected, [string]$Message) {
     if ($Actual -cne $Expected) { throw ('ASSERT_EQUAL_FAILED: ' + $Message + ';actual=' + $Actual + ';expected=' + $Expected) }
 }
 
+$qualificationProfile = 'WIN11_PREPRODUCTION_CHATGPT_LOW_V1'
+$qualificationModel = 'gpt-6-luna'
+$qualificationReasoning = 'low'
+$qualificationFields = @('codex_qualification_profile','codex_qualification_model',
+    'codex_qualification_reasoning','codex_qualification_cli_version','codex_qualification_cli_sha256',
+    'codex_qualification_auth_kind','codex_qualification_github_main_sha','codex_qualification_host',
+    'codex_qualification_task','codex_qualification_utc')
+$expectedHost = 'DESKTOP-1B6PD2P'
+$executorTaskName = 'PTYSD-Codex-Executor'
+foreach ($name in @('Set-CodexExecutorQualificationFlags','Assert-CodexExecutorQualificationProfile')) {
+    $functionAst = $installerAst.Find({ param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+    }, $true)
+    if ($null -eq $functionAst) { throw ('CODEX_QUALIFICATION_TEST_FUNCTION_MISSING: ' + $name) }
+    Invoke-Expression $functionAst.Extent.Text
+}
+$qualificationFixture = [pscustomobject]@{
+    github_transport_verified=$false; codex_cli_qualified=$false; codex_login_verified=$false
+    enable_codex_model_runs=$false; codex_usage_authorized=$false; allowed_codex_models=[pscustomobject]@{}
+    codex_executable_sha256=('a' * 64); codex_qualification_profile='DISABLED'
+    codex_qualification_model=$null; codex_qualification_reasoning=$null
+    codex_qualification_cli_version=$null; codex_qualification_cli_sha256=$null
+    codex_qualification_auth_kind=$null; codex_qualification_github_main_sha=$null
+    codex_qualification_host=$null; codex_qualification_task=$null; codex_qualification_utc=$null
+}
+Set-CodexExecutorQualificationFlags $qualificationFixture
+Assert-Equal $qualificationFixture.github_transport_verified $true 'qualification enables only the read-verified GitHub transport flag'
+Assert-Equal $qualificationFixture.codex_cli_qualified $true 'qualified CLI flag is enabled'
+Assert-Equal $qualificationFixture.codex_login_verified $true 'verified ChatGPT login flag is enabled'
+Assert-Equal $qualificationFixture.enable_codex_model_runs $true 'explicit qualification enables Codex model runs'
+Assert-Equal $qualificationFixture.codex_usage_authorized $true 'explicit qualification records ordinary authorized usage'
+Assert-Equal $qualificationFixture.allowed_codex_models.'gpt-6-luna'[0] 'low' 'the allowlist contains only the fixed low-effort model profile'
+Set-CodexExecutorQualificationFlags $qualificationFixture -Revoke
+Assert-Equal $qualificationFixture.github_transport_verified $false 'revocation clears verified transport'
+Assert-Equal $qualificationFixture.codex_cli_qualified $false 'revocation clears CLI qualification'
+Assert-Equal $qualificationFixture.codex_login_verified $false 'revocation clears login qualification'
+Assert-Equal $qualificationFixture.enable_codex_model_runs $false 'revocation disables model runs'
+Assert-Equal $qualificationFixture.codex_usage_authorized $false 'revocation clears usage authorization'
+Assert-Equal @($qualificationFixture.allowed_codex_models.PSObject.Properties).Count 0 'revocation clears every model allowlist entry'
+
+$disabledQualification = [pscustomobject]@{}
+Assert-Equal (Assert-CodexExecutorQualificationProfile $disabledQualification) $false 'legacy unqualified configs remain disabled'
+$validQualification = [pscustomobject]@{
+    codex_qualification_profile=$qualificationProfile; codex_qualification_model=$qualificationModel
+    codex_qualification_reasoning=$qualificationReasoning; codex_qualification_cli_version='codex-cli 0.169.1'
+    codex_qualification_cli_sha256=('a' * 64); codex_executable_sha256=('a' * 64)
+    codex_qualification_auth_kind='CHATGPT'; codex_qualification_github_main_sha=('b' * 40)
+    codex_qualification_host=$expectedHost; codex_qualification_task=$executorTaskName
+    codex_qualification_utc='2026-11-20T06:00:00.0000000Z'
+}
+foreach ($field in $qualificationFields) {
+    if ($null -eq $validQualification.PSObject.Properties[$field]) { throw ('QUALIFICATION_FIXTURE_FIELD_MISSING: ' + $field) }
+}
+Assert-Equal (Assert-CodexExecutorQualificationProfile $validQualification -RequireCurrentCli) $true 'exact qualification metadata is accepted'
+$validQualification.codex_qualification_cli_sha256 = 'c' * 64
+$profileFailure = ''
+try { $null = Assert-CodexExecutorQualificationProfile $validQualification -RequireCurrentCli }
+catch { $profileFailure = $_.Exception.Message }
+Assert-Equal $profileFailure 'CODEX_QUALIFICATION_CLI_PIN_MISMATCH_REVOKE_REQUIRED' 'CLI pin drift fails closed'
+
 $workerInstallerTokens = $null
 $workerInstallerErrors = $null
 $workerInstallerAst = [System.Management.Automation.Language.Parser]::ParseFile(
