@@ -753,7 +753,30 @@ function Assert-CodexExecutorQualificationTask($Task, [string]$NodePath) {
     }
 }
 
-function Assert-CodexExecutorQualificationQuiescent {
+function Test-CodexExecutorQualificationDesktopServerProcess($Process, [string]$ExpectedCodexExecutable) {
+    $processName = [string]$Process.Name
+    if ($processName -ine 'codex.exe') { return $false }
+    $executable = [string]$Process.ExecutablePath
+    $command = [string]$Process.CommandLine
+    if ([string]::IsNullOrWhiteSpace($executable) -or [string]::IsNullOrWhiteSpace($ExpectedCodexExecutable)) {
+        throw 'CODEX_QUALIFICATION_PROCESS_IDENTITY_UNKNOWN'
+    }
+    if ([string]::IsNullOrWhiteSpace($command)) { throw 'CODEX_QUALIFICATION_PROCESS_STATE_UNKNOWN' }
+    try {
+        $actualPath = [IO.Path]::GetFullPath($executable)
+        $expectedPath = [IO.Path]::GetFullPath($ExpectedCodexExecutable)
+    } catch { throw 'CODEX_QUALIFICATION_PROCESS_IDENTITY_UNKNOWN' }
+    if (-not [string]::Equals($actualPath, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'CODEX_QUALIFICATION_PROCESS_IDENTITY_UNKNOWN'
+    }
+
+    # The signed AppX binary also hosts the Desktop app's long-lived servers.
+    # Ignore only those exact server subcommands; standalone CLI/model work stays blocking.
+    $serverRoles = [regex]::Matches($command, '(?i)(?<![\w-])(?:app-server|exec-server)(?![\w-])')
+    return $serverRoles.Count -eq 1 -and $command -notmatch '(?i)(?<![\w-])exec(?![\w-])'
+}
+
+function Assert-CodexExecutorQualificationQuiescent([string]$ExpectedCodexExecutable) {
     foreach ($directory in @('requests','claims','locks','workspaces')) {
         $path = Join-Path $spoolDir $directory
         if (-not (Test-Path -LiteralPath $path -PathType Container) -or
@@ -774,9 +797,19 @@ function Assert-CodexExecutorQualificationQuiescent {
         $name = [string]$process.Name
         $exe = [string]$process.ExecutablePath
         $command = [string]$process.CommandLine
+        $executableName = ''
+        if ($exe) {
+            try { $executableName = [IO.Path]::GetFileName([IO.Path]::GetFullPath($exe)) }
+            catch { throw 'CODEX_QUALIFICATION_PROCESS_IDENTITY_UNKNOWN' }
+        }
+        if ($name -ieq 'codex.exe' -or $executableName -ieq 'codex.exe') {
+            if ($name -ine 'codex.exe') { throw 'CODEX_QUALIFICATION_PROCESS_STATE_UNKNOWN' }
+            if (Test-CodexExecutorQualificationDesktopServerProcess $process $ExpectedCodexExecutable) { continue }
+            throw 'CODEX_QUALIFICATION_EXECUTOR_OR_MODEL_PROCESS_RUNNING'
+        }
         $isExecutorProcess = $command -and
             $command.IndexOf($executorScriptPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
-        if ($isExecutorProcess -or $name -ieq 'codex.exe' -or
+        if ($isExecutorProcess -or
             ($name -in @('node.exe','wscript.exe') -and $command -and
              $command.IndexOf($executorConfigPath, [StringComparison]::OrdinalIgnoreCase) -ge 0)) {
             throw 'CODEX_QUALIFICATION_EXECUTOR_OR_MODEL_PROCESS_RUNNING'
@@ -884,7 +917,7 @@ function Invoke-CodexExecutorQualification([switch]$Revoke) {
             $isQualified = Assert-CodexExecutorQualificationProfile $config -RequireCurrentCli
             if ($isQualified) { throw 'CODEX_QUALIFICATION_ALREADY_ACTIVE_REVOKE_FIRST' }
         }
-        Assert-CodexExecutorQualificationQuiescent
+        Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable ([string]$config.codex_executable)
 
         $currentQualificationProperty = $config.PSObject.Properties['codex_qualification_profile']
         $currentQualificationProfile = if ($null -ne $currentQualificationProperty) {
