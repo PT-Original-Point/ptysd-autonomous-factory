@@ -755,6 +755,19 @@ function Set-CodexExecutorWorkerQualificationState($WorkerConfig, $ExecutorConfi
     return $WorkerConfig
 }
 
+function Test-CodexExecutorWorkerCliPinCompatibility($WorkerConfig, $ExecutorConfig) {
+    $workerPin = $WorkerConfig.PSObject.Properties['codex_executable_sha256']
+    if ($null -eq $workerPin -or
+        [string]$workerPin.Value -ceq [string]$ExecutorConfig.codex_executable_sha256) {
+        return $true
+    }
+    # RefreshCodexCli leaves the Worker disabled while it updates the
+    # executor's signed AppX pin. Permit that stale mirror only in the fully
+    # disabled state; qualification copies the verified new pin in its existing
+    # backup/readback transaction before Worker model use is re-enabled.
+    return (Test-CodexExecutorWorkerQualificationState $WorkerConfig $ExecutorConfig) -ceq 'DISABLED'
+}
+
 function Test-CodexExecutorWorkerQualificationState($WorkerConfig, $ExecutorConfig) {
     $flags = @('github_transport_verified','codex_cli_qualified','codex_login_verified',
         'enable_codex_model_runs','codex_usage_authorized')
@@ -878,7 +891,23 @@ function Test-CodexExecutorQualificationDesktopServerProcess($Process, [string]$
         $expectedPath = [IO.Path]::GetFullPath($ExpectedCodexExecutable)
     } catch { throw 'CODEX_QUALIFICATION_PROCESS_IDENTITY_UNKNOWN' }
     if (-not [string]::Equals($actualPath, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'CODEX_QUALIFICATION_PROCESS_IDENTITY_UNKNOWN'
+        # During a Desktop AppX upgrade, the executor config can still pin the
+        # removed package version while the running Desktop servers already use
+        # the newly registered package. Permit only that exact, currently
+        # registered OpenAI CLI image for server-role classification; the
+        # standalone exec check below remains blocking.
+        if (-not (Test-CodexExecutorOfficialAppxCliPath $actualPath)) {
+            throw 'CODEX_QUALIFICATION_PROCESS_IDENTITY_UNKNOWN'
+        }
+        try {
+            $signature = Get-AuthenticodeSignature -FilePath $actualPath -ErrorAction Stop
+            if ($signature.Status -cne 'Valid' -or
+                [string]$signature.SignerCertificate.Subject -notmatch '(?i)(?:^|,\s*)CN="?OpenAI OpCo, LLC"?(?:,|$)') {
+                throw 'CODEX_QUALIFICATION_PROCESS_IDENTITY_UNKNOWN'
+            }
+        } catch {
+            throw 'CODEX_QUALIFICATION_PROCESS_IDENTITY_UNKNOWN'
+        }
     }
 
     # The signed AppX binary also hosts the Desktop app's long-lived servers.
@@ -1048,8 +1077,7 @@ function Invoke-CodexExecutorQualification([switch]$Revoke) {
             $workerConfig.codex_executor_task_user -cne $config.codex_executor_task_user -or
             $workerConfig.publisher_identity_sid -cne $config.publisher_identity_sid -or
             $workerConfig.executor_identity_sid -cne $config.executor_identity_sid -or
-            ($workerConfig.PSObject.Properties['codex_executable_sha256'] -and
-                [string]$workerConfig.codex_executable_sha256 -cne [string]$config.codex_executable_sha256) -or
+            -not (Test-CodexExecutorWorkerCliPinCompatibility $workerConfig $config) -or
             $null -eq $workerConfig.allowed_codex_models -or $workerConfig.allowed_codex_models -is [Array]) {
             throw 'CODEX_QUALIFICATION_WORKER_CONFIG_IDENTITY_MISMATCH'
         }
