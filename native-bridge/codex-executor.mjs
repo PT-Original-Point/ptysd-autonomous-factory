@@ -379,8 +379,8 @@ export function buildCodexChildEnvironment(request, evidenceDir, source = proces
 
 export async function runCodex(request, config, worktree, evidenceDir, deps = {}) {
   // Validate the complete request before deriving any filesystem paths from
-  // request identifiers. The CLI permission profile is also bound to the
-  // validated attempt_id, before output and credential-isolation paths exist.
+  // request identifiers. The CLI's additional writable temp root is created
+  // from this validated attempt_id before output and credential paths exist.
   const validatedRequest = validateCodexExecutorRequest(request);
   const job = validatedRequest.job;
   const sourceEnvironment = deps.environment || process.env;

@@ -378,7 +378,7 @@ export function buildCodexExecArgs(job, workspace, attemptId, environment = proc
   if (typeof workspace !== 'string' || !workspace) throw new Error('WORKSPACE_REQUIRED');
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(attemptId || ''))
     throw new Error('INVALID_ATTEMPT_ID');
-  const windowsPath = win32.isAbsolute(workspace);
+  const windowsPath = win32.isAbsolute(workspace) && !isAbsolute(workspace);
   const root = windowsPath ? win32.resolve(workspace) : resolve(workspace);
   const resolvePath = windowsPath ? (...parts) => win32.resolve(...parts) : (...parts) => resolve(...parts);
   const relativePath = windowsPath ? (from, to) => win32.relative(from, to) : relative;
@@ -391,11 +391,11 @@ export function buildCodexExecArgs(job, workspace, attemptId, environment = proc
       throw new Error('CODEX_WRITE_SCOPE_PATH_INVALID');
     return fullPath;
   });
-  const rawTemporaryRoots = [environment?.TEMP, environment?.TMP]
-    .filter(value => typeof value === 'string' && value.trim());
-  if (!rawTemporaryRoots.length) rawTemporaryRoots.push(tmpdir());
   const temporaryRoots = new Map();
-  for (const value of rawTemporaryRoots) {
+  const temporaryByVariable = new Map();
+  for (const variable of ['TEMP', 'TMP']) {
+    const value = environment?.[variable];
+    if (typeof value !== 'string' || !value.trim()) continue;
     if (!isAbsolutePath(value)) throw new Error('CODEX_TEMP_ROOT_INVALID');
     const temporaryRoot = resolvePath(value);
     const relativeWorkspace = relativePath(temporaryRoot, root);
@@ -406,32 +406,47 @@ export function buildCodexExecArgs(job, workspace, attemptId, environment = proc
     }
     const key = windowsPath ? temporaryRoot.toLowerCase() : temporaryRoot;
     temporaryRoots.set(key, temporaryRoot);
+    temporaryByVariable.set(variable, temporaryRoot);
   }
-  // Project config is loaded for trusted workspaces. Give each execution a
-  // fresh profile name so repository config cannot widen this attempt by
-  // contributing additional rules to a predictable shared profile.
-  const profile = `pty_exact_scope_${attemptId.replace(/-/g, '').toLowerCase()}`;
-  const filesystem = [
-    [':minimal', 'read'],
-    [root, 'read'],
-    ...[...temporaryRoots.values()].map(path => [path, 'write']),
-    ...scopedPaths.map(path => [path, 'write']),
-  ].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(',');
-  const config = [
-    `default_permissions=${JSON.stringify(profile)}`,
-    `permissions.${profile}.filesystem={${filesystem}}`,
-    `permissions.${profile}.network.enabled=false`,
-  ];
+  if (!temporaryRoots.size) {
+    const temporaryRoot = tmpdir();
+    if (!isAbsolutePath(temporaryRoot)) throw new Error('CODEX_TEMP_ROOT_INVALID');
+    const resolvedTemporaryRoot = resolvePath(temporaryRoot);
+    const relativeWorkspace = relativePath(resolvedTemporaryRoot, root);
+    if (!relativeWorkspace ||
+        (relativeWorkspace !== '..' && !relativeWorkspace.startsWith(`..${pathSeparator}`) &&
+         !isAbsolutePath(relativeWorkspace))) {
+      throw new Error('CODEX_TEMP_ROOT_CONTAINS_WORKSPACE');
+    }
+    const key = windowsPath ? resolvedTemporaryRoot.toLowerCase() : resolvedTemporaryRoot;
+    temporaryRoots.set(key, resolvedTemporaryRoot);
+  }
+  const fallbackTemporaryRoot = temporaryRoots.values().next().value;
+  const temporaryEnv = {
+    TEMP: temporaryByVariable.get('TEMP') || fallbackTemporaryRoot,
+    TMP: temporaryByVariable.get('TMP') || fallbackTemporaryRoot,
+  };
+  for (const value of Object.values(temporaryEnv)) {
+    const key = windowsPath ? value.toLowerCase() : value;
+    if (!temporaryRoots.has(key)) temporaryRoots.set(key, value);
+  }
+  // Validate each requested path before launch. The executor creates a fresh
+  // clone for this attempt and accepts only this exact path set afterward.
   return ['exec', '--json', '--ignore-user-config', '--strict-config', '--model', job.model,
-    // Scheduled execution cannot answer approval prompts. Keep the CLI inside
-    // its native exact-path permission profile and deny every undeclared write.
+    // The built-in MxC profile supports Node/Windows path resolution and
+    // atomic edits inside the unique attempt clone. Exact write_paths remain
+    // the publication boundary in the native executor.
+    '--sandbox', 'workspace-write',
+    // Scheduled execution cannot answer approval prompts. Keep outbound
+    // network disabled and do not bypass the native sandbox.
     '--config', 'approval_policy=never',
-    // Ignore user config so a legacy elevated backend cannot silently become
-    // the scheduled runtime. MXC was qualified on this host and enforced an
-    // outside-path denial.
+    '--config', 'sandbox_workspace_write.network_access=false',
+    '--config', `sandbox_workspace_write.writable_roots=${JSON.stringify([...temporaryRoots.values()])}`,
+    '--config', `shell_environment_policy.set.TEMP=${JSON.stringify(temporaryEnv.TEMP)}`,
+    '--config', `shell_environment_policy.set.TMP=${JSON.stringify(temporaryEnv.TMP)}`,
     '--config', 'windows.sandbox=mxc',
     '--config', `model_reasoning_effort=${JSON.stringify(job.reasoning_effort)}`,
-    ...config.flatMap(value => ['--config', value]), '-C', root, '-'];
+    '-C', root, '-'];
 }
 
 export function codexSessionFromJsonl(text) {

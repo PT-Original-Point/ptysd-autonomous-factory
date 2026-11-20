@@ -177,13 +177,20 @@ test('Codex run gives the CLI one attempt-scoped temp write root and removes it 
         assert.equal(dirname(attemptedTempRoot), hostTemp,
           'the per-attempt directory is created only under the effective host temp root');
         assert.equal(existsSync(attemptedTempRoot), true);
-        const filesystemProfile = args.find(value => value.startsWith('permissions.') &&
-          value.includes('.filesystem={'));
-        const tempEntryIndex = filesystemProfile?.indexOf(basename(attemptedTempRoot)) ?? -1;
-        assert.notEqual(tempEntryIndex, -1,
-          'the exact CLI permission profile includes the attempt temp root');
-        assert.match(filesystemProfile.slice(tempEntryIndex + basename(attemptedTempRoot).length),
-          /^"="write"/, 'the attempt temp root receives write access');
+        const sandboxIndex = args.indexOf('--sandbox');
+        assert.notEqual(sandboxIndex, -1);
+        assert.equal(args[sandboxIndex + 1], 'workspace-write');
+        assert.equal(args.includes('approval_policy=never'), true);
+        assert.equal(args.includes('sandbox_workspace_write.network_access=false'), true);
+        const writableRootsConfig = args.find(value =>
+          value.startsWith('sandbox_workspace_write.writable_roots='));
+        assert.ok(writableRootsConfig, 'the attempt temp root is explicitly writable');
+        assert.deepEqual(JSON.parse(writableRootsConfig.slice(writableRootsConfig.indexOf('=') + 1)),
+          [attemptedTempRoot], 'the only extra writable root is the per-attempt temp directory');
+        assert.equal(args.includes('shell_environment_policy.set.TEMP=' + JSON.stringify(attemptedTempRoot)), true);
+        assert.equal(args.includes('shell_environment_policy.set.TMP=' + JSON.stringify(attemptedTempRoot)), true);
+        assert.equal(args.some(value => value.startsWith('permissions.')), false,
+          'the rejected custom MxC permission profile is not selected');
         const probe = join(attemptedTempRoot, 'node-test-temp-probe.txt');
         writeFileSync(probe, 'temporary test data');
         assert.equal(readFileSync(probe, 'utf8'), 'temporary test data');
