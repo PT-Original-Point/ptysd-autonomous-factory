@@ -89,7 +89,8 @@ $qualificationFields = @('codex_qualification_profile','codex_qualification_mode
     'codex_qualification_task','codex_qualification_utc')
 $expectedHost = 'DESKTOP-1B6PD2P'
 $executorTaskName = 'PTYSD-Codex-Executor'
-foreach ($name in @('Set-CodexExecutorQualificationFlags','Assert-CodexExecutorQualificationProfile')) {
+foreach ($name in @('Set-CodexExecutorQualificationFlags','Assert-CodexExecutorQualificationProfile',
+        'Test-CodexExecutorQualificationDesktopServerProcess','Assert-CodexExecutorQualificationQuiescent')) {
     $functionAst = $installerAst.Find({ param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
     }, $true)
@@ -482,6 +483,51 @@ function global:Get-CimInstance {
     }
     throw ('UNEXPECTED_CIM_CLASS: ' + $ClassName)
 }
+
+$spoolDir = Join-Path $global:MockRoot 'qualification-spool'
+$executorScriptPath = Join-Path $global:MockRuntime 'codex-executor.mjs'
+$executorConfigPath = Join-Path $global:MockRuntime 'executor-config.json'
+foreach ($directory in @('requests','claims','locks','workspaces','bundles','results','evidence')) {
+    New-Item -ItemType Directory -Path (Join-Path $spoolDir $directory) -Force | Out-Null
+}
+$expectedCodexExecutable = Join-Path $global:MockRoot 'OpenAI.Codex_26.1111.9664.0_x64__2p2nqsd0c76g0\app\resources\codex.exe'
+$global:MockProcesses = @([pscustomobject]@{
+    Name='codex.exe'; ExecutablePath=$expectedCodexExecutable
+    CommandLine=('"' + $expectedCodexExecutable + '" -c features.code_mode_host=true app-server --analytics-default-enabled')
+})
+Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable
+$global:MockProcesses = @([pscustomobject]@{
+    Name='codex.exe'; ExecutablePath=$expectedCodexExecutable
+    CommandLine=('"' + $expectedCodexExecutable + '" -c forced_login_method=chatgpt exec-server --concurrent-requests 32')
+})
+Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable
+$global:MockProcesses = @([pscustomobject]@{
+    Name='codex.exe'; ExecutablePath=$expectedCodexExecutable
+    CommandLine=('"' + $expectedCodexExecutable + '" exec --sandbox mxc')
+})
+$qualificationProcessFailure = ''
+try { Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable }
+catch { $qualificationProcessFailure = $_.Exception.Message }
+Assert-Equal $qualificationProcessFailure 'CODEX_QUALIFICATION_EXECUTOR_OR_MODEL_PROCESS_RUNNING' `
+    'standalone Codex model work remains blocking during qualification'
+$global:MockProcesses = @([pscustomobject]@{
+    Name='codex.exe'; ExecutablePath=(Join-Path $global:MockRoot 'different-codex.exe')
+    CommandLine=('"' + $expectedCodexExecutable + '" app-server')
+})
+$qualificationProcessFailure = ''
+try { Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable }
+catch { $qualificationProcessFailure = $_.Exception.Message }
+Assert-Equal $qualificationProcessFailure 'CODEX_QUALIFICATION_PROCESS_IDENTITY_UNKNOWN' `
+    'unmatched Codex executable cannot inherit the Desktop-server exception'
+$global:MockProcesses = @([pscustomobject]@{
+    Name='codex.exe'; ExecutablePath=$expectedCodexExecutable; CommandLine=$null
+})
+$qualificationProcessFailure = ''
+try { Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable }
+catch { $qualificationProcessFailure = $_.Exception.Message }
+Assert-Equal $qualificationProcessFailure 'CODEX_QUALIFICATION_PROCESS_STATE_UNKNOWN' `
+    'missing Codex process arguments remain fail-closed'
+$global:MockProcesses = @()
 
 function Invoke-RuntimeModuleRefreshAttempt([string]$ExpectedError = '') {
     $failure = $null
