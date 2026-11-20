@@ -90,7 +90,9 @@ $qualificationFields = @('codex_qualification_profile','codex_qualification_mode
 $expectedHost = 'DESKTOP-1B6PD2P'
 $executorTaskName = 'PTYSD-Codex-Executor'
 foreach ($name in @('Set-CodexExecutorQualificationFlags','Assert-CodexExecutorQualificationProfile',
-        'Test-CodexExecutorQualificationDesktopServerProcess','Assert-CodexExecutorQualificationQuiescent')) {
+        'Test-CodexExecutorQualificationDesktopServerProcess','Assert-CodexExecutorQualificationQuiescent',
+        'Invoke-CodexQualificationReadOnly','Set-CodexExecutorWorkerQualificationState',
+        'Test-CodexExecutorWorkerQualificationState')) {
     $functionAst = $installerAst.Find({ param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
     }, $true)
@@ -124,6 +126,9 @@ Assert-Equal @($qualificationFixture.allowed_codex_models.PSObject.Properties).C
 $disabledQualification = [pscustomobject]@{}
 Assert-Equal (Assert-CodexExecutorQualificationProfile $disabledQualification) $false 'legacy unqualified configs remain disabled'
 $validQualification = [pscustomobject]@{
+    github_transport_verified=$true; codex_cli_qualified=$true; codex_login_verified=$true
+    enable_codex_model_runs=$true; codex_usage_authorized=$true
+    allowed_codex_models=[pscustomobject]@{ 'gpt-6-luna'=@('low') }
     codex_qualification_profile=$qualificationProfile; codex_qualification_model=$qualificationModel
     codex_qualification_reasoning=$qualificationReasoning; codex_qualification_cli_version='codex-cli 0.169.1'
     codex_qualification_cli_sha256=('a' * 64); codex_executable_sha256=('a' * 64)
@@ -135,6 +140,40 @@ foreach ($field in $qualificationFields) {
     if ($null -eq $validQualification.PSObject.Properties[$field]) { throw ('QUALIFICATION_FIXTURE_FIELD_MISSING: ' + $field) }
 }
 Assert-Equal (Assert-CodexExecutorQualificationProfile $validQualification -RequireCurrentCli) $true 'exact qualification metadata is accepted'
+$roundTripQualification = (ConvertTo-Json -InputObject $validQualification -Depth 5 -Compress) | ConvertFrom-Json
+Assert-Equal (Assert-CodexExecutorQualificationProfile $roundTripQualification -RequireCurrentCli) $true `
+    'ISO qualification timestamp survives JSON readback deserialization'
+$workerQualificationFixture = [pscustomobject]@{
+    github_transport_verified=$false; codex_cli_qualified=$false; codex_login_verified=$false
+    enable_codex_model_runs=$false; codex_usage_authorized=$false
+    allowed_codex_models=[pscustomobject]@{}; codex_executable_sha256=''
+    codex_qualification_profile='DISABLED'; codex_qualification_model=$null
+    codex_qualification_reasoning=$null; codex_qualification_cli_version=$null
+    codex_qualification_cli_sha256=$null; codex_qualification_auth_kind=$null
+    codex_qualification_github_main_sha=$null; codex_qualification_host=$null
+    codex_qualification_task=$null; codex_qualification_utc=$null
+    codex_sandbox_boundary='UNKNOWN'; future_extension='preserve'
+}
+Set-CodexExecutorWorkerQualificationState $workerQualificationFixture $roundTripQualification | Out-Null
+Assert-Equal (Test-CodexExecutorWorkerQualificationState $workerQualificationFixture $roundTripQualification) `
+    'QUALIFIED' 'Worker config mirrors the verified executor qualification'
+Assert-Equal $workerQualificationFixture.codex_executable_sha256 ('a' * 64) `
+    'Worker config receives the exact executable pin needed by the gate'
+Assert-Equal $workerQualificationFixture.allowed_codex_models.'gpt-6-luna'[0] 'low' `
+    'Worker model allowlist stays on the qualified low-effort profile'
+Assert-Equal $workerQualificationFixture.codex_sandbox_boundary 'UNKNOWN' `
+    'qualification does not promote an unknown VM sandbox boundary'
+Assert-Equal $workerQualificationFixture.future_extension 'preserve' `
+    'Worker qualification sync preserves unrelated config fields'
+$partialWorkerQualification = $workerQualificationFixture | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+$partialWorkerQualification.codex_login_verified = $false
+Assert-Equal (Test-CodexExecutorWorkerQualificationState $partialWorkerQualification $roundTripQualification) `
+    'PARTIAL_OR_MISMATCHED' 'partially updated Worker authorization fails closed'
+Set-CodexExecutorWorkerQualificationState $workerQualificationFixture $roundTripQualification -Revoke | Out-Null
+Assert-Equal (Test-CodexExecutorWorkerQualificationState $workerQualificationFixture $roundTripQualification) `
+    'DISABLED' 'revocation disables the Worker mirror'
+Assert-Equal $workerQualificationFixture.codex_sandbox_boundary 'UNKNOWN' `
+    'revocation preserves the sandbox boundary classification'
 $validQualification.codex_qualification_cli_sha256 = 'c' * 64
 $profileFailure = ''
 try { $null = Assert-CodexExecutorQualificationProfile $validQualification -RequireCurrentCli }
@@ -527,6 +566,37 @@ try { Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expec
 catch { $qualificationProcessFailure = $_.Exception.Message }
 Assert-Equal $qualificationProcessFailure 'CODEX_QUALIFICATION_PROCESS_STATE_UNKNOWN' `
     'missing Codex process arguments remain fail-closed'
+$global:MockProcesses = @(
+    [pscustomobject]@{ Name='node.exe'; ExecutablePath=$null; CommandLine=$null; SessionId=0 },
+    [pscustomobject]@{ Name='wscript.exe'; ExecutablePath=$null; CommandLine=$null; SessionId=0 }
+)
+Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable
+$global:MockProcesses = @([pscustomobject]@{
+    Name='node.exe'; ExecutablePath=$null; CommandLine=$null; SessionId=1
+})
+$qualificationProcessFailure = ''
+try { Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable }
+catch { $qualificationProcessFailure = $_.Exception.Message }
+Assert-Equal $qualificationProcessFailure 'CODEX_QUALIFICATION_PROCESS_STATE_UNKNOWN' `
+    'unreadable interactive Node process remains fail-closed'
+$global:MockProcesses = @([pscustomobject]@{
+    Name='node.exe'; ExecutablePath=$null; CommandLine=$null
+})
+$qualificationProcessFailure = ''
+try { Assert-CodexExecutorQualificationQuiescent -ExpectedCodexExecutable $expectedCodexExecutable }
+catch { $qualificationProcessFailure = $_.Exception.Message }
+Assert-Equal $qualificationProcessFailure 'CODEX_QUALIFICATION_PROCESS_STATE_UNKNOWN' `
+    'unreadable Node process without session identity remains fail-closed'
+$cmdPath = Join-Path $env:SystemRoot 'System32\cmd.exe'
+$streamProbeArgs = '/d /c echo CODEX_QUALIFICATION_STDOUT_PROBE & echo CODEX_QUALIFICATION_STDERR_PROBE 1>&2'
+$stdoutProbe = Invoke-CodexQualificationReadOnly $cmdPath $streamProbeArgs
+Assert-Equal $stdoutProbe.Trim() 'CODEX_QUALIFICATION_STDOUT_PROBE' `
+    'read-only API callers retain stdout without stderr contamination'
+$combinedProbe = Invoke-CodexQualificationReadOnly $cmdPath $streamProbeArgs -IncludeStandardError
+if ($combinedProbe -notmatch 'CODEX_QUALIFICATION_STDOUT_PROBE' -or
+    $combinedProbe -notmatch 'CODEX_QUALIFICATION_STDERR_PROBE') {
+    throw 'QUALIFICATION_READONLY_OPTIONAL_STDERR_CAPTURE_FAILED'
+}
 $global:MockProcesses = @()
 
 function Invoke-RuntimeModuleRefreshAttempt([string]$ExpectedError = '') {
