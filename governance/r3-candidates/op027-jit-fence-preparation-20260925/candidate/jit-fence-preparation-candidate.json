@@ -1,0 +1,134 @@
+{
+  "schema": "vnext5.r3.op027.jit-fence-preparation-design.v1",
+  "candidate_id": "R3-P0-OP027-JIT-FENCE-PREPARATION-DESIGN",
+  "recorded_at_utc": "2026-09-25T02:12:19Z",
+  "classification": "LOCAL_NONCANONICAL_DESIGN_ONLY_NOT_A_FENCE",
+  "status": "FROZEN_PREPARATION_DESIGN",
+  "authority": {
+    "mission_changed": false,
+    "policy_changed": false,
+    "authorization_expanded": false,
+    "canonical_transition_created": false,
+    "accepted_source_created": false,
+    "host_permit_created": false,
+    "dispatch_authority_granted": false
+  },
+  "runtime_effects": {
+    "execution_fence_object": null,
+    "cp192_checkpoint_created": false,
+    "fence_created": false,
+    "fence_armed": false,
+    "host_request_created": false,
+    "host_dispatch_performed": false,
+    "operation027_dispatched": false,
+    "operation025_redispatched": false,
+    "remote_or_canonical_mutation_performed": false,
+    "do_not_submit_to_host": true,
+    "do_not_arm": true,
+    "do_not_dispatch": true
+  },
+  "source_identity": {
+    "repository": "PT-Original-Point/ptysd-vnext42-governance-sandbox",
+    "canonical_control_base_ref": "refs/heads/v45/factory-control",
+    "canonical_control_base_commit_at_read": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+    "candidate_pr": 297,
+    "candidate_head": "137518035f9c3c7f89176b20b12b9db548d3f79c",
+    "candidate_tree": "04c1ce3210b7175be50b9775d968c1f254036f08",
+    "exact_direct_parent": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+    "source_pins_file": "source-pins.json"
+  },
+  "future_fence_binding_design": {
+    "state": "REQUIREMENTS_ONLY_NO_FENCE_INSTANCE",
+    "must_match_exactly": true,
+    "project_id": "CHATGPT_GLOBAL_SKILL_GOVERNANCE",
+    "mission_anchor": {
+      "ref": "github://1352411536/governance/v49/current-mission.json@c57dd50c9c27b217fbd6dd2e4b38c7f7a3ddcd18",
+      "revision": "20260919T010100+0800",
+      "declared_hash": "sha256:58f21a0818bd60b61929925b38ea8507d5b80c09d816a7b6f5a75d2a410d542b",
+      "canonicalization_version": "HUMAN_TEXT_V1"
+    },
+    "policy_anchor": {
+      "ref": "github://1352411536/governance/v49/current-execution-policy.json@c57dd50c9c27b217fbd6dd2e4b38c7f7a3ddcd18",
+      "revision": "20260919T010100+0800-EP71",
+      "declared_hash": "sha256:0dc535adfcf8c0bf1c12b1ff5e5191f5b74f267143403a41d77d626889eba861",
+      "canonicalization_version": "HUMAN_TEXT_V1"
+    },
+    "authorization_envelope_digest": "sha256:cb614427a0a1755d002cd035f50d33b18208bab7e5a9d8efc42dfbc7c4d99d14",
+    "capability_generation": 4,
+    "operation": {
+      "operation_id": "GOV-HARDENING-P5-OP025-RECEIPT-READBACK-027",
+      "operation_kind": "HOST_POWERSHELL",
+      "attempt_id": "GOV-HARDENING-P5-ATTEMPT-068",
+      "attempt_epoch": 68,
+      "script_path": "governance/csg/v49/scripts/gov-hardening-p5-op025-receipt-readback-027.ps1",
+      "script_sha256": "sha256:92573521a5a4c7165884613397153b0116af0d0e6e982978a8434a9a057ef1d9"
+    },
+    "future_accepted_control_oid": null,
+    "future_accepted_checkpoint_digest": null,
+    "fence_schema_id": null,
+    "fence_issuer_route": null,
+    "fence_expiry": null,
+    "note": "The future accepted control/checkpoint identities, fence schema, issuer route and expiry must come from a fresh authorized source before any fence exists. Do not substitute CP190 or PR297 identities as a later accepted current state."
+  },
+  "distinct_historical_operation025_receipt_identity": {
+    "outcome": "UNKNOWN",
+    "operation_id": "GOV-HARDENING-P5-TUNNEL-CLI-CAPABILITY-PROBE-025",
+    "project_id": "CHATGPT_GLOBAL_SKILL_GOVERNANCE",
+    "run_id": "CHATGPT_GLOBAL_SKILL_GOVERNANCE-QUAL-P5",
+    "task_id": "GOV-HARDENING-P5",
+    "attempt_id": "GOV-HARDENING-P5-ATTEMPT-067",
+    "attempt_epoch": 67,
+    "control_oid": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+    "checkpoint_digest": "sha256:7925c06ea87b9cd98cdd8b45fb8fe0766a99abd6cb520a76890749afce02dd2e",
+    "authorization_envelope_digest": "sha256:cb614427a0a1755d002cd035f50d33b18208bab7e5a9d8efc42dfbc7c4d99d14",
+    "capability_generation": 4,
+    "script_sha256": "26c8e830f9c57f4bd1f483dfb60c13e8843be739a29dd2d776057f0eb2398b09",
+    "redispatch_permitted": false,
+    "authorized_host_readback_performed_in_this_unit": false,
+    "receipt_evidence_included_in_this_candidate_package": false,
+    "package_omission_proves_receipt_absence": false
+  },
+  "target_state": {
+    "classification": "CURRENT_TARGET_STATE_NOT_VERIFIED",
+    "expected_runtime_sha256": null,
+    "rule": "File presence and observed hash alone do not establish VERIFIED; an independently pinned expected digest and exact equality are required."
+  },
+  "preconditions_for_any_later_fence_or_dispatch": [
+    {
+      "id": "P1",
+      "condition": "Independent provider-enforced semantic PASS for exact candidate head 137518035f9c3c7f89176b20b12b9db548d3f79c",
+      "current_state": "NOT_ESTABLISHED"
+    },
+    {
+      "id": "P2",
+      "condition": "Canonical acceptance/current transition is established through its authorized gate",
+      "current_state": "NOT_ESTABLISHED"
+    },
+    {
+      "id": "P3",
+      "condition": "Fresh canonical control and checkpoint readback confirms the exact accepted identities; stale PR297 identity cannot be reused",
+      "current_state": "NOT_ESTABLISHED"
+    },
+    {
+      "id": "P4",
+      "condition": "Fresh authorized Factory health, exact canonical readback, idle Host execution lane and healthy live P4 route",
+      "current_state": "NOT_READ_IN_THIS_UNIT"
+    },
+    {
+      "id": "P5",
+      "condition": "Qualified JIT fence schema, issuer route, scope and expiry are read from an authorized source and bound to the exact operation027 script and attempt",
+      "current_state": "NOT_ESTABLISHED"
+    },
+    {
+      "id": "P6",
+      "condition": "Authorized Factory Host PowerShell route is available to the current executor",
+      "current_state": "NOT_ESTABLISHED"
+    },
+    {
+      "id": "P7",
+      "condition": "OP025 historical receipt is resolved only by exact-identity readback; UNKNOWN must not be converted to success or trigger redispatch",
+      "current_state": "UNKNOWN"
+    }
+  ],
+  "acceptance_boundary": "A design artifact cannot satisfy any precondition, accept source, create a canonical transition, or authorize operation027."
+}
