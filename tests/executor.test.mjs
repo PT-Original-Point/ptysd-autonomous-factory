@@ -177,10 +177,11 @@ test('Codex run gives the CLI one attempt-scoped temp write root and removes it 
         assert.equal(dirname(attemptedTempRoot), hostTemp,
           'the per-attempt directory is created only under the effective host temp root');
         assert.equal(existsSync(attemptedTempRoot), true);
-        const sandboxIndex = args.indexOf('--sandbox');
-        assert.notEqual(sandboxIndex, -1);
-        assert.equal(args[sandboxIndex + 1], 'workspace-write');
-        assert.equal(args.includes('approval_policy=never'), true);
+        assert.equal(args.includes('--approve-for-me'), true);
+        assert.equal(args.includes('--sandbox'), false,
+          '--approve-for-me selects workspace-write and is incompatible with an explicit sandbox flag');
+        assert.equal(args.some(value => value.startsWith('approval_policy=')), false,
+          'the explicit automatic-review option controls the approval route');
         assert.equal(args.includes('sandbox_workspace_write.network_access=false'), true);
         const writableRootsConfig = args.find(value =>
           value.startsWith('sandbox_workspace_write.writable_roots='));
