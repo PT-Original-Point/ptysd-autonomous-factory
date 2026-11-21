@@ -11,14 +11,26 @@ const TRUST_ROOT=[
 ];
 const AUTHORITY=[
   'governance/v47/current-mission.json',
-  'governance/v47/current-execution-policy.json'
+  'governance/v47/current-execution-policy.json',
+  'governance/v48/current-mission.json',
+  'governance/v48/current-execution-policy.json',
+  'governance/v49/current-mission.json',
+  'governance/v49/current-execution-policy.json'
 ];
 const CANONICAL_ALLOWED=['governance/csg/','schemas/csg/','scripts/csg-','tests/csg/','tools/csg/'];
 function fail(code,detail=''){const e=new Error(detail?`${code}:${detail}`:code);e.code=code;throw e;}
 function oid(v,name){if(typeof v!=='string'||!OID.test(v))fail(`INVALID_${name}`);return v;}
 function git(cwd,args){return execFileSync('git',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();}
 function clean(p){return p.replaceAll('\\','/');}
-function forbidden(p){return [...TRUST_ROOT,...AUTHORITY].some(f=>p===f||(f.endsWith('/')&&p.startsWith(f)));}
+function forbidden(p){
+  if([...TRUST_ROOT,...AUTHORITY].some(f=>p===f||(f.endsWith('/')&&p.startsWith(f))))return true;
+  const m=/^governance\/v[0-9]+\/(.+)$/i.exec(p);
+  if(!m)return false;
+  const rel=m[1];
+  return /^current(?:[-_].*)?\.(?:json|ya?ml)$/i.test(rel)
+    || /(?:^|[\/._-])(?:mission|policy|authority|authorization)(?:$|[\/._-])/i.test(rel)
+    || /^(?:missions|policies|execution-policies|authority|authorization)\//i.test(rel);
+}
 export function verifyPathSet(paths,{baseRef}={}){
   if(!Array.isArray(paths)||paths.length<1)fail('EMPTY_CHANGESET');
   if(!['main','v45/factory-control'].includes(baseRef))fail('UNAUTHORIZED_BASE_REF',String(baseRef));
