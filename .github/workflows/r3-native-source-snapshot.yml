@@ -1,0 +1,114 @@
+# R3-03 / T07 / T16 Native Source Snapshot Qualification
+# Purpose: Independent public qualification of immutable candidate commit on standard ephemeral GitHub-hosted runner.
+# Note: Snapshot receipts and commit targets are immutable PER-ATTEMPT. Future candidate evaluations
+# require an explicitly reviewed commit SHA update; no permanent model or software version pins are introduced.
+name: R3 Native Source Snapshot Qualification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/r3-native-source-snapshot.yml'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  source-snapshot-qualification:
+    if: github.repository == 'PT-Original-Point/ptysd-vnext42-governance-sandbox' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      REPO_URL: 'https://github.com/PT-Original-Point/ptysd-vnext42-governance-sandbox.git'
+      EXPECTED_BASE_SHA: 'd39486601d851e31256852a24e9c1393b9046fe5'
+      CANDIDATE_HEAD_SHA: 'ada188e861358135fa5f7a7e95f3d5958d97fd6e'
+      CANONICAL_REF: 'refs/heads/v45/factory-control'
+      PROJECT_ID: 'CHATGPT_GLOBAL_SKILL_GOVERNANCE'
+    steps:
+      - name: Verify Host Identity and Validate Inputs
+        run: |
+          echo "Observed runner: ${RUNNER_ENVIRONMENT} (${RUNNER_OS})"
+          if [[ "${RUNNER_ENVIRONMENT}" != "github-hosted" || "${RUNNER_OS}" != "Linux" ]]; then
+            echo "Error: Execution must run on a GitHub-hosted Linux runner" >&2
+            exit 1
+          fi
+
+          git --version
+          node --version
+
+          SHA_RE='^[0-9a-f]{40}$'
+          if [[ ! "${EXPECTED_BASE_SHA}" =~ ${SHA_RE} || ! "${CANDIDATE_HEAD_SHA}" =~ ${SHA_RE} ]]; then
+            echo "Error: Invalid SHA format for baseline or candidate commit" >&2
+            exit 1
+          fi
+
+      - name: Fetch and Verify Lineage
+        run: |
+          mkdir workspace && cd workspace
+          git init -q
+          git remote add origin "${REPO_URL}"
+
+          git fetch --depth=2 origin "${CANDIDATE_HEAD_SHA}"
+          git fetch --depth=1 origin "${EXPECTED_BASE_SHA}"
+          git fetch --depth=1 origin "${CANONICAL_REF}"
+
+          REMOTE_CANONICAL_SHA=$(git ls-remote origin "${CANONICAL_REF}" | awk '{print $1}')
+          echo "Remote canonical ${CANONICAL_REF}: ${REMOTE_CANONICAL_SHA}"
+          if [[ "${REMOTE_CANONICAL_SHA}" != "${EXPECTED_BASE_SHA}" ]]; then
+            echo "Error: Canonical ref does not match baseline SHA" >&2
+            exit 1
+          fi
+
+          PARENTS=($(git log --pretty=%P -n 1 "${CANDIDATE_HEAD_SHA}"))
+          if [[ ${#PARENTS[@]} -ne 1 || "${PARENTS[0]}" != "${EXPECTED_BASE_SHA}" ]]; then
+            echo "Error: Candidate commit must have exactly one parent matching baseline ${EXPECTED_BASE_SHA}" >&2
+            exit 1
+          fi
+
+      - name: Verify Baseline Test Tree Immutability
+        run: |
+          cd workspace
+          BASELINE_FILES=$(git ls-tree -r --name-only "${EXPECTED_BASE_SHA}" tools/csg/cell-kernel/tests)
+          if [[ -z "${BASELINE_FILES}" ]]; then
+            echo "Error: Baseline test directory cannot be empty" >&2
+            exit 1
+          fi
+
+          COUNT=0
+          while IFS= read -r FILE; do
+            [[ -z "${FILE}" ]] && continue
+            COUNT=$((COUNT + 1))
+            BASE_BLOB=$(git rev-parse "${EXPECTED_BASE_SHA}:${FILE}" 2>/dev/null || true)
+            CAND_BLOB=$(git rev-parse "${CANDIDATE_HEAD_SHA}:${FILE}" 2>/dev/null || true)
+            if [[ -z "${CAND_BLOB}" ]]; then
+              echo "Error: Baseline file missing in candidate: ${FILE}" >&2
+              exit 1
+            fi
+            if [[ "${BASE_BLOB}" != "${CAND_BLOB}" ]]; then
+              echo "Error: Baseline file mutated in candidate: ${FILE}" >&2
+              exit 1
+            fi
+            echo "Verified unchanged: ${FILE} (${BASE_BLOB})"
+          done <<< "${BASELINE_FILES}"
+          echo "Total baseline files verified unchanged: ${COUNT}"
+
+      - name: Execute Candidate Tests
+        run: |
+          cd workspace
+          git checkout -q "${CANDIDATE_HEAD_SHA}"
+          echo "Candidate HEAD: $(git rev-parse HEAD)"
+          echo "Baseline Parent: ${EXPECTED_BASE_SHA}"
+          node --test --test-reporter=tap tools/csg/cell-kernel/tests/*.test.mjs
+
+      - name: Post-test Canonical Guard
+        run: |
+          cd workspace
+          CURRENT_REMOTE_SHA=$(git ls-remote origin "${CANONICAL_REF}" | awk '{print $1}')
+          if [[ "${CURRENT_REMOTE_SHA}" != "${EXPECTED_BASE_SHA}" ]]; then
+            echo "Error: Post-test canonical ref alteration detected. Authority promotion forbidden." >&2
+            exit 1
+          fi
+          echo "Canonical guard verified: ${CANONICAL_REF} remains ${CURRENT_REMOTE_SHA}"
