@@ -433,12 +433,11 @@ export function buildCodexExecArgs(job, workspace, attemptId, environment = proc
   // Validate each requested path before launch. The executor creates a fresh
   // clone for this attempt and accepts only this exact path set afterward.
   return ['exec', '--json', '--ignore-user-config', '--strict-config', '--model', job.model,
-    // Keep the native Codex Executor's existing Windows sandbox setting.
-    // This selects its configured mode without making a safety claim.
-    '--sandbox', 'workspace-write',
-    // Scheduled execution cannot answer approval prompts. Keep outbound
-    // network disabled and do not bypass the native sandbox.
-    '--config', 'approval_policy=never',
+    // This option routes approval-gated actions through Codex's automatic
+    // reviewer and selects workspace-write. The CLI rejects a simultaneous
+    // --sandbox argument; exact per-attempt TEMP/TMP roots remain the only
+    // additional writable paths.
+    '--approve-for-me',
     '--config', 'sandbox_workspace_write.network_access=false',
     '--config', `sandbox_workspace_write.writable_roots=${JSON.stringify([...temporaryRoots.values()])}`,
     '--config', `shell_environment_policy.set.TEMP=${JSON.stringify(temporaryEnv.TEMP)}`,

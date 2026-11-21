@@ -600,7 +600,7 @@ test('claim can be released only for the exact attempt before publication', () =
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('Codex CLI args select workspace-write and bound isolated attempt temp roots', () => {
+test('Codex CLI args use automatic review within workspace-write and bound temp roots', () => {
   const attemptId = '00000000-0000-0000-0000-000000000021';
   const temporaryRoots = ['C:/Users/x/AppData/Local/Temp', 'D:/PTYSD-Temp'];
   const args = buildCodexExecArgs(job(), 'C:\\isolated\\attempt', attemptId,
@@ -612,12 +612,12 @@ test('Codex CLI args select workspace-write and bound isolated attempt temp root
     'legacy user settings cannot silently change the qualified execution');
   assert.equal(args.includes('--strict-config'), true,
     'unsupported config must fail before execution');
-  assert.equal(rawConfigs.includes('approval_policy=never'), true,
-    'scheduled CLI execution remains noninteractive inside the sandbox');
-  const sandboxIndex = args.indexOf('--sandbox');
-  assert.notEqual(sandboxIndex, -1);
-  assert.equal(args[sandboxIndex + 1], 'workspace-write',
-    'the attempt clone uses Codex’s supported workspace-write sandbox');
+  assert.equal(args.includes('--approve-for-me'), true,
+    'approval-gated actions use Codex automatic review instead of a Human prompt');
+  assert.equal(rawConfigs.some(value => value.startsWith('approval_policy=')), false,
+    'the explicit automatic-review option controls approvals for this invocation');
+  assert.equal(args.includes('--sandbox'), false,
+    '--approve-for-me selects workspace-write and rejects a simultaneous --sandbox option');
   assert.equal(rawConfigs.includes('sandbox_workspace_write.network_access=false'), true,
     'outbound network stays disabled');
   assert.equal(rawConfigs.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify(
@@ -658,8 +658,10 @@ test('Codex CLI args select workspace-write and bound isolated attempt temp root
   const reasoningConfigs = reasoningArgs.flatMap((value, index) =>
     value === '--config' ? [reasoningArgs[index + 1]] : []);
   assert.equal(reasoningConfigs.includes('model_reasoning_effort="model-defined-tier-7"'), true);
-  assert.equal(args.includes('--approve-for-me'), false,
-    'scheduled execution must not invoke an unapproved automatic review model');
+  assert.equal(args.includes('--approve-for-me'), true,
+    'the approved automatic-review route remains enabled for ordinary scheduled work');
+  assert.equal(args.filter(value => value === '--model').length, 1,
+    'automatic review cannot silently select a second execution model');
   assert.equal(args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
   assert.equal(args.includes('--oss'), false);
   assert.equal(args.includes('cmd.exe'), false);
