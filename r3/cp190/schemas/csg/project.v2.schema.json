@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ptysd.invalid/schemas/csg/csg.project.v2.schema.json",
+  "title": "CSG Directory Project Record v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project_id", "canonical_name", "aliases", "normalization_version", "binding_id", "registration_state", "directory_revision", "binding_generation", "control_locator", "runtime_type", "bootstrap_anchor", "authorization_ref", "data_classification", "previous_binding_ref", "created_at", "updated_at", "active_run_ref"],
+  "properties": {
+    "schema_version": {"const": "csg.project.v2"},
+    "project_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "canonical_name": {"type": "string", "minLength": 1, "maxLength": 256},
+    "aliases": {"type": "array", "maxItems": 32, "items": {"type": "object", "additionalProperties": false, "required": ["display_name", "normalized_name"], "properties": {"display_name": {"type": "string", "minLength": 1, "maxLength": 256}, "normalized_name": {"type": "string", "minLength": 1, "maxLength": 256}}}},
+    "normalization_version": {"type": "string", "minLength": 1, "maxLength": 64},
+    "binding_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "registration_state": {"enum": ["RESERVED", "BOUND", "RETIRED"]},
+    "directory_revision": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "binding_generation": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "control_locator": {"anyOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["provider", "repository_id", "ref", "current_path"], "properties": {"provider": {"const": "github"}, "repository_id": {"type": "integer", "minimum": 1}, "ref": {"type": "string", "minLength": 1, "maxLength": 2048}, "current_path": {"type": "string", "minLength": 1, "maxLength": 512}}}]},
+    "runtime_type": {"const": "GITHUB_ACTIONS_BOUNDED"},
+    "bootstrap_anchor": {"type": ["object", "null"]},
+    "authorization_ref": {"type": "object"},
+    "data_classification": {"enum": ["PUBLIC", "INTERNAL", "CONFIDENTIAL"]},
+    "previous_binding_ref": {"type": ["object", "null"]},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "active_run_ref": {"anyOf": [{"type": "null"}, {"$ref": "active-run-ref.v1.schema.json"}]}
+  }
+}

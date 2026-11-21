@@ -1,0 +1,57 @@
+{
+  "candidate_id": "R3-P0-DIRECTORY-ACTIVE-RUN-REF-CP190-LEGACY-COMPATIBILITY-CANDIDATE",
+  "candidate_version": 2,
+  "status": "FROZEN_LOCAL_NONCANONICAL_CANDIDATE_RESTORE_REHEARSAL_PASS",
+  "overall_goal_status_at_fresh_read": "ACTIVE",
+  "active_run_ref_contract": "csg.active-run-ref.v1",
+  "directory_record_contract": "csg.project.v2",
+  "current_directory_ref": "f22a9eb9e75d6b2d89dc9b950109910af8d290bb",
+  "current_directory_record_schema": "csg.project.v1",
+  "current_directory_record_has_active_run_ref": false,
+  "current_directory_record_has_active_run_id": false,
+  "current_directory_exact_resolution": "FAIL_CLOSED_ACTIVE_RUN_REF_MISSING",
+  "candidate_overlay_resolution": "LOCAL_NONCANONICAL_READ_ONLY_PASS_WITH_EXACT_CP190_BYTES",
+  "cp190_legacy_profile": {
+    "name": "CSG_CHECKPOINT_V1_LEGACY_AUTHORIZATION_MODE_PROFILE",
+    "version": 1,
+    "control_ref": "refs/heads/v45/factory-control",
+    "control_commit": "209e0ad9040a08965a49109e18f783cfd9c7c7f4",
+    "checkpoint_path": "governance/csg/checkpoints/000190.json",
+    "checkpoint_git_blob_oid": "8991abd3e19757698b393ccd4b09fcad5f230651",
+    "checkpoint_raw_sha256": "2591b20875405c4711397dff8b31d9d13ab77f10452c43d239ea567d40cdff8a",
+    "checkpoint_seq": 190,
+    "payload_digest": "sha256:7925c06ea87b9cd98cdd8b45fb8fe0766a99abd6cb520a76890749afce02dd2e"
+  },
+  "cp191_current_strict_schema": {
+    "source_pr_head": "137518035f9c3c7f89176b20b12b9db548d3f79c",
+    "checkpoint_git_blob_oid": "0180e5eb9c65342675f4e4dd743c5a1a04430da1",
+    "result": "PASS_CURRENT_STRICT_SCHEMA"
+  },
+  "tests": {
+    "passed": 18,
+    "failed": 0,
+    "suite": "node --test tests/active-run-ref.test.mjs",
+    "restored_copy_passed": true
+  },
+  "restore_rehearsal": {
+    "status": "RESTORE_REHEARSAL_PASS",
+    "report": "VNEXT5.0-R3-CP190-LEGACY-CHECKPOINT-SCHEMA-COMPATIBILITY-CANDIDATE-20260925-RESTORE-REHEARSAL-REV2.json",
+    "file_set_exact": true,
+    "file_digests_exact": true
+  },
+  "remote_or_canonical_writes": false,
+  "pr297_298_299_modified": false,
+  "canonical_control_modified": false,
+  "directory_record_published": false,
+  "mission_or_production_modified": false,
+  "dispatch_authority_granted": false,
+  "operation025_redispatched": false,
+  "operation027_dispatched": false,
+  "cp192_jit_fence_created": false,
+  "provider_admin_route": "UNAVAILABLE_IN_CURRENT_CODEX_ENVIRONMENT",
+  "remaining_parked_lanes": [
+    "SEMANTIC_PROVIDER_REQUIRED_CHECK",
+    "PR297_CANONICAL_ACCEPTANCE",
+    "OP025_HOST_READBACK"
+  ]
+}

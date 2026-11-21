@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ptysd.invalid/schemas/csg/csg.active-run-ref.v1.schema.json",
+  "title": "CSG Active Run Reference",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project_id", "binding_id", "binding_generation", "directory_revision", "resolution", "control_locator"],
+  "properties": {
+    "schema_version": {"const": "csg.active-run-ref.v1"},
+    "project_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "binding_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "binding_generation": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "directory_revision": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "resolution": {"const": "CURRENT_CANONICAL_CONTROL_POINTER_V1"},
+    "control_locator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "repository_id", "ref", "current_path"],
+      "properties": {
+        "provider": {"const": "github"},
+        "repository_id": {"type": "integer", "minimum": 1},
+        "ref": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "current_path": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    }
+  }
+}
