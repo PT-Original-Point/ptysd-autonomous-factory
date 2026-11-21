@@ -6,6 +6,18 @@ background model poller. GitHub Issue #<configured> is the sole durable task and
 receipt source. The Windows Task Scheduler is only a 5-minute native trigger;
 no new process stays resident between polls.
 
+## W4 monitoring candidate
+
+This source candidate adds W4 to the existing Issue #407 observation and
+read-only panel. The bounded Win11 readback may report the Pi package version,
+whether the exact W4 profile and DPAPI vault file exist, the conditional-ready
+marker, the exact `PTYSD-W4-Pi` task state, and a process count. It never publishes
+the key, Windows SID, command line, or private path. Provider paid-hardstop and
+zero-charge canary remain `UNKNOWN` until separate same-provider evidence is
+verified. W4 therefore remains blocked or unknown and has no accepted dispatch
+job in this candidate; installing Pi, enrolling a key, or registering a task
+does not mark it ready. W1/W2/W3 routing is unchanged.
+
 ## Trust and side effects
 
 * The account connected to `gh` must be authenticated to GitHub and have permission

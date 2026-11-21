@@ -19,7 +19,7 @@ historical/unknown status.
 
 The page checks the publisher account, exact project/repository/Issue identity,
 snapshot schema, source comment ID, time bounds, and expiry. Missing, duplicate, mismatched,
-expired, or unreadable observations show UNKNOWN or STALE. W1/W2/W3 have
+expired, or unreadable observations show UNKNOWN or STALE. W1/W2/W3/W4 have
 separate cards. W1 and W2 activity is bound to its task, attempt, and recent
 role-specific evidence. Desktop worker-card headers are measured and synchronized
 to the tallest current header; the spacer is released when cards stack on narrow
@@ -32,6 +32,10 @@ Tunnel status, receipts, process presence, task exit codes, and Runner service
 state do not by themselves prove coding or acceptance. CI queued, in-progress,
 completed, failed, cancelled, skipped, and neutral outcomes remain distinct;
 skipped/neutral checks are not passes and success is not formal acceptance.
+W4's card reads only a bounded Pi version/profile, DPAPI vault-presence,
+conditional-ready marker, and exact Task Scheduler state. Provider paid-hardstop
+and zero-charge canary remain UNKNOWN until their own receipts are verified;
+the card cannot mark W4 as running from installation or process presence.
 The active OpenCode session endpoint is intentionally not started by the
 observer; without a passively available API, active sessions remain UNKNOWN.
 

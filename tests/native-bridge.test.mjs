@@ -3641,7 +3641,7 @@ test('operator observation reports a queued W1 preflight refusal without inventi
   } finally {rmSync(workspace,{recursive:true,force:true});}
 });
 
-test('operator observation publishes the single seeded comment with role-separated identity and conservative W1/W2/W3 records', async () => {
+test('operator observation publishes the single seeded comment with role-separated identity and conservative W1/W2/W3/W4 records', async () => {
   const host = 'DESKTOP-1B6PD2P';
   const actor = 't14210184';
   const commentAuthor = 'wfvupu1212';
@@ -3685,7 +3685,7 @@ test('operator observation publishes the single seeded comment with role-separat
   assert.equal(result.observation.sequence, 3);
   assert.equal(result.observation.publisher_login, actor);
   assert.equal(result.observation.comment_author_login, commentAuthor);
-  assert.deepEqual(result.observation.workers.map(worker => worker.worker_id), ['W1', 'W2', 'W3']);
+  assert.deepEqual(result.observation.workers.map(worker => worker.worker_id), ['W1', 'W2', 'W3', 'W4']);
   const w1 = result.observation.workers.find(worker => worker.worker_id === 'W1');
   assert.equal(w1.status, 'UNKNOWN');
   assert.equal(w1.blocker_code, 'NO_AUTHORIZED_W1_JOB');
@@ -3699,6 +3699,9 @@ test('operator observation publishes the single seeded comment with role-separat
   const w3 = result.observation.workers.find(worker => worker.worker_id === 'W3');
   assert.equal(w3.status, 'UNKNOWN');
   assert.equal(w3.blocker_code, 'W3_ZERO_RISK_HANDOFF_NOT_IN_NATIVE_SNAPSHOT');
+  const w4 = result.observation.workers.find(worker => worker.worker_id === 'W4');
+  assert.equal(w4.status, 'UNKNOWN');
+  assert.equal(w4.blocker_code, 'W4_OS_OBSERVATION_UNKNOWN');
 });
 
 test('operator observation blocks one request ID reused across W1 and W2 task kinds', async () => {
